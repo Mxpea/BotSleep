@@ -78,4 +78,31 @@ TOOL_DEFINITIONS = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "calculate_stronghold",
+            "description": "Rank Java 1.19+ stronghold chunks from saved independent eye-of-ender coordinate rays. Pure calculation: does not throw eyes or move. Probabilities depend on measurement uncertainty; candidates are not confirmed locations.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "throws": {
+                        "type": "array", "minItems": 1, "maxItems": 32,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "x": {"type": "number"}, "z": {"type": "number"},
+                                "bearing_deg": {"type": "number", "description": "Vanilla yaw degrees: south 0, west 90, north 180, east -90."},
+                                "sigma_deg": {"type": "number", "minimum": 0.001, "maximum": 5},
+                            },
+                            "required": ["x", "z", "bearing_deg", "sigma_deg"],
+                            "additionalProperties": False,
+                        },
+                    },
+                    "top_k": {"type": "integer", "minimum": 1, "maximum": 100, "default": 5},
+                },
+                "required": ["throws"],
+            },
+        },
+    },
 ]
