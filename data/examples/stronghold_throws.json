@@ -1,0 +1,17 @@
+{
+  "description": "Synthetic coordinate rays toward eye-target chunk [128,0]; not real world observations.",
+  "throws": [
+    {
+      "x": 0,
+      "z": 0,
+      "bearing_deg": -90,
+      "sigma_deg": 0.05
+    },
+    {
+      "x": 0,
+      "z": 200,
+      "bearing_deg": -95.57760510665756,
+      "sigma_deg": 0.05
+    }
+  ]
+}

@@ -80,3 +80,20 @@
   - `no_bed_nearby`：搜索范围内未发现可用床位。
   - `path_unreachable`：床位位于不可达区域或封闭房间。
   - `monsters_nearby`：因周边怪物过近被服务器拒绝入睡。
+
+
+### 4. `calculate_stronghold`（纯要塞计算）
+
+- 实现：`skills/stronghold.py` 的 `CalculateStrongholdSkill`。
+- 输入：`throws` 为 1～32 次独立主世界投眼观测，每项含 `x/z/bearing_deg/sigma_deg`；`top_k` 默认 5。角度采用原版 yaw 度数，南 0°、西 90°。
+- 输出：`SkillResult.data` 含官方 Ninjabrain Bot 计算出的候选区块、投眼目标点、下挖参考点和条件概率；不代表已找到传送门房。
+- 前置条件：已安装固定版本的计算 JAR 和 JDK 11+；观测必须来自同一世界、同一要塞，多点采样先归并为一条射线。
+- 错误码：`invalid_observations`（无效或重复观测）、`calculation_failed`（依赖缺失、超时或无一致候选）。
+- 无游戏动作，无需回滚。采样与计算分离；CLI `capture` 会投眼，细节见 `docs/STRONGHOLD.md`。
+
+
+## 三、面向 harness AI 的策略 Skill
+
+`skills/stronghold_localization/SKILL.md` 是供游戏 AI 按需读取的投眼、选点和导航策略，详细推导与来源在其 `references/research.md`。它与 Python `BaseSkill` 动作执行器用途不同。
+
+本策略尚未自动加载到模型上下文，统计误差估计与自动导航优化也未接入运行时代码；不要将文档存在等同于功能已实现。

@@ -73,3 +73,16 @@ cp config.example.yaml config.yaml
 - `#help`：查看当前已加载的调试指令
 - `#status`：实时回显 Bot 坐标、血量与状态
 - `#stop`：紧急打断 Bot 当前动作
+
+---
+
+## 要塞计算（Ninjabrain Bot）
+
+已接入官方 1.5.2 的无界面计算核心，可从投眼坐标射线输出候选区块与概率。先用合成数据离线验证：
+
+```powershell
+.\.venv\Scripts\python.exe -m integrations.ninjabrain setup
+.\.venv\Scripts\python.exe -m integrations.ninjabrain calculate --input data/examples/stronghold_throws.json
+```
+
+真实投眼采样、误差假设和限制见 [要塞计算集成指南](docs/STRONGHOLD.md)。采样会消耗末影之眼；已通过 5 次真实投眼采样与多观测计算实测；尚未挖掘确认传送门房。

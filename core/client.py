@@ -8,6 +8,18 @@ import requests
 from typing import Optional, Dict, Any, List
 
 
+class MinecraftAPIError(RuntimeError):
+    """An API call failed, including business errors returned with HTTP 200."""
+
+    def __init__(self, payload):
+        self.payload = payload
+        error = payload.get("error") or {}
+        if not isinstance(error, dict):
+            error = {"code": "invalid_response", "message": "invalid API error envelope"}
+        self.code = error.get("code", "invalid_response")
+        super().__init__(f"{self.code}: {error.get('message', 'API call failed')}")
+
+
 class MinecraftAgentClient:
     def __init__(
         self,
@@ -105,11 +117,36 @@ class MinecraftAgentClient:
         res = requests.get(url, headers=self.headers, params={"radius": radius}, timeout=5).json()
         return res.get("result", {}).get("blocks", [])
 
-    def get_entities(self, radius: int = 16) -> List[Dict[str, Any]]:
-        """Queries visible entities (mobs, players, items) within radius."""
-        url = f"{self.base_url}/entities"
-        res = requests.get(url, headers=self.headers, params={"radius": radius}, timeout=5).json()
-        return res.get("result", {}).get("entities", [])
+    def _checked_request(self, method: str, path: str, payload=None, timeout: float = 10) -> Dict[str, Any]:
+        """Validate both HTTP status and the API's business success flag."""
+        response = requests.request(
+            method, f"{self.base_url}{path}", headers=self.headers, json=payload, timeout=timeout,
+        )
+        try:
+            data = response.json()
+        except ValueError as error:
+            raise MinecraftAPIError({"error": {"code": "invalid_response", "message": "API did not return JSON"}}) from error
+        if not isinstance(data, dict) or data.get("ok") is not True:
+            raise MinecraftAPIError(data if isinstance(data, dict) else {"error": {"code": "invalid_response"}})
+        response.raise_for_status()
+        if not isinstance(data.get("result"), dict):
+            raise MinecraftAPIError({"error": {"code": "invalid_response", "message": "API result object missing"}})
+        return data
+
+    def get_entities(self, radius: int = 16, types: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+        """Query entities through the current API, optionally filtering by name."""
+        payload = {"radius": radius}
+        if types is not None:
+            payload["types"] = types
+        result = self._checked_request("POST", "/get_entities", payload, timeout=5).get("result", {})
+        entities = result.get("entities")
+        if not isinstance(entities, list):
+            raise MinecraftAPIError({"error": {"code": "invalid_response", "message": "entities list missing"}})
+        return entities
+
+    def get_inventory(self) -> Dict[str, Any]:
+        """Read inventory before consuming an item."""
+        return self._checked_request("GET", "/inventory", timeout=5)["result"]
 
     def place_block(self, x: float, y: float, z: float, item: Optional[str] = None) -> Dict[str, Any]:
         """Places a block at the target coordinate."""
@@ -140,8 +177,7 @@ class MinecraftAgentClient:
 
     def use_item(self, item: str, ms: Optional[int] = None) -> Dict[str, Any]:
         """Uses/consumes an item (e.g. food, bow, potion)."""
-        url = f"{self.base_url}/use_item"
         payload = {"item": item}
-        if ms:
+        if ms is not None:
             payload["ms"] = ms
-        return requests.post(url, headers=self.headers, json=payload, timeout=10).json()
+        return self._checked_request("POST", "/use_item", payload, timeout=10)
