@@ -1,0 +1,32 @@
+llm:
+  # 支持 OpenAI、DeepSeek、Qwen、Ollama、LocalAI 等任何 OpenAI 兼容接口
+  base_url: "https://api.nju-aia.com/v1"
+  api_key: "your-api-key-here"
+  model: "default"
+  temperature: 0.3
+  max_tokens: 1024
+
+agent:
+  name: "SleepBot"
+  password: "agent-secret-pass"
+  reflex_enabled: true
+  reflex_frequency_hz: 20
+  threat_distance_threshold: 8.0
+
+mc_api:
+  base_url: "http://127.0.0.1:18900/api/v1"
+  timeout_seconds: 15
+
+rcon:
+  enabled: true
+  host: "127.0.0.1"
+  port: 25575
+  password: "agent-rcon-pass"
+
+debug:
+  enable_in_game_commands: true
+  command_prefix: "#"
+  log_level: "INFO"
+  flight_recorder:
+    enabled: true
+    output_dir: "logs"

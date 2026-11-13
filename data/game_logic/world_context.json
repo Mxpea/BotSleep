@@ -1,0 +1,12 @@
+{
+  "last_survey_at": "2026-11-13T14:40:46.000Z",
+  "time_of_day": 21463,
+  "is_day": false,
+  "raining": false,
+  "thundering": false,
+  "biome": "",
+  "dimension": "overworld",
+  "surrounding_blocks_count": 0,
+  "visible_entities_count": 0,
+  "entities_sample": []
+}

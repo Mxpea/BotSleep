@@ -1,0 +1,18 @@
+# Virtual environment
+.venv/
+
+# Environment and sensitive keys
+config.yaml
+.env
+*.secret
+
+# Logs and runtime caches
+logs/
+*.log
+__pycache__/
+*.pyc
+
+# Local Minecraft worlds and binaries
+world/
+server/
+*.jar

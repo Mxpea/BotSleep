@@ -1,0 +1,26 @@
+{
+  "last_updated": "2026-11-13T14:40:46.000Z",
+  "username": "SleepBot",
+  "pos": [
+    -7.5,
+    70,
+    -4.5
+  ],
+  "yaw": 3.14,
+  "pitch": 0.0,
+  "dimension": "overworld",
+  "gamemode": "survival",
+  "health": 20,
+  "food": 20,
+  "saturation": 5,
+  "xp_level": 0,
+  "held_item": null,
+  "offhand_item": null,
+  "armor_points": 0,
+  "is_sleeping": false,
+  "in_water": false,
+  "in_lava": false,
+  "in_vehicle": null,
+  "alive": true,
+  "ready": true
+}
