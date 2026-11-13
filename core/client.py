@@ -123,18 +123,71 @@ class MinecraftAgentClient:
         url = f"{self.base_url}/inventory"
         return requests.get(url, headers=self.headers, timeout=5).json()
 
+    def get_inventory_counts(self) -> Dict[str, int]:
+        """Convenience method returning a simple mapping of item_name -> total_count."""
+        res = self.get_inventory()
+        counts: Dict[str, int] = {}
+        items = res.get("result", {}).get("items", [])
+        for item in items:
+            name = item.get("name")
+            cnt = item.get("count", 1)
+            if name:
+                counts[name] = counts.get(name, 0) + cnt
+        return counts
+
     def get_block(self, x: float, y: float, z: float) -> Dict[str, Any]:
         """Gets detailed block information at specific coordinates."""
         url = f"{self.base_url}/get_block"
         return requests.post(url, headers=self.headers, json={"x": x, "y": y, "z": z}, timeout=5).json()
 
-    def place_block(self, x: float, y: float, z: float, item: Optional[str] = None) -> Dict[str, Any]:
-        """Places a block at the target coordinate."""
+    def find_blocks(
+        self,
+        types: Optional[List[str]] = None,
+        radius: int = 16,
+        limit: int = 20,
+    ) -> Dict[str, Any]:
+        """Searches for specific block types within radius."""
+        url = f"{self.base_url}/find_blocks"
+        payload: Dict[str, Any] = {"radius": radius, "limit": limit}
+        if types:
+            payload["types"] = types
+        return requests.post(url, headers=self.headers, json=payload, timeout=8).json()
+
+    def craft(self, item: str, count: int = 1) -> Dict[str, Any]:
+        """Crafts an item via the mc-agent-api /craft endpoint."""
+        url = f"{self.base_url}/craft"
+        return requests.post(
+            url,
+            headers=self.headers,
+            json={"item": item, "count": count},
+            timeout=25,
+        ).json()
+
+    def place_block(
+        self,
+        item: str,
+        x: Optional[float] = None,
+        y: Optional[float] = None,
+        z: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Places a block at the target coordinate, or auto-places near the bot if coordinates are omitted."""
         url = f"{self.base_url}/place"
-        payload = {"x": x, "y": y, "z": z}
-        if item:
-            payload["item"] = item
+        payload: Dict[str, Any] = {"item": item}
+        if x is not None and y is not None and z is not None:
+            payload["x"] = x
+            payload["y"] = y
+            payload["z"] = z
         return requests.post(url, headers=self.headers, json=payload, timeout=10).json()
+
+    def equip(self, item: str, slot: str = "hand") -> Dict[str, Any]:
+        """Equips an item from inventory to slot (hand, off-hand, head, torso, legs, feet)."""
+        url = f"{self.base_url}/equip"
+        return requests.post(
+            url,
+            headers=self.headers,
+            json={"item": item, "slot": slot},
+            timeout=5,
+        ).json()
 
     def interact(
         self,

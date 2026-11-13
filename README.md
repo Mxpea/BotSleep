@@ -36,12 +36,15 @@ BotSleep/
 │
 ├── core/                         # 🔌 基础设施与驱动
 │   ├── client.py                 # mc-agent-api HTTP REST 接口客户端
+│   ├── recipes.py                # 配方管理器与多层级原料预算规划器 (RecipeBook)
 │   ├── radar.py                  # 3D 方块雷达与地形高度图引擎 (BlockRadar)
 │   ├── memory.py                 # 空间记忆与 Sub-Agent 知识库 (MemoryEngine)
 │   ├── rcon.py                   # RCON 客户端管理者
 │   └── telemetry.py              # 环境感知与 20Hz 应急反射监听环
 │
 ├── skills/                       # 📦 程序化宏技能库 (快反应)
+│   ├── crafting.py               # 智能合成技能 (CraftItemSkill: 2x2/3x3 自适应/自动放回收工作台)
+│   ├── mining.py                 # 智能伐木与清理整树 (ChopTreeSkill)
 │   ├── exploration.py            # 常态化雷达自动勘探技能 (ContinuousRadarSkill)
 │   ├── movement.py               # 自动搭高 (pillar_up)、搭桥、潜行
 │   ├── clutch.py                 # 自动落地水 (mlg_water)
@@ -49,16 +52,20 @@ BotSleep/
 │
 ├── agent/                        # 🧠 大模型认知层 (慢思考)
 │   ├── brain.py                  # OpenAI 兼容接口封装 (支持任何兼容端点)
-│   ├── tools.py                  # Function Calling 技能工具定义 (含雷达与记忆检索)
+│   ├── tools.py                  # Function Calling 技能工具定义 (含合成、雷达与记忆检索)
 │   └── loop.py                   # Observe-Think-Act 状态机循环
 │
 ├── data/                         # 💾 游戏逻辑数据与空间知识库
+│   ├── recipes.json              # Minecraft 1.21.11 完整 886 种配方库
 │   └── game_logic/
 │       ├── bot_state.json        # Bot 坐标与生命体征实时快照
 │       ├── landmarks.json        # 战略 POI 数据库 (床/箱子/工作台/矿物/液体)
 │       ├── spatial_grid.json     # 已探索区块与航迹
 │       ├── world_context.json    # 生态与昼夜环境上下文
 │       └── episodic_memory.jsonl # 探索时序回忆流水日志
+│
+├── tests/                        # 🧪 自动化场景验收测试集
+│   └── test_crafting.py          # 智能逆向合成木镐全链路实机验收测试
 │
 ├── debug/                        # 🛠️ 人机协同调试工具箱
 │   ├── chat_debugger.py          # 游戏内 # 聊天调试指令分发器 (#radar, #status 等)

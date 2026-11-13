@@ -26,6 +26,38 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
+            "name": "craft_item",
+            "description": "Craft items using 2x2 player inventory or 3x3 crafting table. Automatically handles prerequisite synthesis, placing a crafting table if needed, and retrieving the table afterwards.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "item": {
+                        "type": "string",
+                        "description": "Item name to craft (e.g. 'wooden_pickaxe', 'oak_planks', 'stick', 'crafting_table').",
+                    },
+                    "count": {
+                        "type": "integer",
+                        "description": "Quantity to produce (default: 1).",
+                        "default": 1,
+                    },
+                    "auto_prerequisites": {
+                        "type": "boolean",
+                        "description": "Whether to automatically synthesize missing sub-components from raw materials (e.g. logs -> planks -> sticks) (default: true).",
+                        "default": True,
+                    },
+                    "retrieve_table": {
+                        "type": "boolean",
+                        "description": "Whether to dig and collect the placed crafting table back into inventory after 3x3 crafting (default: true).",
+                        "default": True,
+                    },
+                },
+                "required": ["item"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "chop_tree",
             "description": "Locate nearest trees and cleanly chop down all wood logs until target count or time limit is reached.",
             "parameters": {

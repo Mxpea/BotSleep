@@ -39,6 +39,7 @@ from .clutch import MLGWaterSkill
 from .sleep import AutoSleepSkill
 from .exploration import ContinuousRadarSkill
 from .mining import ChopTreeSkill
+from .crafting import CraftItemSkill
 
 __all__ = [
     "BaseSkill",
@@ -48,4 +49,5 @@ __all__ = [
     "AutoSleepSkill",
     "ContinuousRadarSkill",
     "ChopTreeSkill",
+    "CraftItemSkill",
 ]

@@ -89,3 +89,38 @@
   - `time_limit_reached`: 是否超时截断。
   - `trees_cleared`: 彻底砍光的完整树木数量。
   - `breakdown`: 各类原木采掘明细（如 `{"oak_log": 6}`）。
+
+---
+
+### 6. `craft_item` (智能合成与工具制作技能)
+
+* **功能**：自动区分 2x2（背包直合）与 3x3（工作台合成）配方，支持前置材料递归逆向分解合成（如原木 -> 木板 -> 木棍 -> 木镐），自动寻找/放置工作台，并在合成完成后自动将工作台挖掘回收回背包。
+* **模块归属**：`skills/crafting.py` (`CraftItemSkill`)，底层配合 `core/recipes.py` (`RecipeBook`) 与 `data/recipes.json`（内置 Minecraft 1.21.11 完整 886 种配方库）。
+* **参数**：
+  - `item: str`：目标合成物品名（如 `wooden_pickaxe`, `stick`, `crafting_table`, `oak_planks`）。
+  - `count: int = 1`：目标合成数量。
+  - `auto_prerequisites: bool = True`：是否自动从基础原料层级推导并合成中间产物（例如只有原木时，自动合成木板与木棍）。
+  - `retrieve_table: bool = True`：3x3 合成完成后是否自动回收工作台（让工作台留在背包备用，不遗失在野外）。
+  - `max_duration_seconds: float = 60.0`：合成动作超时时间。
+* **执行工作流 (Pipeline)**：
+  1. **配方分类**：检查配方尺寸。若 $\le 2\times 2$（如木板、木棍、工作台、火把），直接在玩家背包制作。
+  2. **3x3 工作台调度**：
+     - 若周围 12 格内已有放置好的工作台，直接寻路复用。
+     - 若无工作台且背包中无工作台，使用 2x2 自动用 4 块木板合成工作台。
+     - 若当前脚下为树叶/水域等不稳固方块，自动微移至坚实地面（`_ensure_solid_ground`）。
+     - 调用 `place_block("crafting_table")` 放置于身侧，并更新 `MemoryEngine` 空间地标。
+  3. **前置原料预算与批处理合成**：
+     - 精确计算所需全部中间材料（如木镐需要 3 木板 + 2 木棍，1 次木棍合成消耗 2 木板产生 4 木棍，总计需 9 块木板，推导出需 3 根原木）。
+     - 自动合并批量合成（一次性将 3 根原木合成为 12 块木板），极大提升合成速度与效率。
+  4. **3x3 界面交互合成**：
+     - 与工作台交互，自动填充配方并取回目标物品。
+  5. **工作台自动回收**：
+     - 若 `retrieve_table=True`，自动对放置的工作台执行 `dig(collect=True)`，将其拾回背包。
+* **输出数据 (Result Data)**：
+  - `item`: 目标物品。
+  - `requested_count`: 目标数量。
+  - `total_in_inventory`: 背包中该物品现存总量。
+  - `gained`: 本次净增数量。
+  - `duration_seconds`: 耗时。
+  - `steps`: 详细执行步骤链。
+  - `final_inventory`: 最终背包全量快照。
