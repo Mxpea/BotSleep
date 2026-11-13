@@ -48,6 +48,49 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
+            "name": "radar_sweep",
+            "description": "Trigger a 3D block radar scan around the bot to discover POIs (beds, chests, crafting tables, minerals, hazards).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "radius": {
+                        "type": "integer",
+                        "description": "Radar radius in blocks (1-32, default: 24).",
+                        "default": 24,
+                    },
+                    "categories": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional specific categories to scan: 'bed', 'crafting', 'container', 'mineral', 'liquid_and_hazard'.",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_memory_poi",
+            "description": "Query historical spatial memory and landmarks to locate recorded beds, chests, or safe points.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "category": {
+                        "type": "string",
+                        "description": "POI category to recall: 'bed', 'container', 'crafting', 'mineral', 'shelter'.",
+                    },
+                    "max_distance": {
+                        "type": "number",
+                        "description": "Maximum distance from current position (default: 64.0).",
+                        "default": 64.0,
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "chat_say",
             "description": "Send a chat message to other players in the game server.",
             "parameters": {

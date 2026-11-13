@@ -1,0 +1,19 @@
+{
+  "visited_waypoints": [
+    {
+      "pos": [
+        -4.5,
+        70,
+        8.5
+      ],
+      "dimension": "overworld",
+      "t": "2026-11-13T14:52:35.000Z"
+    }
+  ],
+  "explored_chunks": [
+    [
+      -1,
+      0
+    ]
+  ]
+}

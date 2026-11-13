@@ -1,1 +1,2 @@
 {"timestamp": "2026-11-13T14:40:46.000Z", "event_type": "snapshot", "summary": "Bot snapshot recorded at [-7.5, 70, -4.5]. Weather: is_day=False, HP=20", "pos": [-7.5, 70, -4.5], "details": {"blocks_count": 0, "entities_count": 0}}
+{"timestamp": "2026-11-13T14:52:35.000Z", "event_type": "radar_sweep", "summary": "Radar sweep complete at [-4.5, 70, 8.5]. Found 10 POIs.", "pos": [-4.5, 70, 8.5], "details": {"findings_count": 10}}

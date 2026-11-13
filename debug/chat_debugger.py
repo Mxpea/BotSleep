@@ -3,14 +3,24 @@
 Listens to in-game chat messages starting with '#' and executes debug commands.
 """
 
-from typing import Dict, Any, Callable
+from typing import Dict, Any, Callable, Optional
 from core.client import MinecraftAgentClient
+from core.memory import MemoryEngine
+from skills.exploration import ContinuousRadarSkill
 
 
 class ChatDebugger:
-    def __init__(self, client: MinecraftAgentClient, prefix: str = "#"):
+    def __init__(
+        self,
+        client: MinecraftAgentClient,
+        prefix: str = "#",
+        radar_skill: Optional[ContinuousRadarSkill] = None,
+        memory: Optional[MemoryEngine] = None,
+    ):
         self.client = client
         self.prefix = prefix
+        self.radar_skill = radar_skill or ContinuousRadarSkill(client)
+        self.memory = memory or MemoryEngine()
         self.last_seq = 0
         self.commands: Dict[str, Callable[[str], None]] = {}
         self._register_default_commands()
@@ -19,6 +29,7 @@ class ChatDebugger:
         self.commands["help"] = self._cmd_help
         self.commands["status"] = self._cmd_status
         self.commands["stop"] = self._cmd_stop
+        self.commands["radar"] = self._cmd_radar
 
     def poll_and_dispatch(self) -> None:
         """Polls new chat events and dispatches matching # commands."""
@@ -51,8 +62,34 @@ class ChatDebugger:
         pos = st.get("pos", [0, 0, 0])
         hp = st.get("health", 0)
         day = st.get("is_day", True)
-        self.client.chat(f"[BotSleep Debug] Pos: {pos}, HP: {hp}, Day: {day}")
+        radar_stat = "ON" if self.radar_skill.is_active else "OFF"
+        self.client.chat(f"[BotSleep Debug] Pos: {pos}, HP: {hp}, Day: {day}, Radar: {radar_stat}")
 
     def _cmd_stop(self, args: str) -> None:
-        self.client.chat("[BotSleep Debug] Stopping all active tasks...")
-        # TODO: Send stop signal
+        self.client.chat("[BotSleep Debug] Stopping all active tasks and continuous radar...")
+        self.radar_skill.disable()
+
+    def _cmd_radar(self, args: str) -> None:
+        sub = args.strip().lower()
+        if sub == "on":
+            res = self.radar_skill.enable()
+            self.client.chat(f"[Radar] {res.message}")
+        elif sub == "off":
+            res = self.radar_skill.disable()
+            self.client.chat(f"[Radar] {res.message}")
+        elif sub == "scan":
+            self.client.chat("[Radar] Executing manual radar sweep...")
+            res = self.radar_skill.execute(force_sweep=True)
+            new_pois = res.data.get("new_pois", 0)
+            self.client.chat(f"[Radar] Sweep completed! Indexed {new_pois} strategic POIs.")
+        elif sub == "poi":
+            st = self.client.get_status().get("result", {})
+            pos = st.get("pos", [0, 0, 0])
+            pois = self.memory.query_pois(max_distance=32.0, from_pos=pos)
+            if not pois:
+                self.client.chat("[Radar] No POIs recorded within 32 blocks.")
+            else:
+                summary = ", ".join(f"{p['name']} ({p.get('current_dist')}m)" for p in pois[:4])
+                self.client.chat(f"[Radar POI] Nearest: {summary}")
+        else:
+            self.client.chat("[Radar] Usage: #radar [on|off|scan|poi]")
