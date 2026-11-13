@@ -38,6 +38,7 @@ from .movement import PillarUpSkill
 from .clutch import MLGWaterSkill
 from .sleep import AutoSleepSkill
 from .exploration import ContinuousRadarSkill
+from .mining import ChopTreeSkill
 
 __all__ = [
     "BaseSkill",
@@ -46,4 +47,5 @@ __all__ = [
     "MLGWaterSkill",
     "AutoSleepSkill",
     "ContinuousRadarSkill",
+    "ChopTreeSkill",
 ]

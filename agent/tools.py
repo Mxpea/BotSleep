@@ -26,6 +26,28 @@ TOOL_DEFINITIONS = [
     {
         "type": "function",
         "function": {
+            "name": "chop_tree",
+            "description": "Locate nearest trees and cleanly chop down all wood logs until target count or time limit is reached.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target_count": {
+                        "type": "integer",
+                        "description": "Target number of wood logs to harvest (default: 5).",
+                        "default": 5,
+                    },
+                    "max_duration_seconds": {
+                        "type": "number",
+                        "description": "Maximum work time in seconds before stopping (default: 60.0).",
+                        "default": 60.0,
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "auto_sleep",
             "description": "Search for a nearby bed, walk near it, and sleep through the night or thunderstorm. Will wake automatically when morning comes.",
             "parameters": {

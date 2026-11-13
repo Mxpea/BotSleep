@@ -7,6 +7,7 @@ from typing import Dict, Any, Callable, Optional
 from core.client import MinecraftAgentClient
 from core.memory import MemoryEngine
 from skills.exploration import ContinuousRadarSkill
+from skills.mining import ChopTreeSkill
 
 
 class ChatDebugger:
@@ -16,11 +17,13 @@ class ChatDebugger:
         prefix: str = "#",
         radar_skill: Optional[ContinuousRadarSkill] = None,
         memory: Optional[MemoryEngine] = None,
+        chop_skill: Optional[ChopTreeSkill] = None,
     ):
         self.client = client
         self.prefix = prefix
         self.radar_skill = radar_skill or ContinuousRadarSkill(client)
         self.memory = memory or MemoryEngine()
+        self.chop_skill = chop_skill or ChopTreeSkill(client, memory=self.memory)
         self.last_seq = 0
         self.commands: Dict[str, Callable[[str], None]] = {}
         self._register_default_commands()
@@ -30,6 +33,7 @@ class ChatDebugger:
         self.commands["status"] = self._cmd_status
         self.commands["stop"] = self._cmd_stop
         self.commands["radar"] = self._cmd_radar
+        self.commands["chop"] = self._cmd_chop
 
     def poll_and_dispatch(self) -> None:
         """Polls new chat events and dispatches matching # commands."""
@@ -93,3 +97,13 @@ class ChatDebugger:
                 self.client.chat(f"[Radar POI] Nearest: {summary}")
         else:
             self.client.chat("[Radar] Usage: #radar [on|off|scan|poi]")
+
+    def _cmd_chop(self, args: str) -> None:
+        """Handles #chop [target_count] [max_seconds]."""
+        parts = args.split()
+        target = int(parts[0]) if len(parts) > 0 and parts[0].isdigit() else 5
+        timeout = float(parts[1]) if len(parts) > 1 and parts[1].replace(".", "").isdigit() else 60.0
+
+        self.client.chat(f"[ChopTree] Starting tree chopping (target: {target} logs, timeout: {timeout}s)...")
+        res = self.chop_skill.execute(target_count=target, max_duration_seconds=timeout)
+        self.client.chat(f"[ChopTree] {res.message}")

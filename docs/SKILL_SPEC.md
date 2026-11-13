@@ -63,3 +63,29 @@
   - `radius: int = 16`：床位搜索半径。
   - `threat_check: bool = True`：是否先校验并避开周边敌对生物。
 * **记忆联动**：若雷达已探明床位坐标，直接从 `MemoryEngine` 调取最近床位寻路，无需从头漫游盲扫。
+
+---
+
+### 5. `chop_tree` (智能伐木与清理整树技能)
+
+* **功能**：定位最近的可达树木，自底向上完整采伐整根树干，支持工作时长限制与目标数量阈值，返回精准完成状态。
+* **模块归属**：`skills/mining.py` (`ChopTreeSkill`)。
+* **参数**：
+  - `target_count: int = 5`：目标收集的原木数量（达到后停止）。
+  - `max_duration_seconds: float = 60.0`：单次工作最大超时时间（秒）。
+  - `search_radius: int = 32`：搜树半径。
+  - `clean_entire_tree: bool = True`：是否完整采伐整棵树（防止空中残留浮空树枝）。
+  - `log_types: Optional[List[str]] = None`：指定采伐的原木类型（默认自动适配橡木、白桦、云杉等全原木）。
+* **核心动作流程**：
+  1. 通过雷达/`find_blocks` 探测周边所有原木方块，按水平聚类算法区分独立树干并按距离排序。
+  2. 自动剔除因深坑/阻隔导致不可达的树木（`unreachable_trees` 故障自动重试转移）。
+  3. 自底向上逐块采掘并自动拾取掉落物。
+  4. 达到目标数量或超时后，返回 `SkillResult`，写入 `episodic_memory.jsonl` 情景记忆。
+* **输出数据 (Result Data)**：
+  - `harvested_count`: 采集的原木总数。
+  - `target_count`: 目标数。
+  - `elapsed_seconds`: 实际耗时。
+  - `target_reached`: 是否达成目标。
+  - `time_limit_reached`: 是否超时截断。
+  - `trees_cleared`: 彻底砍光的完整树木数量。
+  - `breakdown`: 各类原木采掘明细（如 `{"oak_log": 6}`）。

@@ -111,6 +111,23 @@ class MinecraftAgentClient:
         res = requests.get(url, headers=self.headers, params={"radius": radius}, timeout=5).json()
         return res.get("result", {}).get("entities", [])
 
+    def dig(self, x: float, y: float, z: float, collect: bool = True, timeout_ms: int = 30000) -> Dict[str, Any]:
+        """Approaches the block, equips best tool, digs it, and optionally collects the drops."""
+        url = f"{self.base_url}/dig"
+        payload = {"x": x, "y": y, "z": z, "collect": collect}
+        # timeout includes approaching and digging
+        return requests.post(url, headers=self.headers, json=payload, timeout=timeout_ms / 1000 + 10).json()
+
+    def get_inventory(self) -> Dict[str, Any]:
+        """Fetches the full inventory contents, armor, held item, and offhand."""
+        url = f"{self.base_url}/inventory"
+        return requests.get(url, headers=self.headers, timeout=5).json()
+
+    def get_block(self, x: float, y: float, z: float) -> Dict[str, Any]:
+        """Gets detailed block information at specific coordinates."""
+        url = f"{self.base_url}/get_block"
+        return requests.post(url, headers=self.headers, json={"x": x, "y": y, "z": z}, timeout=5).json()
+
     def place_block(self, x: float, y: float, z: float, item: Optional[str] = None) -> Dict[str, Any]:
         """Places a block at the target coordinate."""
         url = f"{self.base_url}/place"
