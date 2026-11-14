@@ -231,6 +231,7 @@ class MinecraftAgentClient:
         pos: Optional[List[float]] = None,
         entity_id: Optional[int] = None,
         item: Optional[str] = None,
+        timeout: float = 30.0,
     ) -> Dict[str, Any]:
         """Interacts (right-clicks) with a block or entity."""
         url = f"{self.base_url}/interact"
@@ -243,7 +244,7 @@ class MinecraftAgentClient:
             payload["entity_id"] = entity_id
         if item is not None:
             payload["item"] = item
-        return requests.post(url, headers=self.headers, json=payload, timeout=10).json()
+        return requests.post(url, headers=self.headers, json=payload, timeout=timeout).json()
 
     def use_item(self, item: str, ms: Optional[int] = None) -> Dict[str, Any]:
         """Uses/consumes an item (e.g. food, bow, potion)."""

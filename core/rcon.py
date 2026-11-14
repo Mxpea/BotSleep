@@ -25,6 +25,13 @@ class RconManager:
             finally:
                 self._rcon = None
 
+    def __enter__(self):
+        self.connect()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.disconnect()
+
     def command(self, cmd: str) -> str:
         """Executes a command and returns the response string."""
         self.connect()

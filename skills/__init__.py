@@ -40,6 +40,7 @@ from .sleep import AutoSleepSkill
 from .exploration import ContinuousRadarSkill
 from .mining import ChopTreeSkill
 from .crafting import CraftItemSkill
+from .portal import CastNetherPortalSkill
 
 __all__ = [
     "BaseSkill",
@@ -50,4 +51,5 @@ __all__ = [
     "ContinuousRadarSkill",
     "ChopTreeSkill",
     "CraftItemSkill",
+    "CastNetherPortalSkill",
 ]
