@@ -86,3 +86,7 @@ cp config.example.yaml config.yaml
 ```
 
 真实投眼采样、误差假设和限制见 [要塞计算集成指南](docs/STRONGHOLD.md)。采样会消耗末影之眼；已通过 5 次真实投眼采样与多观测计算实测；尚未挖掘确认传送门房。
+
+## Harness 接口设计
+
+[接口契约与架构决策](docs/HARNESS_INTERFACES.md) 持续记录底层 API 事实、接口草案与架构访谈结论；未决设计不代表已实现。
