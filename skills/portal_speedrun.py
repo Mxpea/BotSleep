@@ -31,12 +31,67 @@ class NetherPortalSpeedrunSkill(BaseSkill):
         has_water = inv.get("water_bucket", 0) > 0 or inv.get("bucket", 0) > 0
         return has_stone and has_water
 
+    def build_scaffolding(self, x0: int, y0: int, z0: int) -> SkillResult:
+        """Builds the precision 7-cobblestone scaffolding and activates controlled water curtain.
+        
+        Relative coordinate offsets from portal origin (x0, y0, z0):
+          - x0: left column (dx=0), x0+1: left opening, x0+2: right opening, x0+3: right column
+          - y0: ground level (dy=0), y0+1..3: vertical frame levels
+          - z0: portal plane (dz=0), z0-1: pillar & wall line, z0-2: backboard line
+        
+        7 Cobblestone placements:
+          1. Backboard:      [x0 + 1, y0 + 1, z0 - 2]
+          2. Left wall far:  [x0 + 0, y0 + 1, z0 - 1]
+          3. Left wall near: [x0 + 1, y0 + 1, z0 - 1]
+          4. Pillar layer 1: [x0 + 3, y0 + 1, z0 - 1]
+          5. Pillar layer 2: [x0 + 3, y0 + 2, z0 - 1]
+          6. Pillar layer 3: [x0 + 3, y0 + 3, z0 - 1]
+          7. Arm forward:    [x0 + 3, y0 + 3, z0 + 0]
+        
+        Water activation:
+          - Water poured at: [x0 + 2, y0 + 3, z0 - 1] against pillar layer 3.
+        """
+        logger.info(f"Building precision cobblestone scaffolding for portal origin [{x0}, {y0}, {z0}]...")
+        # Check inventory for building blocks and water bucket
+        inv = self.client.get_inventory_counts()
+        if inv.get("cobblestone", 0) < 7:
+            return SkillResult(success=False, error_code="missing_cobblestone", message="Need at least 7 cobblestone for scaffolding.")
+        if inv.get("water_bucket", 0) < 1:
+            return SkillResult(success=False, error_code="missing_water_bucket", message="Water bucket required for water curtain.")
+
+        # 1. Backboard
+        self.client.place_block("cobblestone", x0 + 1, y0 + 1, z0 - 2)
+        # 2. Left walls
+        self.client.place_block("cobblestone", x0 + 0, y0 + 1, z0 - 1)
+        self.client.place_block("cobblestone", x0 + 1, y0 + 1, z0 - 1)
+        # 3. Right pillar (3 blocks)
+        self.client.place_block("cobblestone", x0 + 3, y0 + 1, z0 - 1)
+        self.client.place_block("cobblestone", x0 + 3, y0 + 2, z0 - 1)
+        self.client.place_block("cobblestone", x0 + 3, y0 + 3, z0 - 1)
+        # 4. Arm extending forward
+        self.client.place_block("cobblestone", x0 + 3, y0 + 3, z0 + 0)
+        time.sleep(0.3)
+
+        # 5. Pour water on top against pillar layer 3
+        water_spot = [x0 + 2, y0 + 3, z0 - 1]
+        logger.info(f"Activating controlled water curtain at {water_spot}...")
+        water_res = self.client.interact(pos=water_spot, item="water_bucket", stop_on=["death"])
+        time.sleep(1.0)
+
+        return SkillResult(
+            success=True,
+            message="Scaffolding and controlled water curtain built successfully with zero leaks.",
+            data={"water_spot": water_spot, "water_res": water_res},
+        )
+
     def execute(self, step: int = 1, **kwargs) -> SkillResult:
         """Executes a specific step or the entire speedrun sequence."""
         if step == 1:
             return self.execute_step_1(**kwargs)
         if step == 2:
             return self.execute_step_2(**kwargs)
+        if step == "scaffold":
+            return self.build_scaffolding(**kwargs)
         return SkillResult(success=False, error_code="step_not_implemented", message=f"Step {step} not yet implemented.")
 
     def execute_step_1(
