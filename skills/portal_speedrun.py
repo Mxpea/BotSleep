@@ -12,6 +12,7 @@ import time
 from typing import Optional, List, Dict, Any, Tuple
 
 from . import BaseSkill, SkillResult
+from .portal_telemetry import PortalTelemetryRecorder
 from core.memory import MemoryEngine
 
 logger = logging.getLogger("BotSleep.Skills.PortalSpeedrun")
@@ -20,9 +21,42 @@ logger = logging.getLogger("BotSleep.Skills.PortalSpeedrun")
 class NetherPortalSpeedrunSkill(BaseSkill):
     """Speedrun Nether Portal Casting Skill executing step-by-step."""
 
-    def __init__(self, client, memory: Optional[MemoryEngine] = None):
+    def __init__(
+        self,
+        client,
+        memory: Optional[MemoryEngine] = None,
+        telemetry: Optional[PortalTelemetryRecorder] = None,
+    ):
         super().__init__(client)
         self.memory = memory or MemoryEngine()
+        self.telemetry = telemetry
+
+    def _record(
+        self,
+        step_id: str,
+        description: str,
+        target_pos: Optional[List[int]] = None,
+        anchor_ref: Optional[List[int]] = None,
+        anchor_face: Optional[List[int]] = None,
+        action_func: Optional[Any] = None,
+        portal_origin: Optional[Tuple[int, int, int]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ):
+        """Helper to cleanly route action execution through telemetry if enabled."""
+        if self.telemetry:
+            return self.telemetry.record_step(
+                step_id=step_id,
+                description=description,
+                target_pos=target_pos,
+                anchor_ref=anchor_ref,
+                anchor_face=anchor_face,
+                action_func=action_func,
+                portal_origin=portal_origin,
+                metadata=metadata,
+            )
+        elif action_func:
+            return action_func()
+        return None
 
     def validate_preconditions(self, **kwargs) -> bool:
         """Validates that items, space, and bot status meet preconditions."""
@@ -59,31 +93,43 @@ class NetherPortalSpeedrunSkill(BaseSkill):
         if inv.get("water_bucket", 0) < 1:
             return SkillResult(success=False, error_code="missing_water_bucket", message="Water bucket required for water curtain.")
 
-        def place_if_needed(bx, by, bz):
+        def place_if_needed(bx, by, bz, name="scaffold_block"):
             b = self.client.get_block(bx, by, bz).get("result", {})
             if b.get("name") not in ["cobblestone", "stone"]:
-                self.client.place_block("cobblestone", bx, by, bz)
+                self._record(
+                    step_id=name,
+                    description=f"放置脚手架方块至 [{bx}, {by}, {bz}]",
+                    target_pos=[bx, by, bz],
+                    action_func=lambda: self.client.place_block("cobblestone", bx, by, bz),
+                )
                 time.sleep(0.15)
 
         # 1. Backboard
-        place_if_needed(x0 + 1, y0 + 1, z0 - 2)
+        place_if_needed(x0 + 1, y0 + 1, z0 - 2, "scaffold_backboard")
         # 2. Left walls
-        place_if_needed(x0 + 0, y0 + 1, z0 - 1)
-        place_if_needed(x0 + 1, y0 + 1, z0 - 1)
+        place_if_needed(x0 + 0, y0 + 1, z0 - 1, "scaffold_left_wall_far")
+        place_if_needed(x0 + 1, y0 + 1, z0 - 1, "scaffold_left_wall_near")
         # 3. Right pillar (3 blocks)
-        place_if_needed(x0 + 3, y0 + 1, z0 - 1)
-        place_if_needed(x0 + 3, y0 + 2, z0 - 1)
-        place_if_needed(x0 + 3, y0 + 3, z0 - 1)
+        place_if_needed(x0 + 3, y0 + 1, z0 - 1, "scaffold_pillar_layer_1")
+        place_if_needed(x0 + 3, y0 + 2, z0 - 1, "scaffold_pillar_layer_2")
+        place_if_needed(x0 + 3, y0 + 3, z0 - 1, "scaffold_pillar_layer_3")
         # 4. Arm extending forward
-        place_if_needed(x0 + 3, y0 + 3, z0 + 0)
+        place_if_needed(x0 + 3, y0 + 3, z0 + 0, "scaffold_arm_forward")
         time.sleep(0.3)
 
         # 5. Pour water on top against pillar layer 3 West face
         water_spot = [x0 + 2, y0 + 3, z0 - 1]
         pillar_top = [x0 + 3, y0 + 3, z0 - 1]
         logger.info(f"Activating controlled water curtain at {water_spot} against {pillar_top}...")
-        water_res = self.client.interact(
-            pos=water_spot, item="water_bucket", ref=pillar_top, face=[-1, 0, 0], stop_on=["death"]
+        water_res = self._record(
+            step_id="scaffold_water_curtain",
+            description="顶部激活定向水幕",
+            target_pos=water_spot,
+            anchor_ref=pillar_top,
+            anchor_face=[-1, 0, 0],
+            action_func=lambda: self.client.interact(
+                pos=water_spot, item="water_bucket", ref=pillar_top, face=[-1, 0, 0], stop_on=["death"]
+            ),
         )
         time.sleep(1.0)
 
@@ -149,7 +195,12 @@ class NetherPortalSpeedrunSkill(BaseSkill):
             stone_res = {"placed": stone_name, "reused": True}
         else:
             logger.info(f"Step 1.1: Placing stone at {stone_pos}...")
-            stone_res = self.client.place_block(item="cobblestone", x=stone_pos[0], y=stone_pos[1], z=stone_pos[2])
+            stone_res = self._record(
+                step_id="step1_place_stone",
+                description="第一步：放置临时石头",
+                target_pos=stone_pos,
+                action_func=lambda: self.client.place_block(item="cobblestone", x=stone_pos[0], y=stone_pos[1], z=stone_pos[2]),
+            )
             time.sleep(0.3)
             b_stone = self.client.get_block(stone_pos[0], stone_pos[1], stone_pos[2]).get("result", {})
             stone_name = b_stone.get("name", "air")
@@ -173,7 +224,14 @@ class NetherPortalSpeedrunSkill(BaseSkill):
 
         logger.info(f"Step 1.3: Placing water at {water_pos} aiming against stone {stone_pos} West face...")
         # Explicitly pass ref=stone_pos, face=[-1, 0, 0] to guarantee water is placed on West face at Y=y0
-        water_res = self.client.interact(pos=water_pos, item="water_bucket", ref=stone_pos, face=[-1, 0, 0])
+        water_res = self._record(
+            step_id="step1_place_water",
+            description="第一步：放置水并生成基底黑曜石",
+            target_pos=water_pos,
+            anchor_ref=stone_pos,
+            anchor_face=[-1, 0, 0],
+            action_func=lambda: self.client.interact(pos=water_pos, item="water_bucket", ref=stone_pos, face=[-1, 0, 0]),
+        )
         time.sleep(0.6)
 
         # Safety verification: ensure water did not accidentally land on top face at Y=y0+1
@@ -181,7 +239,12 @@ class NetherPortalSpeedrunSkill(BaseSkill):
         if b_above.get("name") in ["water", "flowing_water"]:
             logger.warning(f"Step 1.3 Alert: Spill water detected at Y+1 ({b_above.get('name')}), scooping immediately...")
             self.client.equip(item="bucket", slot="hand")
-            self.client.interact(pos=[water_pos[0], water_pos[1] + 1, water_pos[2]], item="bucket")
+            self._record(
+                step_id="step1_scoop_spill",
+                description="清理顶部溢出水流",
+                target_pos=[water_pos[0], water_pos[1] + 1, water_pos[2]],
+                action_func=lambda: self.client.interact(pos=[water_pos[0], water_pos[1] + 1, water_pos[2]], item="bucket"),
+            )
             time.sleep(0.3)
 
         # 4. 检查放置水后水和岩浆的状态
@@ -202,7 +265,12 @@ class NetherPortalSpeedrunSkill(BaseSkill):
 
         # 5. 换位置 (Move to red_sand)
         logger.info(f"Step 1.5: Moving to recommended standing position (red_sand at {red_sand_pos})...")
-        move_res = self.client.move_to(red_sand_pos[0], None, red_sand_pos[2])
+        move_res = self._record(
+            step_id="step1_move_red_sand",
+            description="第一步：换位置到推荐站位",
+            target_pos=[int(red_sand_pos[0]), int(red_sand_pos[1]), int(red_sand_pos[2])],
+            action_func=lambda: self.client.move_to(red_sand_pos[0], None, red_sand_pos[2]),
+        )
         time.sleep(0.5)
 
         final_status = self.client.get_status().get("result", {})
@@ -285,7 +353,12 @@ class NetherPortalSpeedrunSkill(BaseSkill):
         logger.info(f"Step 2.1: Checking stone at {stone_pos} -> {stone_name}")
         if stone_name in ["cobblestone", "stone", "dirt", "netherrack", "obsidian"]:
             logger.info(f"Step 2.1: Digging temporary stone ({stone_name}) at {stone_pos}...")
-            dig_res = self.client.dig(stone_pos[0], stone_pos[1], stone_pos[2], collect=False, stop_on=["death"])
+            dig_res = self._record(
+                step_id="step2_dig_stone",
+                description="第二步：拆掉临时定位石头",
+                target_pos=stone_pos,
+                action_func=lambda: self.client.dig(stone_pos[0], stone_pos[1], stone_pos[2], collect=False, stop_on=["death"]),
+            )
             time.sleep(0.4)
             b_stone_after = self.client.get_block(stone_pos[0], stone_pos[1], stone_pos[2]).get("result", {})
             stone_after_name = b_stone_after.get("name", "air")
@@ -307,7 +380,12 @@ class NetherPortalSpeedrunSkill(BaseSkill):
             top_name = b_top.get("name", "air")
             if top_name in ["cobblestone", "stone", "dirt", "obsidian", "gravel"]:
                 logger.info(f"Step 2.1: Digging opening block ({top_name}) at {top_pos}...")
-                self.client.dig(top_pos[0], top_pos[1], top_pos[2], collect=False, stop_on=["death"])
+                self._record(
+                    step_id=f"step2_dig_opening_{top_pos[0]}",
+                    description=f"挖掘门洞作业空间 [{top_pos[0]}, {top_pos[1]}, {top_pos[2]}]",
+                    target_pos=top_pos,
+                    action_func=lambda: self.client.dig(top_pos[0], top_pos[1], top_pos[2], collect=False, stop_on=["death"]),
+                )
                 time.sleep(0.4)
 
         # 3. 检查底部方块 (Check bottom blocks at Y=-1 / Y=63)
@@ -325,7 +403,12 @@ class NetherPortalSpeedrunSkill(BaseSkill):
             # Non-obsidian solid block: Dig it out
             if cur_name in ["stone", "cobblestone", "dirt", "gravel", "sand", "andesite", "diorite", "granite"]:
                 logger.info(f"Step 2.2: Digging non-obsidian solid block ({cur_name}) at {pos}...")
-                self.client.dig(pos[0], pos[1], pos[2], collect=False, stop_on=["death"])
+                self._record(
+                    step_id=f"step2_dig_base_{idx}",
+                    description=f"挖掘底部非黑曜石方块 [{pos[0]}, {pos[1]}, {pos[2]}]",
+                    target_pos=pos,
+                    action_func=lambda: self.client.dig(pos[0], pos[1], pos[2], collect=False, stop_on=["death"]),
+                )
                 time.sleep(0.3)
                 cur_name = self.client.get_block(pos[0], pos[1], pos[2]).get("result", {}).get("name", "air")
                 logger.info(f"Step 2.2: Block at {pos} after dig is {cur_name}.")
@@ -345,7 +428,12 @@ class NetherPortalSpeedrunSkill(BaseSkill):
                 time.sleep(0.1)
 
                 logger.info(f"Step 2.2: Placing lava at {pos}...")
-                place_lava_res = self.client.interact(pos=pos, item="lava_bucket", stop_on=["death"])
+                place_lava_res = self._record(
+                    step_id=f"step2_place_bottom_lava_{idx}",
+                    description=f"注入底部岩浆 [{pos[0]}, {pos[1]}, {pos[2]}]",
+                    target_pos=pos,
+                    action_func=lambda: self.client.interact(pos=pos, item="lava_bucket", stop_on=["death"]),
+                )
                 time.sleep(0.5)
 
         # 4. If any bottom block is lava, place water to freeze it into obsidian!
@@ -361,13 +449,23 @@ class NetherPortalSpeedrunSkill(BaseSkill):
             logger.info(f"Step 2.2: Freezing bottom trench lava with water at {water_target}...")
             self.client.equip(item="water_bucket", slot="hand")
             time.sleep(0.1)
-            self.client.interact(pos=water_target, item="water_bucket", stop_on=["death"])
+            self._record(
+                step_id="step2_freeze_trench",
+                description=f"放置水流转化底部黑曜石 [{water_target[0]}, {water_target[1]}, {water_target[2]}]",
+                target_pos=water_target,
+                action_func=lambda: self.client.interact(pos=water_target, item="water_bucket", stop_on=["death"]),
+            )
             time.sleep(0.8)
             # Scoop back the water source with empty bucket
             logger.info(f"Step 2.2: Scooping back water from {water_target}...")
             self.client.equip(item="bucket", slot="hand")
             time.sleep(0.1)
-            self.client.interact(pos=water_target, item="bucket", stop_on=["death"])
+            self._record(
+                step_id="step2_scoop_trench_water",
+                description=f"回收底部水流 [{water_target[0]}, {water_target[1]}, {water_target[2]}]",
+                target_pos=water_target,
+                action_func=lambda: self.client.interact(pos=water_target, item="bucket", stop_on=["death"]),
+            )
             time.sleep(0.5)
 
         # Re-verify all bottom blocks are now obsidian
@@ -404,7 +502,12 @@ class NetherPortalSpeedrunSkill(BaseSkill):
                 logger.info(f"Step 2: Scooping bottom water source at {chk_pos}...")
                 self.client.equip(item="bucket", slot="hand")
                 time.sleep(0.1)
-                self.client.interact(pos=chk_pos, item="bucket", stop_on=["death"])
+                self._record(
+                    step_id=f"step2_clear_source_{chk_pos[0]}",
+                    description=f"清理底层残留水原 [{chk_pos[0]}, {chk_pos[1]}, {chk_pos[2]}]",
+                    target_pos=chk_pos,
+                    action_func=lambda: self.client.interact(pos=chk_pos, item="bucket", stop_on=["death"]),
+                )
                 time.sleep(0.4)
 
         elapsed = round(time.time() - start_time, 2)
@@ -560,7 +663,15 @@ class NetherPortalSpeedrunSkill(BaseSkill):
                 )
             
             logger.info(f"Step 3 Pour {num}/6: Casting {desc} at {pos} against {anchor_ref} {anchor_face}...")
-            pour_res = self.client.interact(pos=pos, item="lava_bucket", ref=anchor_ref, face=anchor_face, stop_on=["death"])
+            pour_res = self._record(
+                step_id=f"step3_pour_{num}_{desc.replace(' ', '_').lower()}",
+                description=f"第三步浇筑：第{num}块黑曜石 ({desc})",
+                target_pos=pos,
+                anchor_ref=anchor_ref,
+                anchor_face=anchor_face,
+                action_func=lambda: self.client.interact(pos=pos, item="lava_bucket", ref=anchor_ref, face=anchor_face, stop_on=["death"]),
+                portal_origin=(x0, y0, z0),
+            )
             time.sleep(0.6)
             
             # Verify target block turned into obsidian
@@ -587,35 +698,52 @@ class NetherPortalSpeedrunSkill(BaseSkill):
                     if inv.get(pick, 0) > 0:
                         self.client.equip(item=pick, slot="hand")
                         break
-                self.client.dig(stand_block_pos[0], stand_block_pos[1], stand_block_pos[2], collect=False, stop_on=["death"])
+                self._record(
+                    step_id="step3_mine_temp_stand",
+                    description="拆除临时站立标记方块",
+                    target_pos=stand_block_pos,
+                    action_func=lambda: self.client.dig(stand_block_pos[0], stand_block_pos[1], stand_block_pos[2], collect=False, stop_on=["death"]),
+                )
                 time.sleep(0.4)
 
         # 4. 挪掉水并等水流干净 (Navigate to shore behind scaffolding to scoop top water source)
         logger.info("Step 3.4: Navigating to shore behind scaffolding to scoop top water curtain...")
-        self.client.move_to(x0 - 1.5, None, z0 + 1.0)
-        time.sleep(0.4)
-        self.client.move_to(x0 - 1.5, None, z0 - 1.5)
-        time.sleep(0.4)
+        self.client.move_to(x0 - 1.5, None, z0 + 1.0, range=1.2)
+        time.sleep(0.2)
+        self.client.move_to(x0 - 1.5, None, z0 - 1.5, range=1.2)
+        time.sleep(0.2)
         shore_pos = [x0 + 2.0, y0, z0 - 1.5]
-        self.client.move_to(shore_pos[0], None, shore_pos[2])
-        time.sleep(0.5)
+        self.client.move_to(shore_pos[0], None, shore_pos[2], range=1.0)
+        time.sleep(0.3)
 
         water_source = [x0 + 2, y0 + 3, z0 - 1]
         logger.info(f"Step 3.4: Scooping back top water source at {water_source} from shore...")
         self.client.equip(item="bucket", slot="hand")
         time.sleep(0.1)
-        scoop_res = self.client.interact(pos=water_source, item="bucket", stop_on=["death"])
-        time.sleep(1.0)
+        scoop_res = self._record(
+            step_id="step3_scoop_top_water",
+            description="回收顶部水幕源头",
+            target_pos=water_source,
+            action_func=lambda: self.client.interact(pos=water_source, item="bucket", stop_on=["death"]),
+            portal_origin=(x0, y0, z0),
+        )
+        time.sleep(0.6)
 
         # Walk back to front of portal for puddle check and ignition
         logger.info("Step 3.4: Returning to front of portal...")
-        self.client.move_to(x0 - 1.5, None, z0 - 1.5)
-        time.sleep(0.4)
-        self.client.move_to(x0 - 1.5, None, z0 + 1.0)
-        time.sleep(0.4)
+        self.client.move_to(x0 - 1.5, None, z0 - 1.5, range=1.2)
+        time.sleep(0.2)
+        self.client.move_to(x0 - 1.5, None, z0 + 1.0, range=1.2)
+        time.sleep(0.2)
         front_pos = [x0 + 1.6, y0, z0 + 1.0]
-        self.client.move_to(front_pos[0], None, front_pos[2])
-        time.sleep(0.5)
+        self.client.move_to(front_pos[0], None, front_pos[2], range=0.8)
+        time.sleep(0.3)
+        st_front = self.client.get_status().get("result", {})
+        p_front = st_front.get("pos", [])
+        if p_front and ((p_front[0] - front_pos[0])**2 + (p_front[2] - front_pos[2])**2)**0.5 > 1.2:
+            logger.info(f"Re-aligning to front stance: {p_front} -> {front_pos}")
+            self.client.move_to(front_pos[0], None, front_pos[2], range=0.6)
+            time.sleep(0.3)
 
         # Check and scoop bottom water puddle if lingering
         for dx in [1, 2]:
@@ -624,7 +752,12 @@ class NetherPortalSpeedrunSkill(BaseSkill):
                 logger.info(f"Step 3.4: Scooping lingering puddle at [{x0+dx}, {y0}, {z0}]...")
                 self.client.equip(item="bucket", slot="hand")
                 time.sleep(0.1)
-                self.client.interact(pos=[x0 + dx, y0, z0], item="bucket", stop_on=["death"])
+                self._record(
+                    step_id=f"step3_clear_puddle_{dx}",
+                    description=f"回收底部门洞残留水 [{x0+dx}, {y0}, {z0}]",
+                    target_pos=[x0 + dx, y0, z0],
+                    action_func=lambda: self.client.interact(pos=[x0 + dx, y0, z0], item="bucket", stop_on=["death"]),
+                )
                 time.sleep(0.5)
         
         # Verify portal openings are completely cleared of water
@@ -645,7 +778,17 @@ class NetherPortalSpeedrunSkill(BaseSkill):
         logger.info(f"Step 3.5: Igniting portal with flint_and_steel at [{x0 + 1}, {y0 - 1}, {z0}]...")
         self.client.equip(item="flint_and_steel", slot="hand")
         time.sleep(0.2)
-        ignite_res = self.client.interact(pos=[x0 + 1, y0 - 1, z0], item="flint_and_steel", stop_on=["death"])
+        ignite_res = self._record(
+            step_id="step3_ignite_portal",
+            description="点燃地狱门",
+            target_pos=[x0 + 1, y0 - 1, z0],
+            anchor_ref=[x0 + 1, y0 - 1, z0],
+            anchor_face=[0, 1, 0],
+            action_func=lambda: self.client.interact(
+                pos=[x0 + 1, y0 - 1, z0], item="flint_and_steel", ref=[x0 + 1, y0 - 1, z0], face=[0, 1, 0], stop_on=["death"]
+            ),
+            portal_origin=(x0, y0, z0),
+        )
         time.sleep(1.0)
         
         # Check all 6 portal blocks; retry ignition if needed
