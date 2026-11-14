@@ -19,3 +19,7 @@ server/
 
 # Downloaded calculator and compiled bridge
 .cache/ninjabrain/
+
+# Scratch & temporary workspace files
+scratch/
+
