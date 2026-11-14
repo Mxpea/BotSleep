@@ -86,13 +86,25 @@ class MinecraftAgentClient:
         url = f"{self.base_url}/chat"
         return requests.post(url, headers=self.headers, json={"message": message}, timeout=5).json()
 
-    def move_to(self, x: float, y: float, z: float, timeout_ms: int = 15000) -> Dict[str, Any]:
+    def move_to(
+        self,
+        x: float,
+        y: Optional[float] = None,
+        z: Optional[float] = None,
+        range: float = 1.0,
+        timeout_ms: int = 15000,
+    ) -> Dict[str, Any]:
         """Instructs the bot to pathfind to target coordinates."""
         url = f"{self.base_url}/move_to"
+        payload: Dict[str, Any] = {"x": x, "range": range, "timeout": timeout_ms}
+        if z is not None:
+            payload["z"] = z
+        if y is not None:
+            payload["y"] = y
         return requests.post(
             url,
             headers=self.headers,
-            json={"x": x, "y": y, "z": z, "timeout_ms": timeout_ms},
+            json=payload,
             timeout=timeout_ms / 1000 + 5,
         ).json()
 
@@ -241,6 +253,8 @@ class MinecraftAgentClient:
         pos: Optional[List[float]] = None,
         entity_id: Optional[int] = None,
         item: Optional[str] = None,
+        ref: Optional[List[int]] = None,
+        face: Optional[List[int]] = None,
         timeout: float = 30.0,
         stop_on: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
@@ -255,6 +269,10 @@ class MinecraftAgentClient:
             payload["entity_id"] = entity_id
         if item is not None:
             payload["item"] = item
+        if ref is not None:
+            payload["ref"] = ref
+        if face is not None:
+            payload["face"] = face
         if stop_on is not None:
             payload["stop_on"] = stop_on
         return requests.post(url, headers=self.headers, json=payload, timeout=timeout).json()
