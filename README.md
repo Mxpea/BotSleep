@@ -4,6 +4,40 @@
 
 模型决策循环已接入原生工具调用、技能执行和结果反馈；搭高、落地水与高频反射仍未完成。生存运行方式见 [SURVIVAL.md](docs/SURVIVAL.md)，睡眠契约见 [SKILL_SPEC.md](docs/SKILL_SPEC.md)；[ARCHITECTURE.md](docs/ARCHITECTURE.md) 还包含尚未实现的设计目标。
 
+## dev-ink 分支改动说明
+
+更新日期：2026-11-14。此分支将原有架构骨架补齐为可配置的睡眠、生存与模型运行流程。
+
+| 模块 | 本次改动 |
+| --- | --- |
+| 配置与 API 客户端 | 加载、合并和校验 YAML、环境变量与命令行参数；统一客户端与兼容入口，修复观察接口和业务错误处理；区分请求超时与明确失败，避免重复写操作。 |
+| 自动找床睡眠 | 搜索并合并床头脚、跳过占用床、检查维度与危险、尝试接近候选床，验证真实入睡和醒来，并接入主入口。 |
+| 初期生存技能 | 实现采集、制作、放置、进食、移动、撤退；结合睡眠技能，通过实际库存、方块或位置变化判断结果。 |
+| 生存 harness | 每轮观察、规划、执行一个动作、验证并反馈；增加动作互斥、取消、失败退避、目标冷却、检查点及步骤、时间、探索和死亡预算。 |
+| 模型自主规划 | 接入 OpenAI 兼容的原生工具调用；模型根据当前状态选择技能，收到成功、失败或部分完成结果后继续规划。只接受已实现的工具，执行前再次检查状态。 |
+| 实时监控与日志 | 增加本机只读网页，展示模型请求和返回、工具参数、Agent 阶段、执行结果、错误、token 用量和耗时；持久化脱敏 JSONL 日志。 |
+| 回归测试与文档 | 补充配置、客户端、睡眠、生存、模型协议、恢复和监控测试；记录离线结果与真实游戏验收范围。 |
+
+### 针对实际运行问题的修复
+
+- **高处资源接近**：采集会利用 API 提供的触达信息，避免仅因脚底到目标的距离而强制走到更近的位置。服务若明确报告遮挡，则拒绝直接挖掘并反馈原因。
+- **原地移动误判**：移动结果明确包含 `moved`、`already_in_range` 和 `executed`。已处于容差范围内不代表完成脱困，也不会清空此前失败计数；模型规划会拒绝无位移的移动目标。
+- **失败后调整**：失败动作记录不会被等待或原地操作冲掉；技能保留可用的错误诊断，并区分方块移除与实际取得掉落物。模型需换目标、换站位，或等待相关状态变化。
+- **地形信息不足**：模型观察增加经本地检查的站位和放置候选，各最多 8 个；这些候选表示空间和支撑条件符合要求，不保证存在可行路径。观察期间跨格或明显升降会丢弃该次快照。
+- **上下文超限**：历史观察和工具结果改为摘要，按完整工具事务裁剪历史；超时不积累无回复的观察，请求消息与工具定义设置 30,000 字节预算，避免完整快照反复进入历史导致 HTTP 400。
+
+本分支仅修改 **BotSleep**，适配原版 **mc-agent-api**，不要求修改相邻 API 仓库。此前本地 API 实验补丁已撤回，未提交或上传。`can_dig`、`can_see`、`collection` 等额外元数据按可选字段处理；当前原版 API 没有前述视线字段，缺失的信息不能视为已验证。因此，这些修复不能保证消除底层寻路卡住，也不等于天然地图长期生存已通过。
+
+### 当前验证状态
+
+| 范围 | 已有证据与边界 |
+| --- | --- |
+| 离线自动化 | **293 项测试通过**；包括本机假 HTTP 服务集成测试，不代表真实游戏技能全部成功。 |
+| 自动睡眠 | 已有独立测试世界的真实找床、入睡和醒来验收记录，详见 [TESTING.md](docs/TESTING.md)。 |
+| 确定性生存规划 | 此前在独立、和平难度的平坦靶场，从空背包完成初期石器工具链；不代表模型规划在天然地图上的同等能力。 |
+| 真实模型接入 | 已收到 `default` 路由的原生工具调用，响应 `model` 为 `qwen3.6-35b-a3b`，实际动作失败结果已回传。这是当时服务自报的模型标识，不保证该路由以后固定指向同一模型。 |
+| 最新修复后的自主采集与制作 | **待真实游戏继续验证**。此前运行出现寻路卡住，完成修复后按用户要求停机；尚未完成使用原版 API 的模型自主采集 → 制作闭环验收。 |
+
 ## 安装与配置
 
 Python 3.10+，在本目录执行：
@@ -25,8 +59,8 @@ Copy-Item config.example.yaml config.yaml
 - 日志目录相对配置文件解析，不依赖启动命令的工作目录。
 
 ```powershell
-python main.py --config config.yaml --check-config
-python main.py --config config.yaml
+.\.venv\Scripts\python.exe main.py --config config.yaml --check-config
+.\.venv\Scripts\python.exe main.py --config config.yaml
 ```
 
 `--check-config` 只检查配置，不连接服务器。正常运行前需要先启动 Minecraft 和 mc-agent-api。旧命令 `python bot_sleep.py` 现复用相同入口和配置。
@@ -34,7 +68,7 @@ python main.py --config config.yaml
 只运行一次有时间上限的睡眠尝试：
 
 ```powershell
-python main.py --config config.yaml --once
+.\.venv\Scripts\python.exe main.py --config config.yaml --once
 ```
 
 成功退出码为 0；无床、白天、中断、超时、配置或连接失败均为非零。睡眠持续模式在白天保持观察，失败后按 `sleep.retry_seconds` 冷却再尝试。
@@ -42,7 +76,7 @@ python main.py --config config.yaml --once
 ## 初期生存模式
 
 ```powershell
-python main.py --config config.yaml --mode survival --max-steps 128
+.\.venv\Scripts\python.exe main.py --config config.yaml --mode survival --max-steps 128
 ```
 
 也可配置 `agent.mode: survival`。每轮读取新状态、背包、资源与实体，只执行一个经过参数校验的技能，然后用背包/方块/位置变化验算结果。目标为从木材开始合成工作台、木镐，采集圆石，获得石镐、石斧、石剑和熔炉；已有煤或木炭时可制作火把。
@@ -58,6 +92,39 @@ python main.py --config config.yaml --mode survival --max-steps 128
 ## 模型规划与本机监控
 
 在配置中同时设置 `agent.mode: survival` 和 `llm.enabled: true`，填写支持原生工具调用的 OpenAI 兼容 `llm.base_url`、服务允许的 `llm.model` 路由及密钥。密钥可通过 `BOTSLEEP_LLM_API_KEY` 提供；启用后会实际请求模型服务，费用取决于该服务。
+
+复制示例配置后，修改 `config.yaml` 中对应字段（下面是节选，不要重复追加同名 YAML 节点）：
+
+```yaml
+agent:
+  mode: survival
+
+llm:
+  enabled: true
+  base_url: "https://your-model-provider.example/v1"  # 替换为实际服务地址
+  model: "default"                                # 使用服务允许的路由
+  api_key: ""                                     # 通过 BOTSLEEP_LLM_API_KEY 提供
+  timeout_seconds: 60
+  max_tokens: 2048
+  max_history_turns: 10
+  tls_version: "auto"
+
+debug:
+  enable_in_game_commands: true
+  allowed_usernames: ["YourPlayerName"]             # 替换为可信玩家名
+  monitor:
+    enabled: true
+    host: "127.0.0.1"
+    port: 18930
+    console: true
+```
+
+保留并填写原配置中的 Minecraft API 地址、机器人账号和口令。模型服务如需 TLS 1.2 兼容，可设置 `llm.tls_version: "1.2"`；证书验证仍保持开启。完成配置后运行：
+
+```powershell
+.\.venv\Scripts\python.exe main.py --config config.yaml --check-config
+.\.venv\Scripts\python.exe main.py --config config.yaml --mode survival
+```
 
 每次新鲜观察只接受一个原生 `tool_calls` 动作，经参数白名单校验后再次读取状态、检查危险和目标，再交给本地技能。技能的真实成功/失败及新观察通过对应 `tool_call_id` 的工具结果反馈给下一轮。模型不能关闭安全检查，也不能仅靠文字宣称目标完成。
 
@@ -96,7 +163,7 @@ HTTP 超时不能证明服务端动作停止。客户端不自动重发写操作
 ## 测试
 
 ```powershell
-python -B -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -B -m unittest discover -s tests -v
 ```
 
 测试覆盖配置、API 契约、睡眠与生存技能、确定性/模型规划、原生工具结果反馈、安全门禁、取消/恢复、持久化、调试、监控和入口。离线集成测试使用本机临时 HTTP 假服务，不连接 Minecraft 或真实模型服务，也不改变游戏世界。
@@ -104,7 +171,7 @@ python -B -m unittest discover -s tests -v
 真实游戏验收必须使用独立测试世界，范围与结果见 [TESTING.md](docs/TESTING.md)。开发期 RCON 工具才需要：
 
 ```powershell
-python -m pip install -r requirements-dev.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
 ```
 
 ## 代码入口
