@@ -93,6 +93,24 @@ BotSleep/
 在 HMCL 游戏内聊天框按 `T` 输入：
 - `#help`：查看当前已加载的调试指令
 - `#status`：实时回显 Bot 坐标、血量与雷达状态
+- `#stop`：紧急打断 Bot 当前动作
 - `#radar on` / `#radar off`：实时开关常态自动化雷达勘探
 - `#radar scan`：强制执行一次 3D 全景雷达测绘
 - `#radar poi`：查询距离最近的 4 个关键战略兴趣点
+
+---
+
+## 要塞计算（Ninjabrain Bot）
+
+已接入官方 1.5.2 的无界面计算核心，可从投眼坐标射线输出候选区块与概率。先用合成数据离线验证：
+
+```powershell
+.\.venv\Scripts\python.exe -m integrations.ninjabrain setup
+.\.venv\Scripts\python.exe -m integrations.ninjabrain calculate --input data/examples/stronghold_throws.json
+```
+
+真实投眼采样、误差假设和限制见 [要塞计算集成指南](docs/STRONGHOLD.md)。采样会消耗末影之眼；已通过 5 次真实投眼采样与多观测计算实测；尚未挖掘确认传送门房。
+
+## Harness 接口设计
+
+[接口契约与架构决策](docs/HARNESS_INTERFACES.md) 持续记录底层 API 事实、接口草案与架构访谈结论；未决设计不代表已实现。

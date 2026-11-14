@@ -16,3 +16,6 @@ __pycache__/
 world/
 server/
 *.jar
+
+# Downloaded calculator and compiled bridge
+.cache/ninjabrain/

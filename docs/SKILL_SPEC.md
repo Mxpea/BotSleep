@@ -62,11 +62,35 @@
 * **参数**：
   - `radius: int = 16`：床位搜索半径。
   - `threat_check: bool = True`：是否先校验并避开周边敌对生物。
+* **前置条件**：
+  1. 游戏处于可入睡状态（`is_day == False` 或 `thundering == True`）。
+* **动作序列**：
+  1. 扫描周边半径内的 `*_bed` 方块。
+  2. 若有怪物且 `threat_check == True`，优先评估威胁距离；若怪物处于 5 格内，先执行搭高避险或战术撤退。
+  3. 寻路接近目标床方块（保持在 3 格交互距离内）。
+  4. 发送 `/interact` 点击床铺。
+  5. 状态轮询：等待 `is_sleeping == True`。
+  6. 监听清晨事件（`is_day == True`）或点击床铺唤醒。
 * **记忆联动**：若雷达已探明床位坐标，直接从 `MemoryEngine` 调取最近床位寻路，无需从头漫游盲扫。
+* **错误码**：
+  - `no_bed_nearby`：搜索范围内未发现可用床位。
+  - `path_unreachable`：床位位于不可达区域或封闭房间。
+  - `monsters_nearby`：因周边怪物过近被服务器拒绝入睡。
 
 ---
 
-### 5. `chop_tree` (智能伐木与清理整树技能)
+### 5. `calculate_stronghold`（纯要塞计算）
+
+- 实现：`skills/stronghold.py` 的 `CalculateStrongholdSkill`。
+- 输入：`throws` 为 1～32 次独立主世界投眼观测，每项含 `x/z/bearing_deg/sigma_deg`；`top_k` 默认 5。角度采用原版 yaw 度数，南 0°、西 90°。
+- 输出：`SkillResult.data` 含官方 Ninjabrain Bot 计算出的候选区块、投眼目标点、下挖参考点和条件概率；不代表已找到传送门房。
+- 前置条件：已安装固定版本的计算 JAR 和 JDK 11+；观测必须来自同一世界、同一要塞，多点采样先归并为一条射线。
+- 错误码：`invalid_observations`（无效或重复观测）、`calculation_failed`（依赖缺失、超时或无一致候选）。
+- 无游戏动作，无需回滚。采样与计算分离；CLI `capture` 会投眼，细节见 [docs/STRONGHOLD.md](file:///E:/Program%20Save/VisualCode/BotSleep/docs/STRONGHOLD.md)。
+
+---
+
+### 6. `chop_tree` (智能伐木与清理整树技能)
 
 * **功能**：定位最近的可达树木，自底向上完整采伐整根树干，支持工作时长限制与目标数量阈值，返回精准完成状态。
 * **模块归属**：`skills/mining.py` (`ChopTreeSkill`)。
@@ -92,7 +116,7 @@
 
 ---
 
-### 6. `craft_item` (智能合成与工具制作技能)
+### 7. `craft_item` (智能合成与工具制作技能)
 
 * **功能**：自动区分 2x2（背包直合）与 3x3（工作台合成）配方，支持前置材料递归逆向分解合成（如原木 -> 木板 -> 木棍 -> 木镐），自动寻找/放置工作台，并在合成完成后自动将工作台挖掘回收回背包。
 * **模块归属**：`skills/crafting.py` (`CraftItemSkill`)，底层配合 `core/recipes.py` (`RecipeBook`) 与 `data/recipes.json`（内置 Minecraft 1.21.11 完整 886 种配方库）。
@@ -124,3 +148,11 @@
   - `duration_seconds`: 耗时。
   - `steps`: 详细执行步骤链。
   - `final_inventory`: 最终背包全量快照。
+
+---
+
+## 三、面向 harness AI 的策略 Skill
+
+`skills/stronghold_localization/SKILL.md` 是供游戏 AI 按需读取的投眼、选点和导航策略，详细推导与来源在其 `references/research.md`。它与 Python `BaseSkill` 动作执行器用途不同。
+
+本策略尚未自动加载到模型上下文，统计误差估计与自动导航优化也未接入运行时代码；不要将文档存在等同于功能已实现。
