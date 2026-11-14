@@ -1,0 +1,3 @@
+-r requirements.txt
+# Optional RCON playground support; unittest is part of the Python standard library.
+mcrcon>=0.7,<1

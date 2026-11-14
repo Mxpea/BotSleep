@@ -1,8 +1,23 @@
-"""Core module for BotSleep: Driver, RCON, Telemetry, and Memory Engine."""
+"""Core exports, loaded lazily so RCON remains an optional dependency."""
 
-from .client import MinecraftAgentClient
-from .rcon import RconManager
-from .telemetry import TelemetryManager, ReflexDaemon
-from .memory import MemoryEngine
+from importlib import import_module
 
-__all__ = ["MinecraftAgentClient", "RconManager", "TelemetryManager", "ReflexDaemon", "MemoryEngine"]
+_EXPORTS = {
+    "APIError": (".client", "APIError"),
+    "MinecraftAgentClient": (".client", "MinecraftAgentClient"),
+    "RconManager": (".rcon", "RconManager"),
+    "TelemetryManager": (".telemetry", "TelemetryManager"),
+    "ReflexDaemon": (".telemetry", "ReflexDaemon"),
+    "MemoryEngine": (".memory", "MemoryEngine"),
+}
+
+__all__ = list(_EXPORTS)
+
+
+def __getattr__(name):
+    if name not in _EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    module_name, attribute = _EXPORTS[name]
+    value = getattr(import_module(module_name, __name__), attribute)
+    globals()[name] = value
+    return value

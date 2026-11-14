@@ -1,76 +1,45 @@
-# BotSleep 人机协同调试指南 (DEBUG GUIDE)
+# 调试与验证
 
-为了让人类开发者和 AI 助手（如 Antigravity）能够零阻碍、高透明度地观察游戏世界、单步执行动作并排查偶发故障，BotSleep 设立了专门的**“三维一体调试体系”**。
+## 当前游戏内命令
 
----
+调试通过配置 `debug.enable_in_game_commands: true` 或命令行 `--debug` 开启。必须在 `debug.allowed_usernames` 中列出允许控制 Bot 的玩家，空列表不接受聊天指令。
 
-## 一、游戏内聊天调试控制台 (In-Game Chat Debugger)
+支持 API `messagestr` 中的标准 `<Player> #command` 格式。不执行匿名系统消息、机器人自己的消息或未列入名单的玩家指令。服务器插件自定义的聊天格式尚未适配。
 
-玩家在 HMCL 客户端中登录游戏后，可以直接在游戏聊天框输入以 `#` 为前缀的指令与 Bot 直接交互，无需切换到终端控制台。
+| 指令 | 实际行为 |
+|---|---|
+| `#help` | 列出已注册命令 |
+| `#status` | 睡眠模式查询位置/生命/睡眠；生存模式显示任务、步骤和暂停原因 |
+| `#stop` | 设置本地取消信号，请求 API 停止，并暂停后续自动动作 |
+| `#sleep` | 恢复自动睡眠并请求一次尝试；已有任务时不会启动第二个 |
+| `#resume` | 仅生存模式，解除暂停并重新观察；不重放旧检查点动作 |
 
-### 支持的聊天指令规范
+`#look`、`#pillar`、`#mlg`、`#llm` 尚未实现，不列入帮助。
 
-| 指令 | 参数 | 说明 | 示例 |
-|---|---|---|---|
-| `#help` | 无 | 列出当前 Bot 支持的全部调试指令 | `#help` |
-| `#status` | 无 | 汇报 Bot 坐标、血量、饥饿度、背包物品简要 | `#status` |
-| `#stop` | 无 | 强制中断 Bot 当前所有动作并清除寻路路径 | `#stop` |
-| `#look` | 无 | Bot 立即转头注视发送该指令的玩家 | `#look` |
-| `#pillar` | `[高度=3]` | 强制执行程序化自动搭高 | `#pillar 5` |
-| `#mlg` | 无 | 触发一次落地水演练或自检水桶状态 | `#mlg` |
-| `#sleep` | 无 | 强制触发寻找床位并入睡状态机 | `#sleep` |
-| `#llm` | `<自然语言提示>` | 强制将用户输入交给大模型规划并执行下一步行为 | `#llm 帮我建造一个 3x3 的火把防护圈` |
+技能在后台线程执行，等待天亮不会阻塞聊天轮询。正在等待的同步 HTTP 调用受自身超时限制；停止回执只说明已经请求停止。取消睡眠不会再次点击床，以免起床/入睡竞态。Ctrl+C 会取消任务、等待工作线程结束，然后登出；清理失败不会跳过登出步骤。
 
-### 交互反馈模式
-Bot 会在游戏聊天栏中使用私聊或公屏给予即时反馈：
-- `[BotSleep] [OK] 正在执行自动搭高，高度：4`
-- `[BotSleep] [WARN] 背包内没有足够的实心方块，搭高已取消`
-- `[BotSleep] [FAIL] 16 格内未发现任何可用的床方块`
+## 日志
 
----
+`debug.flight_recorder.output_dir` 相对配置文件目录。启用后写入 JSONL，时间为带毫秒的 UTC。
 
-## 二、RCON 上帝视角测试靶场 (Playground Harness)
+当前事件包括启动、睡眠开始、结果、停止请求、崩溃和退出。睡眠结果包含标准 `SkillResult`、尝试床位、错误码和验证证据。
 
-通过直连服务端的 RCON 服务（`127.0.0.1:25575`），调试脚本可以瞬间构建复杂的边界测试场景，自动化验收宏技能。
+生存模式还记录 `DECISION`、`STEP_RESULT`、`SAFETY_INTERRUPT`、`DEATH_OBSERVED`、`RECOVERY_REQUIRED`、`PAUSED` 和预算耗尽事件。无论飞行日志是否开启，`survival.state_dir` 都保存按服务器/机器人/world_id 隔离的原子检查点和事件记录。HTTP 超时或内部验证异常后的 pending 不会自动重放。
 
-### 常用测试场景 (Scenarios)
+目前没有全量三维现场快照、模型推理追踪或自动回放。
 
-#### 场景 1：自动落地水测试 (MLG Water Clutch Test)
-- **步骤**：
-  1. RCON 给 Bot 发放水桶：`/give SleepBot water_bucket 1`
-  2. RCON 将 Bot 传送至 25 格高空悬空：`/tp SleepBot ~ ~25 ~`
-  3. 观察 Bot 下落时是否在接地前 1~2 格触发水桶倒水并在着地后收回。
-  4. 断言：Bot 是否存活且血量未减少。
+## 离线回归
 
-#### 场景 2：黑夜寻床入睡测试 (Night Sleep Test)
-- **步骤**：
-  1. RCON 清空周边生物并放置一张红色床：`/setblock ~3 ~ ~ red_bed`
-  2. RCON 将时间强制切换至午夜：`/time set midnight`
-  3. 观察 BotSleep 是否主动识别并入睡。
-
-#### 场景 3：受怪骚扰搭高避险测试 (Hostile Evade Test)
-- **步骤**：
-  1. RCON 在 Bot 旁 5 格生成一只僵尸：`/summon zombie ~5 ~ ~`
-  2. 观察大模型决策是否调用 `pillar_up` 搭高脱离僵尸近战判定范围。
-
----
-
-## 三、飞行记录仪与日志排查 (Flight Recorder)
-
-所有决策与动作执行日志均以 JSON Lines 格式输出至 `logs/flight_YYYYMMDD.jsonl`，包含毫秒级时间戳、上下文与执行结果：
-
-```json
-{
-  "timestamp": "2026-11-13T14:15:20.123Z",
-  "level": "INFO",
-  "module": "agent.loop",
-  "event": "LLM_DECISION",
-  "data": {
-    "thought": "天色变暗且周边有僵尸靠近，选择搭高 3 格以确保安全。",
-    "tool_call": "pillar_up",
-    "arguments": { "height": 3 }
-  }
-}
+```powershell
+python -B -m unittest discover -s tests -v
 ```
 
-遇到异常时，飞行记录仪会自动记录**现场快照**（周围 5x5 方块、实体列表、背包剩余），极度方便开发者和 AI 助手快速分析根本原因。
+HTTP 集成用本机临时假服务验证真实请求和主入口生命周期，不连接 Minecraft。
+
+## RCON 开发工具
+
+`core/rcon.py`、`debug/playground.py` 为可选开发工具。普通自动睡眠不导入或使用 mcrcon，仅使用靶场时安装 `requirements-dev.txt`。
+
+靶场会给物品、传送、放床、改时间或生成生物，只能在专用测试世界调用。已有 playground 方法只是场景布置，不能单独作为技能通过验收的证据。
+
+实际游戏测试步骤和结果见 [TESTING.md](TESTING.md)。

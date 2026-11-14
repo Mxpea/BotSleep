@@ -1,5 +1,17 @@
 # BotSleep 评估交接文档
 
+> **2026-11-14 更新**：用户明确要求不修改 `mc-agent-api`。此前本地 `src/session.js` 修改及新增 `src/navigation.js`、`test/navigation.test.js` 已撤回，未提交或推送；原有未跟踪 `package-lock.json` 保留。后续只在 BotSleep 侧适配原版 API。下文 13 项 API 测试仅为已撤回实验的历史结果，不是当前依赖或当前可运行检查。
+
+> **最新暂停点（2026-11-13 22:52，Asia/Shanghai）**：用户准备断电，要求完成当前修复后停止。机器人、监控及本机 API 已停止；Minecraft 已执行 `save-all flush` 和 `stop`，日志确认所有维度保存，Java 进程已退出。未设置自动重启，等待用户再次授权恢复。
+>
+> 模型已接入生存主流程，`default` 的真实响应字段为 `qwen3.6-35b-a3b`，原生工具调用与失败反馈已发生。BotSleep 保留的修复：触达信息兼容、无位移结果与失败记忆、实际库存采集证据、有限安全站位/放置候选，以及历史完整观察导致 51,524 tokens 超过 43,776 上限的 HTTP 400。BotSleep **293 项离线测试通过**。上游空路径行为及视线字段补丁已撤回；额外 `can_dig/can_see/collection` 元数据均为可选，不要求原版 API 提供。**修复后的真实自主采集→制作闭环尚未验证**，不可引用此前确定性靶场结果代替。
+>
+> 恢复时先启动 `.test-runtime/leaves` 的游戏服务，再启动原版 `../mc-agent-api/src/index.js`（配置 `.test-runtime/api-config.json`），最后使用 `.test-runtime/llm.yaml` 启动 `main.py --mode survival`。监控端口 18930，API 18920，游戏 25585；私密配置已忽略，不要打印凭据。检查 checkpoint.pending 后再执行；普通世界仍禁止破坏性测试布置。诊断证据在 `.test-runtime/pathing-terrain-inspection.json`、模型探测 JSON、`navigation-offline-tests.log` 和原 flight 日志中。
+
+> 历史评估记录：下文涉及其他工作区的路径与当时状态。当前 `D:\Code\Python\MC-Agent\BotSleep` 已继续实现配置加载、统一客户端和自动睡眠主流程；配置、客户端、睡眠与测试的最新使用说明见 README 和 `docs/TESTING.md`。下文的“未授权修复”“当前尚未实现”等描述不代表后续用户授权或最新代码状态。
+
+> 当日后续：用户已授权实现正常生存模块与 harness，并要求普通地图。现已接入确定性初期工具链、六项验证技能、观察/持久化/失败恢复/预算，197 项离线测试通过，最终真实空背包验收 38 步完成石镐/石斧/石剑/熔炉。详见 `docs/SURVIVAL.md`、`docs/TESTING.md`。这不是完整长期生存或比赛全部目标。25585 的 `.test-runtime` 已切换 `botsleep-survival-world`，是用户正在玩的普通世界，**不得运行破坏性旧睡眠测试或拿来搭测试场**；旧平坦世界保留。独立 `.survival-test-runtime` 验收服务已关闭，报告与存档保留。在线 SleepTestBot 仍运行 sleep 模式；新普通世界的 survival 配置已另备于 `.test-runtime/survival.yaml`，未启动第二个同名机器人。
+
 更新日期：2026-11-13（Asia/Shanghai）。已补充当日 19:53 的本地真实服务测试。本文记录架构评估、验证证据和下一步，接手者无需阅读之前的对话。
 
 ## 1. 背景与目标

@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>BotSleep · 实时运行监控</title>
+<style>
+:root{--bg:#10151d;--panel:#18202b;--panel2:#1c2733;--line:#2a3848;--text:#e7edf5;--muted:#98a8bb;--mint:#80e2c2;--blue:#9ac4ff;--amber:#f4ce82;--red:#ff9eaa}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.6 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif}button,input,select{font:inherit}button,select,input{color:var(--text);background:#111923;border:1px solid var(--line);border-radius:8px;padding:7px 12px}button{cursor:pointer}button:hover,button.active{border-color:var(--mint);color:var(--mint)}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--mint);outline-offset:2px}main{max-width:1540px;margin:auto;padding:25px 30px 36px}.top{display:flex;justify-content:space-between;gap:20px;align-items:center;margin-bottom:24px}.brand{display:flex;gap:14px;align-items:center}.mark{height:43px;width:43px;display:grid;place-items:center;background:#23423d;color:var(--mint);font-size:20px;border-radius:12px}.eyebrow{font-size:11px;letter-spacing:2px;color:var(--mint)}h1{font-size:23px;letter-spacing:.3px;line-height:1.25;margin:2px 0 0}h2{font-size:16px;margin:0}h3{font-size:13px;font-weight:500;color:var(--muted);margin:0 0 7px}.muted,.sub{color:var(--muted)}.sub{font-size:12px}.right{text-align:right}.pill{display:inline-flex;align-items:center;gap:7px;padding:5px 10px;border-radius:99px;background:#26313e;color:var(--muted);font-size:12px}.pill.good{color:var(--mint);background:#203d36}.pill.bad{color:var(--red);background:#402b35}.pill.warn{color:var(--amber);background:#3d3526}.dot{width:6px;height:6px;border-radius:50%;background:currentColor}.summary{display:grid;grid-template-columns:1fr 1.1fr 1.25fr 1.4fr;gap:14px;margin-bottom:18px}.card,.panel{background:var(--panel);border:1px solid var(--line);border-radius:13px}.card{padding:16px 19px;min-width:0}.value{font-size:20px;font-weight:650;line-height:1.35;overflow-wrap:anywhere}.card .sub{margin-top:6px}.mono,pre{font-family:Consolas,"Cascadia Code",ui-monospace,monospace}.stats{display:flex;gap:20px}.stat{flex:1}.track{height:4px;border-radius:6px;background:#2b3745;margin-top:8px;overflow:hidden}.fill{height:100%;background:var(--mint);width:0}.fill.food{background:var(--amber)}.workspace{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(320px,1fr);gap:18px;margin-bottom:18px}.panel-head{padding:16px 20px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:10px}.panel-body{padding:18px 20px}.tabs{display:flex;flex-wrap:wrap;gap:6px;padding:12px 18px 0}.tabs button{font-size:12px;padding:5px 10px}.model-body{min-height:275px;max-height:440px;overflow:auto;padding:18px 20px}.model-body pre{margin:0;font-size:13px;line-height:1.75;white-space:pre-wrap;overflow-wrap:anywhere}.empty{display:flex;flex-direction:column;justify-content:center;align-items:center;min-height:245px;color:var(--muted);gap:7px;text-align:center}.empty strong{color:var(--text);font-size:16px;font-weight:500}.metrics{display:flex;flex-wrap:wrap;gap:18px;padding:10px 20px;border-top:1px solid var(--line);font-size:12px;color:var(--muted)}.metrics b{color:var(--text);font-weight:500}.stack{display:grid;gap:18px}.decision{font-size:19px;color:var(--blue);font-weight:600;overflow-wrap:anywhere}.reason{margin:6px 0 12px;color:var(--muted);overflow-wrap:anywhere}.label-row{display:flex;gap:12px;align-items:center;justify-content:space-between;margin-bottom:8px}.kv{display:grid;grid-template-columns:70px 1fr;gap:6px;font-size:13px}.kv span:nth-child(odd){color:var(--muted)}details>summary{color:var(--muted);cursor:pointer;user-select:none;font-size:12px}details pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;max-height:300px;overflow:auto;margin:9px 0 0;background:#111923;border-radius:8px;padding:12px}.result{font-size:14px;white-space:pre-wrap;overflow-wrap:anywhere}.toolbar{display:flex;gap:9px;align-items:center;flex-wrap:wrap}.toolbar input{width:205px;font-size:12px}.toolbar select,.toolbar button{font-size:12px}.timeline{height:360px;overflow:auto;padding:0 20px 10px}.event{padding:12px 0;border-bottom:1px solid var(--line)}.event-line{display:grid;grid-template-columns:78px 125px 1fr;gap:12px;align-items:baseline}.event-time{color:var(--muted);font-size:12px}.event-name{font-size:11px;letter-spacing:.2px;color:var(--blue);overflow-wrap:anywhere}.event-name.warn{color:var(--amber)}.event-name.error{color:var(--red)}.event-description{overflow-wrap:anywhere;font-size:13px}.event details{margin:3px 0 0 215px}.timeline-empty{padding:55px 0;text-align:center;color:var(--muted)}.notice{color:var(--amber);font-size:12px;padding:0 20px 8px}.footer{display:flex;justify-content:space-between;gap:15px;margin-top:14px;color:var(--muted);font-size:12px}.hidden{display:none!important}.banner{padding:10px 15px;border:1px solid #615137;background:#302a21;color:var(--amber);border-radius:9px;margin-bottom:16px;font-size:13px}@media(max-width:1050px){.summary{grid-template-columns:1fr 1fr}.workspace{grid-template-columns:1fr}.stack{grid-template-columns:1fr 1fr}}@media(max-width:650px){main{padding:16px}.top{align-items:flex-start}.summary{gap:9px}.card{padding:13px}.value{font-size:17px}.stack{grid-template-columns:1fr}.panel-head{align-items:flex-start;flex-direction:column}.event-line{grid-template-columns:68px 1fr}.event-description{grid-column:1/-1}.event details{margin-left:0}.footer{flex-direction:column;gap:3px}.toolbar input{width:155px}.right .sub{max-width:140px}.brand{gap:10px}h1{font-size:20px}}
+</style>
+</head>
+<body>
+<main>
+<header class="top"><div class="brand"><div class="mark" aria-hidden="true">▥</div><div><div class="eyebrow">BOTSLEEP / LIVE</div><h1>实时运行监控</h1></div></div><div class="right"><span id="connection" class="pill"><span class="dot"></span><span id="connection-text">正在连接</span></span><div id="updated" class="sub">等待监控服务</div></div></header>
+<div id="paused-banner" class="banner hidden">自动运行已暂停。监控仍在更新；游戏内使用 #resume 恢复。</div>
+<section class="summary" aria-label="运行概况">
+<div class="card"><h3>Agent 状态</h3><div id="run-state" class="value">等待 Agent 数据</div><div id="account" class="sub">账号 —</div></div>
+<div class="card"><h3>实际模型 · 服务返回</h3><div id="model-name" class="value">未确认</div><div id="model-route" class="sub">请求路由 —</div><div id="planner-name" class="sub">规划器 —</div></div>
+<div class="card"><h3>当前位置</h3><div id="position" class="value mono">— · — · —</div><div id="environment" class="sub">维度与昼夜信息尚未到达</div></div>
+<div class="card"><div class="stats"><div class="stat"><h3>生命</h3><div id="health" class="value">— / 20</div><div class="track"><div id="health-bar" class="fill"></div></div></div><div class="stat"><h3>饥饿值</h3><div id="food" class="value">— / 20</div><div class="track"><div id="food-bar" class="fill food"></div></div></div></div><div id="steps" class="sub">已执行 0 步</div></div>
+</section>
+<section class="workspace">
+<article class="panel"><div class="panel-head"><h2>模型请求与返回</h2><span id="llm-state" class="pill">等待模型事件</span></div><nav class="tabs" aria-label="模型内容"><button class="active" data-tab="content">回复内容</button><button data-tab="tools">工具调用</button><button data-tab="reasoning">附带推理信息</button><button data-tab="response">完整返回 JSON</button><button data-tab="request">完整请求 JSON</button></nav><div class="model-body"><div id="model-empty" class="empty"><strong>尚未收到模型返回</strong><span>确定性规划模式下也会展示 Agent 状态和操作。</span></div><pre id="model-content" class="hidden"></pre></div><div class="metrics"><span>耗时 <b id="latency">—</b></span><span>输入 token <b id="input-tokens">—</b></span><span>输出 token <b id="output-tokens">—</b></span><span>总 token <b id="total-tokens">—</b></span></div></article>
+<aside class="stack"><article class="panel"><div class="panel-head"><h2>当前决策</h2><span id="skill-state" class="pill">尚未执行</span></div><div class="panel-body"><div id="decision-name" class="decision">等待下一步决策</div><p id="decision-reason" class="reason">模型或规划器选定动作后将在这里显示。</p><div class="kv"><span>目标</span><span id="goal">—</span><span>执行状态</span><span id="execution">—</span></div><details><summary>查看动作参数</summary><pre id="decision-args">{}</pre></details></div></article><article class="panel"><div class="panel-head"><h2>最近执行结果</h2><span id="result-state" class="pill">暂无结果</span></div><div class="panel-body"><div id="result-message" class="result muted">操作完成或失败后将在这里显示。</div><details><summary>查看完整结果</summary><pre id="result-json">{}</pre></details></div></article></aside>
+</section>
+<section class="panel"><div class="panel-head"><h2>运行时间线 <span id="event-count" class="sub">0 条</span></h2><div class="toolbar"><select id="filter" aria-label="事件分类"><option value="all">全部事件</option><option value="model">模型请求 / 返回</option><option value="action">Agent 操作</option><option value="error">警告与异常</option><option value="system">运行状态</option></select><input id="search" type="search" placeholder="筛选事件或内容" aria-label="搜索事件"><button id="scroll-toggle" aria-pressed="true">自动滚动：开</button></div></div><div id="retention" class="notice hidden"></div><div id="timeline" class="timeline"><div class="timeline-empty">等待 Agent 发布运行事件…</div></div></section>
+<footer class="footer"><span>本机只读监控 · 每 0.5 秒更新 · 最多保留最近 500 条事件</span><span>控制命令仍通过游戏聊天发送：#stop / #resume</span></footer>
+</main>
+<script>
+(() => {
+'use strict';
+const $ = id => document.getElementById(id);
+const txt = (id, value) => { $(id).textContent = value == null ? '—' : String(value); };
+const pretty = value => typeof value === 'string' ? value : JSON.stringify(value, null, 2);
+const stateNames = {waiting:'等待 Agent 数据',starting:'正在启动',running:'运行中',paused:'已暂停',completed:'阶段目标完成',finished:'运行已结束',stopped:'已停止',error:'运行异常'};
+const phaseNames = {idle:'空闲',observing:'正在观察环境',thinking:'等待模型返回',rechecking:'正在复核最新状态',acting:'正在执行技能',waiting:'等待下一步',paused:'自动运行已暂停',complete:'阶段目标完成'};
+let cursor = 0, events = [], currentState = null, selectedTab = 'content', autoScroll = true;
+let dropped = 0, lastModelText = null, lastGood = 0;
+function badge(id, text, kind='') { $(id).textContent=text; $(id).className='pill' + (kind ? ' '+kind : ''); }
+function responseParts() {
+  const llm = (currentState || {}).llm || {};
+  const envelope = llm.response || {};
+  const raw = envelope.response || envelope.raw_response || envelope;
+  const message = raw.choices && raw.choices[0] ? raw.choices[0].message || {} : raw.message || raw;
+  return {llm,envelope,raw,message};
+}
+function renderModel() {
+  const {llm,envelope,message} = responseParts();
+  let value, empty = '';
+  if (selectedTab === 'request') { value=llm.request; empty='尚未收到模型请求。'; }
+  else if (selectedTab === 'response') { value=llm.response; empty='尚未收到模型返回。'; }
+  else if (selectedTab === 'tools') { value=message.tool_calls || envelope.tool_calls; empty='这次返回没有工具调用。'; }
+  else if (selectedTab === 'reasoning') { value=message.reasoning_content || message.reasoning || message.reasoning_details || message.thinking || envelope.reasoning_content || envelope.reasoning; empty='模型没有提供可展示的附带推理信息。'; }
+  else { value=message.content != null ? message.content : envelope.content; empty=llm.state==='requesting' ? '模型正在生成返回…' : '这次返回没有文本内容，可查看工具调用或完整 JSON。'; }
+  const hasValue = value != null && value !== '' && !(Array.isArray(value) && !value.length);
+  $('model-empty').classList.toggle('hidden', hasValue);
+  $('model-content').classList.toggle('hidden', !hasValue);
+  if (hasValue) {
+    const rendered=pretty(value);
+    if (rendered !== lastModelText) { $('model-content').textContent=rendered; lastModelText=rendered; }
+  } else {
+    const label=document.createElement('strong');
+    label.textContent=llm.state==='idle' ? '尚未收到模型事件' : empty;
+    const note=document.createElement('span');
+    note.textContent=llm.error ? pretty(llm.error) : '可切换查看请求、工具调用和完整脱敏返回。';
+    $('model-empty').replaceChildren(label,note);
+  }
+}
+function renderState(state) {
+  currentState=state;
+  const run=state.run || {}, status=state.status || {}, llm=state.llm || {};
+  const phase=phaseNames[run.phase] || run.phase;
+  txt('run-state', state.has_data ? (run.state==='running' && phase ? phase : stateNames[run.state] || run.state) : '等待 Agent 数据');
+  txt('account', '账号 '+(run.username || status.username || '—'));
+  txt('model-name', llm.actual_model || '未确认');
+  txt('model-route', '请求路由 '+(llm.request_model || run.model || '—'));
+  txt('planner-name', '规划器 '+(run.planner || '—'));
+  txt('position', Array.isArray(status.pos) ? status.pos.map(v => Number(v).toFixed(1)).join(' · ') : '— · — · —');
+  const weather=status.thundering ? '雷暴' : status.raining ? '下雨' : '无降雨';
+  txt('environment', (status.dimension || '维度未知')+' · '+(typeof status.is_day==='boolean' ? status.is_day ? '白天' : '夜间' : '昼夜未知')+' · '+weather);
+  ['health','food'].forEach(key => { const v=status[key]; txt(key,(Number.isFinite(v) ? v : '—')+' / 20'); $(key+'-bar').style.width=(Number.isFinite(v) ? Math.max(0,Math.min(100,v*5)) : 0)+'%'; });
+  txt('steps','已执行 '+(run.steps || 0)+' 步');
+  $('paused-banner').classList.toggle('hidden',!run.paused);
+  txt('paused-banner','自动运行已暂停'+(run.pause_reason ? ' · 原因：'+run.pause_reason : '')+'。监控仍在更新；游戏内使用 #resume 恢复。');
+  badge('llm-state',({idle:'等待模型事件',requesting:'模型请求中',responded:'已收到返回',error:'模型请求失败'})[llm.state] || llm.state, llm.state==='error' ? 'bad' : llm.state==='requesting' ? 'warn' : llm.state==='responded' ? 'good' : '');
+  const usage=llm.usage || {};
+  txt('latency',Number.isFinite(llm.elapsed_ms) ? (llm.elapsed_ms/1000).toFixed(2)+' 秒' : '—');
+  txt('input-tokens',usage.prompt_tokens != null ? usage.prompt_tokens : usage.input_tokens);
+  txt('output-tokens',usage.completion_tokens != null ? usage.completion_tokens : usage.output_tokens);
+  txt('total-tokens',usage.total_tokens);
+  const decision=state.decision || {};
+  txt('decision-name',decision.name || '等待下一步决策');
+  txt('decision-reason',decision.reason || '模型或规划器选定动作后将在这里显示。');
+  txt('goal',run.goal || decision.goal);
+  txt('execution',run.paused ? '已暂停，等待恢复' : phase || (run.busy ? '正在执行 / 等待返回' : '空闲 / 等待下一步'));
+  badge('skill-state',run.paused ? '已暂停' : phase || (run.busy ? '执行中' : '空闲'),run.paused ? 'warn' : run.busy ? 'good' : '');
+  txt('decision-args',pretty(decision.args || {}));
+  const result=state.last_result;
+  badge('result-state',!result ? '暂无结果' : result.success ? '成功' : '失败',!result ? '' : result.success ? 'good' : 'bad');
+  txt('result-message',result ? (result.message || '无文本结果')+(result.error_code ? ' ['+result.error_code+']' : '') : '操作完成或失败后将在这里显示。');
+  txt('result-json',pretty(result || {}));
+  renderModel();
+}
+function isModel(event) { return String(event.event).startsWith('LLM_'); }
+function isAction(event) { return /DECISION|STEP_RESULT|SLEEP_|ACTION|SKILL/.test(String(event.event)); }
+function matches(event) {
+  const kind=$('filter').value;
+  if (kind==='model' && !isModel(event)) return false;
+  if (kind==='action' && !isAction(event)) return false;
+  if (kind==='error' && !/WARN|ERROR/.test(String(event.level)) && !/ERROR|FAILED|CRASH/.test(String(event.event))) return false;
+  if (kind==='system' && (isModel(event) || isAction(event))) return false;
+  const search=$('search').value.trim().toLowerCase();
+  return !search || JSON.stringify(event).toLowerCase().includes(search);
+}
+function describe(event) {
+  const d=event.data || {};
+  if (event.event==='DECISION') return ((d.decision || {}).name || '决策')+' · '+((d.decision || {}).reason || '');
+  if (event.event==='STEP_RESULT') return ((d.result || {}).success ? '成功 · ' : '失败 · ')+((d.result || {}).message || '');
+  if (event.event==='HEARTBEAT') return '状态更新 · '+(d.paused ? '已暂停' : d.busy ? '执行中' : '等待下一步')+' · 步数 '+(d.steps || 0);
+  if (event.event==='AGENT_PHASE') return phaseNames[d.phase] || String(d.phase || '阶段更新');
+  if (event.event==='LLM_REQUEST') return '请求模型 '+(d.model || '')+' · 展开查看完整请求';
+  if (event.event==='LLM_RESPONSE') return '模型已返回 · 展开查看完整内容与工具调用';
+  return String(d.message || d.reason || d.error || (typeof d==='string' ? d : '展开查看事件详情')).slice(0,240);
+}
+function renderTimeline() {
+  const box=$('timeline'), oldScroll=box.scrollTop;
+  const openIds=new Set(Array.from(box.querySelectorAll('details[open]')).map(node=>node.dataset.seq));
+  const fragment=document.createDocumentFragment(), visible=events.filter(matches);
+  visible.forEach(event => {
+    const row=document.createElement('article'); row.className='event';
+    const line=document.createElement('div'); line.className='event-line';
+    const stamp=document.createElement('span'); stamp.className='event-time mono';
+    const date=new Date(event.timestamp); stamp.textContent=Number.isNaN(date.getTime()) ? '—' : date.toLocaleTimeString('zh-CN',{hour12:false});
+    const name=document.createElement('span'); name.className='event-name '+(event.level==='ERROR' ? 'error' : event.level==='WARN' ? 'warn' : ''); name.textContent=String(event.event);
+    const description=document.createElement('span'); description.className='event-description'; description.textContent=describe(event);
+    line.append(stamp,name,description);
+    const details=document.createElement('details'); details.dataset.seq=String(event.seq); details.open=openIds.has(String(event.seq));
+    const summary=document.createElement('summary'); summary.textContent='原始 JSON · '+event.module+' · #'+event.seq;
+    const raw=document.createElement('pre'); raw.textContent=JSON.stringify(event,null,2); details.append(summary,raw);
+    row.append(line,details); fragment.append(row);
+  });
+  if (!visible.length) { const empty=document.createElement('div'); empty.className='timeline-empty'; empty.textContent=events.length ? '没有符合筛选条件的事件。' : '等待 Agent 发布运行事件…'; fragment.append(empty); }
+  box.replaceChildren(fragment);
+  box.scrollTop=autoScroll ? box.scrollHeight : oldScroll;
+  txt('event-count',visible.length+' / '+events.length+' 条');
+  $('retention').classList.toggle('hidden',!dropped);
+  txt('retention',dropped ? '较早的 '+dropped+' 条事件已移出内存窗口；完整记录由 Flight Recorder 保存。' : '');
+}
+document.querySelectorAll('[data-tab]').forEach(button => button.addEventListener('click',() => {
+  selectedTab=button.dataset.tab;
+  document.querySelectorAll('[data-tab]').forEach(item=>item.classList.toggle('active',item===button));
+  renderModel();
+}));
+$('filter').addEventListener('change',renderTimeline);
+$('search').addEventListener('input',renderTimeline);
+$('scroll-toggle').addEventListener('click',() => { autoScroll=!autoScroll; txt('scroll-toggle','自动滚动：'+(autoScroll?'开':'暂停')); $('scroll-toggle').setAttribute('aria-pressed',String(autoScroll)); if(autoScroll) $('timeline').scrollTop=$('timeline').scrollHeight; });
+async function poll() {
+  const controller=new AbortController(), timer=setTimeout(()=>controller.abort(),3000);
+  try {
+    const responses=await Promise.all([fetch('/api/events?since='+cursor,{cache:'no-store',signal:controller.signal}),fetch('/api/state',{cache:'no-store',signal:controller.signal})]);
+    if(responses.some(response=>!response.ok)) throw new Error('monitor unavailable');
+    const [batch,state]=await Promise.all(responses.map(response=>response.json()));
+    if(batch.reset) events=[];
+    const known=new Set(events.map(event=>event.seq));
+    const incoming=(batch.events || []).filter(event=>!known.has(event.seq));
+    events=events.concat(incoming).slice(-500); cursor=batch.last_seq; dropped=batch.dropped || 0;
+    if(incoming.length || batch.reset) renderTimeline();
+    renderState(state); lastGood=Date.now();
+    $('connection').className='pill good'; txt('connection-text','已连接');
+    const age=state.updated_at ? Math.max(0,Math.floor((Date.now()-Date.parse(state.updated_at))/1000)) : null;
+    txt('updated',!state.has_data ? '监控已连接，等待 Agent 发布数据' : 'Agent 数据更新于 '+(age < 2 ? '刚刚' : age+' 秒前'));
+  } catch(error) {
+    $('connection').className='pill bad'; txt('connection-text','连接中断 · 重试中');
+    txt('updated',lastGood ? '保留最后一次收到的数据，尚未重新连接' : '请确认本机监控服务已启动');
+  } finally { clearTimeout(timer); setTimeout(poll,500); }
+}
+poll();
+})();
+</script>
+</body>
+</html>
