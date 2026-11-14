@@ -11,6 +11,9 @@ logs/
 *.log
 __pycache__/
 *.pyc
+.test-runtime/
+runtime/
+.survival-test-runtime/
 
 # Local Minecraft worlds and binaries
 world/

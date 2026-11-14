@@ -6,12 +6,14 @@
 
 ## 一、技能基础契约 (BaseSkill Contract)
 
-所有宏技能均继承 `BaseSkill`，提供标准的生命周期钩子：
+单一宏技能采用 `BaseSkill` 契约，提供以下生命周期钩子。生存基础动作通过 `SurvivalSkills.execute(name, args, cancel_event)` 注册分派，同样返回 `SkillResult`，实际契约见 [SURVIVAL.md](SURVIVAL.md)，不会注册未实现的搭高/落地水骨架：
 - `validate_preconditions(context) -> bool`：校验背包资源、空间高度、网络状态。
 - `execute(context, **params) -> SkillResult`：核心动作逻辑。
 - `rollback(context, reason) -> None`：动作异常中断时的安全恢复（如清空跳跃、恢复正常视线）。
 
 ---
+
+日常生产技能及验证边界见 [DAILY_SURVIVAL.md](DAILY_SURVIVAL.md)。下面的 `pillar_up` 和 `mlg_water` 是未接入的设计规范，不属于可执行模型工具。
 
 ## 二、核心技能规范
 
@@ -63,33 +65,63 @@
 
 ### 3. `auto_sleep` (智能找床睡眠)
 
-* **功能**：在夜间或雷暴天气下，主动探测附近安全床位，寻路至床边并右键入睡，清晨自动唤醒。
-* **参数**：
-  - `radius: int = 16`：床位搜索半径。
-  - `threat_check: bool = True`：是否先校验并避开周边敌对生物。
-* **前置条件**：
-  1. 游戏处于可入睡状态（`is_day == False` 或 `thundering == True`）。
+* **实现状态**：已实现通过公开 HTTP API 执行的有界状态机，离线测试与独立真实游戏验证范围见 [TESTING.md](TESTING.md)。自动搭高和落地水仍为未接入骨架。
+* **功能**：仅在主世界的夜间或雷暴时搜索床、接近并入睡，等待服务器将机器人唤醒，依据状态变化验证完成。已在睡眠中的机器人直接等待醒来，不重复点击床。
+* **调用契约**：
+
+  ```python
+  execute(radius=16, threat_check=True, *, timeout_seconds=600,
+          move_timeout_seconds=15, confirm_timeout_seconds=5,
+          threat_distance=8, poll_interval_seconds=0.5, cancel_event=None)
+  ```
+
+  - `radius`：1–64 格搜索半径。
+  - `threat_check`：是否在移动前和接近床后检查敌对实体；默认开启。
+  - `threat_distance`：机器人或床周围的三维威胁距离，默认 8 格，最大 61 格。只能检查客户端已接收的实体，不能保证服务器一定允许入睡。
+  - `timeout_seconds`：包括搜索、移动、确认和等待醒来的总时间预算。
+  - `move_timeout_seconds`：每张床的寻路预算；服务端明确拒绝或寻路超时后可尝试下一张床。
+  - `confirm_timeout_seconds`：点击床的 HTTP 等待上限、随后确认入睡的轮询预算，以及醒来后等待时间/天气数据同步的确认窗口；各窗口均受任务总预算限制。
+  - `poll_interval_seconds`：状态轮询间隔，默认 0.5 秒。
+  - `cancel_event`：可选 `threading.Event`；设置后中断等待并在请求边界退出。已经发出的同步 HTTP 请求仍受其请求超时限制；控制器可以同时调用 `client.stop()` 停止寻路。
+
+* **前置条件与安全检查**：
+  1. 状态必须为 `ready=True`、`alive=True`，维度必须是 `overworld` 或 `minecraft:overworld`；下界、末地和未知维度一律拒绝点击床。
+  2. 必须已经在睡眠中，或 `is_day=False` / `thundering=True`。仅正常白天不会执行动作。
+  3. 移动后和点击床前再次检查生命、就绪状态、维度和昼夜，避免把旧状态当成当前位置。
+
 * **动作序列**：
-  1. 扫描周边半径内的 `*_bed` 方块。
-  2. 若有怪物且 `threat_check == True`，优先评估威胁距离；若怪物处于 5 格内，先执行搭高避险或战术撤退。
-  3. 寻路接近目标床方块（保持在 3 格交互距离内）。
-  4. 发送 `/interact` 点击床铺。
-  5. 状态轮询：等待 `is_sleeping == True`。
-  6. 监听清晨事件（`is_day == True`）或点击床铺唤醒。
-* **错误码**：
-  - `no_bed_nearby`：搜索范围内未发现可用床位。
-  - `path_unreachable`：床位位于不可达区域或封闭房间。
-  - `monsters_nearby`：因周边怪物过近被服务器拒绝入睡。
+  1. 使用 `/find_blocks` 的 `types` 列表查询全部 16 色床，取得带坐标的方块列表，按距离排序。
+  2. 根据 `part`、`facing` 合并床头和床脚；任一半 `occupied=True` 则跳过该床。
+  3. 检查机器人周围威胁，调用 `move_to(..., range=2)` 接近床。不可达时尝试下一张；HTTP 请求超时意味着动作状态未知，立即失败并请求停止，不自动重发动作。
+  4. 复查距离、床方块和占用状态，再检查床及机器人附近威胁。遇到怪物返回失败，**不会声称已搭高或撤退**。
+  5. 确认仍在主世界且床可交互后调用 `/interact`，随后轮询状态；单次 HTTP 成功或 `interacted=True` 不等于成功入睡。
+  6. 满足以下任一证据链才返回成功：
+     - 观察到 `is_sleeping=True`，随后观察到清晨/雷暴结束且 `is_sleeping=False`；
+     - `/interact` 明确返回 `slept=True`，且前后状态从夜间/雷暴转为正常白天，用于单人服瞬时跳夜、来不及观察躺床状态的情况。
+  7. 醒来事件和时间/天气更新可能分包到达。已观察到睡眠后，如果先看到 `is_sleeping=False` 但仍是夜间/雷暴，最多再等 `confirm_timeout_seconds` 确认时间和天气，期间继续检查生命、维度和取消；窗口截止仍未结束才返回 `sleep_interrupted`。若窗口内重新观察到睡眠，回到等待醒来状态，不再次点击床，也不延长任务总预算。单独观察到天亮、没有入睡证据，仍返回 `sleep_unverified`。
+
+* **返回证据**：`SkillResult.data` 包含 `bed_pos`、`state`、`attempts`、`evidence` 和耗时；成功还包含 `verification` 与关键最终状态。启动时已经睡着可能没有已知床坐标，此时 `bed_pos=None`。
+* **取消与失败恢复**：已开始动作的任务失败后尽力调用 `/stop`，清理失败会保留错误码。不会通过再次点击床来猜测起床：当前 API 的同一点击也能触发入睡，存在状态竞态；因此取消时机器人可能仍躺在床上，由服务器正常唤醒。`/stop` 本身的底层取消能力及 HTTP 延迟仍是执行边界。
+* **主要错误码**：
+  - `bad_args`：参数类型、范围或时间预算不合法。
+  - `not_ready` / `dead` / `disconnected` / `unsafe_dimension`：机器人状态不适合睡眠。
+  - `daytime`：正常白天，或到床前已天亮。
+  - `no_bed_nearby` / `bed_occupied` / `bed_unavailable`：没有床、床被占用或目标已变化。
+  - `path_unreachable`：候选床无法接近。
+  - `monsters_nearby`：检测到邻近敌对实体，没有执行自动战斗或撤退。
+  - `sleep_rejected` / `sleep_unverified` / `sleep_interrupted`：交互被拒绝、缺少睡眠证据、入睡后提前醒来。
+  - `cancelled` / `timeout`：主动取消或任务总预算耗尽。
+  - `request_timeout`：HTTP 等待超时，后台动作结果未知；不自动重试。其他 API 错误码保留，不转成空列表或成功。
 
 
 ### 4. `calculate_stronghold`（纯要塞计算）
 
-- 实现：`skills/stronghold.py` 的 `CalculateStrongholdSkill`。
+- 实现：`skills/stronghold.py` 的 `CalculateStrongholdSkill`，可由 Python 或独立 CLI 调用。`agent/tools.py` 仅保存独立 `STRONGHOLD_TOOL_DEFINITION` 常量；starter/daily 模型工具目录与运行时没有注册此动作。
 - 输入：`throws` 为 1～32 次独立主世界投眼观测，每项含 `x/z/bearing_deg/sigma_deg`；`top_k` 默认 5。角度采用原版 yaw 度数，南 0°、西 90°。
 - 输出：`SkillResult.data` 含官方 Ninjabrain Bot 计算出的候选区块、投眼目标点、下挖参考点和条件概率；不代表已找到传送门房。
 - 前置条件：已安装固定版本的计算 JAR 和 JDK 11+；观测必须来自同一世界、同一要塞，多点采样先归并为一条射线。
 - 错误码：`invalid_observations`（无效或重复观测）、`calculation_failed`（依赖缺失、超时或无一致候选）。
-- 无游戏动作，无需回滚。采样与计算分离；CLI `capture` 会投眼，细节见 `docs/STRONGHOLD.md`。
+- 无游戏动作，无需回滚。采样与计算分离；CLI `capture` 会投眼，细节见 [STRONGHOLD.md](STRONGHOLD.md)。
 
 
 ## 三、面向 harness AI 的策略 Skill
@@ -97,3 +129,5 @@
 `skills/stronghold_localization/SKILL.md` 是供游戏 AI 按需读取的投眼、选点和导航策略，详细推导与来源在其 `references/research.md`。它与 Python `BaseSkill` 动作执行器用途不同。
 
 本策略尚未自动加载到模型上下文，统计误差估计与自动导航优化也未接入运行时代码；不要将文档存在等同于功能已实现。
+
+策略 skill 默认面向小模型：短正文、真实接口调用表、最多五步流程，原理和长示例放入 `references/`。未绑定入口须明确标注；会话、采样、计算和并发监控由 harness 负责。完整编写约定见 [AGENTS.md](../AGENTS.md)，未来赛事入口见 [HARNESS_INTERFACES.md](HARNESS_INTERFACES.md)。

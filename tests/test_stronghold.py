@@ -1,6 +1,7 @@
 """Regression checks for the real engine, coordinate conventions, and capture."""
 
 from dataclasses import asdict
+import copy
 import json
 import math
 from pathlib import Path
@@ -9,11 +10,12 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
+import requests
 
 from integrations.ninjabrain.calculator import CalculationError, EyeThrow, JAR_PATH, StrongholdCalculator
 from integrations.ninjabrain.observations import EyeObservationCollector, ObservationError, fit_trajectory
 from skills.stronghold import CalculateStrongholdSkill
-from core.client import MinecraftAgentClient, MinecraftAPIError
+from core.client import APIError, MinecraftAgentClient, MinecraftAPIError
 
 
 class ObservationTests(unittest.TestCase):
@@ -54,6 +56,7 @@ class ObservationTests(unittest.TestCase):
 class ApiTests(unittest.TestCase):
     @patch("core.client.requests.request")
     def test_entities_use_post_and_preserve_filters(self, request):
+        request.return_value.status_code = 200
         request.return_value.json.return_value = {"ok": True, "result": {"entities": [{"id": 12}]}}
         client = MinecraftAgentClient()
         client.token = "test-token"
@@ -64,6 +67,7 @@ class ApiTests(unittest.TestCase):
 
     @patch("core.client.requests.request")
     def test_business_error_is_not_empty_entities(self, request):
+        request.return_value.status_code = 200
         request.return_value.json.return_value = {"ok": False, "error": {"code": "wrong_server"}}
         with self.assertRaises(MinecraftAPIError) as error:
             MinecraftAgentClient().get_entities()
@@ -71,18 +75,21 @@ class ApiTests(unittest.TestCase):
 
     @patch("core.client.requests.request")
     def test_use_item_error_is_not_a_successful_throw(self, request):
+        request.return_value.status_code = 200
         request.return_value.json.return_value = {"ok": False, "error": {"code": "missing_item"}}
         with self.assertRaises(MinecraftAPIError):
             MinecraftAgentClient().use_item("ender_eye")
 
     @patch("core.client.requests.request")
     def test_null_success_result_is_an_explicit_error(self, request):
+        request.return_value.status_code = 200
         request.return_value.json.return_value = {"ok": True, "result": None}
         with self.assertRaises(MinecraftAPIError):
             MinecraftAgentClient().get_entities()
 
     @patch("core.client.requests.request")
     def test_malformed_entities_are_rejected(self, request):
+        request.return_value.status_code = 200
         request.return_value.json.return_value = {"ok": True, "result": {}}
         with self.assertRaises(MinecraftAPIError):
             MinecraftAgentClient().get_entities()
@@ -93,7 +100,7 @@ class CaptureTests(unittest.TestCase):
         client = Mock()
         client.get_status.return_value = {"ok": True, "result": {
             "ready": True, "alive": True, "dimension": "overworld", "pos": [0, 64, 0], "busy": None}}
-        client.get_inventory.return_value = {"items": [{"name": "ender_eye", "count": 2}]}
+        client.inventory.return_value = {"ok": True, "result": {"items": [{"name": "ender_eye", "count": 2}]}}
         client.use_item.return_value = {"ok": True, "result": {"thrown": True, "projectile": "zombie"}}
         return client
 
@@ -104,7 +111,7 @@ class CaptureTests(unittest.TestCase):
 
     def test_no_eye_inventory_does_not_consume_anything(self):
         client = self.make_client()
-        client.get_inventory.return_value = {"items": []}
+        client.inventory.return_value = {"ok": True, "result": {"items": []}}
         with self.assertRaises(ObservationError):
             EyeObservationCollector(client).capture()
         client.use_item.assert_not_called()
@@ -143,6 +150,98 @@ class CaptureTests(unittest.TestCase):
         with self.assertRaises(ObservationError) as error:
             self.run_capture(client)
         self.assertIn("moved", str(error.exception))
+
+
+class RealClientCaptureTests(unittest.TestCase):
+    """Use the real merged HTTP client, mocking only its network boundary."""
+
+    def setUp(self):
+        self.client = MinecraftAgentClient(password="fake-password")
+        self.client.token = "fake-token"
+        self.calls = []
+        self.eye_queries = 0
+        self.inventory = {"ok": True, "result": {"items": [{"name": "ender_eye", "count": 2}]}}
+        self.throw_failure = None
+
+    def http(self, method, url, **kwargs):
+        path = url.rsplit("/", 1)[-1]
+        self.calls.append((method, path, copy.deepcopy(kwargs)))
+        if path == "status":
+            result = {"ok": True, "result": {"ready": True, "alive": True, "dimension": "overworld",
+                "pos": [0, 64, 0], "busy": None}}
+        elif path == "inventory":
+            result = self.inventory
+        elif path == "get_entities":
+            self.eye_queries += 1
+            entities = [] if self.eye_queries == 1 else [{"id": 77, "name": "eye_of_ender", "pos": [self.eye_queries * 3, 65, 0]}]
+            result = {"ok": True, "result": {"entities": entities}}
+        elif path == "use_item":
+            if self.throw_failure:
+                raise self.throw_failure
+            result = {"ok": True, "result": {"thrown": True}}
+        else:
+            self.fail("Unexpected HTTP endpoint: " + path)
+        response = Mock(status_code=200)
+        response.json.return_value = copy.deepcopy(result)
+        return response
+
+    def capture(self):
+        with patch("core.client.requests.request", side_effect=self.http), \
+             patch("integrations.ninjabrain.observations.time.monotonic", side_effect=[i * .125 for i in range(100)]), \
+             patch("integrations.ninjabrain.observations.time.sleep"):
+            return EyeObservationCollector(self.client, duration_seconds=1).capture()
+
+    def test_real_client_inventory_envelope_and_identified_eye_capture(self):
+        observation = self.capture()
+        self.assertAlmostEqual(observation["throw"]["bearing_deg"], -90)
+        self.assertEqual(observation["entity_id"], 77)
+        throws = [call for call in self.calls if call[1] == "use_item"]
+        self.assertEqual(len(throws), 1)
+        self.assertEqual(throws[0][0], "POST")
+        self.assertEqual(throws[0][2]["json"], {"item": "ender_eye"})
+        self.assertTrue(all(call[0] == "POST" for call in self.calls if call[1] == "get_entities"))
+        self.assertEqual([call[0] for call in self.calls if call[1] == "inventory"], ["GET"])
+
+    def test_real_client_accepts_offhand_eye_from_inventory_result(self):
+        self.inventory = {"ok": True, "result": {"items": [], "offhand": {"name": "ender_eye", "count": 1}}}
+        self.assertEqual(self.capture()["entity_id"], 77)
+
+    def test_real_client_business_inventory_error_does_not_throw(self):
+        self.inventory = {"ok": False, "error": {"code": "wrong_server", "message": "not ready"}}
+        with self.assertRaises(MinecraftAPIError) as caught:
+            self.capture()
+        self.assertIsInstance(caught.exception, APIError)
+        self.assertEqual(caught.exception.code, "wrong_server")
+        self.assertFalse(any(call[1] == "use_item" for call in self.calls))
+
+    def test_malformed_inventory_envelope_does_not_throw(self):
+        for result in (None, {}, {"items": "unknown"}):
+            self.inventory = {"ok": True, "result": result}
+            with self.subTest(result=result), self.assertRaises(ObservationError):
+                self.capture()
+        self.assertFalse(any(call[1] == "use_item" for call in self.calls))
+
+    def test_timeout_is_one_unknown_throw_without_replay(self):
+        self.throw_failure = requests.Timeout("fake transport timeout")
+        with self.assertRaises(ObservationError) as caught:
+            self.capture()
+        self.assertIn("request_timeout", str(caught.exception))
+        self.assertEqual(sum(call[1] == "use_item" for call in self.calls), 1)
+        self.assertFalse(any(call[1] in {"stop", "auth/login"} for call in self.calls))
+
+    def test_legacy_error_constructor_and_modern_error_catch_both_work(self):
+        legacy = MinecraftAPIError({"error": {"code": "missing_item", "message": "no eye"}})
+        self.assertEqual(legacy.code, "missing_item")
+        modern = APIError("request_timeout", "unknown", 504, {"action_state": "unknown"})
+        self.assertIsInstance(modern, MinecraftAPIError)
+        self.assertEqual(modern.payload["error"]["action_state"], "unknown")
+        self.assertEqual(modern.status_code, 504)
+
+    @patch("core.client.requests.request")
+    def test_get_inventory_keeps_existing_public_envelope_contract(self, request):
+        request.return_value.status_code = 200
+        request.return_value.json.return_value = self.inventory
+        self.assertEqual(self.client.get_inventory(), self.inventory)
 
 
 class DependencyTests(unittest.TestCase):
