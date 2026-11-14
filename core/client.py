@@ -148,10 +148,20 @@ class MinecraftAgentClient:
         """Read inventory before consuming an item."""
         return self._checked_request("GET", "/inventory", timeout=5)["result"]
 
-    def dig(self, x: float, y: float, z: float, collect: bool = True, timeout_ms: int = 30000) -> Dict[str, Any]:
+    def dig(
+        self,
+        x: float,
+        y: float,
+        z: float,
+        collect: bool = True,
+        timeout_ms: int = 30000,
+        stop_on: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
         """Approaches the block, equips best tool, digs it, and optionally collects the drops."""
         url = f"{self.base_url}/dig"
         payload = {"x": x, "y": y, "z": z, "collect": collect}
+        if stop_on is not None:
+            payload["stop_on"] = stop_on
         # timeout includes approaching and digging
         return requests.post(url, headers=self.headers, json=payload, timeout=timeout_ms / 1000 + 10).json()
 
@@ -232,6 +242,7 @@ class MinecraftAgentClient:
         entity_id: Optional[int] = None,
         item: Optional[str] = None,
         timeout: float = 30.0,
+        stop_on: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Interacts (right-clicks) with a block or entity."""
         url = f"{self.base_url}/interact"
@@ -244,6 +255,8 @@ class MinecraftAgentClient:
             payload["entity_id"] = entity_id
         if item is not None:
             payload["item"] = item
+        if stop_on is not None:
+            payload["stop_on"] = stop_on
         return requests.post(url, headers=self.headers, json=payload, timeout=timeout).json()
 
     def use_item(self, item: str, ms: Optional[int] = None) -> Dict[str, Any]:
