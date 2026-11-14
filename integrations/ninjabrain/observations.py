@@ -93,8 +93,13 @@ class EyeObservationCollector:
             raise ObservationError("bot must be idle, stationary, and outside a vehicle")
         if any(before.get(flag) for flag in ("in_lava", "on_fire", "submerged")):
             raise ObservationError("bot is not in a suitable state for an eye measurement")
-        inventory = self.client.get_inventory()
-        items = list(inventory.get("items", [])) + [inventory.get("offhand") or {}]
+        response = self.client.inventory()
+        inventory = response.get("result") if isinstance(response, dict) and response.get("ok") is True else None
+        if not isinstance(inventory, dict) or not isinstance(inventory.get("items"), list):
+            raise ObservationError("inventory request returned no verified item list; no item was used")
+        items = inventory["items"] + [inventory.get("offhand") or {}]
+        if any(not isinstance(item, dict) for item in items):
+            raise ObservationError("inventory request returned malformed items; no item was used")
         if not any(item.get("name") == "ender_eye" and item.get("count", 0) > 0 for item in items):
             raise ObservationError("inventory has no ender_eye; no item was used")
         existing = {entity["id"] for entity in self._eyes()}

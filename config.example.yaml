@@ -1,32 +1,81 @@
-llm:
-  # 支持 OpenAI、DeepSeek、Qwen、Ollama、LocalAI 等任何 OpenAI 兼容接口
-  base_url: "https://api.nju-aia.com/v1"
-  api_key: "your-api-key-here"
-  model: "default"
-  temperature: 0.3
-  max_tokens: 1024
+# Copy to config.yaml. Priority: --username > MC_AGENT_* environment > YAML > defaults.
+# main.py also accepts --config or BOTSLEEP_CONFIG to select this file.
+mc_api:
+  base_url: "http://127.0.0.1:18900/api/v1"  # MC_AGENT_API
+  timeout_seconds: 15
+  login_timeout_seconds: 30
 
 agent:
-  name: "SleepBot"
-  password: "agent-secret-pass"
-  reflex_enabled: true
-  reflex_frequency_hz: 20
-  threat_distance_threshold: 8.0
+  name: "SleepBot"                         # MC_AGENT_USER or --username
+  password: ""                            # Prefer MC_AGENT_PASSWORD; empty for no-password offline servers.
+  mode: "sleep"                           # sleep or survival; --mode overrides this.
 
-mc_api:
-  base_url: "http://127.0.0.1:18900/api/v1"
-  timeout_seconds: 15
+survival:
+  objective: "starter"                     # starter: bounded stone tools; daily: ongoing survival; --objective overrides.
+  daily:
+    food_reserve: 8                         # Target inventory item counts, not saturation guarantees.
+    wood_reserve: 8
+    fuel_reserve: 8
+    maintenance_interval_seconds: 30
+  world_id: "default"                      # Change this when replacing a server world.
+  state_dir: "runtime/survival"             # Checkpoints scoped by API, username and world_id.
+  scan_radius: 24
+  poll_interval_seconds: 1
+  retry_seconds: 5
+  max_steps: 256
+  max_runtime_seconds: 3600
+  max_target_failures: 2
+  target_cooldown_seconds: 300
+  max_consecutive_failures: 6
+  max_deaths: 3
+  explore_distance: 16
+  max_explore_steps: 8
+  low_health_threshold: 8
+  food_threshold: 16
+  threat_radius: 8
 
-rcon:
+sleep:
   enabled: true
-  host: "127.0.0.1"
-  port: 25575
-  password: "agent-rcon-pass"
+  radius: 16                              # Integer, 1-64 blocks.
+  threat_check: true
+  threat_distance: 8
+  poll_interval_seconds: 0.5
+  retry_seconds: 15
+  timeout_seconds: 600
+  move_timeout_seconds: 15
+  confirm_timeout_seconds: 5
 
 debug:
-  enable_in_game_commands: true
+  enable_in_game_commands: false           # Enable here or pass --debug; both require the player allowlist below.
   command_prefix: "#"
-  log_level: "INFO"
+  allowed_usernames: []                    # Empty denies remote commands; list trusted player names explicitly.
   flight_recorder:
     enabled: true
-    output_dir: "logs"
+    output_dir: "logs"                     # Relative to this YAML file, not the shell's current directory.
+  monitor:
+    enabled: false
+    host: "127.0.0.1"                      # Loopback only; local read-only dashboard.
+    port: 18930
+    heartbeat_seconds: 2
+    console: false                         # Also print redacted model/action JSON to stdout.
+
+# Enable together with agent.mode: survival to use native model tool calls.
+# No silent fallback to rules on model errors. Store real keys only in ignored config files.
+llm:
+  enabled: false
+  base_url: "http://127.0.0.1:8000/v1"      # BOTSLEEP_LLM_BASE_URL
+  api_key: ""                             # BOTSLEEP_LLM_API_KEY
+  model: "qwen3.6-35b-a3b"                # BOTSLEEP_LLM_MODEL; use the provider's permitted route name.
+  temperature: 0.3
+  max_tokens: 2048
+  timeout_seconds: 60
+  max_history_turns: 10
+  max_repair_attempts: 1
+  tls_version: "auto"                     # Optional "1.2" for TLS negotiation compatibility; verification stays on.
+
+# RCON is an optional development dependency, never used by the model runner.
+rcon:
+  enabled: false
+  host: "127.0.0.1"
+  port: 25575
+  password: ""

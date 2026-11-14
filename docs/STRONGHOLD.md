@@ -4,7 +4,7 @@
 
 ## 安装与离线计算
 
-需要 Python 3.11 和 JDK 11+（`java`、`javac` 在 PATH 或 JAVA_HOME 下）。纯计算仅用 Python 标准库；API 采样通过现有客户端，需要项目环境的 `requests`、`mcrcon`。
+需要 Python 3.10+ 和 JDK 11+（`java`、`javac` 在 PATH 或 JAVA_HOME 下）。纯计算仅用 Python 标准库；API 采样通过现有客户端，需要 `requests`。RCON 不参与采样，正常项目依赖见 `requirements.txt`。
 
 ```powershell
 .\.venv\Scripts\python.exe -m integrations.ninjabrain setup
@@ -56,7 +56,7 @@ result = StrongholdCalculator().calculate([
 ])
 ```
 
-`skills.stronghold.CalculateStrongholdSkill().execute(throws=[...])` 返回标准 `SkillResult`；它只计算、不投眼。`agent/tools.py` 已登记 `calculate_stronghold` 工具结构，但现有 AgentLoop 分发仍是 TODO，不能据此认定模型已经能自主调用。
+`skills.stronghold.CalculateStrongholdSkill().execute(throws=[...])` 返回标准 `SkillResult`；它只计算、不投眼。`agent/tools.py` 以独立常量 `STRONGHOLD_TOOL_DEFINITION` 保留 `calculate_stronghold` 的工具结构；它没有加入 starter/daily 的9/31项模型工具目录。生存调度器已实现，但尚未绑定要塞计算，不能据独立CLI可用认定模型已经能自主调用。
 
 ## 验证与来源
 

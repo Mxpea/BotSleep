@@ -1,5 +1,7 @@
 # BotSleep 系统架构设计规范 (ARCHITECTURE)
 
+> 当前实现：`main.py` 支持 sleep/survival，生存区分 starter 与 daily。已实现可选模型原生工具调用、单游戏动作线程、独立单模型请求线程、主线程安全监测、按世界隔离的检查点与 SQLite 记忆。模型串行门禁跨进程持久化，未知结果不得重放。日常模块、任务依赖和实际边界见 [DAILY_SURVIVAL.md](DAILY_SURVIVAL.md)，基础契约见 [SURVIVAL.md](SURVIVAL.md)。下文是早期设计稿：20Hz 硬实时反射、搭高和落地水等仍未完成，不能将图中规划能力当作已实现。正常运行无需 RCON；模型默认关闭。
+
 ## 一、设计哲学：慢思考与快反应 (Dual-System Model)
 
 在 Minecraft 这种三维物理沙盒游戏中，AI Agent 面临着严峻的时延与物理反馈挑战。

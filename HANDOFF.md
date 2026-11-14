@@ -1,68 +1,56 @@
 # BotSleep / Minecraft Agent Harness 交接
 
-更新日期：2026-11-13（Asia/Shanghai）。面向不同机器上的协作者；文中代码和文档路径均相对本仓库根目录。外部依赖使用项目名指代，部署地址、账号和凭据应由接手者自行配置。
+更新日期：2026-11-14（Asia/Shanghai）。路径均相对仓库根目录；跨机器需要自行配置部署地址、账号和凭据，不依赖原机器的进程或在线会话。提交、合并和远端同步结果以 Git 记录为准，不据本文推断已经 push。
 
-## 1. 目标、用户偏好与当前结论
+## 1. 当前入口、范围与现场状态
 
-目标是基于 BotSleep 建设通用 Minecraft Agent harness，并评估用于 Minecraft Agent 挑战赛的可行性。用户已授权 API 实测、Ninjabrain Bot 计算集成、真实投眼定位和模型接口测试。当前最新任务是整理交接，未要求立即继续游戏操作或实施完整 harness 重写。
+当前主入口为 `main.py`，支持 YAML、环境变量与命令行参数；`bot_sleep.py`、根 `client.py` 分别兼容转发至主入口和统一客户端。普通运行依赖已列于 `requirements.txt`，RCON 为可选开发依赖。不存在“修改 YAML 不生效、必须运行旧独立睡眠脚本”的启动前提。
 
-**现状：模型工具调用和要塞采样/计算分别验证可用，尚未接成小模型自主游戏闭环。** 真实要塞测试由编码助手直接编排程序完成，不能算模型自主成功。
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+Copy-Item config.example.yaml config.yaml
+.\.venv\Scripts\python.exe main.py --config config.yaml --check-config
+.\.venv\Scripts\python.exe main.py --config config.yaml --mode survival --objective daily
+```
 
-用户要求：
+先填写 API 地址、允许登录的账号及口令。`--check-config` 不连接游戏。`llm.enabled` 默认关闭；需要模型时填写服务配置或 `BOTSLEEP_LLM_BASE_URL`、`BOTSLEEP_LLM_MODEL`、`BOTSLEEP_LLM_API_KEY` 环境变量，不假设 `.env` 自动加载。模型与监控配置详见 [README.md](README.md)。
 
-- 中文沟通；面向游戏 AI 的 skill 放在本仓库，不放个人 Codex 技能目录。
-- 默认面向小模型，短正文、明确调用表、最多五步流程。公式、研究和长示例放 `references/`，不默认注入上下文。
-- skill 明确真实接口、参数、单位和返回字段；尚未绑定的入口不得假装可调用。
-- 采样、计算、会话与动作监控由程序负责，模型负责选择下一步。
-- 协作交接不能依赖原机器的路径、进程、执行会话或仍在线的机器人。
+**2026-11-14 18:32 交接记录**：原运行目录的 dev-ink 机器人仍使用合并前已加载代码；PID40544、会话 `2a30267e20eb` 已运行270步，因 `death_limit` 安全暂停，重生后生命/饥饿20、位置 `[-2.5,125,10.5]`，监控 HTTP 200、模型槽 `idle`。这不是合并造成的停止；本次合并不重置死亡预算、不重启机器人，也不替换其运行目录。PID、位置及状态仅是此时间点的记录，后续必须重新观察。
 
-比赛规则来自早期交接，尚未在本轮重新完整核验：8 小时、Java 1.21.11、相同虚空岛；游戏表现 60 分按 advancement 计，工程评审 40 分。难度 1～5 的条目原始分为 5/15/30/60/100，游戏表现按最高原始分归一化。比赛禁止服务器命令、RCON、管理员权限和读取存档，RCON 仅用于开发测试。最终以主办方规则为准；两份规则副本此前未完整比对，上传材料不保证随仓库分发。
+16:26安全空闲时加载过对角清叶、几何改变后解除旧失败、紧急撤退短观察等修复；16:35仍是雷暴/近敌下的本地避险阶段，该状态现为历史。当前实时信息以私有 `.test-runtime/processes.json`、现场报告和只读监控时间戳为准；禁止根据历史 PID 或旧配置启动第二个同名机器人。
 
-## 2. 架构方向与实际实现
+## 2. 已实现链路与验证边界
 
-目标流程：
-
-`状态/事件 → 精简上下文与任务记忆 → 当前任务 skill + 小模型 → 工具校验/分发 → 程序技能 → 游戏 API → 真实结果摘要`
-
-动作执行期间，程序并发观察进展、血量和氧气，必要时停止/恢复。普通动作串行执行；模型超时可有限重试，已发出的游戏动作不能盲目重发，先检查是否已经执行。
+`survival.objective: starter` 执行初期石器工具链；`daily` 持续计算13项基于当前证据的任务，包含食物、材料、铁器、熔炼、床与住所、储物、死亡掉落恢复及维护。日常模式已注册31个工具，仍受步骤、时间、死亡及安全预算限制，不承诺无限无人值守。详情见 [DAILY_SURVIVAL.md](docs/DAILY_SURVIVAL.md)。
 
 | 模块 | 当前状态 |
-|---|---|
-| `agent/brain.py` | OpenAI 兼容 Chat Completions 封装；支持 messages、tools、自动工具选择 |
-| `agent/tools.py` | 部分工具 schema 已有，包含 `calculate_stronghold`；不是可执行工具注册表 |
-| `agent/loop.py` | 仅轮询状态，提示构建、模型调用、工具分发均为 TODO |
-| `main.py` | 未启动 AgentLoop；只连接机器人及可选聊天调试；`--config` 尚未读取 YAML |
-| `core/client.py` | 部分接口可用，部分旧路径仍错误，见第 3 节 |
-| `core/telemetry.py` | 状态缓存已有；ReflexDaemon 检测是 TODO |
-| `core/memory.py`、`debug/logger.py` | JSON/JSONL 状态、地标、事件记忆和日志基础设施存在，未统一接入自主闭环 |
-| `skills/stronghold.py` | 纯要塞计算执行器，返回 SkillResult |
-| `integrations/ninjabrain/` | 官方计算核心桥接、轨迹采样、CLI 已实现 |
-| `skills/stronghold_localization/SKILL.md` | 面向游戏 AI 的精简策略；尚无自动加载器 |
-| 原有睡眠、搭高、落地水技能 | 仍含占位成功返回，不可当作可靠动作 |
+| --- | --- |
+| `core/client.py`、`core/config.py` | 统一公开 API 封装、业务错误与未知结果区分、配置加载校验；旧路径和移动 timeout 参数已适配 |
+| `core/survival_harness.py` | 单动作执行、独立单模型 worker、安全抢占、失败冷却、检查点及预算；不是旧 `agent/loop.py` 骨架 |
+| `agent/llm_planner.py`、`agent/tools.py` | 原生 tool call/result 配对、参数验证、有限请求预算；starter 9项与 daily 31项可执行工具 |
+| `core/model_gate.py` | 同服务及凭据作用域的跨线程/进程请求串行门禁，未知请求持久化锁定 |
+| `core/daily_observation.py`、`core/daily_policy.py`、`core/survival_memory.py` | 新鲜证据、本地安全决策、按账号/世界隔离的 SQLite 记忆；记忆不是库存真值 |
+| 睡眠与生存技能 | 已接入真实动作及后验验证；搭高、落地水和20Hz反射仍未接入 |
+| `integrations/ninjabrain/`、`skills/stronghold.py` | 独立采样与官方计算核心；未纳入日常模型工具目录 |
+| `skills/stronghold_localization/SKILL.md` | 小模型策略文档，尚未自动加载到运行上下文 |
 
-`docs/ARCHITECTURE.md` 是早期设计，关于 20Hz 反射、实时落地水等描述不是已实现能力。当前 API 没有速度字段；应先建设动作监控和有限恢复，再评估实时能力。
+合并后全套 **772项测试通过（17.137秒，0跳过）**：包含原 dev-ink 的740项基线、31项要塞回归及1项目录隔离回归。固定 Ninjabrain Bot 1.5.2 JAR 已下载并通过 SHA-256 校验，真实计算引擎用例没有跳过；compileall、示例配置检查和监控 JavaScript 语法检查通过。合并前 dev-ink 的 **740项/15.126秒** 仅保留为历史基线。
 
-## 3. 游戏 API 契约与已知问题
+真实自然地图记录：15:50–15:56的会话 `b8b27ada1620` 完成清叶、两次采木、木板/木棍/木镐制作，11个动作的后续原生工具反馈配对正确；工作台缺料、移动失败后模型改选行动。16:03被僵尸击杀并空背包重生。不得把死亡前物品当作当前持有，也不能用此记录证明后续新会话或完整日常链通过。睡眠与确定性石器靶场另有历史验证，完整食物、熔炼、建屋、储物及长期生存仍待验收，证据见 [TESTING.md](docs/TESTING.md)。
 
-外部依赖项目名为 `mc-agent-api`。早期源码审查基于其 v1.3.3；其他机器应核对实际部署的 `docs/API.md` 和实现版本。API 不能修改，适配在 harness 一侧完成。
+API 1.3.7（官方 `1cfecc3`）已实际返回 `speed/velocity`，速度进入模型与监控；缺失/null表示未知，不是零。`dig_unconfirmed`、树冠分段撤退等有离线回归，但不能把离线检查当作真实恢复成功。原模型服务路由为 `default`，历史响应自报 `qwen3.6-35b-a3b`；路由或模型列表不保证实际后端身份，当前响应缺失时应显示“未确认”。
 
-- 基址由部署配置提供，路径前缀 `/api/v1`。`POST /auth/login` 换 Bearer token，然后轮询 `GET /status` 至 `ready: true`。重复登录同名角色可能使旧 token 失效。
-- 检查响应 `ok`，不能只检查 HTTP 状态。部分业务错误使用 HTTP 200。
-- 动作高层、阻塞、互斥，第二个动作可能返回 `busy`。观察接口以及 stop、posture、look 可在动作期间调用。
-- `/events` 按 `seq` 游标读取；早期审查为 500 条环形缓冲，分页与溢出尚未实测。
-- `/control` 最短 50ms、最长 3000ms。`move_to` 使用 `timeout`（毫秒），不是 `timeout_ms`；省略 y 时按水平目标寻路。
-- `posture` 是全量姿态设置，未指定字段会复位；动作结束会重放持久姿态。水中恢复时不要过早解除 jump。
-- 两套 yaw 不同：控制为 mineflayer 弧度 `atan2(-dx,-dz)`；投眼为原版度数 `degrees(atan2(-dx,+dz))`。
-- 源码审查有死亡循环和重连限制，实测前核对部署配置；未验证完整死亡/重连恢复。
+## 3. 协作、安全与小模型约定
 
-已确认及仍待修复：
+- 用户要求仅修改 BotSleep，不修改或提交相邻 `mc-agent-api`；历史 API 实验补丁已撤回。不要为验收给物、传送、改时间/天气或破坏用户普通世界。
+- 模型服务不支持并发，不得在机器人请求在途时另发探测。明确完整 HTTP 429/5xx 可按预算退避；传输超时或断连保留 `llm_request_uncertain`，确认远端结束前不清锁、不自动重发。
+- `--resume` / `#resume` 只授权重新观察并规划游戏任务，不重放未知动作，也不清模型请求槽。只有确认模型服务空闲才使用 `--acknowledge-model-idle`。`#stop` 请求取消并暂停，不能保证后端瞬时停止。
+- 配置、凭据、原始模型日志、世界、运行台账、JAR与缓存不随仓库分发。私有日志路径仅提供证据索引，不代表接收端已经拥有这些文件。
+- 面向游戏 AI 的 skill 放在本仓库，默认约300～600中文字、明确接口调用表与最多五步流程；公式、原理及长示例放 `references/`。未绑定接口明确标注，不虚构工具。
+- 模型选择目标和下一行动；会话、坐标转换、采样、数学计算与并发监控由 harness 承担。普通动作串行，未知副作用先核验，完成必须有证据。
 
-1. 原 `GET /blocks`、`GET /entities`、`POST /look_at` 真实返回 404 `unknown_api`；正确路径是 `POST /find_blocks`、`POST /get_entities`、`POST /look`。
-2. 集成时仅修正了 `core/client.py.get_entities`，新增 `get_inventory`，并为这些调用和 `use_item` 增加业务错误检查。`get_blocks`、`look_at` 以及根目录旧 `client.py` 仍需适配。
-3. `core/client.py.move_to` 仍发送 `timeout_ms`，测试通过正确 HTTP 请求绕过，不能声称封装已修复。
-4. `main.py` 默认用户名和密码硬编码，曾因部署白名单拒绝登录；异常退出码却为 0。配置模板修改不会自动生效。
-5. `#stop` 仍只是聊天提示，不是真正停止。不要依赖它紧急中断。
-6. `probe_api.py` 用子串 `vel` 检测速度，会误匹配 `xp_level`；该 bug 尚未修改。它默认会登录、转向、空闲 stop 和登出，并非严格只读。
+[HARNESS_INTERFACES.md](docs/HARNESS_INTERFACES.md) 保留赛事阶段目标、进度卡、导航、reflex、compact/handoff等设计访谈与未冻结入口。当前 daily 运行时解决了部分基础链路，但不等于已经实现该文档中的全部未来赛事接口；`select_task`、`finish_task`、自动浮水/搭桥等不得作为现成工具调用。
 
 ## 4. Ninjabrain Bot 集成
 
@@ -72,23 +60,12 @@
 - 直接使用官方 Posterior，保留生成环、生物群系偏移、角度误差和最近要塞约束；不启动 GUI、剪贴板或热键。
 - 适用原版 Java 1.19+ 主世界，坐标观测绕过人工准星修正；不接入 divine、船眼或下界盲穿功能。
 - `EyeObservationCollector(client).capture()` 消耗一只眼，按名字和 ID 跟踪一只新眼的多点轨迹，输出 `throw/quality/diagnostics`。
-- `CalculateStrongholdSkill().execute(throws=[...], top_k=2)` 只计算，返回 `success/data/error_code`；候选在 `data.candidates`。
+- `CalculateStrongholdSkill().execute(throws=[...], top_k=2)` 只计算，返回 `success/data/error_code`；候选在 `data.candidates`。`STRONGHOLD_TOOL_DEFINITION` 仅是独立 schema 常量，没有进入 starter/daily 工具目录或模型分派。
 - CLI `capture` 会自行登录并在结束时登出；持续 harness 会话应使用注入 client 的 Python 入口，避免顶掉会话。
 
 API 的 `use_item(ender_eye)` 会返回 `landed_at/eye_vector/bearing_deg`，但源码选择最近的新实体，可能误认；采样器不直接依赖该方位角。API 坐标舍入到 0.1 方块，方位角取整到 1°，因此应从坐标拟合方向。
 
-## 5. 已完成的验证
-
-### 基础与离线验证
-
-- 基线 21 个 Python 文件语法解析通过。依赖安装后 `main.py --help` 可运行，但默认实机启动因账号不匹配失败。
-- 真实登录 ready、状态、事件、advancement 查询成功；正确方块查询找到内容，旧客户端却把错误吞成空结果。
-- 空闲 stop 成功。后续移动实测中 stop 能中断寻路；并发第二个动作是否返回 busy 尚未系统验收。
-- 原有三技能隔离测试证明：搭高和落地水零动作调用便报成功；睡眠仅检查夜间便报成功。
-- `tests/test_stronghold.py` 在安装官方 JAR 后，最近一次运行 **24 项通过**：方向/负坐标、轨迹拟合、实体歧义、业务错误、依赖校验、真实官方引擎、基线变化、矛盾观测及离线 CLI。
-- 合成示例 `data/examples/stronghold_throws.json` 的首选为 `[128,0]`，与真实世界无关。缺 JAR 时引擎测试会显式跳过。
-
-### 五眼真实定位
+## 5. 历史真实验证：2026-11-13 五眼定位
 
 用户在测试服准备眼睛并移动假人后，使用普通游戏 API 完成 5 次投眼：每次 11～13 个不同水平位置，水平跨度约 12.1 方块，实体名实际为 `eye_of_ender`。
 
@@ -122,67 +99,36 @@ API 的 `use_item(ender_eye)` 会返回 `landed_at/eye_vector/bearing_deg`，但
 
 **运行代码尚未采用新的统计 σ、提前结束采样、自动选点或统一导航监控；skill 只是策略文档。** 旧文档中的 100～300 格横移建议不是新策略默认值。临时 Codex 个人 skill 空模板已删除，仓库 skill 才是交付物。后续编写约定已记录到 `AGENTS.md`。
 
-## 7. 小模型接入实测
+## 7. 后续工作与模型接口历史
 
-用户提供的模型服务：`https://api.nju-aia.com/v1`。该地址是本次服务选择，不是 harness 应硬编码的通用默认。凭据从私有 `.env` 读取，不能写入交接、日志或代码。
+2026-11-13 曾以模拟工具验证 Chat Completions 的工具调用与工具结果往返；这是协议验证，不能算真实要塞自主任务。后续日常模型主循环已经接通，早期“无 YAML 启动、工具结果未回传、#stop仅提示”的缺口不再是当前入口状态。
 
-- `GET /models` 认证成功，仅列出模型 ID `default`。配置继续使用 `default`。
-- 成功 Chat Completions 响应中的模型标识为 `qwen3.6-35b-a3b`；这是服务返回标识，不是独立验证的底层部署事实。
-- 模拟 `move_to` 正确生成 x/z/range/timeout 参数，耗时约 2.69 秒。
-- 模拟 `get_status` 正确返回空参数工具调用，约 3.38 秒；回传模拟状态后，约 1.19 秒准确回答血量和坐标，没有再次调用。
-- 完整基础 tool-calling 往返已通过，但不是游戏自主任务验收。未发送真实游戏动作。
-- 服务曾返回 403/1010、502 和连接/读取超时，后续请求才成功；需实现有限重试、超时与可观测错误。不能将某次成功当作稳定性通过。
+仍需分开验证：自然地图持续食物/熔炼/住所/储物闭环；树冠和水域安全导航；要塞采样的统计误差与独立真值；要塞技能未来模型绑定、自动选点与导航整合。纯计算概率不是找到传送门房的证据，不注册尚未实现或未验证的执行器。
 
-每位协作者自行配置：
+## 8. 跨机器准备与文件索引
 
-```dotenv
-LLM_BASE_URL=https://api.nju-aia.com/v1
-LLM_MODEL=default
-LLM_API_KEY=<自行获取并保密>
-```
+建议 Python 3.11（生存入口要求3.10+）；创建本机虚拟环境并安装 `requirements.txt`。计算桥接另需 JDK 11+，保证 `java`/`javac` 可发现。不要复制原机器虚拟环境或已编译缓存。
 
-`.env`、`config.yaml` 都被忽略，不随仓库分发。**目前没有自动加载 `.env`/YAML 并启动模型循环的完整入口**，上述配置是约定，不代表写入后主程序自动生效。接口测试通过临时脚本进行，尚未沉淀成独立测试命令。
-
-## 8. 下一步实施顺序
-
-后续目标是最小要塞定位闭环，不先扩展全部生存技能：
-
-1. 统一配置和启动：加载模型/API/账号配置，移除硬编码依赖；启动失败非零退出，明确登录和会话归属。
-2. 建立真实工具注册/分发：状态、背包、采眼、计算、受监控移动、停止；先验证只读调用和保存观测回放。工具名、schema、skill 调用表保持一致。
-3. 接通 AgentLoop：加载当前精简 skill，构造少量状态/任务摘要，校验 tool_calls 参数，执行并回传 role=tool 结果。一个普通动作在途，保留独立观察和停止通道。
-4. 完善程序边界：按世界隔离投眼记录、保留真实结果及失败路线；控制上下文长度；模型重试与动作恢复分开；记录日志和后置条件。
-5. 再验证真实采眼与短距离移动。统计误差优化先完成独立校验，导航需覆盖河流、卡住、超时、中断恢复；不能用假成功技能充当验收。
-
-需要先说明并解决的缺口：缺少采眼等工具绑定、状态摘要与 skill 加载；旧客户端路径和移动超时字段；模型服务间歇故障；动作安全监控；误差模型尚未标定。主架构文档尚未按最新方向重写，阅读时以实现和本交接区分现状。
-
-## 9. 跨机器准备与文件索引
-
-使用 Python 3.11；当前运行依赖包括 requests、mcrcon，尚无统一依赖清单。官方计算桥接需 JDK 11+，保证 java/javac 可发现。创建各自虚拟环境，勿复制原机器的环境或已编译缓存。
-
-以下命令在仓库根目录运行，`python` 指接手者自己虚拟环境的解释器：
-
-```shell
-python -m pip install requests mcrcon
+```powershell
+python -m pip install -r requirements.txt
 python -m integrations.ninjabrain setup
 python -m integrations.ninjabrain calculate --input data/examples/stronghold_throws.json
-python -m unittest discover -s tests -v
-python -m compileall -q main.py agent core skills debug integrations tests
+python -B -m unittest discover -s tests -v
 ```
 
-第一次 setup 需下载官方 JAR，后续计算可离线。原环境安装曾遇 pip 初始化及 PyPI TLS 问题，属于当时环境现象，不是每台机器都需照搬的步骤。外部 API 与 Minecraft 的地址、白名单账号、认证口令及存档由部署者配置；回环地址只代表执行进程所在机器，不代表远程游戏服务器。
+`setup` 下载固定官方1.5.2 JAR并检查 SHA-256，后续计算可离线；`.cache/ninjabrain/` 不提交。缺少引擎时测试会明确跳过，不能报告为引擎全部通过。合成示例指向 `[128,0]`，与实际世界无关。
 
-| 仓库相对路径 | 用途 |
-|---|---|
-| `AGENTS.md` | 贡献指南与小模型 skill 编写要求 |
-| `agent/brain.py`、`agent/loop.py`、`agent/tools.py` | 模型请求、待接通循环、工具 schema |
-| `core/client.py` | 游戏 API 客户端及已知适配缺口 |
-| `integrations/ninjabrain/` | 官方计算桥接、采样器、CLI |
-| `skills/stronghold.py` | 纯计算程序技能 |
-| `skills/stronghold_localization/SKILL.md` | 游戏 AI 的精简策略 |
-| `skills/stronghold_localization/references/research.md` | 误差分析、导航依据与实现边界 |
-| `tests/test_stronghold.py` | 24 项最近通过的回归用例 |
-| `docs/STRONGHOLD.md`、`docs/SKILL_SPEC.md` | 用法及接口契约 |
-| `third_party/ninjabrain/` | 上游来源与许可证 |
-| `probe_api.py` | 原始探测脚本，含已知速度字段误判 |
+`capture` 会登录、消耗末影之眼并在结束时登出，可能替换同名旧会话。需要实机采样时按 [STRONGHOLD.md](docs/STRONGHOLD.md) 使用自己的部署配置；持续 harness 进程应使用受协调的注入 client 入口，不能另起同名 CLI 采样。禁止把独立采样器误当作已注册的日常模型动作。
 
-本次收尾前，集成、测试和部分新文档仍包含未跟踪文件，已有文件也存在未提交修改；没有创建本轮提交。**交接文件不等于代码已发布：传递工作时确保新文件一起纳入提交或补丁，并检查接收端文件完整性。** 私有配置、日志、JAR 和缓存默认不会传递；本文中的真实世界坐标仅作历史证据。
+| 路径 | 用途 |
+| --- | --- |
+| `README.md`、`AGENTS.md` | 当前启动、验证边界及贡献/skill约定 |
+| `docs/DAILY_SURVIVAL.md`、`docs/SURVIVAL.md`、`docs/TESTING.md` | 日常与初期生存契约、实际验证记录 |
+| `docs/HARNESS_INTERFACES.md` | 未来赛事接口、已确认设计方向与未实现提案 |
+| `integrations/ninjabrain/`、`skills/stronghold.py` | 独立官方计算桥接、采样器和CLI |
+| `skills/stronghold_localization/SKILL.md`、其 `references/research.md` | 精简策略与误差研究，尚非运行时加载器 |
+| `tests/test_stronghold.py`、`data/examples/stronghold_throws.json` | 要塞计算回归及合成输入 |
+| `third_party/ninjabrain/` | 上游来源及GPL v3许可证 |
+| `probe_api.py` | 早期探测脚本；不是当前主入口，运行前先核对其动作与局限 |
+
+跨机器不复用历史PID、token、同名机器人会话或旧世界的投眼记录。游戏/API白名单、凭据、地址和存档由部署者配置；回环地址只表示当前执行机器。Git提交、远端同步和接收端完整性单独核验，本文不声称代码已推送或生产进程已加载合并结果。

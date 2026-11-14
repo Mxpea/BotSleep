@@ -1,0 +1,442 @@
+{
+  "description": "Observed canopy geometry, reduced to the blocks read during four safe relay plans. Unlisted blocks are unknown, never air. No account or server metadata.",
+  "origin": [
+    9.6,
+    113,
+    -9.7
+  ],
+  "threat": [
+    10.3,
+    106.1,
+    -11.7
+  ],
+  "expected_waypoints": [
+    [
+      9.5,
+      114,
+      -8.5
+    ],
+    [
+      9.5,
+      113,
+      -7.5
+    ],
+    [
+      9.5,
+      112,
+      -6.5
+    ],
+    [
+      9.5,
+      110,
+      -5.5
+    ]
+  ],
+  "blocks": {
+    "10,110,-10": {
+      "name": "oak_leaves",
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 1
+      }
+    },
+    "10,110,-8": {
+      "name": "oak_leaves",
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 1
+      }
+    },
+    "10,111,-10": {
+      "name": "birch_leaves",
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 1
+      }
+    },
+    "10,111,-8": {
+      "name": "oak_leaves",
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 1
+      }
+    },
+    "10,112,-10": {
+      "name": "birch_leaves",
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 1
+      }
+    },
+    "10,112,-8": {
+      "name": "oak_leaves",
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 1
+      }
+    },
+    "10,113,-10": {
+      "name": "oak_leaves",
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 2
+      }
+    },
+    "10,113,-8": {
+      "name": "oak_leaves",
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 2
+      }
+    },
+    "10,113,-9": {
+      "name": "oak_leaves",
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 1
+      }
+    },
+    "10,114,-10": {
+      "name": "air",
+      "properties": {}
+    },
+    "10,114,-8": {
+      "name": "air",
+      "properties": {}
+    },
+    "10,114,-9": {
+      "name": "air",
+      "properties": {}
+    },
+    "10,115,-10": {
+      "name": "air",
+      "properties": {}
+    },
+    "10,115,-8": {
+      "name": "air",
+      "properties": {}
+    },
+    "10,115,-9": {
+      "name": "air",
+      "properties": {}
+    },
+    "11,109,-9": {
+      "name": "air",
+      "properties": {}
+    },
+    "11,110,-9": {
+      "name": "oak_leaves",
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 1
+      }
+    },
+    "11,111,-10": {
+      "name": "oak_leaves",
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 2
+      }
+    },
+    "11,111,-9": {
+      "name": "oak_leaves",
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 1
+      }
+    },
+    "11,112,-10": {
+      "name": "air",
+      "properties": {}
+    },
+    "11,112,-9": {
+      "name": "oak_leaves",
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 1
+      }
+    },
+    "11,113,-10": {
+      "name": "air",
+      "properties": {}
+    },
+    "11,113,-9": {
+      "name": "oak_leaves",
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 2
+      }
+    },
+    "11,114,-10": {
+      "name": "air",
+      "properties": {}
+    },
+    "11,114,-9": {
+      "name": "air",
+      "properties": {}
+    },
+    "11,115,-10": {
+      "name": "air",
+      "properties": {}
+    },
+    "11,115,-9": {
+      "name": "air",
+      "properties": {}
+    },
+    "12,111,-10": {
+      "name": "oak_leaves",
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 3
+      }
+    },
+    "12,112,-10": {
+      "name": "air",
+      "properties": {}
+    },
+    "12,113,-10": {
+      "name": "air",
+      "properties": {}
+    },
+    "7,110,-9": {
+      "name": "air",
+      "properties": {}
+    },
+    "7,111,-9": {
+      "name": "air",
+      "properties": {}
+    },
+    "7,112,-9": {
+      "name": "air",
+      "properties": {}
+    },
+    "7,113,-9": {
+      "name": "air",
+      "properties": {}
+    },
+    "8,110,-10": {
+      "name": "oak_leaves",
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 1
+      }
+    },
+    "8,110,-8": {
+      "name": "air",
+      "properties": {}
+    },
+    "8,111,-10": {
+      "name": "birch_leaves",
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 1
+      }
+    },
+    "8,111,-8": {
+      "name": "air",
+      "properties": {}
+    },
+    "8,112,-10": {
+      "name": "birch_leaves",
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 1
+      }
+    },
+    "8,112,-8": {
+      "name": "air",
+      "properties": {}
+    },
+    "8,112,-9": {
+      "name": "birch_leaves",
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 2
+      }
+    },
+    "8,113,-10": {
+      "name": "birch_leaves",
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 1
+      }
+    },
+    "8,113,-8": {
+      "name": "air",
+      "properties": {}
+    },
+    "8,113,-9": {
+      "name": "air",
+      "properties": {}
+    },
+    "8,114,-10": {
+      "name": "birch_leaves",
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 2
+      }
+    },
+    "8,114,-9": {
+      "name": "air",
+      "properties": {}
+    },
+    "8,115,-9": {
+      "name": "air",
+      "properties": {}
+    },
+    "9,109,-6": {
+      "name": "grass_block",
+      "properties": {
+        "snowy": false
+      }
+    },
+    "9,110,-6": {
+      "name": "leaf_litter",
+      "properties": {
+        "segment_amount": 2,
+        "facing": "west"
+      }
+    },
+    "9,110,-9": {
+      "name": "oak_leaves",
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 1
+      }
+    },
+    "9,111,-10": {
+      "name": "birch_leaves",
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 2
+      }
+    },
+    "9,111,-6": {
+      "name": "air",
+      "properties": {}
+    },
+    "9,111,-7": {
+      "name": "oak_leaves",
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 3
+      }
+    },
+    "9,111,-9": {
+      "name": "birch_leaves",
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 1
+      }
+    },
+    "9,112,-10": {
+      "name": "birch_leaves",
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 2
+      }
+    },
+    "9,112,-6": {
+      "name": "air",
+      "properties": {}
+    },
+    "9,112,-7": {
+      "name": "air",
+      "properties": {}
+    },
+    "9,112,-8": {
+      "name": "oak_leaves",
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 2
+      }
+    },
+    "9,112,-9": {
+      "name": "birch_leaves",
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 1
+      }
+    },
+    "9,113,-10": {
+      "name": "air",
+      "properties": {}
+    },
+    "9,113,-6": {
+      "name": "air",
+      "properties": {}
+    },
+    "9,113,-7": {
+      "name": "air",
+      "properties": {}
+    },
+    "9,113,-8": {
+      "name": "air",
+      "properties": {}
+    },
+    "9,113,-9": {
+      "name": "oak_leaves",
+      "properties": {
+        "waterlogged": false,
+        "persistent": false,
+        "distance": 2
+      }
+    },
+    "9,114,-10": {
+      "name": "air",
+      "properties": {}
+    },
+    "9,114,-7": {
+      "name": "air",
+      "properties": {}
+    },
+    "9,114,-8": {
+      "name": "air",
+      "properties": {}
+    },
+    "9,114,-9": {
+      "name": "air",
+      "properties": {}
+    },
+    "9,115,-10": {
+      "name": "air",
+      "properties": {}
+    },
+    "9,115,-8": {
+      "name": "air",
+      "properties": {}
+    },
+    "9,115,-9": {
+      "name": "air",
+      "properties": {}
+    }
+  }
+}
