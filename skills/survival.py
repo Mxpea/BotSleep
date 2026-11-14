@@ -7,7 +7,12 @@ remain subject to their HTTP deadlines; cancellation is checked between calls.
 
 import math
 import re
+import time
+from collections import deque
 from typing import Any, Dict, List
+
+from core.block_geometry import trace_block_visibility
+from core.client import APIError
 
 from . import SkillResult
 
@@ -26,6 +31,8 @@ class SurvivalSkills:
     GATHERABLE = LOGS | {"stone", "cobblestone", "coal_ore", "deepslate_coal_ore"}
     PICKAXES = frozenset(tier + "_pickaxe" for tier in ("wooden", "copper", "stone", "iron", "golden", "diamond", "netherite"))
     AIR = frozenset({"air", "cave_air", "void_air"})
+    RETREAT_PASSABLE = AIR | {"short_grass", "leaf_litter"}
+    RETREAT_LEAVES = frozenset(wood + "_leaves" for wood in WOODS)
     HAZARDS = frozenset({"water", "lava", "bubble_column", "fire", "soul_fire", "magma_block",
                          "campfire", "soul_campfire", "cactus", "sweet_berry_bush", "powder_snow"})
     SUPPORT = LOGS | PLANKS | {"stone", "cobblestone", "dirt", "grass_block", "coarse_dirt", "rooted_dirt",
@@ -90,9 +97,18 @@ class SurvivalSkills:
         if context["cancel"] is not None and context["cancel"].is_set():
             raise _Failure("cancelled", "Survival action cancelled")
 
+    @staticmethod
+    def _read_options(context):
+        if "recovery_deadline" not in context:
+            return {}
+        remaining = context["recovery_deadline"] - time.monotonic()
+        if remaining <= 0:
+            raise _Failure("recovery_budget_exhausted", "Dig recovery observation budget expired")
+        return {"timeout_seconds": remaining}
+
     def _status(self, context):
         self._check(context)
-        status = self._result(self.client.get_status())
+        status = self._result(self.client.get_status(**self._read_options(context)))
         self._check(context)
         if status.get("alive") is False:
             raise _Failure("dead", "Bot is dead")
@@ -119,7 +135,7 @@ class SurvivalSkills:
 
     def _inventory(self, context):
         self._check(context)
-        result = self._result(self.client.inventory())
+        result = self._result(self.client.inventory(**self._read_options(context)))
         self._check(context)
         items = result.get("items")
         if not isinstance(items, list):
@@ -133,14 +149,16 @@ class SurvivalSkills:
 
     def _block(self, pos, context):
         self._check(context)
-        block = self._result(self.client.get_block(pos))
+        block = self._result(self.client.get_block(pos, **self._read_options(context)))
         self._check(context)
         if not isinstance(block.get("name"), str):
             raise _Failure("invalid_response", "Block query has no name")
         return block
 
-    def _action(self, context, operation, *args, **kwargs):
-        self._status(context)
+    def _action(self, context, operation, *args, _validate_status=None, **kwargs):
+        status = self._status(context)
+        if _validate_status is not None:
+            _validate_status(status)
         context["acted"] = True
         result = self._result(operation(*args, **kwargs))
         self._check(context)
@@ -207,32 +225,155 @@ class SurvivalSkills:
         # to its integer origin. Forcing range=2 first can demand climbing a
         # wall even though a visible log is already within interaction reach.
         reachable = target.get("can_dig", target.get("harvest_tool_ok")) is True
-        if target.get("can_see") is False:
-            raise _Failure("target_occluded", "Target is hidden by terrain; choose a visible resource or a different safe standing position",
-                           {"target": pos, "can_see": False, "can_dig": reachable, "executed": False})
-        if not reachable:
+        # The original API still walks closer when feet-to-origin distance is
+        # over 4, even if canDigBlock is true. Do that before testing sight so
+        # the following dig does not silently choose a different viewpoint.
+        if not reachable or math.dist(status["pos"], pos) > 4:
             status = self._approach(pos, context)
         target = self._gather_guard(pos, name, status, context)
-        if target.get("can_see") is False:
-            raise _Failure("target_occluded", "Target became hidden after approach; choose another safe standing position",
-                           {"target": pos, "can_see": False})
-        dig_result = self._action(context, self.client.dig, pos, collect=True)
-        self._status(context)
-        after, _ = self._inventory(context)
-        remaining = self._block(pos, context)
+        visible = target.get("can_see")
+        visibility = {"source": "api", "visible": visible}
+        if type(visible) is not bool:
+            # Original mc-agent-api exposes canDigBlock as harvest_tool_ok,
+            # which establishes reach but says nothing about intervening walls.
+            visibility = trace_block_visibility(
+                status["pos"], pos, lambda point: self._block(point, context),
+                max_queries=32, max_distance=8)
+            visible = visibility["visible"]
+        if visible is not True:
+            raise _Failure(
+                "target_occluded" if visible is False else "visibility_unknown",
+                "Target visibility is not clear; choose a visible resource or a different safe standing position",
+                {"target": pos, "can_see": visible, "visibility": visibility,
+                 "can_dig": reachable, "executed": context["acted"]})
         expected_drops = {name}
         if name == "stone":
             expected_drops.add("cobblestone")
         if name in {"coal_ore", "deepslate_coal_ore"}:
             expected_drops.add("coal")
+        try:
+            dig_result = self._action(context, self.client.dig, pos, collect=True)
+        except APIError as error:
+            if error.code != "dig_unconfirmed":
+                raise
+            return self._recover_dig(pos, name, before, expected_drops, status, context, error)
+        self._status(context)
+        after, _ = self._inventory(context)
+        remaining = self._block(pos, context)
         gained = {item: after.get(item, 0) - before.get(item, 0) for item in expected_drops if after.get(item, 0) > before.get(item, 0)}
         evidence = {"pos": pos, "gathered": name, "gained": gained,
                     "remaining_block": remaining["name"], "block_removed": remaining["name"] != name}
         if isinstance(dig_result.get("collection"), dict):
             evidence["collection"] = dig_result["collection"]
+        if evidence["block_removed"] and not gained:
+            self._uncollected_drops(pos, expected_drops, context, evidence)
         if remaining["name"] == name or not gained:
             raise _Failure("gather_unverified", "Block removal and expected inventory gain were not both observed", evidence)
         return evidence
+
+    def _recover_dig(self, pos, name, before, expected_drops, initial_status, context, error):
+        """Stop once, then reconcile an unconfirmed dig without replaying it."""
+        evidence = {"pos": pos, "gathered": name, "backend_error": error.code,
+                    "api_details": error.details, "action_state": "unknown", "recovery_attempts": 0,
+                    "recovery_hint": "Do not replay this dig: the original block may be a restored client cache entry."}
+        context["dig_recovery"] = evidence
+        context["recovery_deadline"] = time.monotonic() + 2.0
+        stage = "stop"
+        try:
+            # Even a cancellation received with the error must request stop.
+            # Do not repeat this request in execute's ordinary failure cleanup.
+            context["cleanup_attempted"] = True
+            stopped = self._result(self.client.stop(**self._read_options(context)))
+            if stopped.get("stopped") is not True:
+                raise _Failure("stop_unverified", "Backend did not confirm the stop request")
+            evidence["cleanup"] = "stop_requested"
+            stage = "cancelled"
+            self._check(context)
+            for attempt in range(1, 4):
+                evidence["recovery_attempts"] = attempt
+                stage = "status"
+                status = self._status(context)
+                if status.get("last_death") != initial_status.get("last_death"):
+                    raise _Failure("death_changed", "Death state changed while reconciling the dig")
+                stage = "inventory"
+                after, _ = self._inventory(context)
+                stage = "block"
+                remaining = self._block(pos, context)
+                stage = "status_after"
+                checked = self._status(context)
+                if checked.get("last_death") != initial_status.get("last_death"):
+                    raise _Failure("death_changed", "Death state changed while reconciling the dig")
+                gained = {item: after.get(item, 0) - before.get(item, 0)
+                          for item in expected_drops if after.get(item, 0) > before.get(item, 0)}
+                # The API restores its cache after missing a confirmation. An
+                # unchanged name therefore cannot establish that no dig happened.
+                evidence.update(gained=gained, remaining_block=remaining["name"],
+                                block_removed=True if remaining["name"] != name else None)
+                if evidence["block_removed"] and gained:
+                    evidence.update(recovered_from=error.code, action_state="verified", recovery_stage="verified")
+                    evidence.pop("recovery_hint", None)
+                    return evidence
+                if attempt < 3:
+                    stage = "wait"
+                    delay = min(0.4, self._read_options(context)["timeout_seconds"])
+                    if context["cancel"] is None:
+                        time.sleep(delay)
+                    else:
+                        context["cancel"].wait(delay)
+                    self._check(context)
+            if evidence.get("block_removed"):
+                stage = "drops"
+                self._uncollected_drops(pos, expected_drops, context, evidence)
+                self._check(context)
+                evidence.update(action_state="block_removed", recovery_stage="verified_removal")
+            else:
+                stage = "verification"
+                raise _Failure("unconfirmed_block_state", "No authoritative removal and inventory gain were observed")
+        except Exception as recovery_error:
+            evidence.update(action_state="unknown", recovery_stage=stage,
+                            recovery_error=getattr(recovery_error, "code", "internal_error"))
+            if stage == "stop":
+                evidence["cleanup_error"] = evidence["recovery_error"]
+            raise _Failure("dig_unconfirmed", "Dig result remains unknown after bounded read-only recovery", evidence) from None
+        raise _Failure("gather_unverified", "Block was removed but expected inventory gain was not observed; do not dig it again", evidence)
+
+    def _uncollected_drops(self, pos, expected_drops, context, evidence):
+        """Add one bounded, read-only recovery observation without retrying dig."""
+        evidence["recovery_hint"] = (
+            "The block was removed. Inspect nearby drops and inventory after moving safely; do not dig this target again.")
+        try:
+            self._check(context)
+            entities = self.client.get_entities(radius=16, types=["item"], **self._read_options(context))
+            self._check(context)
+            if not isinstance(entities, list):
+                raise _Failure("invalid_response", "Entity query has no item list")
+            drops = []
+            # The upstream endpoint returns at most 40 entities. Keep this
+            # bound even with a malformed or alternative API implementation.
+            for entity in entities[:40]:
+                if not isinstance(entity, dict) or entity.get("name") != "item":
+                    continue
+                item = entity.get("item")
+                match = re.fullmatch(r"([a-z][a-z0-9_]{0,63})x([1-9][0-9]{0,5})", item) if isinstance(item, str) else None
+                if match is None or match[1] not in expected_drops:
+                    continue
+                try:
+                    drop_pos = self._pos(entity.get("pos"))
+                except _Failure:
+                    continue
+                if math.dist(drop_pos, pos) > 6:
+                    continue
+                drop = {"name": match[1], "count": int(match[2]), "pos": drop_pos}
+                if type(entity.get("id")) is int:
+                    drop["id"] = entity["id"]
+                drops.append(drop)
+            drops.sort(key=lambda drop: math.dist(drop["pos"], pos))
+            evidence["visible_drops"] = drops[:8]
+        except Exception as error:
+            # Supplemental diagnostics must not replace the established
+            # block-removed/no-inventory-gain outcome or expose error text.
+            code = getattr(error, "code", "query_failed")
+            evidence["drop_query_error"] = code if isinstance(code, str) else "query_failed"
 
     def _craft_item(self, args, context):
         item = self._item(args["item"])
@@ -243,7 +384,7 @@ class SurvivalSkills:
         try:
             self._action(context, self.client.craft, item, count=count)
         except Exception as error:
-            if getattr(error, "code", "") in {"request_timeout", "network_error", "cancelled", "interrupted"}:
+            if getattr(error, "code", "") in {"request_timeout", "network_error", "invalid_json", "invalid_response", "cancelled", "interrupted"}:
                 raise
             after, _ = self._inventory(context)
             gained = after.get(item, 0) - before.get(item, 0)
@@ -341,62 +482,294 @@ class SurvivalSkills:
         before = self._status(context)
         self._overworld(before)
         origin = before["pos"]
+        recovery = context.get("recovery_context") or {}
+        anchor = recovery.get("evacuation_origin", origin)
+        excluded = {tuple(pos) for pos in recovery.get("excluded_targets", [])}
         dx, dz = origin[0] - threat[0], origin[2] - threat[2]
         norm = math.hypot(dx, dz)
+        origin_distance = math.dist(origin, threat)
+        anchor_horizontal = math.hypot(anchor[0] - threat[0], anchor[2] - threat[2])
         if norm < 0.1:
-            raise _Failure("unsafe", "No horizontal retreat direction can be inferred")
-        y = math.floor(origin[1])
-        cache = {}
+            raise _Failure("unsafe", "No horizontal retreat direction can be inferred",
+                           {"origin": origin, "threat_pos": threat, "blocked_cells": [],
+                            "target": None, "executed": False, "planned_path": None,
+                            "terrain_search": {"termination": "no_direction"}})
+        def feet(pos):
+            return tuple(math.floor(value + 1e-4) for value in pos)
 
-        def safe_cell(x, z):
-            for dy in (-1, 0, 1):
-                key = (x, y + dy, z)
-                if key not in cache:
-                    try:
-                        cache[key] = self._block(list(key), context)
-                    except Exception as error:
-                        if getattr(error, "code", "") == "not_loaded":
-                            return False
+        start = feet(origin)
+        y = start[1]
+        cache = {}
+        blocked = {}
+        search = {"used": True, "nodes": 0, "block_reads": 0, "termination": "planning",
+                  "solid_nodes": 0, "distance_rejections": 0, "height_guard_rejections": 0}
+        # Up to five fresh swept-body/support reads before a two-block drop,
+        # plus three actual landing reads afterwards.
+        read_limit = 248
+        planned_path = None
+        target = None
+        final_target = None
+        edge_sweeps = {}
+        outcome = {"origin": origin, "threat_pos": threat, "target": None,
+                   "executed": False, "moved": 0, "planned_path": None,
+                   "terrain_search": search, "blocked_cells": [], "retreat_complete": False,
+                   "edge_start": False, "origin_support": {"contacts": [], "entry_rejections": {}}}
+        context["retreat_evidence"] = outcome
+
+        def reject(key, name, reason):
+            # Report only a few cells already read for planning, never a map.
+            if key not in blocked and len(blocked) < 4:
+                blocked[key] = {"pos": list(key), "name": name, "reason": reason}
+            return False
+
+        def evidence(**extra):
+            outcome.update(target=target, planned_path=planned_path, final_target=final_target,
+                           blocked_cells=list(blocked.values()), terrain_search=dict(search))
+            outcome.update(extra)
+            return dict(outcome)
+
+        def read(key):
+            if key not in cache:
+                if search["block_reads"] >= read_limit:
+                    raise _Failure("retreat_budget_exhausted", "Retreat block observation budget expired")
+                search["block_reads"] += 1
+                try:
+                    cache[key] = self._block(list(key), context)
+                except Exception as error:
+                    if getattr(error, "code", "") != "not_loaded":
                         raise
-                block = cache[key]
-                if not self._safe_block(block) or (block["name"] not in self.SUPPORT if dy == -1 else block["name"] not in self.AIR):
-                    return False
+                    cache[key] = None
+            return cache[key]
+
+        def clear_body(key):
+            block = read(key)
+            if block is None:
+                return reject(key, None, "not_loaded")
+            if not self._safe_block(block):
+                return reject(key, block["name"], "hazard")
+            if block["name"] not in self.RETREAT_PASSABLE:
+                return reject(key, block["name"], "body_blocked")
             return True
 
-        target = None
-        for length in (distance, max(2, distance / 2)):
-            for angle in (0, math.pi / 6, -math.pi / 6):
-                vx = (dx * math.cos(angle) - dz * math.sin(angle)) / norm
-                vz = (dx * math.sin(angle) + dz * math.cos(angle)) / norm
-                candidate = [math.floor(origin[0] + vx * length) + 0.5, y, math.floor(origin[2] + vz * length) + 0.5]
-                steps = math.ceil(math.dist(origin, candidate) * 2)
-                cells = {(math.floor(origin[0] + (candidate[0] - origin[0]) * step / steps),
-                          math.floor(origin[2] + (candidate[2] - origin[2]) * step / steps)) for step in range(steps + 1)}
-                if all(safe_cell(x, z) for x, z in sorted(cells)) and math.dist(candidate, threat) > math.dist(origin, threat) + 1:
-                    target = candidate
-                    break
-            if target is not None:
-                break
+        def safe_cell(cell, temporary_leaves=False):
+            x, cy, z = cell
+            key = (x, cy - 1, z)
+            ground = read(key)
+            if ground is None:
+                return reject(key, None, "not_loaded")
+            if not self._safe_block(ground):
+                return reject(key, ground["name"], "hazard")
+            waterlogged = (ground.get("properties") or {}).get("waterlogged")
+            leaf_support = (temporary_leaves and ground["name"] in self.RETREAT_LEAVES
+                            and (waterlogged is False or waterlogged == "false"))
+            if ground["name"] not in self.SUPPORT and not leaf_support:
+                return reject(key, ground["name"], "unsupported_ground")
+            if not clear_body((x, cy, z)) or not clear_body((x, cy + 1, z)):
+                return False
+            return ground["name"]
+
+        def farther(point):
+            # Descending safely may reduce 3D distance to a threat below the
+            # canopy. Retreat progress is horizontal; vertical proximity is a
+            # separate exclusion, never a reward for staying high in a tree.
+            return math.hypot(point[0] - threat[0], point[2] - threat[2]) >= anchor_horizontal + 2
+
+        def safe_height_band(point):
+            horizontal = math.hypot(point[0] - threat[0], point[2] - threat[2])
+            entering_near_height = abs(point[1] - threat[1]) <= 2.5 and abs(origin[1] - threat[1]) > 2.5
+            return not entering_near_height or horizontal >= 3
+
+        def clear_transition(current, cell):
+            change = cell[1] - current[1]
+            if change == 1:
+                return clear_body((current[0], current[1] + 2, current[2]))
+            if change < 0:
+                return all(clear_body((cell[0], level, cell[2]))
+                           for level in range(cell[1] + 2, current[1] + 2))
+            return True
+
+        def contact_overlap(point, cell):
+            # mc-agent-api rounds position to 0.1; its physical half-width is
+            # 0.3001. Require positive contact for every possible true position.
+            overlaps = []
+            for axis in (0, 2):
+                overlaps.append(min(max(0, min(center + 0.3001, cell[axis] + 1)
+                                             - max(center - 0.3001, cell[axis]))
+                                    for center in (point[axis] - 0.05, point[axis] + 0.05)))
+            return overlaps
+
+        def swept_entry_cells(point, cell):
+            center = [cell[0] + 0.5, cell[1], cell[2] + 0.5]
+            low_x = math.floor(min(point[0] - 0.05, center[0]) - 0.3001)
+            high_x = math.floor(max(point[0] + 0.05, center[0]) + 0.3001 - 1e-9)
+            low_z = math.floor(min(point[2] - 0.05, center[2]) - 0.3001)
+            high_z = math.floor(max(point[2] + 0.05, center[2]) + 0.3001 - 1e-9)
+            return {(x, level, z) for x in range(low_x, high_x + 1) for z in range(low_z, high_z + 1)
+                    for level in (cell[1], cell[1] + 1)}
+
+        def starting_entries():
+            nonlocal read_limit
+            central = safe_cell(start, temporary_leaves=True)
+            source = outcome["origin_support"]
+            source.update(center=[start[0], start[1] - 1, start[2]], center_name=(read((start[0], start[1] - 1, start[2])) or {}).get("name"))
+            if central:
+                source["state"] = "center_supported"
+                return [(start, [start])]
+            # An unknown, liquid, or unapproved center support is not evidence
+            # of an edge. Only loaded air with clear source body may use contact.
+            if source["center_name"] not in self.AIR or not clear_body(start) or not clear_body((start[0], start[1] + 1, start[2])):
+                source["state"] = "unverified"
+                return []
+            read_limit = 244  # Worst edge sweep: 9 pre-move + 3 landing reads.
+            entries = []
+            for x in range(math.floor(origin[0] - 0.3501), math.floor(origin[0] + 0.3501) + 1):
+                for z in range(math.floor(origin[2] - 0.3501), math.floor(origin[2] + 0.3501) + 1):
+                    cell = (x, y, z)
+                    overlap = contact_overlap(origin, cell)
+                    if cell == start or min(overlap) <= 1e-4 or cell in excluded:
+                        continue
+                    support = safe_cell(cell, temporary_leaves=True)
+                    if not support:
+                        continue
+                    source["contacts"].append({"pos": [x, y - 1, z], "name": support,
+                                               "minimum_overlap": [round(value, 4) for value in overlap]})
+                    outcome["edge_start"] = True
+                    point = [x + 0.5, y, z + 0.5]
+                    if math.hypot(point[0] - threat[0], point[2] - threat[2]) < norm - 0.5 or not safe_height_band(point):
+                        reason = "threat_proximity"
+                    else:
+                        sweep = swept_entry_cells(origin, cell)
+                        reason = None if all(clear_body(key) for key in sorted(sweep)) else "swept_body_blocked"
+                    if reason:
+                        source["entry_rejections"][reason] = source["entry_rejections"].get(reason, 0) + 1
+                        continue
+                    edge_sweeps[cell] = sweep
+                    entries.append((cell, [start, cell]))
+            source["state"] = "edge_entry_verified" if entries else "no_verified_edge_entry"
+            return entries
+
+        def terrain_fallback():
+            search.update(used=True, termination="no_safe_destination")
+            entries = starting_entries()
+            if not entries:
+                return None, None
+            blocked.clear()
+            visited = {cell for cell, _ in entries}
+            search["nodes"] = len(visited)
+            queue = deque(entries)
+            directions = sorted(((1, 0), (-1, 0), (0, 1), (0, -1)),
+                                key=lambda delta: delta[0] * dx + delta[1] * dz, reverse=True)
+            while queue:
+                self._check(context)
+                current, path = queue.popleft()
+                if len(path) - 1 >= 8:
+                    continue
+                current_point = origin if len(path) == 1 else [current[0] + 0.5, current[1], current[2] + 0.5]
+                current_distance = math.hypot(current_point[0] - threat[0], current_point[2] - threat[2])
+                tolerance = 0.5 if len(path) == 1 else 1e-9
+                for sx, sz in directions:
+                    for step_y in (0, -1, -2, 1):
+                        cell = (current[0] + sx, current[1] + step_y, current[2] + sz)
+                        if cell in visited or cell in excluded:
+                            continue
+                        point = [cell[0] + 0.5, cell[1], cell[2] + 0.5]
+                        horizontal = math.hypot(point[0] - threat[0], point[2] - threat[2])
+                        if (math.hypot(point[0] - origin[0], point[2] - origin[2]) > min(distance, 8)
+                                or not -6 <= point[1] - origin[1] <= 2 or horizontal < norm - 0.5
+                                or horizontal + tolerance < current_distance):
+                            continue
+                        if not safe_height_band(point):
+                            search["height_guard_rejections"] += 1
+                            continue
+                        if len(visited) >= 64:
+                            search["termination"] = "node_budget"
+                            return None, None
+                        support = safe_cell(cell, temporary_leaves=True)
+                        if not support:
+                            continue
+                        if not clear_transition(current, cell):
+                            continue
+                        visited.add(cell)
+                        search["nodes"] = len(visited)
+                        next_path = path + [cell]
+                        if support in self.SUPPORT:
+                            search["solid_nodes"] += 1
+                            if farther(point):
+                                search["termination"] = "target_found"
+                                route = [[c[0] + 0.5, c[1], c[2] + 0.5] for c in next_path]
+                                if outcome["edge_start"]:
+                                    route[0] = list(origin)
+                                return point, route
+                            search["distance_rejections"] += 1
+                        queue.append((cell, next_path))
+                        # A two-block lower floor can coexist with a floor one
+                        # block above the source; inspect that upper alternative.
+                        if step_y != -2:
+                            break
+            return None, None
+
+        if before.get("on_ground") is not True:
+            search["termination"] = "not_grounded"
+            raise _Failure("unsafe", "Wait for stable footing before planning a retreat step", evidence())
+        try:
+            final_target, planned_path = terrain_fallback()
+            if planned_path:
+                target = planned_path[1]
+        except _Failure as error:
+            if error.code != "retreat_budget_exhausted":
+                raise
+            search["termination"] = "read_budget"
         if target is None:
-            raise _Failure("unsafe", "No loaded same-level retreat corridor with safe footing was found")
-        latest = self._status(context)
-        if math.dist(latest["pos"], origin) > 1:
-            raise _Failure("unsafe", "Bot position changed while inspecting the retreat corridor")
+            raise _Failure("unsafe", "No safe retreat destination was found within the bounded terrain search", evidence())
+        read_limit = 256
+        def validate_start(status):
+            if (feet(status["pos"]) != start or abs(status["pos"][1] - origin[1]) >= 0.5
+                    or math.dist(status["pos"], origin) > 1):
+                raise _Failure("unsafe", "Bot position changed while inspecting the retreat corridor", evidence(pos=status["pos"]))
+            if status.get("on_ground") is not True:
+                raise _Failure("unsafe", "Bot left stable footing before the retreat step", evidence())
+            if outcome["edge_start"]:
+                entry = feet(target)
+                if (min(contact_overlap(status["pos"], entry)) <= 1e-4
+                        or not swept_entry_cells(status["pos"], entry).issubset(edge_sweeps.get(entry, set()))):
+                    raise _Failure("unsafe", "Edge support contact changed before the retreat step", evidence(pos=status["pos"]))
+
+        validate_start(self._status(context))
         # Re-read the destination after planning instead of trusting only cached blocks.
         cache.clear()
-        if not safe_cell(math.floor(target[0]), math.floor(target[2])):
-            raise _Failure("unsafe", "Retreat destination changed before movement")
-        self._action(context, self.client.move_to, *target, range=0.5, timeout_ms=10000)
+        blocked.clear()
+        if (not safe_cell(feet(target), temporary_leaves=True) or not clear_transition(start, feet(target))
+                or not all(clear_body(key) for key in sorted(edge_sweeps.get(feet(target), set())))):
+            raise _Failure("unsafe", "Retreat destination changed before movement", evidence(target=target))
+        evidence()
+        try:
+            self._action(context, self.client.move_to, *target, range=0, timeout_ms=10000,
+                         _validate_status=validate_start)
+            outcome["executed"] = True
+        except Exception as error:
+            outcome["executed"] = context["acted"]
+            outcome["candidate_failed"] = getattr(error, "code", "") in {"path_not_found", "stalled", "out_of_reach"}
+            raise
         after = self._status(context)
-        if math.dist(after["pos"], target) > 1 or math.dist(after["pos"], threat) <= math.dist(origin, threat) + 1:
-            raise _Failure("retreat_unverified", "Observed movement did not reach safety farther from the threat", {"pos": after["pos"], "target": target})
+        horizontal_after = math.hypot(after["pos"][0] - threat[0], after["pos"][2] - threat[2])
+        if (feet(after["pos"]) != feet(target) or after.get("on_ground") is not True
+                or horizontal_after < norm - 0.5 or not safe_height_band(after["pos"])):
+            raise _Failure("retreat_unverified", "Observed movement did not reach the checked retreat step", evidence(pos=after["pos"], candidate_failed=True))
         cache.clear()
-        if not safe_cell(math.floor(after["pos"][0]), math.floor(after["pos"][2])):
-            raise _Failure("retreat_unverified", "Retreat destination no longer has safe footing")
-        return {"pos": after["pos"], "target": target, "threat_pos": threat,
-                "distance_before": math.dist(origin, threat), "distance_after": math.dist(after["pos"], threat)}
+        blocked.clear()
+        support = safe_cell(feet(after["pos"]), temporary_leaves=True)
+        if not support:
+            raise _Failure("retreat_unverified", "Retreat destination no longer has safe footing", evidence(pos=after["pos"], target=target))
+        complete = support in self.SUPPORT and farther(after["pos"])
+        return evidence(pos=after["pos"], target=target, moved=round(math.dist(origin, after["pos"]), 3),
+                        retreat_complete=complete, evacuation_stage="ground" if complete else "relay",
+                        horizontal_before=norm, horizontal_after=horizontal_after,
+                        vertical_before=origin[1] - threat[1], vertical_after=after["pos"][1] - threat[1],
+                        distance_before=origin_distance, distance_after=math.dist(after["pos"], threat),
+                        planned_path=planned_path, path_following_verified=False,
+                        path_caveat="Candidate terrain was checked; the backend may choose a different route.")
 
-    def execute(self, name: str, args: Dict[str, Any], cancel_event=None) -> SkillResult:
+    def execute(self, name: str, args: Dict[str, Any], cancel_event=None, *, recovery_context=None) -> SkillResult:
         """Execute one registered action; partial and unverified results fail explicitly."""
         context = {"cancel": cancel_event, "acted": False}
         data = {"skill": name}
@@ -406,6 +779,17 @@ class SurvivalSkills:
             allowed, required = self.ARGUMENTS[name]
             if not isinstance(args, dict) or set(args) - allowed or required - set(args):
                 raise _Failure("bad_args", "Missing or unsupported survival skill arguments")
+            if recovery_context is not None:
+                if (name != "retreat_from" or not isinstance(recovery_context, dict)
+                        or set(recovery_context) - {"excluded_targets", "evacuating", "evacuation_origin"}):
+                    raise _Failure("bad_args", "Unsupported retreat recovery context")
+                excluded = recovery_context.get("excluded_targets", [])
+                if not isinstance(excluded, list) or len(excluded) > 8 or type(recovery_context.get("evacuating", False)) is not bool:
+                    raise _Failure("bad_args", "Invalid retreat recovery context")
+                context["recovery_context"] = {"excluded_targets": [self._pos(pos, block=True) for pos in excluded],
+                                               "evacuating": recovery_context.get("evacuating", False)}
+                if "evacuation_origin" in recovery_context:
+                    context["recovery_context"]["evacuation_origin"] = self._pos(recovery_context["evacuation_origin"])
             self._check(context)
             status = self._status(context)
             context["dimension"] = status["dimension"]
@@ -418,13 +802,23 @@ class SurvivalSkills:
             return SkillResult(True, message, data)
         except Exception as error:
             code = getattr(error, "code", "internal_error")
+            data.update(context.get("retreat_evidence", {}))
+            if code == "cancelled" and context.get("dig_recovery") is not None:
+                # A cancellation immediately after the final recovery read must
+                # not erase the original unknown write outcome either.
+                evidence = context["dig_recovery"]
+                evidence.update(action_state="unknown", recovery_stage="cancelled", recovery_error="cancelled")
+                evidence.pop("recovered_from", None)
+                data.pop("recovered_from", None)
+                error = _Failure("dig_unconfirmed", "Dig result remains unknown after cancellation", evidence)
+                code = error.code
             # Preserve bounded API path diagnostics (goal, endpoint, last path
             # status) so the next model turn can change its approach.
             details = getattr(error, "details", None)
             if isinstance(details, dict) and details:
                 data["api_details"] = details
             data.update(getattr(error, "data", {}))
-            if context["acted"] and code != "busy":
+            if context["acted"] and code != "busy" and not context.get("cleanup_attempted"):
                 try:
                     self.client.stop()
                     data["cleanup"] = "stop_requested"

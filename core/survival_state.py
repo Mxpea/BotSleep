@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from core.client import APIError
+from core.block_geometry import trace_block_visibility
 from skills.survival import SurvivalSkills
 
 
@@ -56,6 +57,66 @@ class ObservationCollector:
     def _cell(pos):
         # Ignore tiny floating-point jitter at exact block boundaries.
         return tuple(math.floor(value + 0.0001) for value in pos)
+
+    def collect_safety(self, cancel_event=None, *, force=False, threat_radius=8):
+        """A bounded status/entities snapshot, never fresh inventory or terrain.
+
+        Return None after the status probe when no emergency requires this path.
+        The caller must restrict partial snapshots to local retreat/wait actions.
+        """
+        started = time.monotonic()
+        deadline = started + 2.0
+
+        def options():
+            self._check_cancel(cancel_event)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise APIError("observation_changed", "Short safety observation budget exhausted")
+            return {"timeout_seconds": remaining}
+
+        def read_status():
+            response = self.client.get_status(**options())
+            self._check_cancel(cancel_event)
+            status = response.get("result") if isinstance(response, dict) else None
+            if (not isinstance(status, dict) or type(status.get("ready")) is not bool
+                    or type(status.get("alive")) is not bool or "busy" not in status
+                    or not isinstance(status.get("dimension"), str)):
+                raise APIError("invalid_response", "Short safety status lacks lifecycle or busy evidence")
+            if status["ready"] and status["alive"]:
+                self._position(status)
+            return status
+
+        first = read_status()
+        nearby = first.get("nearest_hostile") or {}
+        distance = nearby.get("dist") if isinstance(nearby, dict) else None
+        near = type(distance) in (int, float) and math.isfinite(distance) and 0 <= distance <= threat_radius
+        idle = first["ready"] and first["alive"] and (first["busy"] is None or first["busy"] is False)
+        if not force and not near and idle:
+            return None
+        observation = {"status": first, "inventory": [], "counts": {}, "blocks": [], "entities": [],
+                       "fresh": True, "observed_at": utc_now(), "observation_scope": "safety",
+                       "inventory_fresh": False, "terrain_fresh": False}
+        if not idle:
+            return observation  # Local wait only; never overlap a backend action.
+        entities = self.client.get_entities(radius=min(64, max(8, threat_radius + 2)), **options())
+        self._check_cancel(cancel_event)
+        if not isinstance(entities, list) or len(entities) > 64:
+            raise APIError("invalid_response", "Short safety entity list is invalid")
+        for entity in entities:
+            if not isinstance(entity, dict) or not isinstance(entity.get("type"), str):
+                raise APIError("invalid_response", "Short safety entity is invalid")
+            self._position(entity)
+        final = read_status()
+        if (any(final.get(key) != first.get(key) for key in ("last_death", "dimension", "alive", "ready", "busy"))
+                or final.get("alive") is not True or final.get("ready") is not True
+                or not (final.get("busy") is None or final.get("busy") is False)):
+            raise APIError("observation_changed", "Lifecycle or backend activity changed during short safety observation")
+        origin, endpoint = self._position(first), self._position(final)
+        if self._cell(origin) != self._cell(endpoint) or abs(origin[1] - endpoint[1]) >= .5:
+            raise APIError("observation_changed", "Position changed during short safety observation")
+        options()  # Enforce the same total budget after the final response.
+        observation.update(status=final, entities=entities, duration_seconds=round(time.monotonic() - started, 3))
+        return observation
 
     def _local_geometry(self, status, cancel_event):
         """Sample local support/body cells, without promising a traversable path.
@@ -120,6 +181,60 @@ class ObservationCollector:
         return {"local_geometry_origin": origin, "safe_stand_candidates": standing,
                 "placement_candidates": placement}
 
+    def _resource_visibility(self, observation, cancel_event):
+        """Enrich a few nearby resources using only the original get_block API.
+
+        Unknown shapes block a ray conservatively. No cached cell survives a
+        collection, and at most 96 additional block reads serve all candidates.
+        """
+        origin = self._position(observation["status"])
+        cache = {}
+        groups = {"logs": 0, "minerals": 0}
+
+        def block_at(pos):
+            self._check_cancel(cancel_event)
+            block = self.client.get_block(pos)["result"]
+            self._check_cancel(cancel_event)
+            if not isinstance(block, dict) or not isinstance(block.get("name"), str):
+                raise APIError("invalid_response", "Resource visibility block is malformed")
+            return block
+
+        for row in observation["blocks"]:
+            if not isinstance(row, dict) or not isinstance(row.get("name"), str):
+                raise APIError("invalid_response", "Resource candidate is malformed")
+            self._position({"pos": row.get("pos")})
+        rows = sorted(observation["blocks"], key=lambda row: math.dist(origin, row["pos"]))
+        for row in rows:
+            group = "logs" if row["name"] in LOGS else "minerals"
+            if row["name"] not in SurvivalSkills.GATHERABLE or groups[group] >= 8:
+                continue
+            if math.dist(origin, row["pos"]) > 8 or len(cache) >= 96:
+                continue
+            self._check_cancel(cancel_event)
+            groups[group] += 1
+            key = tuple(row["pos"])
+            if key not in cache:
+                try:
+                    cache[key] = block_at(row["pos"])
+                except APIError as error:
+                    if error.code == "not_loaded":
+                        cache[key] = None
+                        continue
+                    raise
+            target = cache[key]
+            if not isinstance(target, dict) or target.get("name") != row["name"]:
+                continue
+            reachable = target.get("can_dig", target.get("harvest_tool_ok"))
+            if isinstance(reachable, bool):
+                row["can_dig"] = reachable
+            if len(cache) >= 96:
+                continue
+            visibility = trace_block_visibility(origin, row["pos"], block_at, cache=cache,
+                                                max_queries=min(24, 96 - len(cache)))
+            if isinstance(visibility.get("visible"), bool):
+                row["can_see"] = visibility["visible"]
+            row["visibility"] = visibility
+
     def collect(self, cancel_event=None):
         self._check_cancel(cancel_event)
         started = time.monotonic()
@@ -158,6 +273,7 @@ class ObservationCollector:
                 "lava", "water", "fire", "soul_fire", "magma_block", "cactus",
                 "campfire", "soul_campfire", "powder_snow", "sweet_berry_bush"], limit=32))
             observation.update(self._local_geometry(status, cancel_event))
+            self._resource_visibility(observation, cancel_event)
         self._check_cancel(cancel_event)
         observation["entities"] = self.client.get_entities(radius=self.radius)
         self._check_cancel(cancel_event)

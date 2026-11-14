@@ -110,7 +110,7 @@ class FakeMinecraftClient:
         self.calls.append(("logout",))
         return envelope({"logged_out": True})
 
-    def get_status(self):
+    def get_status(self, *, timeout_seconds=None):
         return envelope(self.status)
 
     def inventory(self):
@@ -173,6 +173,11 @@ class LLMRuntimeTests(unittest.TestCase):
         self.addCleanup(environment.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
+        from core.model_gate import ModelRequestGate
+        gates = patch("agent.brain.ModelRequestGate", side_effect=lambda endpoint, key, **kwargs:
+                      ModelRequestGate(endpoint, key, directory=Path(self.temp.name) / "gates", **kwargs))
+        gates.start()
+        self.addCleanup(gates.stop)
         self.game = FakeMinecraftClient()
         self.scope = 0
 
@@ -418,7 +423,7 @@ class LLMRuntimeTests(unittest.TestCase):
         finally:
             endpoint.release.set()
         self.assertNotEqual(result, 0, output)
-        self.assertIn("llm_timeout", output)
+        self.assertIn("llm_request_uncertain", output)
         self.assertEqual(len(endpoint.requests), 1)
         self.assertEqual(self.game.writes(), [])
         self.assertEqual(self.game.calls[-1], ("logout",))

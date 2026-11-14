@@ -6,14 +6,14 @@ BotSleep 基于 mc-agent-api 控制 Minecraft 机器人，采用大模型决策�
 
 - **用户约束（2026-11-14）**：不要修改或提交相邻 `mc-agent-api` 仓库。所有适配和修复在 BotSleep 内完成；上游行为不足时记录限制，不依赖本地 API 补丁。
 
-- `main.py`：配置驱动的睡眠/初期生存入口；生存默认使用 `agent/survival_planner.py`，开启 `llm.enabled` 后使用 `agent/llm_planner.py` 的原生工具调用与技能结果反馈。
+- `main.py`：配置驱动的睡眠/生存入口；`survival.objective` 区分 starter 与 daily。日常任务图在 `agent/daily_survival.py`，技能、观察、策略与 SQLite 记忆见 `docs/DAILY_SURVIVAL.md`。开启 `llm.enabled` 后使用原生工具调用与结果反馈。
 - `core/`：HTTP 客户端、RCON、状态感知和记忆管理。
 - `skills/`：移动、落地水和睡眠技能；遵循 `skills/__init__.py` 中的 `BaseSkill`、`SkillResult` 契约。
 - `debug/`：聊天指令、RCON 靶场、脱敏结构化日志和本机只读监控；`data/game_logic/` 保存旧版状态、地标与事件记忆，不用于当前运行检查点。
 - `docs/`：架构、技能契约和调试规范。修改相关行为前先阅读对应文档。
 - 根目录 `bot_sleep.py`、`client.py` 是兼容入口，分别复用 `main.py` 和 `core/client.py`，不要再复制实现。
 - `core/survival_harness.py` 串行执行生存任务，`core/survival_state.py` 按 API/账号/world_id 保存检查点；有 pending 意图时不得自动重放。`skills/survival.py` 的动作需要真实状态变化验证。
-- 模型只能选择已注册技能；模型返回后须重新观察并通过本地安全门禁。瞬时模型错误退避重试，不回退为规则采集。`llm.model` 是请求路由，监控的实际模型仅采用服务返回的 `response.model`，缺失时显示“未确认”。
+- 模型只能选择已注册技能；返回后须重新观察并通过本地安全门禁。所有模型请求必须经过 `core/model_gate.py`，禁止并发请求；传输超时/连接中断留下持久化未知状态，不得自动重试或擅自清锁。明确 HTTP 失败可有界退避，不回退为规则采集。`llm.model` 是请求路由，实际模型仅采用 `response.model`，缺失时显示“未确认”。
 
 ## 构建、测试与开发命令
 

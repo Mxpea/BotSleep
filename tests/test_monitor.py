@@ -22,6 +22,24 @@ def event(name="HEARTBEAT", data=None, level="INFO"):
 
 
 class EventMonitorTests(unittest.TestCase):
+    def test_daily_evidence_and_uncertain_model_remain_visible_while_safety_runs(self):
+        monitor = EventMonitor()
+        board = {"active_task_id": "food_reserve", "tasks": [{"id": "food_reserve", "status": "ready"}]}
+        monitor.publish(event("DAILY_TASKS", {"board": board, "memory_counts": {"places": 2}}))
+        monitor.publish(event("MODEL_SLOT_ACQUIRED"))
+        self.assertEqual(monitor.state()["llm"]["slot_state"], "inflight")
+        monitor.publish(event("MODEL_REQUEST_UNCERTAIN"))
+        monitor.publish(event(data={"objective": "daily", "phase": "acting", "model_blocked": "llm_request_uncertain", "paused": False}))
+        state = monitor.state()
+        self.assertEqual(state["daily"]["board"], board)
+        self.assertEqual(state["daily"]["memory_counts"], {"places": 2})
+        self.assertEqual(state["llm"]["slot_state"], "uncertain")
+        self.assertFalse(state["run"]["paused"])
+        monitor.publish(event("MODEL_IDLE_ACKNOWLEDGED"))
+        monitor.publish(event(data={"model_blocked": None}))
+        self.assertEqual(monitor.state()["llm"]["slot_state"], "idle")
+        self.assertIsNone(monitor.state()["run"]["model_blocked"])
+
     def test_cursor_ring_and_lost_cursor_are_bounded_and_explicit(self):
         monitor = EventMonitor(max_events=3)
         for step in range(5):
@@ -103,6 +121,34 @@ class EventMonitorTests(unittest.TestCase):
         self.assertEqual(monitor.state()["llm"]["request"], request)
         self.assertEqual(monitor.state()["llm"]["response"], response)
 
+    def test_motion_values_preserve_zero_null_and_absence_without_stale_values(self):
+        monitor = EventMonitor()
+        for values in ({"speed": 4.317, "velocity": [-2.0, -0.75, 3.825]},
+                       {"speed": 0, "velocity": [0, 0, 0]},
+                       {"speed": None, "velocity": None}, {}):
+            with self.subTest(values=values):
+                monitor.publish(event(data={"status": {"health": 20, **values}}))
+                expected = {"health": 20, **values}
+                self.assertEqual(monitor.state()["status"], expected)
+                self.assertEqual(monitor.snapshot()["events"][-1]["data"]["status"], expected)
+
+    def test_malformed_motion_is_filtered_before_event_and_state_serialization(self):
+        monitor = EventMonitor()
+        bad_speeds = (-1, True, "4.2", {}, float("nan"), float("inf"), 10 ** 1000)
+        bad_vectors = ([1, 2], [1, 2, 3, 4], [0, True, 0], [0, "1", 0],
+                       [0, float("nan"), 0], [0, float("inf"), 0], [0, 10 ** 1000, 0], "0,0,0", {})
+        for speed in bad_speeds:
+            monitor.publish(event(data={"status": {"speed": speed, "velocity": [0, -1, 0]}}))
+            self.assertNotIn("speed", monitor.state()["status"])
+            self.assertEqual(monitor.state()["status"]["velocity"], [0, -1, 0])
+            self.assertNotIn("speed", monitor.snapshot()["events"][-1]["data"]["status"])
+        for velocity in bad_vectors:
+            monitor.publish(event(data={"status": {"speed": 0, "velocity": velocity}}))
+            self.assertNotIn("velocity", monitor.state()["status"])
+            self.assertEqual(monitor.state()["status"]["speed"], 0)
+            self.assertNotIn("velocity", monitor.snapshot()["events"][-1]["data"]["status"])
+        json.dumps(monitor.snapshot(), allow_nan=False)
+
     def test_request_route_never_substitutes_for_actual_response_model(self):
         monitor = EventMonitor()
         monitor.publish(event(data={"model": "default", "planner": "llm"}))
@@ -180,6 +226,17 @@ class MonitorHTTPTests(unittest.TestCase):
         state = json.loads(self.fetch("/api/state")[2])
         self.assertEqual(state["status"]["health"], 15)
         self.assertEqual(state["run"]["username"], "VisibleBot")
+
+    def test_http_motion_state_and_dashboard_keep_unknown_distinct_from_zero(self):
+        self.server.publish(event(data={"status": {"speed": None, "velocity": None}}))
+        self.assertEqual(json.loads(self.fetch("/api/state")[2])["status"], {"speed": None, "velocity": None})
+        self.server.publish(event(data={"status": {"speed": 0, "velocity": [0, -1.5, 0]}}))
+        self.assertEqual(json.loads(self.fetch("/api/state")[2])["status"], {"speed": 0, "velocity": [0, -1.5, 0]})
+        html = self.fetch("/")[2]
+        self.assertIn('id="motion"', html)
+        self.assertIn("速度（格/秒）", html)
+        self.assertIn("水平 未确认 · 垂直 未确认", html)
+        self.assertNotIn("innerHTML", html)
 
     def test_refresh_can_retrieve_current_ring_and_summary(self):
         self.server.publish(event("PAUSED", {"reason": "manual"}))

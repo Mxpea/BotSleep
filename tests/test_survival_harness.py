@@ -117,6 +117,117 @@ class HarnessTests(unittest.TestCase):
         self.planner.choose.assert_not_called()
         self.skills.execute.assert_not_called()
 
+    def test_unconfirmed_dig_keeps_intention_even_if_stop_fails(self):
+        self.collector.collect.side_effect = lambda *_: {**observation(), "counts": {"stick": 2}}
+        self.skills.execute.return_value = SkillResult(False, "Not confirmed", {
+            "action_state": "unknown", "api_details": {"eye_dist": 4.8}}, "dig_unconfirmed")
+        self.client.stop.side_effect = APIError("network_error", "stop unavailable")
+        harness = self.harness()
+        harness.request_step()
+        self.assertEqual(self.finish(harness).error_code, "dig_unconfirmed")
+        self.assertTrue(harness.paused)
+        self.assertEqual(harness.pause_reason, "dig_unconfirmed")
+        state = json.loads(harness.journal.path.read_text())
+        self.assertEqual(state["pending"]["decision"]["args"]["pos"], [2, 64, 0])
+        self.assertEqual(state["pending"]["before_counts"], {"stick": 2})
+        self.assertEqual(state["last_result"]["error_code"], "dig_unconfirmed")
+        self.assertEqual(state["last_result"]["data"]["api_details"], {"eye_dist": 4.8})
+        events = [json.loads(line)["event"] for line in harness.journal.events_path.read_text().splitlines()]
+        self.assertIn("STOP_FAILED", events)
+        harness._next_attempt = 0
+        harness.tick()
+        self.assertFalse(harness.busy)
+        harness.close()
+        restarted = self.harness()
+        restarted.tick()
+        self.assertTrue(restarted.paused)
+        self.assertEqual(self.skills.execute.call_count, 1)
+        self.planner.choose.return_value = Decision("wait", {"seconds": 1}, "New observation", "observe")
+        reads = self.collector.collect.call_count
+        restarted.request_step()
+        self.assertTrue(self.finish(restarted).success)
+        self.assertGreater(self.collector.collect.call_count, reads)
+        self.assertIsNone(restarted.journal.state["pending"])
+        self.assertEqual(self.skills.execute.call_count, 1)
+
+    def test_unconfirmed_dig_feedback_is_paired_before_pause_and_replanning(self):
+        from agent.llm_planner import LLMSurvivalPlanner
+
+        brain = Mock()
+        def response(name, args, call_id):
+            return {"choices": [{"finish_reason": "tool_calls", "message": {
+                "role": "assistant", "content": None, "tool_calls": [{"id": call_id, "type": "function",
+                    "function": {"name": name, "arguments": json.dumps(args)}}]}}]}
+        brain.chat_completion.side_effect = [
+            response("gather_block", {"pos": [2, 64, 0], "expected_name": "oak_log"}, "dig_once"),
+            response("wait", {"seconds": 1, "reason": "Observe before another action"}, "wait_after_resume"),
+        ]
+        obs = observation(on_ground=True, thundering=False)
+        obs["blocks"] = [{"name": "oak_log", "pos": [2, 64, 0], "diggable": True}]
+        self.collector.collect.side_effect = lambda *_: copy.deepcopy(obs)
+        self.planner = LLMSurvivalPlanner({"enabled": True, "model": "fake", "api_key": "fake"},
+                                         self.settings, brain=brain)
+        self.skills.execute.return_value = SkillResult(False, "Not confirmed", {
+            "action_state": "unknown"}, "dig_unconfirmed")
+        harness = self.harness()
+        harness.request_step()
+        self.assertEqual(self.finish(harness).error_code, "dig_unconfirmed")
+        self.assertTrue(harness.paused)
+        self.assertIsNotNone(harness.journal.state["pending"])
+        self.assertIsNone(self.planner._pending)
+        feedback = [message for message in self.planner.history if message.get("role") == "tool"]
+        self.assertEqual(len(feedback), 1)
+        self.assertEqual(feedback[0]["tool_call_id"], "dig_once")
+        result = json.loads(feedback[0]["content"])["result"]
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error_code"], "dig_unconfirmed")
+        harness._next_attempt = 0
+        harness.tick()
+        self.assertEqual(brain.chat_completion.call_count, 1)
+        harness.request_step()  # Explicit recovery, never automatic replay.
+        self.assertTrue(self.finish(harness).success)
+        messages = brain.chat_completion.call_args.args[0]
+        paired = [message for message in messages if message.get("role") == "tool"]
+        self.assertEqual(paired[0]["tool_call_id"], "dig_once")
+        self.assertEqual(self.skills.execute.call_count, 1)
+        self.assertIsNone(harness.journal.state["pending"])
+
+    def test_reconciled_dig_evidence_clears_pending_without_pause(self):
+        self.skills.execute.return_value = SkillResult(True, "Verified after delayed acknowledgement", {
+            "recovered_from": "dig_unconfirmed", "block_removed": True, "gained": {"oak_log": 1}})
+        harness = self.harness()
+        harness.request_step()
+        self.assertTrue(self.finish(harness).success)
+        self.assertFalse(harness.paused)
+        self.assertIsNone(harness.journal.state["pending"])
+
+    def test_real_skill_recovery_does_not_stop_twice_in_harness(self):
+        from skills.survival import SurvivalSkills
+        from test_survival_skills import World
+
+        for stop_fails in (False, True):
+            with self.subTest(stop_fails=stop_fails):
+                world = World()
+                world.base_url, world.username = "http://local/api/v1", "HarnessBot"
+                world.set_block([2, 64, 0], "oak_log", can_see=True, harvest_tool_ok=True)
+                def dig(pos):
+                    raise APIError("dig_unconfirmed", "Server acknowledgement missing")
+                world.dig_effect = dig
+                if stop_fails:
+                    def failed_stop(**kwargs):
+                        world.calls.append(("stop",))
+                        raise APIError("network_error", "Stop unavailable")
+                    world.stop = failed_stop
+                self.client, self.skills = world, SurvivalSkills(world)
+                self.settings["state_dir"] = str(Path(self.temp.name) / str(stop_fails))
+                harness = self.harness()
+                harness.request_step()
+                result = self.finish(harness)
+                self.assertEqual(result.error_code, "dig_unconfirmed")
+                self.assertTrue(harness.paused)
+                self.assertIsNotNone(harness.journal.state["pending"])
+                self.assertEqual([call[0] for call in world.writes()], ["dig", "stop"])
+
     def test_local_failure_after_action_preserves_uncertain_intention(self):
         harness = self.harness()
         self.skills.execute.return_value = SkillResult(False, "verification crashed", error_code="internal_error")
@@ -241,6 +352,231 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(harness.context["death_count"], 1)
         harness._prepare_context(observation(last_death={"t": 30}))
         self.assertEqual(harness.context["death_count"], 2)
+
+    def retreat_fixture(self):
+        current = observation(thundering=False, on_ground=True)
+        current["entities"] = [{"type": "hostile", "name": "zombie", "pos": [2, 64, 0]}]
+        current["status"]["nearest_hostile"] = {"dist": 2}
+        self.collector.collect.side_effect = lambda *_: copy.deepcopy(current)
+        self.client.get_status.side_effect = lambda **_: {"ok": True, "result": copy.deepcopy(current["status"])}
+        self.planner.uses_llm = True
+        return current
+
+    def step_without_resume(self, harness):
+        self.assertTrue(harness._start())
+        return self.finish(harness)
+
+    def test_retreat_no_route_waits_and_reobserves_without_six_global_failures(self):
+        self.retreat_fixture()
+        self.skills.execute.return_value = SkillResult(False, "No safe route", {"executed": False}, "unsafe")
+        harness = self.harness()
+        harness.failures = self.settings["max_consecutive_failures"] - 1
+        self.assertFalse(self.step_without_resume(harness).success)
+        self.assertFalse(harness.paused)
+        self.assertEqual(harness.failures, self.settings["max_consecutive_failures"] - 1)
+        for _ in range(6):
+            self.assertTrue(self.step_without_resume(harness).data["waiting"])
+        self.assertEqual(self.skills.execute.call_count, 1)
+        self.assertEqual(self.collector.collect.call_count, 7)
+        self.planner.choose.assert_not_called()
+        self.assertIn("retreat_recovery", harness.context)
+        self.assertNotIn("2,64,0", harness.context["blocked_until"])
+        harness.context["retreat_recovery"]["retry_after"] = time.time() - 1
+        self.assertFalse(self.step_without_resume(harness).success)
+        self.assertEqual(self.skills.execute.call_count, 2)
+
+    def test_retreat_wait_still_consumes_the_existing_step_budget(self):
+        self.retreat_fixture()
+        self.settings["max_steps"] = 3
+        self.skills.execute.return_value = SkillResult(False, "No safe route", error_code="unsafe")
+        harness = self.harness()
+        for _ in range(3):
+            self.step_without_resume(harness)
+        self.assertFalse(harness._start())
+        self.assertTrue(harness.finished)
+        self.assertFalse(harness.completed)
+        self.assertEqual(self.skills.execute.call_count, 1)
+
+    def test_observed_obstruction_change_allows_early_retreat_search(self):
+        current = self.retreat_fixture()
+        current["terrain"] = [{"pos": [-1, 64, 0], "name": "stone"}]
+        self.skills.execute.return_value = SkillResult(False, "Blocked", {
+            "blocked_cells": [{"pos": [-1, 64, 0], "name": "stone"}]}, "unsafe")
+        harness = self.harness()
+        self.step_without_resume(harness)
+        self.step_without_resume(harness)
+        self.assertEqual(self.skills.execute.call_count, 1)
+        current["terrain"][0]["name"] = "air"
+        self.step_without_resume(harness)
+        self.assertEqual(self.skills.execute.call_count, 2)
+
+    def test_failed_retreat_excludes_actual_target_and_selects_another_candidate(self):
+        self.retreat_fixture()
+        self.skills.execute.side_effect = [
+            SkillResult(False, "No path", {"target": [-4.5, 64, 0.5], "executed": True}, "path_not_found"),
+            SkillResult(True, "On safe ground", {"target": [-4, 64, 2], "retreat_complete": True, "evacuation_stage": "ground"}),
+        ]
+        harness = self.harness()
+        self.step_without_resume(harness)
+        self.assertEqual(harness.context["failures"], {})
+        self.step_without_resume(harness)
+        options = self.skills.execute.call_args.kwargs["recovery_context"]
+        self.assertEqual(options["excluded_targets"], [[-5, 64, 0]])
+        self.assertFalse(options["evacuating"])
+        self.assertNotIn("retreat_recovery", harness.context)
+        self.assertIsNone(harness.journal.state["pending"])
+
+    def test_retreat_target_cooldowns_expire_and_are_capped_at_eight(self):
+        self.retreat_fixture()
+        self.skills.execute.side_effect = lambda *_args, **_kwargs: SkillResult(False, "Unverified", {
+            "target": [-4, 64, self.skills.execute.call_count], "executed": True}, "retreat_unverified")
+        harness = self.harness()
+        for _ in range(10):
+            self.step_without_resume(harness)
+        recovery = harness.context["retreat_recovery"]
+        self.assertEqual(len(recovery["excluded_until"]), 8)
+        self.assertEqual(len(self.skills.execute.call_args.kwargs["recovery_context"]["excluded_targets"]), 8)
+        recovery["excluded_until"] = {key: time.time() - 1 for key in recovery["excluded_until"]}
+        self.step_without_resume(harness)
+        self.assertEqual(self.skills.execute.call_args.kwargs["recovery_context"]["excluded_targets"], [])
+        self.assertFalse(harness.paused)
+
+    def test_relay_continues_from_fresh_observation_after_hostile_leaves_radius(self):
+        current = self.retreat_fixture()
+        def execute(name, args, **kwargs):
+            options = kwargs["recovery_context"]
+            self.assertEqual(name, "retreat_from")
+            self.assertEqual(options["evacuation_origin"], [0, 64, 0])
+            if self.skills.execute.call_count == 1:
+                self.assertFalse(options["evacuating"])
+                current["status"].update(pos=[-8, 65, 0], nearest_hostile={"dist": 10})
+                return SkillResult(True, "Reached canopy relay", {"target": [-8, 65, 0],
+                    "retreat_complete": False, "evacuation_stage": "relay", "planned_path": [[-8, 65, 0]]})
+            self.assertTrue(options["evacuating"])
+            self.assertEqual(harness.latest_status["pos"], [-8, 65, 0])
+            return SkillResult(True, "Reached ground", {"target": [-10, 64, 0],
+                "retreat_complete": True, "evacuation_stage": "ground"})
+        self.skills.execute.side_effect = execute
+        harness = self.harness()
+        self.assertTrue(self.step_without_resume(harness).success)
+        self.assertTrue(harness.context["retreat_recovery"]["evacuating"])
+        self.assertNotIn("planned_path", harness.context["retreat_recovery"])
+        self.assertTrue(self.step_without_resume(harness).success)
+        self.assertNotIn("retreat_recovery", harness.context)
+        self.assertEqual(self.collector.collect.call_count, 2)
+        self.planner.choose.assert_not_called()
+
+    def test_relay_does_not_override_lethal_hazard_or_unstable_footing(self):
+        current = self.retreat_fixture()
+        self.skills.execute.return_value = SkillResult(True, "relay", {
+            "retreat_complete": False, "evacuation_stage": "relay"})
+        harness = self.harness()
+        self.step_without_resume(harness)
+        for changes in ({"in_lava": True}, {"in_lava": False, "on_ground": False}):
+            current["status"].update(changes)
+            self.assertTrue(self.step_without_resume(harness).data["waiting"])
+        self.assertEqual(self.skills.execute.call_count, 1)
+        self.assertTrue(harness.context["retreat_recovery"]["evacuating"])
+
+    def test_relay_persists_across_restart_and_rules_planning_never_replays_a_path(self):
+        current = self.retreat_fixture()
+        self.skills.execute.return_value = SkillResult(True, "relay", {
+            "retreat_complete": False, "evacuation_stage": "relay", "planned_path": [[-2, 65, 0]]})
+        original = self.harness()
+        self.step_without_resume(original)
+        original.close()
+        current["status"].update(pos=[-8, 65, 0], nearest_hostile={"dist": 10})
+        self.planner.uses_llm = False
+        restored = self.harness()
+        self.assertFalse(restored.paused)
+        self.step_without_resume(restored)
+        call = self.skills.execute.call_args
+        self.assertEqual(call.args[0], "retreat_from")
+        self.assertEqual(call.kwargs["recovery_context"]["evacuation_origin"], [0, 64, 0])
+        self.assertTrue(call.kwargs["recovery_context"]["evacuating"])
+        self.assertNotIn("planned_path", call.kwargs["recovery_context"])
+        self.assertEqual(restored.latest_status["pos"], [-8, 65, 0])
+
+    def test_position_change_breaks_no_route_cooldown_and_refreshes_first_leg_origin(self):
+        current = self.retreat_fixture()
+        self.skills.execute.return_value = SkillResult(False, "No route", error_code="unsafe")
+        harness = self.harness()
+        self.step_without_resume(harness)
+        current["status"]["pos"] = [-1, 64, 0]
+        self.step_without_resume(harness)
+        self.assertEqual(self.skills.execute.call_count, 2)
+        self.assertEqual(self.skills.execute.call_args.kwargs["recovery_context"]["evacuation_origin"], [-1, 64, 0])
+
+    def test_unknown_retreat_pauses_with_pending_and_never_excludes_or_retries(self):
+        self.retreat_fixture()
+        self.skills.execute.return_value = SkillResult(False, "Unknown move", {
+            "target": [-4, 64, 0], "candidate_failed": True, "executed": True}, "request_timeout")
+        harness = self.harness()
+        self.step_without_resume(harness)
+        self.assertTrue(harness.paused)
+        self.assertEqual(harness.pause_reason, "request_timeout")
+        self.assertEqual(harness.context["retreat_recovery"]["excluded_until"], {})
+        pending = copy.deepcopy(harness.journal.state["pending"])
+        self.assertEqual(pending["decision"]["name"], "retreat_from")
+        for _ in range(3):
+            harness.tick()
+        self.assertEqual(self.skills.execute.call_count, 1)
+        self.assertEqual(harness.journal.state["pending"], pending)
+        self.assertTrue(harness.paused)
+
+    def test_paused_lifecycle_reads_count_delayed_death_without_erasing_inventory_evidence(self):
+        current = self.retreat_fixture()
+        harness = self.harness()
+        harness._prepare_context(current)
+        harness.context["milestones"] = {"wood": True}
+        harness.context["retreat_recovery"] = {"evacuating": True, "dimension": "overworld"}
+        pending = {"decision": {"name": "retreat_from"}}
+        harness.journal.update(pending=pending)
+        harness.pause("user_requested")
+        current["status"].update(alive=False, ready=False)
+        harness.tick()
+        self.assertEqual(harness.context["death_count"], 1)
+        self.assertNotIn("retreat_recovery", harness.context)
+        self.assertEqual(harness.context["milestones"], {"wood": True})
+        harness.tick()
+        self.assertEqual(self.client.get_status.call_count, 1)
+        self.assertEqual(self.client.get_status.call_args.kwargs["timeout_seconds"], 2)
+        harness._next_idle_monitor = 0
+        current["status"].update(alive=True, ready=True, last_death={"t": 22}, pos=[20, 70, 20])
+        harness.tick()
+        self.assertEqual(harness.context["death_count"], 1)
+        self.assertEqual(harness.context["spawn"], [20, 70, 20])
+        self.assertEqual(harness.context["milestones"], {"wood": True})
+        self.assertTrue(harness.paused)
+        self.assertEqual(harness.pause_reason, "user_requested")
+        self.assertEqual(harness.journal.state["pending"], pending)
+        self.skills.execute.assert_not_called()
+
+    def test_idle_dimension_change_clears_retreat_but_not_milestones_or_pause(self):
+        current = self.retreat_fixture()
+        harness = self.harness()
+        harness._prepare_context(current)
+        harness.context.update(retreat_recovery={"evacuating": True}, milestones={"stone_pickaxe": True})
+        harness.pause("request_timeout")
+        current["status"]["dimension"] = "the_nether"
+        harness.tick()
+        self.assertNotIn("retreat_recovery", harness.context)
+        self.assertEqual(harness.context["milestones"], {"stone_pickaxe": True})
+        self.assertEqual(harness.pause_reason, "request_timeout")
+        self.skills.execute.assert_not_called()
+
+    def test_idle_read_failure_keeps_unknown_pause_and_pending(self):
+        harness = self.harness()
+        harness.pause("request_timeout")
+        pending = {"decision": {"name": "move_to"}}
+        harness.journal.update(pending=pending)
+        self.client.get_status.side_effect = APIError("network_error", "Offline")
+        harness.tick()
+        self.assertTrue(harness.paused)
+        self.assertEqual(harness.pause_reason, "request_timeout")
+        self.assertEqual(harness.journal.state["pending"], pending)
+        self.client.connect.assert_not_called()
+        self.skills.execute.assert_not_called()
 
 
 class StateTests(unittest.TestCase):

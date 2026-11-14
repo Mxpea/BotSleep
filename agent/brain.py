@@ -9,6 +9,10 @@ import ssl
 import requests
 from requests.adapters import HTTPAdapter
 
+from core.model_gate import ModelGateError, ModelRequestGate
+
+_AUTO_GATE = object()
+
 
 class LLMError(Exception):
     """A bounded, credential-free model request or planning failure."""
@@ -45,6 +49,8 @@ class OpenAIBrain:
         max_tokens: int = 1024,
         timeout_seconds: float = 30,
         tls_version: str = "auto",
+        request_gate=_AUTO_GATE,
+        recorder=None,
     ):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
@@ -55,6 +61,8 @@ class OpenAIBrain:
         if tls_version not in ("auto", "1.2"):
             raise LLMError("llm_invalid_config", "Unsupported model TLS version setting")
         self.tls_version = tls_version
+        self.request_gate = (ModelRequestGate(self.base_url, self.api_key, recorder=recorder)
+                             if request_gate is _AUTO_GATE else request_gate)
 
     @property
     def headers(self) -> Dict[str, str]:
@@ -70,7 +78,23 @@ class OpenAIBrain:
         *,
         cancel_event=None,
     ) -> Dict[str, Any]:
-        """Sends chat completion request with optional tool schemas."""
+        """Serialize every production model request; never replay an unknown one."""
+        if self.request_gate is None:  # Explicit injection for isolated transport tests.
+            return self._chat_completion(messages, tools, cancel_event=cancel_event)
+        try:
+            with self.request_gate.request(cancel_event):
+                return self._chat_completion(messages, tools, cancel_event=cancel_event)
+        except ModelGateError as error:
+            raise LLMError(error.code, str(error), error.details) from None
+        except LLMError as error:
+            if error.code in {"llm_timeout", "llm_network_error"}:
+                raise LLMError("llm_request_uncertain",
+                               "Model transport ended without a complete response; confirm provider idle before another request",
+                               {"transport_error": error.code, "executed": False}) from None
+            raise
+
+    def _chat_completion(self, messages, tools=None, *, cancel_event=None):
+        """Perform exactly one HTTP request while the caller owns its model slot."""
         if cancel_event is not None and cancel_event.is_set():
             raise LLMError("llm_cancelled", "Model request was cancelled")
         payload: Dict[str, Any] = {

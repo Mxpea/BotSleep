@@ -35,7 +35,7 @@ class Brain:
         self.responses = list(responses)
         self.requests = []
 
-    def chat_completion(self, messages, tools=None):
+    def chat_completion(self, messages, tools=None, *, cancel_event=None):
         self.requests.append(copy.deepcopy({"messages": messages, "tools": tools}))
         value = self.responses.pop(0)
         if isinstance(value, Exception):
@@ -370,6 +370,106 @@ class LLMPlannerTests(unittest.TestCase):
         planner.observe_result(decision, SkillResult(False, "Cannot path into block", error_code="stalled"), obs)
         self.assertEqual(planner.choose(obs, {}).name, "gather_block")
 
+    def test_known_visibility_change_allows_retry_after_path_or_occlusion_failure(self):
+        args = {"pos": [3, 64, 0], "expected_name": "oak_log"}
+        for code in ("stalled", "no_path", "path_not_found", "out_of_reach", "move_unverified",
+                     "target_occluded", "visibility_unknown"):
+            with self.subTest(code=code):
+                planner = self.planner(response("gather_block", args), response("gather_block", args, "retry_2"),
+                                       max_repair_attempts=0)
+                before = observation()
+                before["blocks"][0].update(can_see=False, visibility={"blocker": [1, 65, 0]})
+                decision = planner.choose(before, {})
+                planner.observe_result(decision, SkillResult(False, "Cannot reach wood", error_code=code), before)
+                after = copy.deepcopy(before)
+                after["blocks"][0].update(can_see=True, visibility={"state": "visible"})
+                self.assertEqual(planner.choose(after, {}).args, args)
+                # Clearing foliage need not move the bot or gain any inventory.
+                self.assertEqual(after["counts"], before["counts"])
+                self.assertEqual(after["status"]["pos"], before["status"]["pos"])
+                self.assertIn(planner._signature(decision), planner._failed_actions)
+
+    def test_two_known_blockers_changing_allows_replan(self):
+        args = {"pos": [3, 64, 0], "expected_name": "oak_log"}
+        planner = self.planner(response("gather_block", args), response("gather_block", args, "retry_2"),
+                               max_repair_attempts=0)
+        before = observation()
+        before["blocks"][0].update(can_see=False, visibility={"blocker": [1, 65, 0]})
+        decision = planner.choose(before, {})
+        planner.observe_result(decision, SkillResult(False, "Path stalled", error_code="stalled"), before)
+        after = copy.deepcopy(before)
+        after["blocks"][0]["visibility"]["blocker"] = [2, 65, 0]
+        self.assertEqual(planner.choose(after, {}).args, args)
+
+    def test_unknown_or_stale_visibility_and_unrelated_changes_do_not_release_path_failure(self):
+        args = {"pos": [3, 64, 0], "expected_name": "oak_log"}
+        cases = ({}, {"can_see": None}, {"can_see": "true"}, {"can_see": 1},
+                 {"can_see": None, "visibility": {"blocker": [2, 65, 0]}},
+                 {"can_see": "false", "visibility": {"blocker": [2, 65, 0]}},
+                 {"can_see": False, "visibility": {"state": "unknown"}},
+                 {"can_see": False, "visibility": {"blocker": [2.5, 65, 0]}},
+                 {"can_see": True, "fresh": False},
+                 {"can_see": False, "visibility": {"blocker": [1, 65, 0], "reason": "New diagnostic"}})
+        for fields in cases:
+            with self.subTest(fields=fields):
+                planner = self.planner(response("gather_block", args), response("gather_block", args, "retry_2"),
+                                       max_repair_attempts=0)
+                before = observation()
+                before["blocks"][0].update(can_see=False, visibility={"blocker": [1, 65, 0]})
+                decision = planner.choose(before, {})
+                planner.observe_result(decision, SkillResult(False, "Path stalled", error_code="stalled"), before)
+                after = observation(food=17, pos=[0.7, 64, 0.5])
+                after["blocks"][0].update(fields)
+                with self.assertRaises(LLMError) as caught:
+                    planner.choose(after, {})
+                self.assertEqual(caught.exception.code, "llm_repeated_failure")
+
+    def test_visibility_change_does_not_release_unrelated_failure(self):
+        args = {"pos": [3, 64, 0], "expected_name": "oak_log"}
+        planner = self.planner(response("gather_block", args), response("gather_block", args, "retry_2"),
+                               max_repair_attempts=0)
+        before = observation()
+        before["blocks"][0].update(can_see=False, visibility={"blocker": [1, 65, 0]})
+        decision = planner.choose(before, {})
+        planner.observe_result(decision, SkillResult(False, "Needs tool", error_code="missing_tool"), before)
+        after = copy.deepcopy(before)
+        after["blocks"][0].update(can_see=True, visibility={"state": "visible"})
+        with self.assertRaises(LLMError) as caught:
+            planner.choose(after, {})
+        self.assertEqual(caught.exception.code, "llm_repeated_failure")
+
+    def test_crossing_feet_cell_with_small_move_releases_diagonal_foliage_failure(self):
+        for start, end, target in (([1.1, 122, 0.5], [0.4, 122, 0.5], [0, 122, -1]),
+                                   ([0.1, 122, 0.5], [-0.1, 122, 0.5], [-1, 122, -1])):
+            with self.subTest(start=start, end=end):
+                args = {"pos": target, "expected_name": "birch_leaves"}
+                brain = Brain(response("clear_foliage", args), response("clear_foliage", args, "retry_2"))
+                planner = LLMSurvivalPlanner({"enabled": True, "max_repair_attempts": 0},
+                                             {"objective": "daily"}, brain=brain)
+                before = observation(pos=start)
+                before["blocks"] = [{"name": "birch_leaves", "pos": target, "can_see": True,
+                                     "properties": {"waterlogged": False}}]
+                decision = planner.choose(before, {})
+                planner.observe_result(decision, SkillResult(False, "Diagonal target", error_code="unsafe_target"), before)
+                after = copy.deepcopy(before)
+                after["status"]["pos"] = end
+                self.assertEqual(planner.choose(after, {}).args, args)
+
+    def test_same_cell_small_move_does_not_release_unsafe_foliage_failure(self):
+        args = {"pos": [0, 122, -1], "expected_name": "birch_leaves"}
+        brain = Brain(response("clear_foliage", args), response("clear_foliage", args, "retry_2"))
+        planner = LLMSurvivalPlanner({"enabled": True, "max_repair_attempts": 0},
+                                     {"objective": "daily"}, brain=brain)
+        before = observation(pos=[1.5, 122, 0.5])
+        before["blocks"] = [{"name": "birch_leaves", "pos": args["pos"], "can_see": True}]
+        decision = planner.choose(before, {})
+        planner.observe_result(decision, SkillResult(False, "Diagonal target", error_code="unsafe_target"), before)
+        after = copy.deepcopy(before)
+        after["status"]["pos"] = [1.1, 122, 0.5]
+        with self.assertRaises(LLMError) as caught:
+            planner.choose(after, {})
+        self.assertEqual(caught.exception.code, "llm_repeated_failure")
+
     def test_move_already_inside_tolerance_repairs_to_direct_resource_action(self):
         planner = self.planner(response("move_to", {"pos": [1, 64, 0], "range": 2}),
                                response("gather_block", {"pos": [3, 64, 0], "expected_name": "oak_log"}, "direct_2"))
@@ -400,6 +500,49 @@ class LLMPlannerTests(unittest.TestCase):
         self.assertEqual(snapshot["placement_candidates"], obs["placement_candidates"][:8])
         self.assertEqual(snapshot["local_geometry_origin"], obs["status"]["pos"])
 
+    def test_optional_motion_values_reach_model_in_blocks_per_second(self):
+        planner = self.planner(response("wait"))
+        obs = observation(speed=4.317, velocity=[-2.0, -0.75, 3.825])
+        planner.choose(obs, {})
+        messages = self.brain.requests[0]["messages"]
+        status = json.loads(messages[-1]["content"])["observation"]["status"]
+        self.assertEqual(status["speed"], 4.317)
+        self.assertEqual(status["velocity"], [-2.0, -0.75, 3.825])
+        self.assertIn("blocks/second", messages[0]["content"])
+        self.assertIn("speed alone never proves", messages[0]["content"])
+
+    def test_motion_null_missing_and_zero_remain_distinct_in_current_and_history(self):
+        planner = self.planner()
+        for historical in (False, True):
+            with self.subTest(historical=historical):
+                absent = planner._snapshot(observation(), historical=historical)["status"]
+                self.assertNotIn("speed", absent)
+                self.assertNotIn("velocity", absent)
+                unknown = planner._snapshot(observation(speed=None, velocity=None), historical=historical)["status"]
+                self.assertIsNone(unknown["speed"])
+                self.assertIsNone(unknown["velocity"])
+                stopped = planner._snapshot(observation(speed=0, velocity=[0, 0, 0]), historical=historical)["status"]
+                self.assertEqual(stopped["speed"], 0)
+                self.assertEqual(stopped["velocity"], [0, 0, 0])
+
+    def test_invalid_motion_fields_are_omitted_without_poisoning_model_json(self):
+        planner = self.planner()
+        bad_speeds = (-1, True, "4.2", {}, float("nan"), float("inf"), 10 ** 1000)
+        bad_vectors = ([1, 2], [1, 2, 3, 4], [0, True, 0], [0, "1", 0],
+                       [0, float("nan"), 0], [0, float("inf"), 0], [0, 10 ** 1000, 0], "0,0,0", {})
+        for value in bad_speeds:
+            with self.subTest(speed_type=type(value).__name__):
+                snapshot = planner._snapshot(observation(speed=value, velocity=[0, -1, 0]))
+                self.assertNotIn("speed", snapshot["status"])
+                self.assertEqual(snapshot["status"]["velocity"], [0, -1, 0])
+                json.dumps(snapshot, allow_nan=False)
+        for value in bad_vectors:
+            with self.subTest(velocity_type=type(value).__name__):
+                snapshot = planner._snapshot(observation(speed=0, velocity=value))
+                self.assertNotIn("velocity", snapshot["status"])
+                self.assertEqual(snapshot["status"]["speed"], 0)
+                json.dumps(snapshot, allow_nan=False)
+
     def test_resource_summary_prioritizes_visibility_and_reach_without_dropping_unknowns(self):
         planner = self.planner(response())
         obs = observation()
@@ -425,7 +568,7 @@ class BrainTransportTests(unittest.TestCase):
             "type": "exceed_context_size_error",
             "message": "request (51524 tokens) exceeds the available context size (43776 tokens), SECRET"}}))
         with self.assertRaises(LLMError) as caught:
-            OpenAIBrain(api_key="SECRET").chat_completion([])
+            OpenAIBrain(api_key="SECRET", request_gate=None).chat_completion([])
         self.assertEqual(caught.exception.details, {"http_status": 400, "context_limit": True,
                                                    "request_tokens": 51524, "context_tokens": 43776})
         self.assertNotIn("SECRET", str(caught.exception) + json.dumps(caught.exception.details))
@@ -442,7 +585,7 @@ class BrainTransportTests(unittest.TestCase):
                 post.reset_mock()
                 post.return_value = Mock(status_code=status, headers={"Authorization": "SECRET", "x-oneapi-request-id": "SECRET"}, text="SECRET")
                 with self.assertRaises(LLMError) as caught:
-                    OpenAIBrain(api_key="SECRET").chat_completion([])
+                    OpenAIBrain(api_key="SECRET", request_gate=None).chat_completion([])
                 self.assertEqual(caught.exception.code, "llm_http_error")
                 self.assertEqual(caught.exception.details, {"http_status": status})
                 self.assertNotIn("SECRET", str(caught.exception) + json.dumps(caught.exception.details))
@@ -451,7 +594,7 @@ class BrainTransportTests(unittest.TestCase):
     @patch("agent.brain.requests.post")
     def test_native_payload_preserves_legacy_constructor_and_disables_stream(self, post):
         post.return_value = Mock(status_code=200, json=Mock(return_value=response()))
-        brain = OpenAIBrain("https://example.invalid/v1", "test-key", "model", 0.2, 128, timeout_seconds=7)
+        brain = OpenAIBrain("https://example.invalid/v1", "test-key", "model", 0.2, 128, timeout_seconds=7, request_gate=None)
         self.assertIn("choices", brain.chat_completion([{"role": "user", "content": "Observe"}], TOOL_DEFINITIONS))
         args, kwargs = post.call_args
         self.assertEqual(args[0], "https://example.invalid/v1/chat/completions")
@@ -473,7 +616,7 @@ class BrainTransportTests(unittest.TestCase):
                 post.side_effect = value if isinstance(value, Exception) else None
                 post.return_value = value
                 with self.assertRaises(LLMError) as caught:
-                    OpenAIBrain(api_key="SECRET").chat_completion([])
+                    OpenAIBrain(api_key="SECRET", request_gate=None).chat_completion([])
                 self.assertEqual(caught.exception.code, code)
                 self.assertNotIn("SECRET", str(caught.exception))
                 self.assertEqual(post.call_count, 1)
@@ -482,7 +625,7 @@ class BrainTransportTests(unittest.TestCase):
     def test_tls12_is_opt_in_and_retains_certificate_checks(self, session_factory):
         session = session_factory.return_value.__enter__.return_value
         session.post.return_value = Mock(status_code=200, json=Mock(return_value=response()))
-        OpenAIBrain(tls_version="1.2").chat_completion([])
+        OpenAIBrain(tls_version="1.2", request_gate=None).chat_completion([])
         adapter = session.mount.call_args.args[1]
         self.assertIsInstance(adapter, _TLS12Adapter)
         self.assertEqual(adapter._tls_context.minimum_version, ssl.TLSVersion.TLSv1_2)

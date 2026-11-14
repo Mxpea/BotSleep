@@ -27,6 +27,41 @@ class ClientTests(unittest.TestCase):
         self.request = self.request_patch.start()
         self.addCleanup(self.request_patch.stop)
 
+    def test_filtered_block_query_keeps_native_maturity_and_properties(self):
+        rows = [{"name": "wheat", "pos": [1, 64, 2], "mature": True, "growth": [7, 7]}]
+        self.request.return_value = response({"ok": True, "result": {"blocks": rows}})
+        self.assertEqual(self.client.find_blocks(["wheat"], radius=12, limit=4, mature=True, properties={"age": 7}), rows)
+        self.assertEqual(self.request.call_args.kwargs["json"],
+                         {"types": ["wheat"], "radius": 12, "limit": 4, "mature": True, "properties": {"age": 7}})
+
+    def test_window_wrappers_use_slash_routes_and_nested_target(self):
+        self.request.return_value = response({"ok": True, "result": {"sections": {"container": []}}})
+        self.client.window_view([1, 64, 2])
+        self.assertTrue(self.request.call_args.args[1].endswith("/window/view"))
+        self.assertEqual(self.request.call_args.kwargs["json"], {"target": {"pos": [1, 64, 2]}})
+        self.assertGreaterEqual(self.request.call_args.kwargs["timeout"], 68)
+        ops = [{"op": "put", "to": "fuel", "item": "coal", "count": 1}]
+        self.client.window_act([1, 64, 2], ops, timeout_seconds=12)
+        self.assertTrue(self.request.call_args.args[1].endswith("/window/act"))
+        self.assertEqual(self.request.call_args.kwargs["json"], {"target": {"pos": [1, 64, 2]}, "ops": ops})
+        self.assertEqual(self.request.call_args.kwargs["timeout"], 12)
+
+    def test_window_partial_failure_keeps_done_and_is_sent_once(self):
+        done = [{"op": "put", "put": "raw_iron", "count": 2, "to": "input"}]
+        self.request.return_value = response({"ok": False, "error": {"code": "section_full", "message": "Fuel rejected", "done": done, "failed_op": 1}})
+        with self.assertRaises(APIError) as caught:
+            self.client.window_act([1, 64, 2], [{"op": "put", "item": "raw_iron", "count": 2, "to": "input"}])
+        self.assertEqual(caught.exception.details["done"], done)
+        self.assertEqual(self.request.call_count, 1)
+
+    def test_attack_has_hurt_stop_and_collection_timeout_margin(self):
+        self.request.return_value = response({"ok": True, "result": {"killed": False}})
+        self.client.attack(12, timeout_ms=6000, max_hits=4)
+        self.assertEqual(self.request.call_args.kwargs["json"],
+                         {"entity_id": 12, "timeout": 6000, "max_hits": 4, "stop_on": ["hurt", "death"]})
+        self.assertGreaterEqual(self.request.call_args.kwargs["timeout"], 44)
+        self.assertEqual(self.request.call_count, 1)
+
     def test_login_waits_for_readiness_and_returns_status(self):
         status = {"ready": True, "pos": [0, 64, 0]}
         self.request.side_effect = [
@@ -173,6 +208,34 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(error.code, "wrong_server")
         self.assertEqual(error.status_code, 200)
         self.assertEqual(error.details, {"retry_after_s": 4})
+
+    def test_recovery_reads_and_stop_honor_per_request_deadline(self):
+        self.request.return_value = response({"ok": True, "result": {"entities": []}})
+        operations = (
+            lambda **kwargs: self.client.get_block([1, 64, 2], **kwargs),
+            self.client.inventory,
+            self.client.stop,
+            lambda **kwargs: self.client.get_entities(radius=6, types=["item"], **kwargs),
+        )
+        for operation in operations:
+            with self.subTest(operation=operation):
+                operation(timeout_seconds=0.25)
+                self.assertEqual(self.request.call_args.kwargs["timeout"], 0.25)
+                operation()
+                self.assertEqual(self.request.call_args.kwargs["timeout"], self.client.timeout_seconds)
+                with self.assertRaises(APIError) as caught:
+                    operation(timeout_seconds=0)
+                self.assertEqual(caught.exception.code, "bad_args")
+
+    def test_unconfirmed_dig_preserves_server_diagnostics_without_retry(self):
+        diagnostics = {"pos": [1.5, 64, 2.5], "eye_dist": 4.8, "on_ground": True, "ping_ms": 30}
+        self.request.return_value = response({"ok": False, "error": {
+            "code": "dig_unconfirmed", "message": "server did not confirm breaking oak_log", **diagnostics}})
+        with self.assertRaises(APIError) as caught:
+            self.client.dig([2, 65, 3])
+        self.assertEqual(caught.exception.code, "dig_unconfirmed")
+        self.assertEqual(caught.exception.details, diagnostics)
+        self.assertEqual(self.request.call_count, 1)
 
     def test_http_error_is_not_an_empty_block_list(self):
         self.request.return_value = response({"ok": False, "error": {"code": "unknown_api"}}, 404)

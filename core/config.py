@@ -23,6 +23,8 @@ DEFAULTS: Dict[str, Any] = {
     },
     "agent": {"name": "SleepBot", "password": "", "mode": "sleep"},
     "survival": {
+        "objective": "starter",
+        "daily": {"food_reserve": 8, "wood_reserve": 8, "fuel_reserve": 8, "maintenance_interval_seconds": 30},
         "world_id": "default",
         "state_dir": "runtime/survival",
         "scan_radius": 24,
@@ -166,6 +168,14 @@ def _validate(config: Dict[str, Any], config_dir: Path) -> None:
     survival = config["survival"]
     if set(survival) - set(DEFAULTS["survival"]):
         raise ConfigError("survival contains unsupported options")
+    if survival["objective"] not in {"starter", "daily"}:
+        raise ConfigError("survival.objective must be starter or daily")
+    daily = _mapping(survival["daily"], "survival.daily")
+    if set(daily) - set(DEFAULTS["survival"]["daily"]):
+        raise ConfigError("survival.daily contains unsupported options")
+    for key, maximum in (("food_reserve", 64), ("wood_reserve", 64), ("fuel_reserve", 64), ("maintenance_interval_seconds", 60)):
+        if type(daily[key]) is not int or not 1 <= daily[key] <= maximum:
+            raise ConfigError(f"survival.daily.{key} must be an integer between 1 and {maximum}")
     world_id = _string(survival["world_id"], "survival.world_id")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", world_id):
         raise ConfigError("survival.world_id must contain 1-64 letters, digits, underscores or hyphens")

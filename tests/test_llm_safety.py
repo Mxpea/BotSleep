@@ -34,7 +34,7 @@ class Model:
         self.name, self.args = name, args
         self.before_response, self.content = before_response, content
 
-    def chat_completion(self, messages, tools=None):
+    def chat_completion(self, messages, tools=None, *, cancel_event=None):
         if self.before_response:
             self.before_response()
         return {"choices": [{"finish_reason": "tool_calls", "message": {

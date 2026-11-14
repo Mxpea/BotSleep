@@ -1,4 +1,4 @@
-"""Configured sleep and early-survival runners for mc-agent-api."""
+"""Configured sleep, starter and daily survival runners for mc-agent-api."""
 
 import argparse
 import os
@@ -14,13 +14,16 @@ from debug.logger import FlightRecorder
 
 
 def parse_args(argv=None):
-    parser = argparse.ArgumentParser(description="BotSleep automatic sleep and starter survival runner")
+    parser = argparse.ArgumentParser(description="BotSleep automatic sleep and survival runner")
     parser.add_argument("--config", default=os.environ.get("BOTSLEEP_CONFIG", str(Path(__file__).with_name("config.yaml"))))
     parser.add_argument("--username", default=None, help="Override the configured Minecraft username")
     parser.add_argument("--debug", action="store_true", help="Enable allowlisted in-game debug commands")
     parser.add_argument("--mode", choices=("sleep", "survival"), help="Override agent.mode")
+    parser.add_argument("--objective", choices=("starter", "daily"), help="Select starter goal or ongoing daily survival")
     parser.add_argument("--max-steps", type=int, help="Bound survival observation/action cycles")
     parser.add_argument("--once", action="store_true", help="Run one sleep attempt or survival decision and exit")
+    parser.add_argument("--resume", action="store_true", help="Explicitly resume survival from fresh observations; never replay a saved action")
+    parser.add_argument("--acknowledge-model-idle", action="store_true", help="Clear model transport uncertainty ONLY after confirming the provider has no running request")
     parser.add_argument("--check-config", action="store_true", help="Validate configuration without connecting")
     return parser.parse_args(argv)
 
@@ -31,6 +34,14 @@ def main(argv=None) -> int:
         config = load_config(args.config, username=args.username)
         if args.mode:
             config["agent"]["mode"] = args.mode
+        if args.objective:
+            if config["agent"]["mode"] != "survival":
+                raise ConfigError("--objective is only available in survival mode")
+            config["survival"]["objective"] = args.objective
+        if args.acknowledge_model_idle and (config["agent"]["mode"] != "survival" or not config["llm"]["enabled"]):
+            raise ConfigError("--acknowledge-model-idle requires model survival mode")
+        if args.resume and config["agent"]["mode"] != "survival":
+            raise ConfigError("--resume is only available in survival mode")
         if args.max_steps is not None:
             if not 1 <= args.max_steps <= 10000:
                 raise ConfigError("--max-steps must be between 1 and 10000")
@@ -68,6 +79,7 @@ def main(argv=None) -> int:
         if recorder:
             recorder.record("INFO", "main", "STARTUP", {"username": client.username, "mode": config["agent"]["mode"],
                             "planner": "llm" if survival and config["llm"]["enabled"] else "rules",
+                            "objective": config["survival"]["objective"] if survival else None,
                             "model": config["llm"]["model"] if config["llm"]["enabled"] else None,
                             "monitor_url": monitor.address if monitor else None})
         status = client.login(max_wait_seconds=config["mc_api"]["login_timeout_seconds"])
@@ -81,9 +93,17 @@ def main(argv=None) -> int:
             if config["llm"]["enabled"]:
                 from agent.llm_planner import LLMSurvivalPlanner
                 planner = LLMSurvivalPlanner(config["llm"], config["survival"], recorder=recorder)
+                if args.acknowledge_model_idle:
+                    planner.brain.request_gate.acknowledge_provider_idle()
                 print(f"Model planner: {config['llm']['model']}")
             controller = SurvivalHarness(client, config["survival"], config["sleep"], recorder=recorder, planner=planner)
+            if args.resume:
+                controller.resume()
             print(controller.summary())
+            if args.once and controller.paused and not args.resume:
+                exit_code = 1
+                print("Survival recovery is paused; use --resume to reobserve and replan before a single step.", file=sys.stderr)
+                return exit_code
         else:
             controller = SleepController(client, config["sleep"], recorder=recorder)
         debug_config = config["debug"]

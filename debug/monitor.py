@@ -27,6 +27,30 @@ def _secret_key(key):
     return normalized in SECRET_KEYS or normalized.endswith(("password", "passwd", "apikey", "secret", "token"))
 
 
+def _motion_status(status):
+    """Keep optional API motion values in blocks/second; never coerce unknown to zero."""
+    cleaned = dict(status)
+
+    def finite_number(value):
+        try:
+            return type(value) in (int, float) and math.isfinite(value)
+        except OverflowError:
+            return False
+
+    if "speed" in cleaned:
+        speed = cleaned["speed"]
+        if speed is not None and not (finite_number(speed) and speed >= 0):
+            cleaned.pop("speed")
+    if "velocity" in cleaned:
+        velocity = cleaned["velocity"]
+        if velocity is not None:
+            if not isinstance(velocity, (list, tuple)) or len(velocity) != 3 or not all(map(finite_number, velocity)):
+                cleaned.pop("velocity")
+            else:
+                cleaned["velocity"] = list(velocity)
+    return cleaned
+
+
 class EventMonitor:
     """Thread-safe event bus. It never reads a log file, config, or environment."""
 
@@ -45,6 +69,7 @@ class EventMonitor:
                     "steps": 0, "busy": False, "paused": False, "goal": None,
                     "phase": "idle", "pause_reason": None},
             "status": {}, "decision": None, "last_result": None,
+            "daily": {"board": None, "memory_counts": {}},
             "llm": {"state": "idle", "request": None, "response": None, "error": None,
                     "usage": None, "elapsed_ms": None, "request_model": None, "actual_model": None},
         }
@@ -103,10 +128,13 @@ class EventMonitor:
         with self._lock:
             self._find_secrets(record)
             self._seq += 1
+            data = record.get("data") or {}
+            if isinstance(data, dict) and isinstance(data.get("status"), dict):
+                data = {**data, "status": _motion_status(data["status"])}
             cleaned = self._clean({
                 "timestamp": record.get("timestamp") or datetime.now(timezone.utc).isoformat(),
                 "level": record.get("level", "INFO"), "module": record.get("module", "agent"),
-                "event": record.get("event", "EVENT"), "data": record.get("data") or {},
+                "event": record.get("event", "EVENT"), "data": data,
             })
             cleaned["seq"] = self._seq
             encoded = json.dumps(cleaned, ensure_ascii=False).encode("utf-8")
@@ -132,7 +160,8 @@ class EventMonitor:
         if isinstance(data.get("status"), dict):
             state["status"] = data["status"]
         status = state["status"]
-        for key in ("username", "planner", "model", "steps", "busy", "paused", "goal", "phase", "pause_reason"):
+        for key in ("username", "planner", "model", "steps", "busy", "paused", "goal", "phase", "pause_reason",
+                    "objective", "model_blocked", "model_pending"):
             if key in data:
                 run[key] = data[key]
         if status.get("username"):
@@ -144,6 +173,12 @@ class EventMonitor:
                             else "paused" if run["paused"] else "running")
             if "busy" not in data:
                 run["busy"] = status.get("busy", False)
+            if data.get("daily_tasks") is not None:
+                state["daily"]["board"] = data["daily_tasks"]
+            if isinstance(data.get("memory_summary"), dict):
+                state["daily"]["memory_counts"] = data["memory_summary"]
+        if event == "DAILY_TASKS":
+            state["daily"] = {"board": data.get("board"), "memory_counts": data.get("memory_counts", {})}
         if event == "AGENT_PHASE":
             run["busy"] = run["phase"] in {"observing", "thinking", "rechecking", "acting"}
             if not run["paused"]:
@@ -174,6 +209,12 @@ class EventMonitor:
         elif event == "BUDGET_EXHAUSTED":
             run.update(state="finished", busy=False)
         llm = state["llm"]
+        if event == "MODEL_SLOT_ACQUIRED":
+            llm["slot_state"] = "inflight"
+        elif event in {"MODEL_SLOT_RELEASED", "MODEL_IDLE_ACKNOWLEDGED"}:
+            llm["slot_state"] = "idle"
+        elif event in {"MODEL_REQUEST_UNCERTAIN", "MODEL_BLOCKED_SAFETY_ACTIVE"}:
+            llm["slot_state"] = "uncertain"
         if event == "LLM_REQUEST":
             llm.update(state="requesting", request=data, error=None,
                        request_model=data.get("model"), actual_model=None)

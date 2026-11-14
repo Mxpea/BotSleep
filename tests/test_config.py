@@ -59,6 +59,17 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(ConfigError):
             load_config(self.write({"agent": {"mode": "invalid"}}), environ={})
 
+    def test_daily_objective_preserves_defaults_and_bounds_reserves(self):
+        config = load_config(self.write({"survival": {"objective": "daily", "daily": {"food_reserve": 12}}}), environ={})
+        self.assertEqual(config["survival"]["objective"], "daily")
+        self.assertEqual(config["survival"]["daily"]["food_reserve"], 12)
+        self.assertEqual(config["survival"]["daily"]["fuel_reserve"], 8)
+        for change in ({"objective": "endgame"}, {"daily": {"food_reserve": True}},
+                       {"daily": {"fuel_reserve": 65}}, {"daily": {"maintenance_interval_seconds": 0}},
+                       {"daily": {"parallel_models": 2}}):
+            with self.subTest(change=change), self.assertRaises(ConfigError):
+                load_config(self.write({"survival": change}), environ={})
+
     def test_unknown_sleep_options_are_rejected_without_echoing_values(self):
         self.write({"sleep": {"max_retries": "private-config-value"}})
         with self.assertRaises(ConfigError) as caught:

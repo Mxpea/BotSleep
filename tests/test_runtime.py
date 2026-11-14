@@ -1,10 +1,19 @@
+import copy
+from contextlib import redirect_stderr, redirect_stdout
+import io
+import json
+import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
+import main as entrypoint
+from agent.survival_planner import Decision
 from core.config import DEFAULTS
 from core.sleep_controller import SleepController
+from core.survival_harness import SurvivalHarness
+from core.survival_state import SurvivalJournal
 from debug.chat_debugger import ChatDebugger
 from skills import SkillResult
 
@@ -135,6 +144,116 @@ class ChatTests(unittest.TestCase):
         self.client.chat.side_effect = RuntimeError("rate limited")
         self.send("<TestPlayer> #stop")
         self.stop.assert_called_once()
+
+
+class SurvivalResumeEntryTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.config = copy.deepcopy(DEFAULTS)
+        self.config["agent"]["mode"] = "survival"
+        self.config["llm"]["enabled"] = False
+        self.config["debug"]["flight_recorder"]["enabled"] = False
+        self.config["debug"]["monitor"].update(enabled=False, console=False)
+        self.config["survival"].update(state_dir=self.temp.name, max_steps=1,
+                                         max_runtime_seconds=5, poll_interval_seconds=0.001)
+        self.client = Mock(username="ResumeTestBot", base_url="http://fake-game.invalid/api/v1", token="fixture-token")
+        self.status = {"ready": True, "alive": True, "busy": None, "health": 20, "food": 20,
+                       "gamemode": "survival", "dimension": "overworld", "pos": [8, 64, 3],
+                       "is_day": True, "thundering": False, "on_ground": True}
+        self.client.login.return_value = copy.deepcopy(self.status)
+        self.client.get_status.return_value = {"ok": True, "result": self.status}
+        self.journal = SurvivalJournal(self.temp.name, endpoint=self.client.base_url,
+                                       username=self.client.username, world_id=self.config["survival"]["world_id"])
+        self.pending = {"decision": {"name": "gather_block", "args": {"pos": [2, 64, 0], "expected_name": "oak_log"}},
+                        "before_counts": {"oak_log": 0}}
+        self.journal.update(pending=copy.deepcopy(self.pending))
+        self.collector = Mock()
+        self.collector.collect.return_value = {"fresh": True, "status": copy.deepcopy(self.status),
+                                               "counts": {"oak_log": 1}, "blocks": [], "entities": [], "inventory": []}
+        self.planner = Mock()
+        self.planner.progress.return_value = {}
+        self.planner.choose.return_value = Decision("wait", {"seconds": 1}, "Use new state", "observe")
+        self.skills = Mock()
+        self.controller = None
+
+    def run_main(self, arguments, interrupt_idle=False):
+        def construct(client, settings, sleep_settings, recorder=None, planner=None):
+            self.controller = SurvivalHarness(client, settings, sleep_settings,
+                planner=self.planner, collector=self.collector, skills=self.skills, journal=self.journal)
+            self.controller.resume = Mock(wraps=self.controller.resume)
+            return self.controller
+
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with patch.object(entrypoint, "load_config", return_value=copy.deepcopy(self.config)), \
+                patch.object(entrypoint, "MinecraftAgentClient", return_value=self.client) as client_factory, \
+                patch("core.survival_harness.SurvivalHarness", side_effect=construct), \
+                redirect_stdout(stdout), redirect_stderr(stderr):
+            if interrupt_idle:
+                # No worker starts while the persisted action remains paused.
+                with patch.object(entrypoint.time, "sleep", side_effect=KeyboardInterrupt):
+                    code = entrypoint.main(arguments)
+            else:
+                code = entrypoint.main(arguments)
+        return code, stdout.getvalue() + stderr.getvalue(), client_factory
+
+    def test_default_restart_remains_paused_and_preserves_pending(self):
+        code, output, _ = self.run_main([], interrupt_idle=True)
+        self.assertEqual(code, 0, output)
+        self.assertTrue(self.controller.paused)
+        self.controller.resume.assert_not_called()
+        self.collector.collect.assert_not_called()
+        self.skills.execute.assert_not_called()
+        self.assertEqual(json.loads(self.journal.path.read_text())["pending"], self.pending)
+        self.client.logout.assert_called_once()
+
+    def test_explicit_resume_reobserves_and_replans_without_replaying_saved_action(self):
+        code, output, _ = self.run_main(["--resume"])
+        self.assertEqual(code, 2, output)  # One new decision consumed the budget.
+        self.controller.resume.assert_called_once()
+        self.collector.collect.assert_called_once()
+        self.assertEqual(self.planner.choose.call_args.args[0]["status"]["pos"], [8, 64, 3])
+        self.assertEqual(self.planner.choose.call_args.args[0]["counts"], {"oak_log": 1})
+        self.skills.execute.assert_not_called()
+        self.assertIsNone(json.loads(self.journal.path.read_text())["pending"])
+        self.client.logout.assert_called_once()
+
+    def test_once_does_not_implicitly_resume_an_interrupted_action(self):
+        code, output, _ = self.run_main(["--once"])
+        self.assertEqual(code, 1, output)
+        self.assertIn("--resume", output)
+        self.controller.resume.assert_not_called()
+        self.collector.collect.assert_not_called()
+        self.skills.execute.assert_not_called()
+        self.assertEqual(self.journal.state["pending"], self.pending)
+        self.client.logout.assert_called_once()
+
+    def test_once_with_explicit_resume_runs_only_a_fresh_decision(self):
+        code, output, _ = self.run_main(["--once", "--resume"])
+        self.assertEqual(code, 0, output)
+        self.collector.collect.assert_called_once()
+        self.planner.choose.assert_called_once()
+        self.skills.execute.assert_not_called()
+        self.assertIsNone(self.journal.state["pending"])
+        self.client.logout.assert_called_once()
+
+    def test_resume_rejects_sleep_mode_before_login_or_controller_creation(self):
+        for config_mode, arguments in (("sleep", ["--resume"]),
+                                       ("survival", ["--mode", "sleep", "--resume"])):
+            with self.subTest(config_mode=config_mode):
+                self.config["agent"]["mode"] = config_mode
+                code, output, client_factory = self.run_main(arguments)
+                self.assertEqual(code, 1, output)
+                self.assertIn("only available in survival mode", output)
+                client_factory.assert_not_called()
+                self.assertIsNone(self.controller)
+
+    def test_mode_override_allows_explicit_resume_and_config_check_stays_offline(self):
+        self.config["agent"]["mode"] = "sleep"
+        code, output, client_factory = self.run_main(["--mode", "survival", "--resume", "--check-config"])
+        self.assertEqual(code, 0, output)
+        client_factory.assert_not_called()
+        self.assertIsNone(self.controller)
 
 
 if __name__ == "__main__":

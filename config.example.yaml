@@ -11,6 +11,12 @@ agent:
   mode: "sleep"                           # sleep or survival; --mode overrides this.
 
 survival:
+  objective: "starter"                     # starter: bounded stone tools; daily: ongoing survival; --objective overrides.
+  daily:
+    food_reserve: 8                         # Target inventory item counts, not saturation guarantees.
+    wood_reserve: 8
+    fuel_reserve: 8
+    maintenance_interval_seconds: 30
   world_id: "default"                      # Change this when replacing a server world.
   state_dir: "runtime/survival"             # Checkpoints scoped by API, username and world_id.
   scan_radius: 24

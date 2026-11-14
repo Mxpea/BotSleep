@@ -216,17 +216,19 @@ class MinecraftAgentClient:
             raise APIError("invalid_response", "Untyped block query must return a summary object")
         return [{"name": name, "pos": info.get("nearest"), "dist": info.get("dist"), "count": info.get("count")} for name, info in blocks.items()]
 
-    def get_entities(self, radius: int = 16, types: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    def get_entities(self, radius: int = 16, types: Optional[List[str]] = None, *,
+                     timeout_seconds: Optional[float] = None) -> List[Dict[str, Any]]:
         payload: Dict[str, Any] = {"radius": radius}
         if types is not None:
             payload["types"] = types
-        return self._list(self._result(self._request("POST", "get_entities", payload=payload)), "entities")
+        return self._list(self._result(self._request("POST", "get_entities", payload=payload,
+                                                     timeout_seconds=timeout_seconds)), "entities")
 
-    def get_block(self, pos: List[float]) -> Dict[str, Any]:
-        return self._request("POST", "get_block", payload={"pos": pos})
+    def get_block(self, pos: List[float], *, timeout_seconds: Optional[float] = None) -> Dict[str, Any]:
+        return self._request("POST", "get_block", payload={"pos": pos}, timeout_seconds=timeout_seconds)
 
-    def inventory(self) -> Dict[str, Any]:
-        return self._request("GET", "inventory")
+    def inventory(self, *, timeout_seconds: Optional[float] = None) -> Dict[str, Any]:
+        return self._request("GET", "inventory", timeout_seconds=timeout_seconds)
 
     def get_inventory(self) -> Dict[str, Any]:
         return self.inventory()
@@ -234,13 +236,44 @@ class MinecraftAgentClient:
     def equip(self, item: str, slot: str = "hand") -> Dict[str, Any]:
         return self._request("POST", "equip", payload={"item": item, "slot": slot})
 
-    def stop(self) -> Dict[str, Any]:
+    def stop(self, *, timeout_seconds: Optional[float] = None) -> Dict[str, Any]:
         """Request an immediate stop; this does not guarantee task cancellation."""
-        return self._request("POST", "stop")
+        return self._request("POST", "stop", timeout_seconds=timeout_seconds)
 
     def connect(self) -> Dict[str, Any]:
         """Request reconnection once; readiness must be checked separately."""
         return self._request("POST", "connect")
+
+    def find_blocks(self, types: List[str], radius: int = 16, limit: int = 64, *,
+                    properties: Optional[Dict[str, Any]] = None,
+                    mature: Optional[bool] = None) -> List[Dict[str, Any]]:
+        """Return typed rows with the upstream crop/property filters."""
+        payload: Dict[str, Any] = {"types": types, "radius": radius, "limit": limit}
+        if properties is not None:
+            payload["properties"] = properties
+        if mature is not None:
+            payload["mature"] = mature
+        return self._list(self._result(self._request("POST", "find_blocks", payload=payload)), "blocks")
+
+    def window_view(self, pos: List[int], *, timeout_seconds: Optional[float] = None) -> Dict[str, Any]:
+        """Open, inspect and close a GUI; this may pathfind and takes the action lock."""
+        budget = self._action_timeout(65) if timeout_seconds is None else self._positive(timeout_seconds, "timeout_seconds")
+        return self._request("POST", "window/view", payload={"target": {"pos": pos}}, timeout_seconds=budget)
+
+    def window_act(self, pos: List[int], ops: List[Dict[str, Any]], *,
+                   timeout_seconds: Optional[float] = None) -> Dict[str, Any]:
+        """Send one bounded operation batch. Completed operations are not rolled back."""
+        if not isinstance(ops, list) or not 1 <= len(ops) <= 8:
+            raise APIError("bad_args", "window_act requires between one and eight operations")
+        budget = self._action_timeout(115) if timeout_seconds is None else self._positive(timeout_seconds, "timeout_seconds")
+        return self._request("POST", "window/act", payload={"target": {"pos": pos}, "ops": ops}, timeout_seconds=budget)
+
+    def attack(self, entity_id: int, *, timeout_ms: int = 6000, max_hits: int = 6) -> Dict[str, Any]:
+        """Bound passive-animal hunting and stop on damage, overriding upstream combat defaults."""
+        deadline = self._positive(timeout_ms, "timeout_ms") / 1000
+        return self._request("POST", "attack", payload={"entity_id": entity_id, "timeout": timeout_ms,
+                             "max_hits": max_hits, "stop_on": ["hurt", "death"]},
+                             timeout_seconds=self._action_timeout(deadline + 35))
 
     def dig(self, pos: List[float], collect: bool = True) -> Dict[str, Any]:
         """Allow 60s approach, 30s digging and up to four 8s pickup paths."""
