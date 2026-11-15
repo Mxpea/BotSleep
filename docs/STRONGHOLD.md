@@ -27,16 +27,16 @@
 等准备实机测试时再运行。确认机器人静止、主世界、背包有 `ender_eye`，并留意登录会替换同名旧会话；采样结束会登出。不会自动移动、挖掘、传送或使用 RCON。
 
 ```powershell
-.\.venv\Scripts\python.exe -m integrations.ninjabrain capture --api-config G:\ww\mc-agent-api\config.json --world local-test --session logs/eyes-local-test.json --output logs/stronghold_prediction.json
+.\.venv\Scripts\python.exe -m integrations.ninjabrain capture --world local-test --session logs/eyes-local-test.json --output logs/stronghold_prediction.json
 ```
 
-也可用 `MC_AGENT_USER`、`MC_AGENT_PASSWORD` 配置凭据，或指定 `--username`；口令和 token 不写入会话。`--base` 可更换接口地址。`--world` 是你给存档起的标签，换世界必须换标签和会话文件。
+运行前通过本机环境变量 `MC_AGENT_USER`、`MC_AGENT_PASSWORD` 提供凭据；`--username` 可覆盖用户名。也可显式用 `--api-config ../mc-agent-api/config.json` 只读载入本地 API 配置，路径按实际目录调整；该 JSON 不是 BotSleep 的 YAML 配置。口令和 token 不写入会话。`--base` 可更换接口地址。`--world` 是你给存档起的标签，换世界必须换标签和会话文件。
 
-第一次投眼后只能得到方向和概率分布。通过正常游戏方式横向移动一段距离，稳定站好，再以同一个 `--world/--session` 运行第二次。至少两次有横向基线的观测才有定位价值；最好先横移约 100～300 方块，视地形和距离调整。不要为获得更大基线越过不同要塞的最近区域。
+第一次投眼后只能得到方向和概率分布。通过正常游戏方式横向移动一段距离，稳定站好，再以同一个 `--world/--session` 运行第二次。第二次应取得有效横向基线。当前策略草案在近距离先评估约20～50方块侧移，远距离再按距离、误差和地形调整；这不是自动选点实现，也不是固定两眼必然定位保证。不要为增加基线越过不同要塞的最近区域。路线应服从 harness 的当前安全能力，尚未实现的水面/搭路策略不能只凭提示调用。
 
 采样过程：
 
-1. 读取状态、背包和已有眼实体 ID，再并发调用 `/use_item` 与 `/get_entities`。
+1. 读取状态、背包和已有眼实体 ID，再并发调用 `/use_item` 与 `/get_entities`。`client.inventory()` 返回 `ok/result` envelope，物品从 `result.items` 与 `result.offhand` 读取；兼容名 `get_inventory()` 也返回同样的 envelope。
 2. 只接受新出现、身份匹配的同一只眼，约每 100ms 记录位置，共 3.5 秒。
 3. 用多点拟合水平飞行射线，要求至少 3 个不同水平位置、跨度至少 3 方块、轨迹无明显转弯或倒退，且玩家位置基本不变。
 4. 保存原始坐标、实体 ID、拟合质量和投眼响应，随后调用计算核心。失败尝试也保存到 `attempts`，不会混入有效观测。
@@ -56,7 +56,7 @@ result = StrongholdCalculator().calculate([
 ])
 ```
 
-`skills.stronghold.CalculateStrongholdSkill().execute(throws=[...])` 返回标准 `SkillResult`；它只计算、不投眼。`agent/tools.py` 以独立常量 `STRONGHOLD_TOOL_DEFINITION` 保留 `calculate_stronghold` 的工具结构；它没有加入 starter/daily 的9/31项模型工具目录。生存调度器已实现，但尚未绑定要塞计算，不能据独立CLI可用认定模型已经能自主调用。
+`skills.stronghold.CalculateStrongholdSkill().execute(throws=[...])` 返回标准 `SkillResult`；它只计算、不投眼。`agent/tools.py` 以独立常量 `STRONGHOLD_TOOL_DEFINITION` 保留 `calculate_stronghold` 的工具结构；它没有加入 starter/daily 的9/31项模型工具目录。现行 `core/survival_harness.py` 已实现生存调度，但尚未绑定采眼与要塞计算；`skills/stronghold_localization/SKILL.md` 也未自动加载，不能据独立 CLI 可用认定模型已经能自主调用。
 
 ## 验证与来源
 

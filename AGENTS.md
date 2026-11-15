@@ -14,6 +14,7 @@ BotSleep 基于 mc-agent-api 控制 Minecraft 机器人，采用大模型决策�
 - `integrations/ninjabrain/`：无界面要塞计算与坐标采样；`tests/` 为 unittest 回归测试，`data/examples/` 存合成输入。
 - 根目录 `bot_sleep.py`、`client.py` 是兼容入口，分别复用 `main.py` 和 `core/client.py`，不要再复制实现。
 - `core/survival_harness.py` 串行执行生存任务，`core/survival_state.py` 按 API/账号/world_id 保存检查点；有 pending 意图时不得自动重放。`skills/survival.py` 的动作需要真实状态变化验证。
+- `core/competition_rules.py` 与 `core/competition_tasks.py` 实现 competition 规则快照、advancement 证据计分、任务状态与终态恢复；只读面板见 `docs/MONITORING.md`。计分以服务端状态为准，条件项须显式 override。当前 45 个明确计分项目中仅 7 个有明确行动计划；其余目录虽可评估计分但标为 unsupported。不得把离线覆盖说成完整比赛执行验收。
 - 模型只能选择已注册技能；返回后须重新观察并通过本地安全门禁。所有模型请求必须经过 `core/model_gate.py`，禁止并发请求；传输超时/连接中断留下持久化未知状态，不得自动重试或擅自清锁。明确 HTTP 失败可有界退避，不回退为规则采集。`llm.model` 是请求路由，实际模型仅采用 `response.model`，缺失时显示“未确认”。
 
 ## 构建、测试与开发命令
@@ -69,3 +70,9 @@ Copy-Item config.example.yaml config.yaml
 - 接口写明真实名称或 HTTP 方法/路径、参数示例、单位及关键返回字段。尚未绑定的入口必须注明，不虚构可调用工具。
 - 原理、公式、来源和长示例放入 `references/`，不默认注入模型上下文。只给当前任务需要的状态与结果摘要。
 - 会话管理、坐标转换、采样、数学计算及并发监控由 harness 负责；skill 只让模型选择行动，并给出明确的完成、失败和中止条件。
+
+## 文档状态同步
+
+- `docs/ARCHITECTURE.md` 描述当前 starter/daily/competition 运行链路；`docs/HARNESS_INTERFACES.md` 分开记录现有比赛得分任务子集和未来提案。不得因旧 `agent/loop.py` 有 TODO 就宣称生存主循环未接通。
+- 当前只读面板聚合 heartbeat、Agent 阶段、模型槽、pending、competition 任务快照；API 端点延迟、检查点写入健康度、无进展/重复输出告警与可靠性汇总仍待补。历史裁剪按请求字节预算执行，不等于 Pi/OMP 式语义 compact；阶段目标清单、handoff、Markdown skill 加载、水面优先导航和自动搭路仍待实现。
+- 测试结果注明源码基线、环境与是否本轮复核；历史全绿不能覆盖另一环境中的失败。最新结果与已知差异统一放 `docs/TESTING.md`。

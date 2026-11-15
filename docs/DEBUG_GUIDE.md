@@ -26,7 +26,11 @@
 
 生存模式还记录 `DECISION`、`STEP_RESULT`、`SAFETY_INTERRUPT`、`DEATH_OBSERVED`、`RECOVERY_REQUIRED`、`PAUSED` 和预算耗尽事件。无论飞行日志是否开启，`survival.state_dir` 都保存按服务器/机器人/world_id 隔离的原子检查点和事件记录。HTTP 超时或内部验证异常后的 pending 不会自动重放。
 
-目前没有全量三维现场快照、模型推理追踪或自动回放。
+`--resume`（或可信玩家的 `#resume`）只解除生存控制器暂停并重新观察；模型请求的跨进程未知锁独立处理。`--acknowledge-model-idle` 必须先确认 provider 已无请求执行，不得仅凭客户端超时或模型取消就使用。详细错误与恢复契约见 [SURVIVAL.md](SURVIVAL.md) 和 [DAILY_SURVIVAL.md](DAILY_SURVIVAL.md)。
+
+启用 `debug.monitor.enabled` 后，`debug/monitor.py` 提供本机回环地址上的只读网页，默认端口18930。展示任务板、观察与执行证据、模型请求/返回及实际 `response.model`、token/耗时、模型槽状态和记忆摘要。只展示运行时显式发布的事件，经过脱敏和数量/大小限制；不是通用文件浏览器或远程控制台。模型返回的 reasoning/content 字段属于服务返回数据，不代表可以检查模型内部状态。
+
+目前没有全量三维世界快照或完整自动游戏回放。模型原始响应和技能结果日志可用于排查，但不替代实机后验。正式比赛关闭聊天调试；本机只读监控也不能被当作人工代操作入口。
 
 ## 离线回归
 

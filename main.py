@@ -19,7 +19,7 @@ def parse_args(argv=None):
     parser.add_argument("--username", default=None, help="Override the configured Minecraft username")
     parser.add_argument("--debug", action="store_true", help="Enable allowlisted in-game debug commands")
     parser.add_argument("--mode", choices=("sleep", "survival"), help="Override agent.mode")
-    parser.add_argument("--objective", choices=("starter", "daily"), help="Select starter goal or ongoing daily survival")
+    parser.add_argument("--objective", choices=("starter", "daily", "competition"), help="Select starter, daily survival or model-driven competition scoring")
     parser.add_argument("--max-steps", type=int, help="Bound survival observation/action cycles")
     parser.add_argument("--once", action="store_true", help="Run one sleep attempt or survival decision and exit")
     parser.add_argument("--resume", action="store_true", help="Explicitly resume survival from fresh observations; never replay a saved action")
@@ -38,6 +38,11 @@ def main(argv=None) -> int:
             if config["agent"]["mode"] != "survival":
                 raise ConfigError("--objective is only available in survival mode")
             config["survival"]["objective"] = args.objective
+        if config["survival"]["objective"] == "competition":
+            if config["agent"]["mode"] != "survival" or not config["llm"]["enabled"]:
+                raise ConfigError("competition requires survival mode and llm.enabled=true")
+            if args.debug or config["debug"]["enable_in_game_commands"]:
+                raise ConfigError("competition disables in-game debug commands")
         if args.acknowledge_model_idle and (config["agent"]["mode"] != "survival" or not config["llm"]["enabled"]):
             raise ConfigError("--acknowledge-model-idle requires model survival mode")
         if args.resume and config["agent"]["mode"] != "survival":

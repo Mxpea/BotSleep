@@ -11,7 +11,14 @@ agent:
   mode: "sleep"                           # sleep or survival; --mode overrides this.
 
 survival:
-  objective: "starter"                     # starter: bounded stone tools; daily: ongoing survival; --objective overrides.
+  objective: "starter"                     # starter, daily, competition (requires llm.enabled; no chat debug).
+  competition:
+    # Conditions in the draft are NOT enabled automatically. Set final-table IDs explicitly.
+    eligibility_overrides: {}              # e.g. minecraft:story/follow_ender_eye: true (only if final rules score it).
+    defer_seconds: 300                    # Force-exited goals cannot be immediately reselected.
+    advancement_poll_seconds: 5
+    max_seconds: 28800                    # Persisted competition session budget, not an official match clock.
+    max_steps: 100000                     # Separate from starter/daily development step budget.
   daily:
     food_reserve: 8                         # Target inventory item counts, not saturation guarantees.
     wood_reserve: 8
