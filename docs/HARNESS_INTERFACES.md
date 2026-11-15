@@ -1,6 +1,6 @@
 # Harness 接口契约与架构决策
 
-更新：2026-11-15；源码核对基线为当前工作区赛事任务改动。状态：**第 2 节与第 5 节赛事任务子集为现有运行接口；其余未实现入口仍是设计提案**。路径均相对本仓库；部署地址、账号与凭据由配置提供。
+更新：2026-11-15；源码核对基线为合并后的 `3801be9`。状态：**第 2 节与第 5 节赛事任务子集为现有运行接口；其余未实现入口仍是设计提案**。路径均相对本仓库；部署地址、账号与凭据由配置提供。
 
 合并说明：本页保留 dev-aure 的赛事接口设计访谈，不是当前全部运行能力清单。合并后的配置入口、原生模型反馈、日常技能、单模型请求门禁及本地安全运行时见 [README.md](../README.md)、[DAILY_SURVIVAL.md](DAILY_SURVIVAL.md) 和 [TESTING.md](TESTING.md)。这些实现不代表完整阶段 skill 加载、compact/handoff、浮水/搭桥执行器等未来提案已经落地。
 
@@ -31,11 +31,17 @@
 | 调试控制 | `pause(reason)`、`resume()`、`request_step()`、`request_sleep()`、`close()` | 生存内部/白名单调试入口，不是新增赛事模型工具；resume 不重放 pending |
 | 模型选择 | `LLMSurvivalPlanner.choose(observation,context,cancel_event)` | 返回一个 Decision；`observe_result(decision,result,observation)` 回传配对原生工具结果 |
 | 模型门禁 | `ModelRequestGate.request(cancel_event)`、`snapshot()` | 本机线程/进程串行化；传输未知持久化锁定；不自动清锁 |
-| 进度/记忆 | `SurvivalJournal.update/record`、`SurvivalMemory.recall/record_result` | 已有按世界隔离的检查点及有界 SQLite；不是新赛事 checkpoint schema |
+| 进度/记忆 | `SurvivalJournal.update/record`、`SurvivalMemory.recall/record_result` | 按 API/账号/world_id 隔离的检查点及有界 SQLite；competition 子状态可恢复终态，pending 不重放 |
 | 模型工具目录 | `tools_for_objective("starter"/"daily"/"competition")` | 9/31/36 个已注册工具；competition 的 5 个任务工具由本地任务管理器执行，游戏工具仍受后验门禁 |
 | 赛事任务 | `CompetitionTasks`、`tools_for_objective("competition")`、`MinecraftAgentClient.advancements()` | 规则目录、目标选择、progress/finish/force-exit/end、服务器 advancement 计分和终态检查点已实现；模型自报不算证据 |
 | 要塞 | `EyeObservationCollector.capture()`、`CalculateStrongholdSkill.execute(...)` | 独立 Python/CLI；STRONGHOLD_TOOL_DEFINITION 未加入 starter/daily/competition 工具目录 |
 | Markdown skill | `skills/stronghold_localization/SKILL.md` | 策略文档，无运行时按需加载器 |
+| 扩展客户端 | `get_block([x,y,z])` / `get_block(x,y,z)`、`dig([x,y,z], collect=True)` / `dig(x,y,z,...)`、`get_inventory_counts()` | 坐标兼容与背包计数；主入口仍使用配置凭据。`move_to` 可省略 y，z 通过显式参数传入。 |
+| 独立宏技能 | `NetherPortalSpeedrunSkill.execute(step=1, **kwargs)`、`CraftItemSkill.execute(...)`、`ChopTreeSkill.execute(...)` | Python 实现已合并，未绑定 starter/daily/competition；与模型 `craft_item` 的生存实现不同。 |
+| 开发雷达 | `main.py --debug --radar`、`ContinuousRadarSkill.enable/disable/execute` | 后台读取并写开发 `MemoryEngine`；不用于 advancement 核验。 |
+
+`PROCEDURAL_TOOL_DEFINITIONS` 中的 pillar_up/chop_tree/radar_sweep/cast_nether_portal 只是独立 schema，不由 `tools_for_objective(...)` 返回。特别是 `cast_nether_portal(axis)` 与分步技能需要的阶段坐标不是同一调用契约，不能直接注册到 harness。门户 `PortalTelemetryRecorder` 主动读取 API，不是现有监控服务的事件订阅或健康告警。
+
 
 目标与能力差异：daily 的 13 项证据任务板不等于赛事 advancement 清单；competition 现在提供 advancement 任务板和结束 gate，但尚未实现完整阶段清单、动态 skill 加载或导航执行器；starter 的 `goal_complete` 与 competition 的 `end_competition` 是两套退出语义。
 

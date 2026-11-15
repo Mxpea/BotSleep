@@ -1,6 +1,6 @@
 # BotSleep 架构与实现状态
 
-更新：2026-11-15。源码核对基线：当前工作区 `c21d623` 加赛事任务改动。本页描述拉取后的实际运行路径；未来赛事接口和已确认产品方向见 [HARNESS_INTERFACES.md](HARNESS_INTERFACES.md)。验证结果见 [TESTING.md](TESTING.md)，不要把设计图或历史实服状态当作当前验收。
+更新：2026-11-15。源码核对基线：`3801be9`，另含本轮文档同步与实服测试隔离改动。本页描述拉取后的实际运行路径；未来赛事接口和已确认产品方向见 [HARNESS_INTERFACES.md](HARNESS_INTERFACES.md)。验证结果见 [TESTING.md](TESTING.md)，不要把设计图或历史实服状态当作当前验收。
 
 ## 1. 当前入口与运行模式
 
@@ -19,47 +19,23 @@
 
 ```mermaid
 flowchart TD
-    subgraph CognitiveLayer["🧠 慢思考：大模型认知层 (System 2)"]
-        LLM["大模型 (OpenAI API 兼容接口)<br/>负责：战术推理、环境总结、长期目标规划"]
-        SubAgents["🤖 专项 Sub-Agents 派发调度<br/>(DailySurvival, NetherPortalSpeedrun, CompetitionTasks)"]
-    end
-
-    subgraph AgentScheduler["⚙️ 中枢调度：Agent 核心引擎"]
-        Planner["主决策状态机 (Main Loop / SurvivalHarness)"]
-        ReflexDaemon["⚡ 本地应急安全监控<br/>负责：坠落检测、窒息打断、濒死防御"]
-        FlightRecorder["📋 飞行记录仪 (Flight Recorder)<br/>结构化跟踪决策流与动作事件"]
-    end
-
-    subgraph PerceptionMemory["📡 感知与空间记忆引擎 (core/)"]
-        Radar["3D 方块雷达 (BlockRadar)<br/>(POI 定向扫描 / 全景生态测绘 / 地形网格)"]
-        Memory["空间知识库 (MemoryEngine)<br/>(landmarks, spatial_grid, episodic_memory)"]
-        Radar --> Memory
-    end
-
-    subgraph SkillLayer["📦 快反应：程序化宏技能库 (System 1)"]
-        SkillRadar["常态雷达勘探 (ContinuousRadarSkill)"]
-        SkillPortal["速通地狱门水桶浇筑 (NetherPortalSpeedrunSkill)"]
-        SkillCraft["智能配方逆向合成 (CraftItemSkill)"]
-        SkillChop["智能整树连续伐木 (ChopTreeSkill)"]
-        SkillSleep["智能找床睡眠 (auto_sleep)"]
-    end
-
-    subgraph DriverLayer["🔌 驱动层：mc-agent-api"]
-        MC_Client["Python Client SDK"]
-        HTTP_API["mc-agent-api (HTTP 18900)"]
-        GameServer["Minecraft Leaves 1.21.11"]
-    end
-
-    LLM <-->|Function Calling / JSON| Planner
-    Planner --> SubAgents
-    Memory -.->|知识库切片简报 Context| SubAgents
-    Planner --> SkillLayer
-    SkillRadar --> Radar
-    ReflexDaemon -.->|安全检查与打断| SkillLayer
-    SkillLayer --> MC_Client
-    MC_Client <--> HTTP_API <--> GameServer
-    Planner --> FlightRecorder
+    A[配置与唯一游戏客户端] --> B[SurvivalHarness.tick]
+    B --> C[新鲜状态与资源观察]
+    C --> D[starter / daily / competition 目标与受限记忆]
+    D --> E[规则规划或串行模型 worker]
+    E --> F[重新观察与本地安全门禁]
+    F --> G[写 pending 后执行已注册技能]
+    G --> H[后验核验与原生工具反馈]
+    H --> I[检查点与有界 SQLite 记忆]
+    I --> B
+    S[主线程安全监测] --> F
+    H --> R[事件日志与只读监控]
 ```
+
+`DailySurvivalGoals`、`CompetitionTasks` 是本地任务组件，不是模型 subagent；当前无图中“多专项模型派发”一类运行时。主循环也没有把传送门、整树伐木或独立配方规划器接入模型分派。
+
+另有开发路径：`--debug --radar` 创建 `ContinuousRadarSkill` 并开启 daemon 线程，读取客户端、将 POI/航迹写入 `MemoryEngine`。单独 `--radar` 不创建该对象。门户浇筑、独立合成与伐木需由程序显式调用；聊天的 `chop_skill`、`craft_skill` 注入槽在 `main.py` 尚未赋值。它们不继承生存 harness 的动作互斥、pending 和取消恢复保证。
+
 
 模型每轮只提一个已注册的工具，程序验证参数与执行前状态，再派发有限技能或最多 8 步的小批任务。模型文本自报“完成”、API 返回 ok 或路径目标点存在，均不能替代技能的实际效果核验。
 
@@ -69,11 +45,12 @@ flowchart TD
 |---|---|
 | `core/client.py` | 统一端点、认证、HTTP/业务错误与超时；保留原响应封装，列表型方法做结构转换 |
 | `core/radar.py` | 3D 方块全景雷达测绘与关键 POI 定向扫描 |
-| `core/recipes.py` | 内置 886 种配方逆向递归解析与材料预算推导 |
-| `skills/portal_speedrun.py` | 速通级 10 块黑曜石水桶浇筑、点火与框架状态验证 |
+| `core/recipes.py`、`data/recipes.json` | 886 个可合成产物的配方目录及前置解析；独立 `CraftItemSkill` 使用，不替换模型 `craft_item` |
+| `skills/portal_speedrun.py` | 独立分步浇筑、点火与门框读取；坐标和阶段由调用者提供，未绑定模型工具 |
+| `skills/portal_telemetry.py`、`skills/lava_lake_generator.py` | 前者主动读取门户动作前后状态并导出 JSON，后者通过 RCON 生成专用测试地形；不是只读 EventMonitor |
 | `skills/crafting.py` | 智能 2x2/3x3 工作台调度合成与工作台自动回收 |
 | `skills/mining.py` | 整树连续自动伐木与掉落物拾取 |
-| `skills/exploration.py` | 常态化连续巡航雷达与位移触发扫描 |
+| `skills/exploration.py` | 可开关后台雷达，约每秒读取状态，默认位移 6 格后扫描；不是寻路或导航执行器 |
 | `skills/daily_survival.py` | 日常生存技能库（作物、狩猎、铁矿、装备、熔炼、储物、床门、5x5 庇护所） |
 | `core/survival_harness.py` | 串行任务推进、单游戏动作线程、独立模型 worker、安全复查、取消、失败退避和检查点 |
 | `agent/llm_planner.py`、`agent/tools.py` | 按 objective 暴露 starter 9 / daily 31 / competition 36 工具；严格解析原生 tool call，保留配对工具反馈 |
@@ -87,7 +64,7 @@ flowchart TD
 | `debug/` | 白名单聊天调试、脱敏日志、本机只读监控；不是人工比赛控制方案 |
 | `integrations/ninjabrain/` | 独立末影之眼采样和官方计算核心；未绑定 starter/daily 模型目录 |
 
-旧 `agent/loop.py` 和 `core/telemetry.py.ReflexDaemon` 仍有 TODO，但不是当前生存主循环。`core/memory.py` 与 `data/game_logic/` 属旧记忆体系，不是当前生存检查点；维护时不要据旧骨架推断整个系统未实现。
+旧 `agent/loop.py` 和 `core/telemetry.py.ReflexDaemon` 仍有 TODO，但不是当前生存主循环。`core/memory.py` 与 `data/game_logic/` 现被开发雷达/独立伐木复用，但不是当前生存检查点或 SQLite 记忆。默认数据目录不按 API/账号/world_id 隔离，其中部分文件受版本控制，调试后须检查 diff。维护时不要据旧骨架推断整个系统未实现。
 
 ## 4. 模型请求与游戏动作的两套未知状态
 
@@ -122,6 +99,7 @@ flowchart TD
 ## 8. 协作开发与分支规范
 
 为保障多人协作与版本隔离：
+
 - **主分支 (`main`)**：保持纯净且可稳定部署的代码基准。
 - **个人工作分支 (`develop-tianya`)**：用于 TianYa 的个人功能开发、测试与阶段性提交。
 - **存档隔离原则**：Minecraft 运行世界（`world/`）与庞大二进制必须物理隔绝在独立服务端，严禁推送到 Git 仓库。

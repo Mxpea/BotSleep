@@ -6,12 +6,13 @@ BotSleep 基于 mc-agent-api 控制 Minecraft 机器人，采用大模型决策�
 
 - **用户约束（2026-11-14）**：不要修改或提交相邻 `mc-agent-api` 仓库。所有适配和修复在 BotSleep 内完成；上游行为不足时记录限制，不依赖本地 API 补丁。
 
-- `main.py`：配置驱动的睡眠/生存入口；`survival.objective` 区分 starter 与 daily。日常任务图在 `agent/daily_survival.py`，技能、观察、策略与 SQLite 记忆见 `docs/DAILY_SURVIVAL.md`。开启 `llm.enabled` 后使用原生工具调用与结果反馈。
+- `main.py`：配置驱动的睡眠/生存入口；`survival.objective` 区分 starter、daily 与 competition。日常任务图在 `agent/daily_survival.py`，技能、观察、策略与 SQLite 记忆见 `docs/DAILY_SURVIVAL.md`。开启 `llm.enabled` 后使用原生工具调用与结果反馈。
 - `core/`：HTTP 客户端、RCON、状态感知和记忆管理。
 - `skills/`：移动、落地水和睡眠技能；遵循 `skills/__init__.py` 中的 `BaseSkill`、`SkillResult` 契约。
-- `debug/`：聊天指令、RCON 靶场、脱敏结构化日志和本机只读监控；`data/game_logic/` 保存旧版状态、地标与事件记忆，不用于当前运行检查点。
+- `debug/`：聊天指令、RCON 靶场、脱敏结构化日志和本机只读监控；`data/game_logic/` 保存开发雷达/独立技能复用的状态、地标与事件记忆，不用于当前运行检查点，部分文件仍受版本控制。
 - `docs/`：架构、技能契约和调试规范。修改相关行为前先阅读对应文档。
 - `integrations/ninjabrain/`：无界面要塞计算与坐标采样；`tests/` 为 unittest 回归测试，`data/examples/` 存合成输入。
+- `skills/portal_speedrun.py`、`skills/crafting.py`、`skills/mining.py` 和 `core/radar.py` 是已合并的独立/调试能力；独立 schema 不等于已绑定模型工具。模型目录仍为 starter 9、daily 31、competition 36；详见 `docs/SKILL_SPEC.md`。门户主动采样不等于只读 EventMonitor。
 - 根目录 `bot_sleep.py`、`client.py` 是兼容入口，分别复用 `main.py` 和 `core/client.py`，不要再复制实现。
 - `core/survival_harness.py` 串行执行生存任务，`core/survival_state.py` 按 API/账号/world_id 保存检查点；有 pending 意图时不得自动重放。`skills/survival.py` 的动作需要真实状态变化验证。
 - `core/competition_rules.py` 与 `core/competition_tasks.py` 实现 competition 规则快照、advancement 证据计分、任务状态与终态恢复；只读面板见 `docs/MONITORING.md`。计分以服务端状态为准，条件项须显式 override。当前 45 个明确计分项目中仅 7 个有明确行动计划；其余目录虽可评估计分但标为 unsupported。不得把离线覆盖说成完整比赛执行验收。
@@ -45,6 +46,8 @@ Copy-Item config.example.yaml config.yaml
 ```powershell
 .\.venv\Scripts\python.exe -B -m unittest discover -s tests -v
 ```
+
+默认不启用实服测试。`tests/test_speedrun_portal.py` 的 3 项测试仅在 `BOTSLEEP_RUN_LIVE_TESTS=1` 时执行；`tests/test_crafting.py` 和 `tests/test_random_lava_matrix.py` 是直接运行的实服脚本，不是离线 unittest。它们会给物、传送或改地形，需专用世界、显式环境凭据与固定 SleepBot 账号。不得把跳过记为实服通过。隔离门禁回归见 `tests/test_live_test_isolation.py`。
 
 涉及游戏行为时，在专用测试世界验证登录、状态读取和目标技能，并记录复现步骤、预期结果及日志。新增自动化测试放在 `tests/test_<module>.py`，模拟 HTTP、模型与 RCON 响应。搭高、落地水和高频反射仍未完成；自动睡眠、确定性规划与模型生存循环已接入主入口。必须区分协议/离线测试通过、真实技能成功和完整生存目标完成；模型返回工具调用不等于采集或制作成功。`#stop` 请求取消并暂停自动尝试，不保证后端所有动作瞬时终止。
 

@@ -15,6 +15,12 @@
 
 快照 `updated_at/stale` 与 heartbeat 分开展示，stale 只展示运行时标记；缺失时间不伪装新鲜。所有赛事字段复用 EventMonitor 脱敏与有界存储：最多 500 条事件，默认 8 MiB 缓存，单条最多 1 MiB（也受总预算约束），另有字符串、数组和嵌套上限。过大事件只留截断提示，面板可能仍保留前一有效快照，应结合时间线判断。
 
+## 门户调试记录与系统监控的区别
+
+最新合并加入 `skills/portal_telemetry.py` 的 `PortalTelemetryRecorder`：`record_step(...)` 会主动读取机器人、目标方块和可选门框矩阵，也可通过 `action_func` 执行动作；`dump_json(filepath=None)` 默认写 `logs/telemetry/trial_<trial_id>.json`。这些是独立门户靶场证据，未接入 `EventMonitor` 或赛事计分，不是只读监控接口。
+
+`LavaLakeGenerator` 和随机岩浆矩阵脚本会通过 RCON 改地形/物品/位置，仅用于专用测试世界。文件中的零伤害、水不外溢和通过率是测试目标；本轮只验证默认门禁，不声称这些目标已在新版本实服达成。导出的 JSON 不自动继承 FlightRecorder 脱敏或容量限制，分享前需检查。
+
 ## 状态监控建议与当前缺口
 
 不要用单个“健康”灯把不同故障合并。至少分开看以下层次，且每个值保留自己的时间戳/来源：

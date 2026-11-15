@@ -4,9 +4,9 @@ import sys
 import os
 import json
 import logging
-from mcrcon import MCRcon
 
-sys.path.append(r"E:\Program Save\VisualCode\BotSleep")
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from core.client import MinecraftAgentClient
 from core.memory import MemoryEngine
 from skills.crafting import CraftItemSkill
@@ -14,8 +14,17 @@ from skills.crafting import CraftItemSkill
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
 def main():
+    if os.environ.get("BOTSLEEP_RUN_LIVE_TESTS") != "1":
+        raise SystemExit("Live RCON crafting fixture disabled; use a disposable world and set BOTSLEEP_RUN_LIVE_TESTS=1")
+    if os.environ.get("MC_AGENT_USER", "SleepBot") != "SleepBot":
+        raise SystemExit("This fixed fixture requires MC_AGENT_USER=SleepBot")
+    from mcrcon import MCRcon
+    client = MinecraftAgentClient(base_url=os.environ["MC_AGENT_API"], username="SleepBot",
+                                   password=os.environ["MC_AGENT_PASSWORD"])
+    rcon_password = os.environ["MC_RCON_PASSWORD"]
     print("=== Step 1: Connecting RCON and providing test materials (8 oak_log) ===")
-    with MCRcon("127.0.0.1", "agent-rcon-pass", port=25575) as mcr:
+    with MCRcon(os.environ.get("MC_RCON_HOST", "127.0.0.1"), rcon_password,
+                port=int(os.environ.get("MC_RCON_PORT", "25575"))) as mcr:
         # Clear inventory to have a pristine test slate
         mcr.command("clear SleepBot")
         mcr.command("setblock -8 63 -3 air")
@@ -23,7 +32,6 @@ def main():
         print("RCON Give response:", res)
 
     print("\n=== Step 2: Logging in SleepBot via mc-agent-api ===")
-    client = MinecraftAgentClient()
     client.login()
 
     init_inv = client.get_inventory_counts()
