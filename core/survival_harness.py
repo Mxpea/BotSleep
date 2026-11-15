@@ -49,7 +49,16 @@ class SurvivalHarness:
         self.uses_llm = getattr(self.planner, "uses_llm", False) is True
         self._safety_rules = SurvivalPlanner(settings)
         self._model_feedback = False
-        self.daily = settings.get("objective", "starter") == "daily"
+        self.competition_mode = settings.get("objective", "starter") == "competition"
+        self.competition = None
+        self._competition_board_signature = None
+        self._competition_advancements = None
+        self._competition_advancements_fetched_at = None
+        self._competition_advancements_fetched_monotonic = None
+        self._competition_next_advancement = 0.0
+        self.daily = settings.get("objective", "starter") in {"daily", "competition"}
+        if self.competition_mode and not self.uses_llm:
+            raise ValueError("competition requires a model planner; no rule fallback")
         self.daily_goals = None
         self.daily_policy = None
         self.memory = None
@@ -94,6 +103,9 @@ class SurvivalHarness:
         self.context.setdefault("blocked_until", {})
         self.context.setdefault("explore_index", 0)
         self.context["death_count"] = 0
+        if self.competition_mode:
+            from core.competition_tasks import CompetitionTasks
+            self.competition = CompetitionTasks(settings.get("competition", {}), saved=self.context.get("competition"))
         if self.daily:
             from core.survival_memory import SurvivalMemory
             self.memory = SurvivalMemory(settings["state_dir"] + "/memory", endpoint=client.base_url,
@@ -114,8 +126,11 @@ class SurvivalHarness:
         self._budget_exhausted = False
         self.steps = 0
         self.failures = 0
-        self.finished = False
-        self.completed = False
+        terminal_competition = bool(self.competition and self.competition.snapshot().get("phase") == "completed")
+        self.finished = terminal_competition
+        self.completed = terminal_competition
+        if terminal_competition:
+            self.phase = "complete"
         self.last_result = None
         self.last_observation = None
         self.pause_reason = "interrupted_action_requires_resume" if self._paused else None
@@ -138,6 +153,8 @@ class SurvivalHarness:
             self.recorder.record(level, "survival", event, data)
 
     def _checkpoint(self, **changes):
+        if self.competition:
+            self.context["competition"] = self.competition.state()
         if self.recorder and callable(getattr(self.recorder, "redact", None)):
             changes = self.recorder.redact(changes)
         self.journal.update(**changes)
@@ -154,9 +171,11 @@ class SurvivalHarness:
                 "paused": self.paused, "pause_reason": self.pause_reason,
                 "finished": self.finished, "completed": self.completed, "phase": self.phase,
                 "planner": "llm" if self.uses_llm else "rules",
-                "objective": "daily" if self.daily else "starter",
+                "objective": "competition" if self.competition_mode else "daily" if self.daily else "starter",
+                "competition": self.competition.snapshot() if self.competition else None,
                 "model_blocked": self._model_blocked,
                 "model_pending": bool(self._model_worker and self._model_worker.pending),
+                "pending": copy.deepcopy(self.journal.state.get("pending")),
                 "daily_tasks": self.daily_board,
                 "memory_summary": {key: len(value) for key, value in self.context.get("memory", {}).items() if isinstance(value, list)},
                 "retry_in_seconds": max(0, round(self._next_attempt - time.monotonic(), 1)),
@@ -357,7 +376,12 @@ class SurvivalHarness:
     def _start(self, manual=None):
         if self._closed or self.busy or self.paused or self.finished:
             return False
-        if self.steps >= self.settings["max_steps"] or time.monotonic() - self._started >= self.settings["max_runtime_seconds"]:
+        step_limit = (self.settings.get("competition", {}).get("max_steps", 100000)
+                      if self.competition_mode else self.settings["max_steps"])
+        time_expired = (self.competition.snapshot().get("remaining_seconds", 0) <= 0
+                        if self.competition is not None else
+                        time.monotonic() - self._started >= self.settings["max_runtime_seconds"])
+        if self.steps >= step_limit or time_expired:
             self.finished = True
             self.pause_reason = "budget_exhausted"
             self._record("WARN", "BUDGET_EXHAUSTED", {"steps": self.steps})
@@ -406,6 +430,73 @@ class SurvivalHarness:
                 self._record("INFO", "DAILY_TASKS", {"board": self.daily_board,
                     "memory_counts": {key: len(value) for key, value in recalled.items() if isinstance(value, list)}})
                 self._daily_board_signature = signature
+        self._competition_context(observation)
+
+    def _competition_context(self, observation):
+        """Refresh evidence outside the model; retain unknowns instead of fabricated progress."""
+        if not self.competition:
+            return
+        if observation.get("observation_scope") == "safety" or observation.get("fresh") is False:
+            self.context["competition"] = self.competition.state()
+            return
+        now = time.monotonic()
+        if now >= self._competition_next_advancement:
+            interval = self.settings.get("competition", {}).get("advancement_poll_seconds", 5)
+            self._competition_next_advancement = now + interval
+            try:
+                self._competition_advancements = self.client.advancements(
+                    status="all", include_recipes=False, include_criteria=False, timeout_seconds=3)
+                self._competition_advancements_fetched_at = time.time()
+                self._competition_advancements_fetched_monotonic = time.monotonic()
+            except APIError as error:
+                self._competition_advancements = None
+                self._competition_advancements_fetched_at = None
+                self._competition_advancements_fetched_monotonic = None
+                self._record("WARN", "COMPETITION_EVIDENCE_UNAVAILABLE", {"code": error.code})
+        fetch_mono = self._competition_advancements_fetched_monotonic
+        cache_now = time.monotonic()
+        cache_fresh = fetch_mono is not None and 0 <= cache_now - fetch_mono <= 5
+        advancements = self._competition_advancements if cache_fresh else None
+        fetched_at = self._competition_advancements_fetched_at if cache_fresh else None
+        tools = getattr(self.planner, "tool_definitions", [])
+        capabilities = [entry["function"]["name"] for entry in tools]
+        board = self.competition.update(observation, advancements, capabilities=capabilities,
+                                        advancements_fetched_at=fetched_at)
+        self.context["competition"] = self.competition.state()
+        signature = json.dumps(board, sort_keys=True, ensure_ascii=True)
+        if signature != self._competition_board_signature:
+            self._record("INFO", "COMPETITION_TASKS", {"board": board})
+            self._competition_board_signature = signature
+
+    def _competition_tool(self, decision, observation):
+        """Handle metadata-only task tools at an idle, fresh execution boundary."""
+        if not self.competition:
+            return None
+        names = {"select_task", "update_progress", "finish_task", "force_exit_task", "end_competition"}
+        if decision.name not in names:
+            if self.competition.snapshot().get("active_goal_id") is None and decision.name not in {
+                "wait", "retreat_from", "eat_food", "auto_sleep"}:
+                return SkillResult(False, "Select a scored goal before production actions", {"executed": False}, "task_selection_required")
+            return None
+        status = observation.get("status", {})
+        if status.get("busy") or not status.get("ready") or not status.get("alive") or self._cancel.is_set():
+            return SkillResult(False, "Task transition requires an idle fresh living observation", {"executed": False}, "task_transition_unsafe")
+        if self.journal.state.get("pending"):
+            return SkillResult(False, "Uncertain game intention must be reconciled before task transitions", {"executed": False}, "action_unconfirmed")
+        if decision.name == "select_task":
+            response = self.competition.select(decision.args["goal_id"])
+        elif decision.name == "update_progress":
+            response = self.competition.update_progress(decision.args["summary"])
+        elif decision.name == "finish_task":
+            response = self.competition.finish(decision.args["reason"])
+        elif decision.name == "force_exit_task":
+            response = self.competition.force_exit(decision.args["reason"])
+        else:
+            response = self.competition.end_competition(decision.args["reason"])
+        self.context["competition"] = self.competition.state()
+        self._checkpoint(context=self.context)
+        self._record("INFO", "COMPETITION_TASKS", {"board": self.competition.snapshot()})
+        return SkillResult(response["success"], response.get("message", ""), response.get("data", {}), response.get("error_code"))
 
     def _observe(self, *, safety_only=False):
         if callable(getattr(self.collector, "set_context", None)):
@@ -447,7 +538,27 @@ class SurvivalHarness:
             if decision is not None:
                 return decision
         self._safety_baseline = copy.deepcopy(observation["status"])
-        worker.start(observation, self.context)
+        model_context = self.context
+        if self.competition:
+            model_context = copy.deepcopy(self.context)
+            # Competition goals are the primary board. Do not duplicate the
+            # entire daily-production catalogue or its unrelated top-3 hints.
+            model_context.pop("daily_tasks", None)
+            model_context.pop("action_hints", None)
+            board = self.competition.snapshot()
+            model_context["competition"] = {key: board.get(key) for key in (
+                "phase", "active_goal_id", "progress_card", "score", "stale", "remaining_seconds", "last_exit", "advancements", "assessment_complete")}
+            active = next((row for row in board.get("tasks", []) if row.get("id") == board.get("active_goal_id")), None)
+            model_context["competition"]["active_goal"] = ({key: active.get(key) for key in (
+                "id", "title", "points", "stage", "missing", "next_steps", "reason", "required_skills")} if active else None)
+            model_context["competition"]["selectable_goal_ids"] = [row["id"] for row in board["tasks"] if row["selectable"]]
+            model_context["competition"]["catalog_assessment"] = {
+                key: board["catalog_assessment"][key] for key in ("checked", "total", "known_count", "complete")}
+            model_context["competition"]["task_columns"] = ["id", "title", "difficulty", "points", "eligibility", "availability", "completion"]
+            model_context["competition"]["tasks"] = [[row.get(key) for key in (
+                "id", "title", "difficulty", "points", "eligibility", "availability", "completion")]
+                for row in board.get("tasks", [])]
+        worker.start(observation, model_context)
         while not worker.done:
             if self._cancel.wait(.05):
                 worker.cancel()
@@ -606,6 +717,9 @@ class SurvivalHarness:
             self._record("INFO", "DECISION", {"decision": asdict(decision), "status": observation["status"],
                                                "counts": observation["counts"], "milestones": self.context["milestones"],
                                                "source": "model" if self._model_feedback else "manual" if manual else "safety" if self.uses_llm else "rules"})
+            task_result = self._competition_tool(decision, observation)
+            if task_result is not None:
+                return decision, task_result, observation
             if decision.name == "wait":
                 self._phase("waiting")
                 return decision, SkillResult(True, decision.reason, {"waiting": True}), observation
@@ -738,7 +852,10 @@ class SurvivalHarness:
     def tick(self, automatic=True):
         if self._closed:
             return None
-        if not self.finished and time.monotonic() - self._started >= self.settings["max_runtime_seconds"]:
+        time_expired = (self.competition.snapshot().get("remaining_seconds", 0) <= 0
+                        if self.competition is not None else
+                        time.monotonic() - self._started >= self.settings["max_runtime_seconds"])
+        if not self.finished and time_expired:
             self._budget_exhausted = True
             if self._future is not None and not self._future.done() and not self._cancel.is_set():
                 self._cancel.set()
@@ -773,6 +890,10 @@ class SurvivalHarness:
             self.last_result, self.last_observation = result, observation
             self.context["last_result"] = asdict(result)
             self._daily_result(decision, result, observation)
+            if self.competition and decision.name not in {"select_task", "update_progress", "finish_task", "force_exit_task", "end_competition"}:
+                self.competition.record_action(decision.name, decision.args, asdict(result), observation)
+                self.context["competition"] = self.competition.state()
+                self._record("INFO", "COMPETITION_TASKS", {"board": self.competition.snapshot()})
             if decision.goal == "explore" and decision.name == "move_to":
                 self.context["explore_index"] = self.context.get("explore_index", 0) + 1
             delay = self.settings["poll_interval_seconds"]
@@ -834,7 +955,9 @@ class SurvivalHarness:
                 elif (decision.name == "retreat_from" and result.data.get("retreat_complete") is False
                       and result.data.get("evacuation_stage") == "relay"):
                     delay = 0  # Next tick reobserves; never replay the saved route.
-                self.completed = decision.name == "goal_complete"
+                terminal_competition = bool(
+                    self.competition and self.competition.snapshot().get("phase") == "completed")
+                self.completed = decision.name == "goal_complete" or terminal_competition
                 self.finished = self.completed
             if self._budget_exhausted:
                 self.finished = True
@@ -852,7 +975,9 @@ class SurvivalHarness:
             return result
         if self.finished:
             return None
-        if self.steps >= self.settings["max_steps"] or self._budget_exhausted:
+        step_limit = (self.settings.get("competition", {}).get("max_steps", 100000)
+                      if self.competition_mode else self.settings["max_steps"])
+        if self.steps >= step_limit or self._budget_exhausted:
             self.finished = True
             self.pause_reason = "budget_exhausted"
             self._record("WARN", "BUDGET_EXHAUSTED", {"steps": self.steps})

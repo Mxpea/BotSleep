@@ -273,6 +273,22 @@ class MinecraftAgentClient:
     def inventory(self, *, timeout_seconds: Optional[float] = None) -> Dict[str, Any]:
         return self._request("GET", "inventory", timeout_seconds=timeout_seconds)
 
+    def advancements(self, *, status: str = "all", include_recipes: bool = False,
+                     include_criteria: bool = False, timeout_seconds: Optional[float] = None) -> Dict[str, Any]:
+        """Read server-synchronized visible advancement records; missing IDs remain unknown."""
+        if status not in {"all", "completed", "in_progress", "not_started"}:
+            raise ValueError("invalid advancement status filter")
+        if type(include_recipes) is not bool or type(include_criteria) is not bool:
+            raise ValueError("advancement flags must be boolean")
+        envelope = self._request("POST", "advancements", payload={
+            "status": status, "include_recipes": include_recipes, "include_criteria": include_criteria,
+        }, timeout_seconds=timeout_seconds)
+        result = self._result(envelope)
+        self._list(result, "advancements")
+        if type(result.get("ready")) is not bool:
+            raise APIError("invalid_response", "Advancement readiness flag missing")
+        return envelope
+
     def get_inventory(self) -> Dict[str, Any]:
         """Compatibility spelling; returns the same envelope as inventory()."""
         return self.inventory()

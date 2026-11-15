@@ -64,12 +64,13 @@ class EventMonitor:
         self._secrets = deque(maxlen=256)
         self._lock = threading.RLock()
         self._state = {
-            "has_data": False, "last_seq": 0, "updated_at": None,
+            "has_data": False, "last_seq": 0, "updated_at": None, "heartbeat_at": None,
             "run": {"state": "waiting", "username": None, "planner": None, "model": None,
                     "steps": 0, "busy": False, "paused": False, "goal": None,
                     "phase": "idle", "pause_reason": None},
             "status": {}, "decision": None, "last_result": None,
             "daily": {"board": None, "memory_counts": {}},
+            "competition": {"board": None},
             "llm": {"state": "idle", "request": None, "response": None, "error": None,
                     "usage": None, "elapsed_ms": None, "request_model": None, "actual_model": None},
         }
@@ -161,13 +162,24 @@ class EventMonitor:
             state["status"] = data["status"]
         status = state["status"]
         for key in ("username", "planner", "model", "steps", "busy", "paused", "goal", "phase", "pause_reason",
-                    "objective", "model_blocked", "model_pending"):
+                    "objective", "model_blocked", "model_pending", "pending"):
             if key in data:
                 run[key] = data[key]
         if status.get("username"):
             run["username"] = status["username"]
         if event == "STARTUP":
             run["state"] = "starting"
+        if event == "HEARTBEAT":
+            state["heartbeat_at"] = record["timestamp"]
+        if event in {"COMPETITION_TASKS", "HEARTBEAT", "AGENT_STATE"}:
+            if event == "COMPETITION_TASKS":
+                board = data.get("board")
+            else:
+                competition = data.get("competition")
+                board = competition.get("board", competition) if isinstance(competition, dict) else competition
+            if isinstance(board, dict) or (event == "COMPETITION_TASKS" and "board" in data and board is None):
+                # Keep the redacted, bounded snapshot without assessing tasks.
+                state["competition"]["board"] = board
         if event == "HEARTBEAT":
             run["state"] = ("completed" if data.get("completed") else "finished" if data.get("finished")
                             else "paused" if run["paused"] else "running")
@@ -196,7 +208,9 @@ class EventMonitor:
             result = state["last_result"] if isinstance(state["last_result"], dict) else {}
             run.update(busy=False, state="paused" if run["paused"] else "running")
             result_data = result.get("data") if isinstance(result.get("data"), dict) else {}
-            if result_data.get("goal_complete"):
+            if result_data.get("goal_complete") or (
+                    result.get("success") is True and result_data.get("completed_session") is True
+                    and result_data.get("phase") == "completed"):
                 run["state"] = "completed"
         if event in {"PAUSED", "RECOVERY_REQUIRED"}:
             run.update(paused=True, state="paused", phase="paused", pause_reason=data.get("reason"))
