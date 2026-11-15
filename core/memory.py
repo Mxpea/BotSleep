@@ -1,27 +1,20 @@
-"""Memory and Cache Engine for BotSleep
+"""Memory and Spatial Knowledge Base Engine for BotSleep
 
-Persists and recalls game logic data, bot state, landmarks, world context,
-and episodic memories so the AI Agent can recall past context and decisions.
+Persists and indexes all game logic, bot states, spatial landmarks, terrain grids,
+and exploration episodes so AI and sub-agents can rapidly retrieve historical intelligence.
 """
 
 import os
 import json
 import time
+import math
 from typing import Dict, Any, List, Optional
 from dataclasses import dataclass, asdict
 
 
-@dataclass
-class Landmark:
-    name: str
-    category: str  # 'bed', 'chest', 'shelter', 'spawn', 'death', 'mine'
-    pos: List[float]
-    dimension: str = "overworld"
-    metadata: Dict[str, Any] = None
-    discovered_at: str = ""
-
-
 class MemoryEngine:
+    """Persistent spatial memory and sub-agent knowledge retrieval engine."""
+
     def __init__(self, data_dir: str = "data/game_logic"):
         self.data_dir = data_dir
         os.makedirs(self.data_dir, exist_ok=True)
@@ -29,19 +22,24 @@ class MemoryEngine:
         self.state_file = os.path.join(self.data_dir, "bot_state.json")
         self.landmarks_file = os.path.join(self.data_dir, "landmarks.json")
         self.world_file = os.path.join(self.data_dir, "world_context.json")
+        self.spatial_file = os.path.join(self.data_dir, "spatial_grid.json")
         self.episodes_file = os.path.join(self.data_dir, "episodic_memory.jsonl")
 
         self._init_files()
 
     def _init_files(self) -> None:
-        """Initializes data files if they do not exist."""
+        """Initializes data storage files if they do not exist."""
         if not os.path.exists(self.landmarks_file):
             with open(self.landmarks_file, "w", encoding="utf-8") as f:
                 json.dump({"spawn_point": None, "landmarks": []}, f, indent=2, ensure_ascii=False)
 
         if not os.path.exists(self.world_file):
             with open(self.world_file, "w", encoding="utf-8") as f:
-                json.dump({"last_survey": None, "explored_biomes": []}, f, indent=2, ensure_ascii=False)
+                json.dump({"last_survey": None, "explored_biomes": [], "block_census": {}}, f, indent=2, ensure_ascii=False)
+
+        if not os.path.exists(self.spatial_file):
+            with open(self.spatial_file, "w", encoding="utf-8") as f:
+                json.dump({"visited_waypoints": [], "explored_chunks": []}, f, indent=2, ensure_ascii=False)
 
     def save_bot_state(self, status: Dict[str, Any]) -> None:
         """Caches current bot position, vitals, orientation, and status."""
@@ -78,7 +76,7 @@ class MemoryEngine:
         dimension: str = "overworld",
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Records or updates a spatial landmark (e.g. bed, base, chest)."""
+        """Records or updates a spatial landmark (e.g. bed, base, chest, mineral)."""
         data = {"spawn_point": None, "landmarks": []}
         if os.path.exists(self.landmarks_file):
             try:
@@ -90,11 +88,9 @@ class MemoryEngine:
         if category == "spawn":
             data["spawn_point"] = pos
 
-        # Update if exists, or append
         existing = False
         for lm in data.get("landmarks", []):
-            if lm.get("name") == name and lm.get("category") == category:
-                lm["pos"] = pos
+            if lm.get("category") == category and lm.get("pos") == pos:
                 lm["metadata"] = metadata or {}
                 lm["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S.000Z")
                 existing = True
@@ -113,10 +109,105 @@ class MemoryEngine:
         with open(self.landmarks_file, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
 
-    def save_world_context(self, context: Dict[str, Any]) -> None:
-        """Saves environmental context (day/night, weather, surrounding map)."""
-        with open(self.world_file, "w", encoding="utf-8") as f:
-            json.dump(context, f, indent=2, ensure_ascii=False)
+    def record_waypoint(self, pos: List[float], dimension: str = "overworld") -> None:
+        """Records an explored spatial waypoint to maintain coverage tracking."""
+        try:
+            with open(self.spatial_file, "r", encoding="utf-8") as f:
+                grid = json.load(f)
+        except Exception:
+            grid = {"visited_waypoints": [], "explored_chunks": []}
+
+        grid_pos = [round(pos[0], 1), round(pos[1], 1), round(pos[2], 1)]
+        chunk_x = int(math.floor(pos[0] / 16))
+        chunk_z = int(math.floor(pos[2] / 16))
+        chunk_coord = [chunk_x, chunk_z]
+
+        if chunk_coord not in grid.get("explored_chunks", []):
+            grid.setdefault("explored_chunks", []).append(chunk_coord)
+
+        grid.setdefault("visited_waypoints", []).append({
+            "pos": grid_pos,
+            "dimension": dimension,
+            "t": time.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+        })
+
+        if len(grid["visited_waypoints"]) > 1000:
+            grid["visited_waypoints"] = grid["visited_waypoints"][-1000:]
+
+        with open(self.spatial_file, "w", encoding="utf-8") as f:
+            json.dump(grid, f, indent=2, ensure_ascii=False)
+
+    def update_from_radar(self, poi_findings: Dict[str, List[Dict[str, Any]]], current_pos: List[float], dimension: str = "overworld") -> int:
+        """Batch-updates spatial memory from radar POI discoveries."""
+        count = 0
+        for cat, items in poi_findings.items():
+            if cat == "error":
+                continue
+            for item in items:
+                name = item.get("name", "unknown")
+                pos = item.get("pos", [0, 0, 0])
+                dist = item.get("dist", 0.0)
+                self.record_landmark(
+                    name=name,
+                    category=cat,
+                    pos=pos,
+                    dimension=dimension,
+                    metadata={"dist_at_discovery": dist, "properties": item.get("properties")},
+                )
+                count += 1
+        return count
+
+    def query_pois(
+        self,
+        category: Optional[str] = None,
+        max_distance: float = 64.0,
+        from_pos: Optional[List[float]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Queries stored landmarks sorted by proximity to from_pos."""
+        if not os.path.exists(self.landmarks_file):
+            return []
+
+        try:
+            with open(self.landmarks_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except Exception:
+            return []
+
+        landmarks = data.get("landmarks", [])
+        if category:
+            landmarks = [lm for lm in landmarks if lm.get("category") == category]
+
+        if from_pos:
+            fx, fy, fz = from_pos
+            for lm in landmarks:
+                lx, ly, lz = lm["pos"]
+                lm["current_dist"] = round(math.sqrt((lx - fx)**2 + (ly - fy)**2 + (lz - fz)**2), 1)
+            landmarks = [lm for lm in landmarks if lm.get("current_dist", 999) <= max_distance]
+            landmarks.sort(key=lambda lm: lm.get("current_dist", 999))
+
+        return landmarks
+
+    def get_subagent_context(self, subagent_type: str, current_pos: List[float]) -> Dict[str, Any]:
+        """Assembles a high-density intelligence briefing for a delegated subagent."""
+        context = {
+            "subagent_type": subagent_type,
+            "origin_pos": current_pos,
+            "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+        }
+
+        if subagent_type in ["sleep_agent", "bed_seeker"]:
+            context["nearest_beds"] = self.query_pois(category="bed", max_distance=64.0, from_pos=current_pos)
+            context["safe_shelters"] = self.query_pois(category="shelter", max_distance=64.0, from_pos=current_pos)
+
+        elif subagent_type in ["miner_agent", "gatherer"]:
+            context["known_minerals"] = self.query_pois(category="mineral", max_distance=48.0, from_pos=current_pos)
+            context["crafting_tables"] = self.query_pois(category="crafting", max_distance=32.0, from_pos=current_pos)
+            context["chests"] = self.query_pois(category="container", max_distance=32.0, from_pos=current_pos)
+
+        elif subagent_type in ["navigation_agent", "pathfinder"]:
+            context["hazards"] = self.query_pois(category="liquid_and_hazard", max_distance=32.0, from_pos=current_pos)
+
+        return context
 
     def append_episode(
         self,
@@ -135,92 +226,3 @@ class MemoryEngine:
         }
         with open(self.episodes_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-
-    def capture_full_snapshot(self, client) -> Dict[str, Any]:
-        """Captures all observable live game state into persistent cache."""
-        st_res = client.get_status()
-        status = st_res.get("result", {})
-        if not status:
-            return {"ok": False, "error": "Could not fetch status"}
-
-        pos = status.get("pos", [0, 0, 0])
-
-        # 1. Save Bot State
-        self.save_bot_state(status)
-
-        # 2. Query surrounding blocks
-        blocks = client.get_blocks(radius=8)
-        beds = [b for b in blocks if "_bed" in b.get("name", "")]
-        for bed in beds:
-            self.record_landmark(
-                name=bed["name"],
-                category="bed",
-                pos=bed["pos"],
-                dimension=status.get("dimension", "overworld"),
-                metadata={"dist": bed.get("dist")},
-            )
-
-        # 3. Query visible entities
-        entities = client.get_entities(radius=16)
-
-        # 4. Save World Context
-        world_data = {
-            "last_survey_at": time.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
-            "time_of_day": status.get("time_of_day", 0),
-            "is_day": status.get("is_day", True),
-            "raining": status.get("raining", False),
-            "thundering": status.get("thundering", False),
-            "biome": status.get("biome", ""),
-            "dimension": status.get("dimension", "overworld"),
-            "surrounding_blocks_count": len(blocks),
-            "visible_entities_count": len(entities),
-            "entities_sample": entities[:10],
-        }
-        self.save_world_context(world_data)
-
-        # 5. Append Episode
-        self.append_episode(
-            event_type="snapshot",
-            summary=f"Bot snapshot recorded at {pos}. Weather: is_day={status.get('is_day')}, HP={status.get('health')}",
-            pos=pos,
-            details={"blocks_count": len(blocks), "entities_count": len(entities)},
-        )
-
-        return {
-            "ok": True,
-            "pos": pos,
-            "blocks_count": len(blocks),
-            "entities_count": len(entities),
-            "beds_discovered": len(beds),
-        }
-
-    def get_memory_prompt_summary(self) -> str:
-        """Formats recalled memory into a concise string for LLM system prompt."""
-        if not os.path.exists(self.state_file):
-            return "No previous memory recorded."
-
-        try:
-            with open(self.state_file, "r", encoding="utf-8") as f:
-                st = json.load(f)
-            with open(self.landmarks_file, "r", encoding="utf-8") as f:
-                lm = json.load(f)
-            with open(self.world_file, "r", encoding="utf-8") as f:
-                wc = json.load(f)
-
-            summary = [
-                f"【Bot 历史记忆状态】",
-                f"- 上次记录时间: {st.get('last_updated')}",
-                f"- 记录位置: {st.get('pos')} (维度: {st.get('dimension')})",
-                f"- 生命值: {st.get('health')}/20, 饥饿度: {st.get('food')}/20",
-                f"- 环境: {'白天' if wc.get('is_day') else '黑夜'}, 雷暴: {wc.get('thundering')}",
-            ]
-
-            beds = [x for x in lm.get("landmarks", []) if x.get("category") == "bed"]
-            if beds:
-                summary.append(f"- 已记忆床位数量: {len(beds)}，最近床坐标: {beds[0].get('pos')}")
-            else:
-                summary.append("- 附近暂未发现已记忆的床位")
-
-            return "\n".join(summary)
-        except Exception as e:
-            return f"Error loading memory: {e}"

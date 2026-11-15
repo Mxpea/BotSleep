@@ -18,6 +18,7 @@ def parse_args(argv=None):
     parser.add_argument("--config", default=os.environ.get("BOTSLEEP_CONFIG", str(Path(__file__).with_name("config.yaml"))))
     parser.add_argument("--username", default=None, help="Override the configured Minecraft username")
     parser.add_argument("--debug", action="store_true", help="Enable allowlisted in-game debug commands")
+    parser.add_argument("--radar", action="store_true", help="Start continuous exploration radar on launch")
     parser.add_argument("--mode", choices=("sleep", "survival"), help="Override agent.mode")
     parser.add_argument("--objective", choices=("starter", "daily", "competition"), help="Select starter, daily survival or model-driven competition scoring")
     parser.add_argument("--max-steps", type=int, help="Bound survival observation/action cycles")
@@ -114,6 +115,17 @@ def main(argv=None) -> int:
         debug_config = config["debug"]
         debugger = None
         if args.debug or debug_config["enable_in_game_commands"]:
+            radar_skill = None
+            memory = None
+            if getattr(args, "radar", False):
+                from core.memory import MemoryEngine
+                from core.radar import BlockRadar
+                from skills.exploration import ContinuousRadarSkill
+                memory = MemoryEngine()
+                radar = BlockRadar(client)
+                radar_skill = ContinuousRadarSkill(client, memory=memory, radar=radar)
+                radar_skill.enable()
+                print("[Radar] Continuous exploration radar enabled.")
             debugger = ChatDebugger(
                 client,
                 prefix=debug_config["command_prefix"],
@@ -122,6 +134,8 @@ def main(argv=None) -> int:
                 on_sleep=controller.request_sleep,
                 on_resume=controller.resume if survival else None,
                 on_summary=controller.summary if survival else None,
+                radar_skill=radar_skill,
+                memory=memory,
             )
             if not debug_config["allowed_usernames"]:
                 print("Debug enabled; add player names to debug.allowed_usernames to accept commands.")

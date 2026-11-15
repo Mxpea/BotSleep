@@ -9,6 +9,8 @@ _EXPORTS = {
     "TelemetryManager": (".telemetry", "TelemetryManager"),
     "ReflexDaemon": (".telemetry", "ReflexDaemon"),
     "MemoryEngine": (".memory", "MemoryEngine"),
+    "BlockRadar": (".radar", "BlockRadar"),
+    "RecipeBook": (".recipes", "RecipeBook"),
 }
 
 __all__ = list(_EXPORTS)

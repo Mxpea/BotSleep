@@ -19,18 +19,46 @@
 
 ```mermaid
 flowchart TD
-    A[配置与唯一游戏客户端] --> B[SurvivalHarness.tick]
-    B --> C[新鲜状态/库存/资源观察]
-    C --> D[规则规划或日常任务板与记忆召回]
-    D --> E[规则决策 / 串行模型 worker]
-    E --> F[返回后重新观察与本地门禁]
-    F --> G[写 pending 意图]
-    G --> H[单技能执行线程]
-    H --> I[方块/库存/槽位/位置后验验证]
-    I --> J[原生工具结果反馈 + 检查点 + 有界记忆]
-    J --> B
-    W[主线程安全监测] --> K[取消旧提案或请求停止游戏动作]
-    K --> B
+    subgraph CognitiveLayer["🧠 慢思考：大模型认知层 (System 2)"]
+        LLM["大模型 (OpenAI API 兼容接口)<br/>负责：战术推理、环境总结、长期目标规划"]
+        SubAgents["🤖 专项 Sub-Agents 派发调度<br/>(DailySurvival, NetherPortalSpeedrun, CompetitionTasks)"]
+    end
+
+    subgraph AgentScheduler["⚙️ 中枢调度：Agent 核心引擎"]
+        Planner["主决策状态机 (Main Loop / SurvivalHarness)"]
+        ReflexDaemon["⚡ 本地应急安全监控<br/>负责：坠落检测、窒息打断、濒死防御"]
+        FlightRecorder["📋 飞行记录仪 (Flight Recorder)<br/>结构化跟踪决策流与动作事件"]
+    end
+
+    subgraph PerceptionMemory["📡 感知与空间记忆引擎 (core/)"]
+        Radar["3D 方块雷达 (BlockRadar)<br/>(POI 定向扫描 / 全景生态测绘 / 地形网格)"]
+        Memory["空间知识库 (MemoryEngine)<br/>(landmarks, spatial_grid, episodic_memory)"]
+        Radar --> Memory
+    end
+
+    subgraph SkillLayer["📦 快反应：程序化宏技能库 (System 1)"]
+        SkillRadar["常态雷达勘探 (ContinuousRadarSkill)"]
+        SkillPortal["速通地狱门水桶浇筑 (NetherPortalSpeedrunSkill)"]
+        SkillCraft["智能配方逆向合成 (CraftItemSkill)"]
+        SkillChop["智能整树连续伐木 (ChopTreeSkill)"]
+        SkillSleep["智能找床睡眠 (auto_sleep)"]
+    end
+
+    subgraph DriverLayer["🔌 驱动层：mc-agent-api"]
+        MC_Client["Python Client SDK"]
+        HTTP_API["mc-agent-api (HTTP 18900)"]
+        GameServer["Minecraft Leaves 1.21.11"]
+    end
+
+    LLM <-->|Function Calling / JSON| Planner
+    Planner --> SubAgents
+    Memory -.->|知识库切片简报 Context| SubAgents
+    Planner --> SkillLayer
+    SkillRadar --> Radar
+    ReflexDaemon -.->|安全检查与打断| SkillLayer
+    SkillLayer --> MC_Client
+    MC_Client <--> HTTP_API <--> GameServer
+    Planner --> FlightRecorder
 ```
 
 模型每轮只提一个已注册的工具，程序验证参数与执行前状态，再派发有限技能或最多 8 步的小批任务。模型文本自报“完成”、API 返回 ok 或路径目标点存在，均不能替代技能的实际效果核验。
@@ -40,6 +68,13 @@ flowchart TD
 | 模块 | 已有职责 |
 |---|---|
 | `core/client.py` | 统一端点、认证、HTTP/业务错误与超时；保留原响应封装，列表型方法做结构转换 |
+| `core/radar.py` | 3D 方块全景雷达测绘与关键 POI 定向扫描 |
+| `core/recipes.py` | 内置 886 种配方逆向递归解析与材料预算推导 |
+| `skills/portal_speedrun.py` | 速通级 10 块黑曜石水桶浇筑、点火与框架状态验证 |
+| `skills/crafting.py` | 智能 2x2/3x3 工作台调度合成与工作台自动回收 |
+| `skills/mining.py` | 整树连续自动伐木与掉落物拾取 |
+| `skills/exploration.py` | 常态化连续巡航雷达与位移触发扫描 |
+| `skills/daily_survival.py` | 日常生存技能库（作物、狩猎、铁矿、装备、熔炼、储物、床门、5x5 庇护所） |
 | `core/survival_harness.py` | 串行任务推进、单游戏动作线程、独立模型 worker、安全复查、取消、失败退避和检查点 |
 | `agent/llm_planner.py`、`agent/tools.py` | 按 objective 暴露 starter 9 / daily 31 / competition 36 工具；严格解析原生 tool call，保留配对工具反馈 |
 | `core/competition_rules.py`、`core/competition_tasks.py` | 读取规则目录、计算可用性和服务器 advancement 证据、管理选择/完成/强退/终止及得分；不执行游戏动作 |
@@ -83,3 +118,11 @@ flowchart TD
 当前 pull 后的源码状态和本轮离线复核与历史实服结果分别记录于 [TESTING.md](TESTING.md)。本轮不连接游戏/模型，不能据本轮离线复核宣布新版自然地图完整生存成功。
 
 后续先复用现有配置、客户端、模型门禁、后验验证和检查点机制，再补语义 compact/handoff、阶段 skill 加载与水面/搭路导航执行器；competition 任务选择和退出的基础闭环已实现。不要并行新建第二套无人维护的调度/认证体系；未来接口名见 [HARNESS_INTERFACES.md](HARNESS_INTERFACES.md)，未实现入口不得广告给模型。
+
+## 8. 协作开发与分支规范
+
+为保障多人协作与版本隔离：
+- **主分支 (`main`)**：保持纯净且可稳定部署的代码基准。
+- **个人工作分支 (`develop-tianya`)**：用于 TianYa 的个人功能开发、测试与阶段性提交。
+- **存档隔离原则**：Minecraft 运行世界（`world/`）与庞大二进制必须物理隔绝在独立服务端，严禁推送到 Git 仓库。
+- **密钥安全**：本地配置文件（`config.yaml`）已配置 `.gitignore` 绝不入库，示例见 `config.example.yaml`。

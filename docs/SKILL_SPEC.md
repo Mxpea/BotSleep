@@ -20,32 +20,37 @@
 
 ## 二、核心技能规范
 
-### 1. `pillar_up` (自动垂直搭高)
+### 1. `continuous_radar` (常态化雷达自动勘探技能)
+
+* **功能**：在 Bot 移动与探索过程中，常态化对周边空间发射 3D 方块雷达，抓取床、箱子、工作台、矿物、水源、岩浆等战略 POI，并自动更新至 `MemoryEngine` 空间记忆库。
+* **特性**：**可开关的常态自动化技能 (Toggleable Background Autonomous Skill)**。
+* **参数与控制**：
+  - `enable()` / `disable()` / `toggle()`：开关控制。
+  - `min_move_distance: float = 6.0`：位移触发阈值（当位移超过 6 格自动触发一次全景扫荡）。
+  - `scan_radius: int = 24`：雷达扫描半径（最大 32 格）。
+* **产出物**：
+  - 自动更新 [data/game_logic/landmarks.json](file:///E:/Program%20Save/VisualCode/BotSleep/data/game_logic/landmarks.json)（POI 数据库）。
+  - 自动记录航迹与探索区块至 [data/game_logic/spatial_grid.json](file:///E:/Program%20Save/VisualCode/BotSleep/data/game_logic/spatial_grid.json)。
+  - 生成 `episodic_memory.jsonl` 情景记忆。
+
+---
+
+### 2. `pillar_up` (自动垂直搭高)
 
 * **功能**：在当前位置向上跳跃并在脚下放置实心方块，使角色垂直升高 $N$ 格。
 * **参数**：
   - `height: int = 3`：目标搭高层数（建议 1~10）。
-  - `block_filter: Optional[List[str]] = None`：允许消耗的方块类型列表（默认：圆石、深板岩、泥土、橡木木板等实心方块）。
+  - `block_filter: Optional[List[str]] = None`：允许消耗的方块类型列表。
 * **前置条件**：
   1. 背包中实心方块总数 $\ge height$。
-  2. 头顶垂直 $height + 2$ 格空间内无阻碍（非实心方块）。
-* **动作序列**：
-  1. 视线强制旋转至正下方：`yaw = current_yaw, pitch = 1.57 (90°向下)`。
-  2. 选定背包内优先级最高的方块并装备至主手。
-  3. 循环 $i = 1 \dots height$：
-     - 发送跳跃姿态包：`posture(jump=True)`。
-     - 等待角色垂直高度 $y$ 升至当前方块顶面以上（约 250ms）。
-     - 向脚下原方块顶部面发送 `/place` 包。
-     - 判定放置成功且 $y$ 坐标升高 1 格。
-  4. 恢复站立姿态，解除视线锁定。
+  2. 头顶垂直 $height + 2$ 格空间内无阻碍。
 * **错误码**：
   - `insufficient_blocks`：方块储备不足。
   - `overhead_blocked`：头顶空间受阻。
-  - `placement_failed`：方块未被服务器认可或卡在生物碰撞箱。
 
 ---
 
-### 2. `mlg_water` (自动落地水 / 高空坠落缓冲)
+### 3. `mlg_water` (自动落地水 / 高空坠落缓冲)
 
 * **功能**：角色在高空坠落时，在着地前最后一刻向地面倒水抵消跌落伤害，并在着地后立即收回水源。
 * **触发机制**：由 `telemetry.ReflexDaemon` 线程以 20Hz 频率实时守候。
@@ -53,20 +58,10 @@
   1. 角色处于无支撑下落状态 (`in_air = True`, `velocity_y < -12`)。
   2. 预估着地距离处于危险高度（距下方面积 $< 3$ 格）。
   3. 背包或手持栏存在 `water_bucket`。
-* **动作序列**：
-  1. 抢占动作锁，立即中止当前非紧急动作（如长距离寻路）。
-  2. 主手切换至 `water_bucket`。
-  3. 视线快速下切至预测落地点。
-  4. 在接触地面的一瞬间（距地面约 1~1.5 格）向地面发送 `/interact` 倒水。
-  5. 角色接触水源判定（`in_water = True` 或伤害免疫生效）。
-  6. 延迟 80~150ms 再次发送 `/interact` 将水收回为空桶。
-* **错误码**：
-  - `no_water_bucket`：身上没有水桶。
-  - `timing_missed`：未能及时放置水源。
 
 ---
 
-### 3. `auto_sleep` (智能找床睡眠)
+### 4. `auto_sleep` (智能找床睡眠)
 
 * **实现状态**：已实现通过公开 HTTP API 执行的有界状态机，离线测试与独立真实游戏验证范围见 [TESTING.md](TESTING.md)。自动搭高和落地水仍为未接入骨架。
 * **功能**：仅在主世界的夜间或雷暴时搜索床、接近并入睡，等待服务器将机器人唤醒，依据状态变化验证完成。已在睡眠中的机器人直接等待醒来，不重复点击床。
@@ -93,7 +88,7 @@
   3. 移动后和点击床前再次检查生命、就绪状态、维度和昼夜，避免把旧状态当成当前位置。
 
 * **动作序列**：
-  1. 使用 `/find_blocks` 的 `types` 列表查询全部 16 色床，取得带坐标的方块列表，按距离排序。
+  1. 使用 `/find_blocks` 的 `types` 列表查询全部 16 色床，取得带坐标的方块列表，按距离排序。若空间记忆库 `MemoryEngine` 已探明床位坐标，可优先召回。
   2. 根据 `part`、`facing` 合并床头和床脚；任一半 `occupied=True` 则跳过该床。
   3. 检查机器人周围威胁，调用 `move_to(..., range=2)` 接近床。不可达时尝试下一张；HTTP 请求超时意味着动作状态未知，立即失败并请求停止，不自动重发动作。
   4. 复查距离、床方块和占用状态，再检查床及机器人附近威胁。遇到怪物返回失败，**不会声称已搭高或撤退**。
@@ -116,16 +111,107 @@
   - `cancelled` / `timeout`：主动取消或任务总预算耗尽。
   - `request_timeout`：HTTP 等待超时，后台动作结果未知；不自动重试。其他 API 错误码保留，不转成空列表或成功。
 
+---
 
-### 4. `calculate_stronghold`（纯要塞计算）
+### 5. `calculate_stronghold`（纯要塞计算）
 
 - 实现：`skills/stronghold.py` 的 `CalculateStrongholdSkill`，可由 Python 或独立 CLI 调用。`agent/tools.py` 仅保存独立 `STRONGHOLD_TOOL_DEFINITION` 常量；starter/daily 模型工具目录与运行时没有注册此动作。
 - 输入：`throws` 为 1～32 次独立主世界投眼观测，每项含 `x/z/bearing_deg/sigma_deg`；`top_k` 默认 5。角度采用原版 yaw 度数，南 0°、西 90°。
 - 输出：`SkillResult.data` 含官方 Ninjabrain Bot 计算出的候选区块、投眼目标点、下挖参考点和条件概率；不代表已找到传送门房。
 - 前置条件：已安装固定版本的计算 JAR 和 JDK 11+；观测必须来自同一世界、同一要塞，多点采样先归并为一条射线。
 - 错误码：`invalid_observations`（无效或重复观测）、`calculation_failed`（依赖缺失、超时或无一致候选）。
-- 无游戏动作，无需回滚。采样与计算分离；CLI `capture` 会投眼，细节见 [STRONGHOLD.md](STRONGHOLD.md)。
+- 无游戏动作，无需回滚。采样与计算分离；CLI `capture` 会投眼，细节见 [docs/STRONGHOLD.md](STRONGHOLD.md)。
 
+---
+
+### 6. `chop_tree` (智能伐木与清理整树技能)
+
+* **功能**：定位最近的可达树木，自底向上完整采伐整根树干，支持工作时长限制与目标数量阈值，返回精准完成状态。
+* **模块归属**：`skills/mining.py` (`ChopTreeSkill`)。
+* **参数**：
+  - `target_count: int = 5`：目标收集的原木数量（达到后停止）。
+  - `max_duration_seconds: float = 60.0`：单次工作最大超时时间（秒）。
+  - `search_radius: int = 32`：搜树半径。
+  - `clean_entire_tree: bool = True`：是否完整采伐整棵树（防止空中残留浮空树枝）。
+  - `log_types: Optional[List[str]] = None`：指定采伐的原木类型（默认自动适配橡木、白桦、云杉等全原木）。
+* **核心动作流程**：
+  1. 通过雷达/`find_blocks` 探测周边所有原木方块，按水平聚类算法区分独立树干并按距离排序。
+  2. 自动剔除因深坑/阻隔导致不可达的树木（`unreachable_trees` 故障自动重试转移）。
+  3. 自底向上逐块采掘并自动拾取掉落物。
+  4. 达到目标数量或超时后，返回 `SkillResult`，写入 `episodic_memory.jsonl` 情景记忆。
+* **输出数据 (Result Data)**：
+  - `harvested_count`: 采集的原木总数。
+  - `target_count`: 目标数。
+  - `elapsed_seconds`: 实际耗时。
+  - `target_reached`: 是否达成目标。
+  - `time_limit_reached`: 是否超时截断。
+  - `trees_cleared`: 彻底砍光的完整树木数量。
+  - `breakdown`: 各类原木采掘明细（如 `{"oak_log": 6}`）。
+
+---
+
+### 7. `craft_item` (智能合成与工具制作技能)
+
+* **功能**：自动区分 2x2（背包直合）与 3x3（工作台合成）配方，支持前置材料递归逆向分解合成（如原木 -> 木板 -> 木棍 -> 木镐），自动寻找/放置工作台，并在合成完成后自动将工作台挖掘回收回背包。
+* **模块归属**：`skills/crafting.py` (`CraftItemSkill`)，底层配合 `core/recipes.py` (`RecipeBook`) 与 `data/recipes.json`（内置 Minecraft 1.21.11 完整 886 种配方库）。
+* **参数**：
+  - `item: str`：目标合成物品名（如 `wooden_pickaxe`, `stick`, `crafting_table`, `oak_planks`）。
+  - `count: int = 1`：目标合成数量。
+  - `auto_prerequisites: bool = True`：是否自动从基础原料层级推导并合成中间产物（例如只有原木时，自动合成木板与木棍）。
+  - `retrieve_table: bool = True`：3x3 合成完成后是否自动回收工作台（让工作台留在背包备用，不遗失在野外）。
+  - `max_duration_seconds: float = 60.0`：合成动作超时时间。
+* **执行工作流 (Pipeline)**：
+  1. **配方分类**：检查配方尺寸。若 $\le 2\times 2$（如木板、木棍、工作台、火把），直接在玩家背包制作。
+  2. **3x3 工作台调度**：
+     - 若周围 12 格内已有放置好的工作台，直接寻路复用。
+     - 若无工作台且背包中无工作台，使用 2x2 自动用 4 块木板合成工作台。
+     - 若当前脚下为树叶/水域等不稳固方块，自动微移至坚实地面（`_ensure_solid_ground`）。
+     - 调用 `place_block("crafting_table")` 放置于身侧，并更新 `MemoryEngine` 空间地标。
+  3. **前置原料预算与批处理合成**：
+     - 精确计算所需全部中间材料（如木镐需要 3 木板 + 2 木棍，1 次木棍合成消耗 2 木板产生 4 木棍，总计需 9 块木板，推导出需 3 根原木）。
+     - 自动合并批量合成（一次性将 3 根原木合成为 12 块木板），极大提升合成速度与效率。
+  4. **3x3 界面交互合成**：
+     - 与工作台交互，自动填充配方并取回目标物品。
+  5. **工作台自动回收**：
+     - 若 `retrieve_table=True`，自动对放置的工作台执行 `dig(collect=True)`，将其拾回背包。
+* **输出数据 (Result Data)**：
+  - `item`: 目标物品。
+  - `requested_count`: 目标数量。
+  - `total_in_inventory`: 背包中该物品现存总量。
+  - `gained`: 本次净增数量。
+  - `duration_seconds`: 耗时。
+  - `steps`: 详细执行步骤链。
+  - `final_inventory`: 最终背包全量快照。
+
+---
+
+### 8. `cast_nether_portal` (速通级地狱门水桶浇筑技能)
+
+* **功能**：自动检索并评估周边岩浆池空间与源头储量，通过水桶倒模机制浇筑出完整标准的 10 块黑曜石地狱门框架，并使用打火石激活，最后全面验收框架与传送门方块的具体状态。
+* **模块归属**：`skills/portal_speedrun.py` (`NetherPortalSpeedrunSkill`，兼容别名 `CastNetherPortalSkill`)。
+* **参数**：
+  - `anchor: Optional[List[int]] = None`：地狱门左下角基准锚点坐标（若不传则基于岩浆池边缘自动选点）。
+  - `axis: str = "x"`：地狱门朝向（`"x"` 沿 X 轴东西向，`"z"` 沿 Z 轴南北向）。
+  - `search_radius: int = 32`：搜寻合格岩浆池的最大半径。
+* **前置条件与空间校验**：
+  1. 背包中备有 `water_bucket`（或空桶）、`flint_and_steel`、任意镐子与 $\ge 4$ 个耐火固体方块。
+  2. **足够空间的岩浆池判定**：
+     - 岩浆池内具有 $\ge 10$ 格连续或近邻的静态岩浆源（`level == 0`）。
+     - 建造区上空必须拥有 $\ge 5$ 格的净空垂直高度（不可处于密闭压顶低矮矿洞）。
+     - 岸边具有可供 Bot 安全站位与作业的干燥实心方块地面。
+* **执行步骤**：
+  1. 扫描岩浆池并评估空间与岩浆储量；选定安全平整锚点。
+  2. 计算地狱门框架 10 块黑曜石目标坐标（底座 2 块、左侧柱 3 块、右侧柱 3 块、顶梁 2 块）。
+  3. 依次执行舀岩浆、水流冷却成型与回收水源的标准循环（避免大范围溢水破坏主岩浆湖）。
+  4. 使用打火石右键基座黑曜石点火激活。
+  5. 完整回扫框架 10 块黑曜石及内圈 6 格空间状态（`nether_portal` 判定）。
+* **产出物 (Result Data)**：
+  - `obsidian_count`: 经验收确认的黑曜石块数（必须为 10/10）。
+  - `frame_complete`: 门框是否 100% 完整。
+  - `portal_active`: 紫色地狱门方块是否成功生成。
+  - `inspection`: 包含框架和内圈全部 16 个具体方块名称与元数据的详细快照字典。
+
+---
 
 ## 三、面向 harness AI 的策略 Skill
 

@@ -51,7 +51,7 @@ class MinecraftAgentClient:
         self,
         base_url: str = "http://127.0.0.1:18900/api/v1",
         username: str = "SleepBot",
-        password: str = "",
+        password: str = "agent-secret-pass",
         timeout_seconds: float = 15,
     ):
         self.base_url = base_url.rstrip("/")
@@ -201,10 +201,27 @@ class MinecraftAgentClient:
     def chat(self, message: str) -> Dict[str, Any]:
         return self._request("POST", "chat", payload={"message": message})
 
-    def move_to(self, x: float, y: float, z: float, timeout_ms: int = 15000, range: float = 1) -> Dict[str, Any]:
+    def move_to(
+        self,
+        x: float,
+        y: Optional[float] = None,
+        z: Optional[float] = None,
+        timeout_ms: int = 15000,
+        range: float = 1,
+    ) -> Dict[str, Any]:
         """Pathfind within range (default one block), with a server deadline."""
         deadline = self._positive(timeout_ms, "timeout_ms") / 1000
-        return self._request("POST", "move_to", payload={"x": x, "y": y, "z": z, "range": range, "timeout": timeout_ms}, timeout_seconds=self._action_timeout(deadline))
+        payload: Dict[str, Any] = {"x": x, "range": range, "timeout": timeout_ms}
+        if y is not None:
+            payload["y"] = y
+        if z is not None:
+            payload["z"] = z
+        return self._request(
+            "POST",
+            "move_to",
+            payload=payload,
+            timeout_seconds=self._action_timeout(deadline),
+        )
 
     def look_at(self, x: float, y: float, z: float) -> Dict[str, Any]:
         return self._request("POST", "look", payload={"x": x, "y": y, "z": z})
@@ -237,7 +254,20 @@ class MinecraftAgentClient:
         return self._list(self._result(self._request("POST", "get_entities", payload=payload,
                                                      timeout_seconds=timeout_seconds)), "entities")
 
-    def get_block(self, pos: List[float], *, timeout_seconds: Optional[float] = None) -> Dict[str, Any]:
+    def get_block(
+        self,
+        pos_or_x: Any,
+        y: Optional[float] = None,
+        z: Optional[float] = None,
+        *,
+        timeout_seconds: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        if isinstance(pos_or_x, (list, tuple)) and len(pos_or_x) == 3:
+            pos = [pos_or_x[0], pos_or_x[1], pos_or_x[2]]
+        elif y is not None and z is not None:
+            pos = [pos_or_x, y, z]
+        else:
+            raise APIError("bad_args", "get_block requires three coordinates or a pos list")
         return self._request("POST", "get_block", payload={"pos": pos}, timeout_seconds=timeout_seconds)
 
     def inventory(self, *, timeout_seconds: Optional[float] = None) -> Dict[str, Any]:
@@ -262,6 +292,18 @@ class MinecraftAgentClient:
     def get_inventory(self) -> Dict[str, Any]:
         """Compatibility spelling; returns the same envelope as inventory()."""
         return self.inventory()
+
+    def get_inventory_counts(self) -> Dict[str, int]:
+        """Convenience method returning a simple mapping of item_name -> total_count."""
+        res = self.get_inventory()
+        counts: Dict[str, int] = {}
+        items = res.get("result", {}).get("items", [])
+        for item in items:
+            name = item.get("name")
+            cnt = item.get("count", 1)
+            if name:
+                counts[name] = counts.get(name, 0) + cnt
+        return counts
 
     def equip(self, item: str, slot: str = "hand") -> Dict[str, Any]:
         return self._request("POST", "equip", payload={"item": item, "slot": slot})
@@ -305,13 +347,29 @@ class MinecraftAgentClient:
                              "max_hits": max_hits, "stop_on": ["hurt", "death"]},
                              timeout_seconds=self._action_timeout(deadline + 35))
 
-    def dig(self, pos: List[float], collect: bool = True) -> Dict[str, Any]:
-        """Allow 60s approach, 30s digging and up to four 8s pickup paths."""
-        if not isinstance(pos, (list, tuple)) or len(pos) != 3:
+    def dig(
+        self,
+        pos_or_x: Any,
+        y: Optional[float] = None,
+        z: Optional[float] = None,
+        collect: bool = True,
+        stop_on: Optional[List[str]] = None,
+        timeout_ms: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Allow approach, digging and pickup paths, supporting coordinate triplet or pos list."""
+        if isinstance(pos_or_x, (list, tuple)) and len(pos_or_x) == 3:
+            px, py, pz = pos_or_x[0], pos_or_x[1], pos_or_x[2]
+        elif y is not None and z is not None:
+            px, py, pz = pos_or_x, y, z
+        else:
             raise APIError("bad_args", "dig requires three coordinates")
+        payload: Dict[str, Any] = {"x": px, "y": py, "z": pz, "collect": collect}
+        if stop_on is not None:
+            payload["stop_on"] = stop_on
+        timeout = self._action_timeout(self._positive(timeout_ms, "timeout_ms") / 1000) if timeout_ms is not None else self._action_timeout(130)
         return self._request(
-            "POST", "dig", payload={"x": pos[0], "y": pos[1], "z": pos[2], "collect": collect},
-            timeout_seconds=self._action_timeout(130),
+            "POST", "dig", payload=payload,
+            timeout_seconds=timeout,
         )
 
     def craft(self, item: str, count: int = 1) -> Dict[str, Any]:
@@ -326,18 +384,58 @@ class MinecraftAgentClient:
             timeout_seconds=self._action_timeout(415),
         )
 
-    def place_block(self, x: float, y: float, z: float, item: Optional[str] = None) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {"x": x, "y": y, "z": z}
-        if item is not None:
-            payload["item"] = item
+    def place_block(
+        self,
+        arg1: Any = None,
+        arg2: Optional[float] = None,
+        arg3: Optional[float] = None,
+        arg4: Optional[str] = None,
+        *,
+        item: Optional[str] = None,
+        x: Optional[float] = None,
+        y: Optional[float] = None,
+        z: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {}
+        if isinstance(arg1, str):
+            target_item = arg1
+            target_x = arg2 if x is None else x
+            target_y = arg3 if y is None else y
+            target_z = arg4 if z is None else z
+        elif isinstance(arg1, (int, float)):
+            target_x = arg1
+            target_y = arg2 if y is None else y
+            target_z = arg3 if z is None else z
+            target_item = arg4 if item is None else item
+        else:
+            target_item = item
+            target_x = x
+            target_y = y
+            target_z = z
+
+        if target_item is not None:
+            payload["item"] = target_item
+        if target_x is not None:
+            payload["x"] = target_x
+        if target_y is not None:
+            payload["y"] = target_y
+        if target_z is not None:
+            payload["z"] = target_z
+
         return self._request("POST", "place", payload=payload, timeout_seconds=self._action_timeout(self.PATHFINDING_SECONDS))
 
-    def interact(self, pos: Optional[List[float]] = None, entity_id: Optional[int] = None, item: Optional[str] = None, timeout_seconds: Optional[float] = None) -> Dict[str, Any]:
-        """Interact with a target, allowing the backend's 60-second pathfinding.
-
-        An explicit timeout_seconds bounds this HTTP wait only, not the backend
-        action. On timeout, inspect/stop the bot before starting another action.
-        """
+    def interact(
+        self,
+        pos: Optional[List[float]] = None,
+        entity_id: Optional[int] = None,
+        item: Optional[str] = None,
+        ref: Optional[List[int]] = None,
+        face: Optional[List[int]] = None,
+        timeout_seconds: Optional[float] = None,
+        stop_on: Optional[List[str]] = None,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Interact with a target, allowing the backend's 60-second pathfinding."""
         payload: Dict[str, Any] = {}
         if pos is not None:
             payload["pos"] = pos
@@ -345,8 +443,15 @@ class MinecraftAgentClient:
             payload["entity_id"] = entity_id
         if item is not None:
             payload["item"] = item
-        timeout = self._action_timeout(self.PATHFINDING_SECONDS) if timeout_seconds is None else self._positive(timeout_seconds, "timeout_seconds")
-        return self._request("POST", "interact", payload=payload, timeout_seconds=timeout)
+        if ref is not None:
+            payload["ref"] = ref
+        if face is not None:
+            payload["face"] = face
+        if stop_on is not None:
+            payload["stop_on"] = stop_on
+        eff_timeout = timeout_seconds if timeout_seconds is not None else timeout
+        t = self._action_timeout(self.PATHFINDING_SECONDS) if eff_timeout is None else self._positive(eff_timeout, "timeout_seconds")
+        return self._request("POST", "interact", payload=payload, timeout_seconds=t)
 
     def use_item(self, item: str, ms: Optional[int] = None) -> Dict[str, Any]:
         payload: Dict[str, Any] = {"item": item}
