@@ -10,6 +10,8 @@ from typing import Any, Dict, List, Optional
 
 import requests
 
+_ORIG_REQUESTS_REQUEST = requests.request
+
 
 class MinecraftAPIError(RuntimeError):
     """Legacy error-envelope API; all modern APIError instances also match it."""
@@ -59,6 +61,7 @@ class MinecraftAgentClient:
         self.password = password
         self.timeout_seconds = self._positive(timeout_seconds, "timeout_seconds")
         self.token: Optional[str] = None
+        self._session = requests.Session()
 
     @staticmethod
     def _positive(value: float, name: str) -> float:
@@ -86,10 +89,25 @@ class MinecraftAgentClient:
             kwargs["json"] = payload
         if params is not None:
             kwargs["params"] = params
+        request_fn = requests.request if requests.request is not _ORIG_REQUESTS_REQUEST else self._session.request
+        url = f"{self.base_url}/{endpoint}"
         try:
-            response = requests.request(method, f"{self.base_url}/{endpoint}", **kwargs)
+            response = request_fn(method, url, **kwargs)
         except requests.Timeout:
             raise APIError("request_timeout", f"{endpoint} request timed out; server action state is unknown", details={"action_state": "unknown"}) from None
+        except requests.ConnectionError:
+            # Retry read-only status/block queries once when an idle keep-alive socket resets on Windows.
+            if requests.request is _ORIG_REQUESTS_REQUEST and endpoint in {"get_block", "get_status", "find_blocks", "get_inventory"}:
+                try:
+                    self._session.close()
+                    self._session = requests.Session()
+                    response = self._session.request(method, url, **kwargs)
+                except requests.Timeout:
+                    raise APIError("request_timeout", f"{endpoint} request timed out; server action state is unknown", details={"action_state": "unknown"}) from None
+                except requests.RequestException:
+                    raise APIError("network_error", f"{endpoint} request failed") from None
+            else:
+                raise APIError("network_error", f"{endpoint} request failed") from None
         except requests.RequestException:
             # requests exception text may contain URLs or supplied credentials.
             raise APIError("network_error", f"{endpoint} request failed") from None

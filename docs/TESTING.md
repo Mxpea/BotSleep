@@ -1,8 +1,23 @@
 # 配置、客户端、生存、赛事与监控验证
 
-最近独立复核：2026-11-15（Asia/Shanghai），分支 `develop-tianya`（基于 `d6d92f2` 完成多人协作结构与稳定性四阶段节点改造）。首节为本轮离线结果；后续各节为历史证据，不代表当前进程在线或本轮实服验收。
+最近独立复核：2026-11-16（Asia/Shanghai），分支 `develop-tianya`（含速通地狱门结构规约与工作流加固改动，尚未提交）。首节为最新状态与验证记录；后续各节为历史证据，不代表当前进程在线。
 
-## `develop-tianya` 多人协作结构与稳定性验证（2026-11-15）
+## `develop-tianya` 速通传送门架构与自然岩浆池实测（2026-11-16）
+
+本轮新增并验证了通用结构规约 [`core/structure_spec.py`](../core/structure_spec.py)、动作工作流 [`skills/action_workflow.py`](../skills/action_workflow.py) 以及速通地狱门技能 [`skills/portal_speedrun.py`](../skills/portal_speedrun.py)（含 `keep-alive` 只读重连保护 [`core/client.py`](../core/client.py)）。相邻 `mc-agent-api` 仓库保持完全未修改。
+
+| 检查 / 实测轮次 | 结果与说明 |
+| --- | --- |
+| 离线专项回归（`test_structure_spec`、`test_action_workflow`、`test_portal_workflow`、`test_client`、`test_contracts`） | **96 项全部通过**（`0` 失败、`0` 错误、`0` 跳过）。 |
+| 离线全仓 `unittest`（`PYTHONPATH=.;tests`，排除需连活服的 `test_speedrun_portal.py`） | **901 项运行，OK（skipped=5）**；跳过的 5 项均为缺少本地 Ninjabrain JAR 的要塞引擎/校准用例。 |
+| `main.py --config config.example.yaml --check-config` + `compileall` | 输出 `Configuration valid.`，字节码编译无误。 |
+| R7 实服自然岩浆池基准（Batch 7 代码，12 处全新未改地形：6 地表 + 6 地下） | **9/12（75.0%）**，其中地下洞穴 `6/6（100%）`、地表 `3/6`；3 处失败均为底座倾倒前缘 `damage_taken`。 |
+| R8 实服自然岩浆池基准（Batch 8 修复 `GoalNearXZ` 前缘微调，12 处全新未改地形：6 地表 + 6 地下） | **9/12（75.0%）**，地表 `4/6`、地下 `5/6`，**全部 12 处 `health=20`、`on_fire=False`**（零受伤、零着火）；3 处失败为 `dig_unconfirmed`、`unreachable_stance` 与 `radius=24` 截断导致 `no_portal_site_found`。 |
+| R9 实服自然岩浆池基准（Batch 9 扩展安全清障与 `radius>=32` 探测，12 处全新未改地形：6 地表 + 6 地下） | **4/12（33.3%）**；清障与选址探测正常，但 6/8 失败源于侧壁倾倒保护阈值 `max_back=0.46` 过严误拦 `0.50` / `0.70` 常规贴边站位。收尾阶段已将侧壁安全阈值修正为基于射线几何截断的 `0.52`（离线单测已重跑验证；尚未重新全量跑 12 池活服）。 |
+
+> 说明：R7–R9 尚未达到此前设定的 ≥ 90%（≥ 11/12）自然岩浆池绝对通过率目标，后续如继续冲刺 >90%，重点需针对斜坡落差站位（`dy > 1` 接近/搭坡）及路径寻路贴边停在 `0.70` 时的垫脚/侧向绕行补强。
+
+## 历史：`develop-tianya` 多人协作结构与稳定性验证（2026-11-15）
 
 本轮只跑离线测试与静态契约校验，没有连接 Minecraft、mc-agent-api、RCON 或模型。实服速通用例与缺少本地 JAR 的 Ninjabrain 引擎用例按规范显式跳过（`skipped=8`），不伪装为实服或引擎完整验收。
 
