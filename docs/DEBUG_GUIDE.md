@@ -1,82 +1,58 @@
-# 调试与验证
+# 调试、日志与实服靶场
 
-## 当前游戏内命令
+更新：2026-11-15，源码基线 `3801be9`。普通运行方式见 [README.md](../README.md)，本轮结果及历史证据见 [TESTING.md](TESTING.md)。
 
-调试通过配置 `debug.enable_in_game_commands: true` 或命令行 `--debug` 开启。必须在 `debug.allowed_usernames` 中列出允许控制 Bot 的玩家，空列表不接受聊天指令。
+## 聊天调试入口
 
-支持 API `messagestr` 中的标准 `<Player> #command` 格式。不执行匿名系统消息、机器人自己的消息或未列入名单的玩家指令。服务器插件自定义的聊天格式尚未适配。
+启用 `--debug` 或 `debug.enable_in_game_commands: true`，并配置 `debug.allowed_usernames`。空名单不接受命令；只处理白名单玩家的 `<Player> #command`，忽略服务器/匿名消息和机器人自身消息。competition 模式禁止聊天调试。
 
-| 指令 | 实际行为 |
-| 指令 | 参数 | 说明 | 示例 |
-|---|---|---|---|
-| `#help` | 无 | 列出当前 Bot 支持的全部调试指令 | `#help` |
-| `#status` | 无 | 汇报 Bot 坐标、血量、睡眠状态及雷达状态 | `#status` |
-| `#stop` | 无 | 请求中断当前动作并暂停自动任务 | `#stop` |
-| `#sleep` | 无 | 恢复自动睡眠并请求一次尝试 | `#sleep` |
-| `#resume` | 无 | 仅生存模式，解除暂停并重新观察 | `#resume` |
-| `#radar` | `[on\|off\|scan\|poi]` | 3D 方块雷达控制与空间 POI 检索 | `#radar on` |
-| `#chop` | `[目标数量=5] [超时秒=60]` | 寻找最近树木并自动连续伐木整树 | `#chop 5 60` |
-| `#craft` | `<物品名> [数量=1]` | 智能合成物品（2x2直合，3x3自动放取工作台） | `#craft wooden_pickaxe 1` |
-| `#inv` | 无 | 查看当前背包物品快照与数量 | `#inv` |
-
-技能在后台线程执行，等待天亮不会阻塞聊天轮询。正在等待的同步 HTTP 调用受自身超时限制；停止回执只说明已经请求停止。取消睡眠不会再次点击床，以免起床/入睡竞态。Ctrl+C 会取消任务、等待工作线程结束，然后登出；清理失败不会跳过登出步骤。
-
-## 日志与飞行记录仪
-
-`debug.flight_recorder.output_dir` 相对配置文件目录。启用后写入 JSONL，时间为带毫秒的 UTC。所有决策与动作执行日志均以 JSON Lines 格式输出至 `logs/flight_YYYYMMDD.jsonl`，包含毫秒级时间戳、上下文与执行结果。遇到异常时，飞行记录仪会自动记录**现场快照**，方便开发者快速分析根本原因。
-
-当前事件包括启动、睡眠开始、结果、停止请求、崩溃和退出。睡眠结果包含标准 `SkillResult`、尝试床位、错误码和验证证据。
-
-生存模式还记录 `DECISION`、`STEP_RESULT`、`SAFETY_INTERRUPT`、`DEATH_OBSERVED`、`RECOVERY_REQUIRED`、`PAUSED` 和预算耗尽事件。无论飞行日志是否开启，`survival.state_dir` 都保存按服务器/机器人/world_id 隔离的原子检查点和事件记录。HTTP 超时或内部验证异常后的 pending 不会自动重放。
-
-`--resume`（或可信玩家的 `#resume`）只解除生存控制器暂停并重新观察；模型请求的跨进程未知锁独立处理。`--acknowledge-model-idle` 必须先确认 provider 已无请求执行，不得仅凭客户端超时或模型取消就使用。详细错误与恢复契约见 [SURVIVAL.md](SURVIVAL.md) 和 [DAILY_SURVIVAL.md](DAILY_SURVIVAL.md)。
-
-启用 `debug.monitor.enabled` 后，`debug/monitor.py` 提供本机回环地址上的只读网页，默认端口18930。展示任务板、观察与执行证据、模型请求/返回及实际 `response.model`、token/耗时、模型槽状态和记忆摘要。只展示运行时显式发布的事件，经过脱敏和数量/大小限制；不是通用文件浏览器或远程控制台。模型返回的 reasoning/content 字段属于服务返回数据，不代表可以检查模型内部状态。
-
-目前没有全量三维世界快照或完整自动游戏回放。模型原始响应和技能结果日志可用于排查，但不替代实机后验。正式比赛关闭聊天调试；本机只读监控也不能被当作人工代操作入口。
-
-## 离线回归测试
+| 命令 | 参数 / 条件 | 行为 |
+| --- | --- | --- |
+| `#help` / `#status` / `#inv` | 调试已开启 | 列出实际注册命令、运行状态或背包计数 |
+| `#stop` | 调试已开启 | 请求取消并暂停；不能证明服务器动作已瞬时结束 |
+| `#sleep` | 已注入睡眠回调，主入口有 | 交由控制器安排睡眠 |
+| `#resume` | 生存模式注入恢复回调 | 重新观察后规划，不重放 pending，不清模型请求锁 |
+| `#radar on/off/scan/poi` | 启动时额外传 `--radar` | 开关后台扫描、立即扫描或查询开发记忆 |
+| `#chop [数量] [秒]` | 另行注入 `chop_skill` | 当前 main 未注入，因此普通 `--debug` 不注册 |
+| `#craft <物品> [数量]` | 另行注入 `craft_skill` | 当前 main 未注入；不是模型的 `craft_item` |
 
 ```powershell
+python -B main.py --config config.yaml --debug --radar
+```
+
+雷达确有后台 daemon 线程，约每秒读状态，默认移动 6 格触发扫描；单独 `--radar` 无效。其 MemoryEngine 默认写 `data/game_logic/`，不是生存 SQLite 或 scoped 检查点。独立宏技能与聊天回调不自动获得 harness 动作互斥或取消恢复保证，不要与生存动作同时使用。睡眠/生存控制器的后台线程保证不能推及所有调试 handler。
+
+## 日志、恢复与只读监控
+
+FlightRecorder 把显式发布事件写入配置的日志目录，路径相对配置文件解析；不保证每次异常都有完整三维现场。生存运行记录 DECISION、STEP_RESULT、SAFETY_INTERRUPT、DEATH_OBSERVED、RECOVERY_REQUIRED、PAUSED 等事件，检查点按 API/账号/world_id 隔离。
+
+游戏 pending 必须先重新观察、核验，不自动重放；`--resume` 不解除模型未知锁。只有确认远端模型已空闲后才能使用 `--acknowledge-model-idle`，不能因本地超时或取消就试探解锁。停止回执不是动作结束证据，清理失败也不应跳过登出。详细契约见 [SURVIVAL.md](SURVIVAL.md) 和 [DAILY_SURVIVAL.md](DAILY_SURVIVAL.md)。
+
+`debug.monitor.enabled: true` 提供默认 `127.0.0.1:18930` 的只读网页，只消费已发布事件并脱敏、限制缓存。它显示阶段、任务、模型槽、response.model 和执行结果，不是远程控制台，也不重试动作或清锁。门户 PortalTelemetryRecorder 主动读游戏并导出 JSON，是另一条开发记录路径，未接入该事件面板；见 [MONITORING.md](MONITORING.md)。
+
+## 默认离线回归
+
+```powershell
+$env:BOTSLEEP_RUN_LIVE_TESTS = "0"
 python -B -m unittest discover -s tests -v
 ```
 
-HTTP 集成用本机临时假服务验证真实请求和主入口生命周期，不连接 Minecraft。
+HTTP 用例使用本机临时假服务。门户三步实服 unittest 默认跳过，不能记为通过；合成和随机矩阵文件只有 main 脚本，不是离线 unittest。`test_live_test_isolation.py` 在子进程禁止网络和 RCON 导入，验证三个入口的关闭状态。
 
-## RCON 开发工具与靶场演练
+## 显式实服测试
 
-`core/rcon.py`、`debug/playground.py` 为可选开发工具。普通自动睡眠不导入或使用 mcrcon，仅使用靶场时安装 `requirements-dev.txt`。
+这些脚本会清空物品、给物、传送、改变模式/效果或填充方块，只能在已授权的专用测试世界运行；本轮未执行其主体。默认生产依赖不包含 mcrcon，先安装 `requirements-dev.txt`。
 
-靶场会给物品、传送、放床、改时间或生成生物，只能在专用测试世界调用。实际游戏测试步骤和结果见 [TESTING.md](TESTING.md)。
+需显式设置 `BOTSLEEP_RUN_LIVE_TESTS=1`，并由本机环境提供 `MC_AGENT_API`、`MC_AGENT_PASSWORD`、`MC_RCON_PASSWORD`。可选 `MC_RCON_HOST`（默认回环地址）、`MC_RCON_PORT`（默认 25575）；固定坐标命令针对 SleepBot，若设置 `MC_AGENT_USER` 必须为 SleepBot。不要把真实凭据写入仓库或文档。
 
-### 常用靶场测试场景
+```powershell
+# 仅在配置好专用测试服务器和上述环境变量后运行
+$env:BOTSLEEP_RUN_LIVE_TESTS = "1"
+python -B -m unittest discover -s tests -p test_speedrun_portal.py -v
+python -B tests/test_crafting.py
+python -B tests/test_random_lava_matrix.py --trials 20 --start 1
+```
 
-#### 场景 1：自动落地水测试 (MLG Water Clutch Test)
-- **步骤**：
-  1. RCON 给 Bot 发放水桶：`/give SleepBot water_bucket 1`
-  2. RCON 将 Bot 传送至 25 格高空悬空：`/tp SleepBot ~ ~25 ~`
-  3. 观察 Bot 下落时是否在接地前 1~2 格触发水桶倒水并在着地后收回。
+门户脚本验证分步放石/放水、底部浇筑和后续点火；第一步靶场会给抗火效果，不能当作纯自然生存验收。随机岩浆矩阵通过 RCON 生成有噪声岸线、树木和接近路线，零伤害、零溢水和至少 90% 成功率是目标，不能由文件存在或离线跳过推断达成。独立合成脚本清包给 8 根原木后尝试制作木镐；物品前置由靶场提供，不代表自然采集完整链通过。
 
-#### 场景 2：黑夜寻床入睡测试 (Night Sleep Test)
-- **步骤**：
-  1. RCON 清空周边生物并放置一张红色床：`/setblock ~3 ~ ~ red_bed`
-  2. RCON 将时间强制切换至午夜：`/time set midnight`
-  3. 观察 BotSleep 是否主动识别并入睡。
-
-#### 场景 3：整树连续伐木测试 (Chop Tree Test)
-- **步骤**：
-  1. 玩家在游戏内输入 `#chop 5 60`。
-  2. 观察 BotSleep 自动探测最近可达树干，自底向上挖掘，规避水域阻碍，并在砍伐完毕后自动拾取全部掉落物。
-
-#### 场景 4：智能逆向合成木镐测试 (Wooden Pickaxe Crafting Test)
-- **步骤**：
-  1. 玩家或测试脚本清空背包并给予 8 根原木：`give SleepBot oak_log 8`。
-  2. 在聊天框输入 `#craft wooden_pickaxe 1`（或运行 `tests/test_crafting.py`）。
-  3. 观察 Bot 依次自动完成：
-     - 背包 2x2 批量合成 12 块橡木木板
-     - 背包 2x2 合成 1 张工作台
-     - 背包 2x2 合成 4 根木棍
-     - 寻找身旁坚实平地放置工作台
-     - 使用工作台 3x3 界面精准合成木镐
-     - 自动挖掘收回工作台至背包
-  4. 输入 `#inv` 确认最终背包包含 `wooden_pickaxe`、`crafting_table`、`stick` 与剩余木板。
+完成开发后关闭显式实服开关，再运行默认离线命令。自动搭高、落地水及 20Hz ReflexDaemon 仍未接入，不能把传送至高空的场景描述当作已可用测试工具。新增能力的真实 Python 参数见 [SKILL_SPEC.md](SKILL_SPEC.md)。

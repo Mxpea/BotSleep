@@ -10,35 +10,33 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core.client import APIError, MinecraftAgentClient
-from core.rcon import RconManager
+from core.client import MinecraftAgentClient
 from skills.portal_speedrun import NetherPortalSpeedrunSkill
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("BotSleepTest.SpeedrunPortal")
 
 
+@unittest.skipUnless(os.environ.get("BOTSLEEP_RUN_LIVE_TESTS") == "1",
+                     "Live RCON arena test; set BOTSLEEP_RUN_LIVE_TESTS=1 only for a disposable test world")
 class BotSleepTest(unittest.TestCase):
     """Test suite for Nether Portal Speedrun casting using BotSleepTest."""
 
     @classmethod
     def setUpClass(cls):
-        cls.rcon = RconManager(host="127.0.0.1", port=25575, password="agent-rcon-pass")
-        cls.client = MinecraftAgentClient(password="agent-secret-pass")
-        cls._live_unavailable_reason = None
+        from core.rcon import RconManager
+        # Arena commands below intentionally address the fixture account SleepBot.
+        if os.environ.get("MC_AGENT_USER", "SleepBot") != "SleepBot":
+            raise ValueError("This fixed arena fixture requires MC_AGENT_USER=SleepBot")
+        cls.rcon = RconManager(host=os.environ.get("MC_RCON_HOST", "127.0.0.1"),
+                               port=int(os.environ.get("MC_RCON_PORT", "25575")),
+                               password=os.environ["MC_RCON_PASSWORD"])
+        cls.client = MinecraftAgentClient(base_url=os.environ["MC_AGENT_API"], username="SleepBot",
+                                           password=os.environ["MC_AGENT_PASSWORD"])
 
     def setUp(self):
         """Prepare world state and bot before each test."""
-        if self.__class__._live_unavailable_reason:
-            self.skipTest(self.__class__._live_unavailable_reason)
-        try:
-            self.client.login()
-        except APIError as exc:
-            if exc.code == "network_error" and os.environ.get("BOTSLEEP_REQUIRE_LIVE") != "1":
-                reason = f"Live mc-agent-api server unavailable during offline unittest run: {exc}"
-                self.__class__._live_unavailable_reason = reason
-                self.skipTest(reason)
-            raise
+        self.client.login()
         time.sleep(0.5)
 
     def tearDown(self):

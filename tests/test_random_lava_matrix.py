@@ -14,9 +14,12 @@ Verification Criteria per Trial:
 Pass Target: >= 90% (>= 18 / 20 successes).
 """
 
+from __future__ import annotations
+
 import sys
 import os
-sys.path.insert(0, os.path.abspath("E:/Program Save/VisualCode/BotSleep"))
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import time
 import json
@@ -29,7 +32,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("LavaMatrixTest")
 
 from core.client import MinecraftAgentClient
-from core.rcon import RconManager
 from skills.lava_lake_generator import LavaLakeGenerator
 from skills.portal_speedrun import NetherPortalSpeedrunSkill
 from skills.portal_telemetry import PortalTelemetryRecorder
@@ -273,10 +275,16 @@ def main():
     parser.add_argument("--start", type=int, default=1, help="Starting trial index")
     args = parser.parse_args()
 
-    rcon = RconManager("127.0.0.1", 25575, "agent-rcon-pass")
+    if os.environ.get("BOTSLEEP_RUN_LIVE_TESTS") != "1":
+        parser.error("Live RCON terrain generation disabled; use a disposable world and set BOTSLEEP_RUN_LIVE_TESTS=1")
+    if os.environ.get("MC_AGENT_USER", "SleepBot") != "SleepBot":
+        parser.error("This fixed arena fixture requires MC_AGENT_USER=SleepBot")
+    from core.rcon import RconManager
+    client = MinecraftAgentClient(base_url=os.environ["MC_AGENT_API"], username="SleepBot",
+                                   password=os.environ["MC_AGENT_PASSWORD"])
+    rcon = RconManager(os.environ.get("MC_RCON_HOST", "127.0.0.1"),
+                       int(os.environ.get("MC_RCON_PORT", "25575")), os.environ["MC_RCON_PASSWORD"])
     rcon.connect()
-
-    client = MinecraftAgentClient("http://127.0.0.1:18900/api/v1", password="agent-secret-pass")
     client.login()
     time.sleep(1.0)
 

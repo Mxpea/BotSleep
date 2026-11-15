@@ -1,6 +1,6 @@
 # 配置、客户端、生存、赛事与监控验证
 
-最近独立复核：2026-11-16（Asia/Shanghai），分支 `develop-tianya`（含速通地狱门结构规约与工作流加固改动，尚未提交）。首节为最新状态与验证记录；后续各节为历史证据，不代表当前进程在线。
+最近独立复核：2026-11-16（Asia/Shanghai），分支 `develop-tianya`（合并 `origin/main` `c53f70a` 并接入速通地狱门结构规约与工作流加固改动）。首节为最新状态与验证记录；后续各节为历史证据，不代表当前进程在线。
 
 ## `develop-tianya` 速通传送门架构与自然岩浆池实测（2026-11-16）
 
@@ -29,9 +29,29 @@
 | `.\.venv\Scripts\python.exe -X utf8 -B main.py --config config.example.yaml --check-config` | 输出 `Configuration valid.`，退出码 `0`。 |
 | `.\.venv\Scripts\python.exe -X utf8 -B -m unittest discover -s tests -q` | **853 项运行，0 失败，0 错误，8 项显式跳过（`OK (skipped=8)`）**；其中 5 项为未安装本地 Ninjabrain JAR 的引擎/校准跳过，3 项为离线环境下 `test_speedrun_portal.py` 未连接实服的显式跳过。 |
 
-## 历史：工作区赛事任务验证（2026-11-15，基线 `c21d623`）
+## 历史：拉取后复核（3801be9）
 
-本轮只跑离线测试，没有连接 Minecraft、mc-agent-api、RCON 或模型。赛事目录和工作区代码尚未提交；任何结果均不得解释为真实比赛执行验证。
+环境：Windows、Python 3.11.3、requests 2.34.2、PyYAML 6.0.3、Temurin OpenJDK/javac 25.0.2。已有虚拟环境，本轮未安装依赖。只使用离线测试和本机临时假 HTTP 服务，没有连接 Minecraft、实际 mc-agent-api、RCON 或模型，也未修改相邻 API 仓库。
+
+| 检查 | 本轮结果 |
+| --- | --- |
+| `$env:BOTSLEEP_RUN_LIVE_TESTS='0'; python -X utf8 -B -m unittest discover -s tests -q` | **845 项，39.857 秒：841 项通过、3 项跳过、1 项 ERROR**；`FAILED (errors=1, skipped=3)`，不能报告全绿。 |
+| `python -B -m unittest discover -s tests -p test_live_test_isolation.py -v`（门禁关闭） | 3 项通过；子进程禁止网络连接与 mcrcon/core.rcon 导入，验证门户 unittest 跳过、独立合成/随机地形脚本拒绝执行。 |
+| `python -X utf8 -B main.py --config config.example.yaml --check-config` | `Configuration valid.`；只核对示例配置，不读取私有服务状态。 |
+| 工具、目录与配方读取 | starter/daily/competition 为 9/31/36 个模型工具；125 项赛事目录、7 个行动计划；RecipeBook 加载 886 个产物，并读取木镐/木板配方及网格分类。不代表全部配方执行正确。 |
+| Python AST / 文档链接 | 101 个受版本控制或新增 Python 文件语法通过；69 个文档相对链接有效，未发现合并冲突标记或本机绝对路径，`git diff --check` 通过。 |
+
+唯一 ERROR 仍是 `test_survival_memory.SurvivalMemoryTests.test_corrupt_and_future_schema_databases_are_preserved` 清理临时 `memory.sqlite3` 时的 WinError32，后续 WinError267。首轮 842 项（39.024 秒）与最终复跑均出现同类错误；不是业务断言失败，但根因与修复仍未完成。本轮不删除原数据、不忽略清理异常，也不改记忆模块掩盖错误。
+
+3 项跳过全部来自 `tests/test_speedrun_portal.py`，不是缺少 Ninjabrain JAR；5 项 Ninjabrain 引擎/离线 CLI 用例实际执行且未跳过。本轮没有新的实服门户验收。`test_crafting.py` 和 `test_random_lava_matrix.py` 是直接运行的脚本，默认 discover 只导入，不包含 unittest 用例；不能把被发现或导入当作这些能力测试通过。旧代码中的“已验证”、零伤害、20 轮/90% 成功率描述是目标或历史主张，没有本轮新日志支撑。
+
+最新源码增加的实服测试若直接 discover 原会登录并用 RCON 改世界。本轮加 `BOTSLEEP_RUN_LIVE_TESTS=1` 门禁，RCON 依赖延后导入；显式执行还需 `MC_AGENT_API`、`MC_AGENT_PASSWORD`、`MC_RCON_PASSWORD`，可选 `MC_RCON_HOST/MC_RCON_PORT`。固定坐标命令针对 SleepBot，其他 `MC_AGENT_USER` 被拒绝。只在已授权的专用测试世界启用；运行命令及限制见 [DEBUG_GUIDE.md](DEBUG_GUIDE.md)。
+
+模型主链仍没有绑定 `PROCEDURAL_TOOL_DEFINITIONS`，独立传送门/整树伐木/配方合成/雷达不是新增计分行动计划。`PortalTelemetryRecorder` 主动读取与 JSON 导出也未接入 EventMonitor，见 [ARCHITECTURE.md](ARCHITECTURE.md) 和 [MONITORING.md](MONITORING.md)。
+
+## 历史：赛事任务工作区验证（2026-11-15，c21d623 → 783e152）
+
+该轮只跑离线测试，没有连接 Minecraft、mc-agent-api、RCON 或模型。当时的工作区改动后经 `783e152` 提交并已合并；下表只作历史基线，不代表当前结果。
 
 | 检查 | 本轮结果 |
 | --- | --- |

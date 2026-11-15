@@ -2,9 +2,9 @@
 
 更新日期：2026-11-15（Asia/Shanghai）。路径均相对仓库根目录；跨机器需要自行配置部署地址、账号和凭据，不依赖原机器的进程或在线会话。提交、合并和远端同步结果以 Git 记录为准，不据本文推断已经 push。
 
-**本轮状态（HEAD `c21d623` + 未提交工作树改动）**：赛事任务系统基础闭环已写入；125 项规则目录（120 个 advancement、5 个根节点），45 项明确计分、54 项条件待确认、26 项不计分。服务器 advancement 才是计分证据；fresh 全目录评估后才允许正常结束，终态可恢复。只有 7 个早期 scored 目标有明确行动计划，其余 scored 目标仍 unsupported；未完成完整赛事技能覆盖或实服验证。
+**本轮状态（已拉取 `HEAD 3801be9`，另含本轮文档/测试隔离改动）**：赛事基础闭环已随 `783e152` 提交并合并，不再是未提交的 `c21d623` 工作树。最新合并另加入独立门户浇筑、门户遥测、随机岩浆靶场、配方合成、整树伐木和雷达。它们没有自动进入生存模型执行链；starter/daily/competition 仍为 9/31/36 个工具，125 项规则目录中仍只有 7 个明确行动计划。
 
-最新全量离线复核为 **839 项、25.143 秒、1 项 Windows SQLite 临时文件清理 ERROR**；赛事定向 67 项、通用监控定向 23 项通过。该 ERROR 不是业务断言失败，但整套测试不能报全绿。详见 [TESTING.md](docs/TESTING.md)。本轮不连接游戏、API、RCON 或模型；不得把离线成绩或旧现场记录当作本轮实服验收。
+本轮发现 README 残留合并冲突标记，以及门户实服测试默认会登录并用 RCON 改世界。已清理文档并为三个实服入口加显式启用门禁；额外的离线隔离回归会禁止网络和 RCON 导入，核验关闭状态。最新全量复核 **845 项、39.857 秒：841 项通过、3 项实服测试跳过、1 项 Windows SQLite 临时文件清理 ERROR**；不能报全绿。详见 [TESTING.md](docs/TESTING.md)。未操作实际游戏、API、RCON 或模型，未修改相邻 `mc-agent-api`。
 
 ## 1. 当前入口、范围与历史现场
 
@@ -25,6 +25,16 @@ Copy-Item config.example.yaml config.yaml
 
 `.test-runtime/`、`.survival-test-runtime/` 和 `logs/` 均为本地忽略目录，不随 Git 拉取分发。接收端不能假定历史现场报告存在；需要时获取脱敏副本或另行验证，不根据历史记录启动第二个同名机器人。
 
+### 最新合并能力的接线边界
+
+| 能力 | 当前状态 |
+| --- | --- |
+| `NetherPortalSpeedrunSkill` | `build_scaffolding`、`execute(step=1, **kwargs)` 与 3 个分步方法已存在；需要显式阶段坐标，不是 `cast_nether_portal(axis)` 的完整实现。未接入模型任务和安全恢复。 |
+| `PortalTelemetryRecorder` / `LavaLakeGenerator` | 前者主动读游戏并导出 `logs/telemetry/` JSON；后者通过 RCON 改测试地形。都不是只读系统监控或赛事完成证据。 |
+| `RecipeBook` / `CraftItemSkill` / `ChopTreeSkill` | 886 个产物的配方目录及独立宏技能已合并；模型 `craft_item` 仍使用生存技能。聊天处理器有注入槽，但 `main.py` 没有注入合成/伐木对象。 |
+| `ContinuousRadarSkill` / `MemoryEngine` | debug 加 `--radar` 时创建后台扫描；默认写 `data/game_logic/`，不是 scoped SQLite 或生存检查点。调试后检查受版本控制文件的 diff。 |
+| 实服脚本 | 门户 unittest 默认跳过 3 项；合成/随机岩浆是 `main()` 脚本，无离线 unittest 用例。均需显式启用、专用世界及环境凭据，不能以脚本存在推断实服验证通过。 |
+
 ## 2. 已实现链路与验证边界
 
 `survival.objective: starter` 执行初期石器工具链；`daily` 持续计算13项基于当前证据的任务，包含食物、材料、铁器、熔炼、床与住所、储物、死亡掉落恢复及维护。日常模式已注册31个工具，仍受步骤、时间、死亡及安全预算限制，不承诺无限无人值守。详情见 [DAILY_SURVIVAL.md](docs/DAILY_SURVIVAL.md)。
@@ -33,7 +43,7 @@ Copy-Item config.example.yaml config.yaml
 
 | 模块 | 当前状态 |
 | --- | --- |
-| `core/client.py`、`core/config.py` | 统一公开 API 封装、业务错误与未知结果区分、配置加载校验；旧路径和移动 timeout 参数已适配 |
+| `core/client.py`、`core/config.py` | 统一配置与协议；新增 get_block/dig 坐标三元组兼容、可省略 y 的 move_to 和 get_inventory_counts。独立程序仍应显式传入凭据。 |
 | `core/survival_harness.py` | 单动作执行、独立单模型 worker、安全抢占、失败冷却、检查点及分 objective 预算；不是旧 `agent/loop.py` 骨架 |
 | `core/competition_rules.py`、`core/competition_tasks.py` | 规则核对、任务状态、server advancement 计分、全目录终止 gate 与 terminal restore；非计分来源不授权得分 |
 | `agent/llm_planner.py`、`agent/tools.py` | 原生 tool call/result 配对、参数验证、有限请求预算；starter 9项、daily 31项、competition 36项工具 |
@@ -124,7 +134,7 @@ python -m integrations.ninjabrain calculate --input data/examples/stronghold_thr
 python -B -m unittest discover -s tests -v
 ```
 
-`setup` 下载固定官方1.5.2 JAR并检查 SHA-256，后续计算可离线；`.cache/ninjabrain/` 不提交。缺少引擎时测试会明确跳过，不能报告为引擎全部通过。本轮合成示例 CLI 已成功计算，首选区块为 `[128,0]`，与实际世界无关。
+`setup` 下载固定官方1.5.2 JAR并检查 SHA-256，后续计算可离线；`.cache/ninjabrain/` 不提交。缺少引擎时测试会明确跳过，不能报告为引擎全部通过。前轮合成示例 CLI 曾计算首选区块 `[128,0]`，与实际世界无关；本轮状态按 TESTING 首节记录。
 
 `capture` 会登录、消耗末影之眼并在结束时登出，可能替换同名旧会话。需要实机采样时按 [STRONGHOLD.md](docs/STRONGHOLD.md) 使用自己的部署配置；持续 harness 进程应使用受协调的注入 client 入口，不能另起同名 CLI 采样。禁止把独立采样器误当作已注册的日常模型动作。
 
