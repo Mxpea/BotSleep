@@ -1,7 +1,9 @@
-"""Memory and Spatial Knowledge Base Engine for BotSleep
+"""Legacy Memory and Spatial Knowledge Base Engine (`data/game_logic/`).
 
-Persists and indexes all game logic, bot states, spatial landmarks, terrain grids,
-and exploration episodes so AI and sub-agents can rapidly retrieve historical intelligence.
+NOTE: This module belongs to the legacy spatial/radar memory subsystem and is NOT
+used for current survival checkpoints or daily SQLite memory. Active survival
+checkpoints are managed by `core/survival_state.py` (`SurvivalJournal`) and
+bounded SQLite recall is managed by `core/survival_memory.py` (`SurvivalMemory`).
 """
 
 import os

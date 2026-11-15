@@ -75,11 +75,15 @@ flowchart TD
 | `skills/mining.py` | 整树连续自动伐木与掉落物拾取 |
 | `skills/exploration.py` | 常态化连续巡航雷达与位移触发扫描 |
 | `skills/daily_survival.py` | 日常生存技能库（作物、狩猎、铁矿、装备、熔炼、储物、床门、5x5 庇护所） |
+| `core/domain.py` | 共享领域常量（木种、床色、食物点、危险方块）、纯坐标/体素键解析、背包计数提取与 `TypedDict` 契约 |
+| `core/skill_registry.py` | starter / daily / competition 技能注册表（目标作用域、终点安全复核标记、执行器槽位分发）单一事实源 |
+| `core/retreat_controller.py` | 树冠/近敌分段撤退恢复状态机、失败落点冷却与中继恢复判定 |
 | `core/survival_harness.py` | 串行任务推进、单游戏动作线程、独立模型 worker、安全复查、取消、失败退避和检查点 |
 | `agent/llm_planner.py`、`agent/tools.py` | 按 objective 暴露 starter 9 / daily 31 / competition 36 工具；严格解析原生 tool call，保留配对工具反馈 |
 | `core/competition_rules.py`、`core/competition_tasks.py` | 读取规则目录、计算可用性和服务器 advancement 证据、管理选择/完成/强退/终止及得分；不执行游戏动作 |
 | `core/model_worker.py`、`core/model_gate.py` | 慢模型异步等待；同服务/凭据作用域的本机线程与进程门禁；未知请求持久化锁定 |
-| `core/survival_state.py` | 有界观察与原子检查点，按 API/账号/world_id 隔离；pending 不自动重放 |
+| `core/survival_state.py` | 有界观察、跨进程文件锁与原子检查点，按 API/账号/world_id 隔离并提供单实例 `instance_lock()`；pending 不自动重放 |
+| `scripts/botctl.py` | 离线只读运维工具，检查生存实例锁、`pending` 意图及 `ModelRequestGate` 状态（`status` / `check-ready-to-replace`） |
 | `agent/daily_survival.py` | 根据当前证据生成日常任务板、依赖、缺口和建议；competition 中仅作生存辅助，不是计分来源 |
 | `core/daily_observation.py`、`core/daily_policy.py` | 日常证据采集、安全情境和模型放行条件；未知资源不当成可执行目标 |
 | `skills/survival.py`、`skills/daily_survival.py` 等 | 采集、制作、移动、撤退、农业、熔炼、住所、容器等执行及后验验证 |

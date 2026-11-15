@@ -1,8 +1,20 @@
 # 配置、客户端、生存、赛事与监控验证
 
-最近独立复核：2026-11-15（Asia/Shanghai），基线 `HEAD c21d623` 加未提交赛事任务改动。首节为本轮离线结果；后续各节为历史证据，不代表当前进程在线或本轮实服验收。
+最近独立复核：2026-11-15（Asia/Shanghai），分支 `develop-tianya`（基于 `d6d92f2` 完成多人协作结构与稳定性四阶段节点改造）。首节为本轮离线结果；后续各节为历史证据，不代表当前进程在线或本轮实服验收。
 
-## 当前工作区赛事任务验证（2026-11-15）
+## `develop-tianya` 多人协作结构与稳定性验证（2026-11-15）
+
+本轮只跑离线测试与静态契约校验，没有连接 Minecraft、mc-agent-api、RCON 或模型。实服速通用例与缺少本地 JAR 的 Ninjabrain 引擎用例按规范显式跳过（`skipped=8`），不伪装为实服或引擎完整验收。
+
+| 检查 | 本轮结果 |
+| --- | --- |
+| `.\.venv\Scripts\python.exe -X utf8 -B -m unittest discover -s tests -p "test_contracts.py" -v` | **8 项通过**，覆盖全仓 AST 语法与 `with sqlite3.connect` 句柄泄漏静态拦截、starter/daily/competition 工具目录与技能 `ARGUMENTS` / `SKILL_REGISTRY` 一致性、`core/domain.py` 纯函数，以及 `SurvivalJournal.instance_lock()` 跨进程互斥与 `main.py` 重复启动拦截。 |
+| `.\.venv\Scripts\python.exe -X utf8 -B -m unittest discover -s tests -p "test_botctl.py" -v` | **3 项通过**，覆盖 `scripts/botctl.py` 离线只读检查（空闲可替换、实例锁/`pending` 阻塞、`ModelRequestGate` `uncertain` 阻塞与确认后放行）。 |
+| `.\.venv\Scripts\python.exe -X utf8 -B -m unittest discover -s tests -p "test_survival_memory.py" -v` | **30 项通过（0 错误，0 `ResourceWarning`）**；修复 `test_corrupt_and_future_schema_databases_are_preserved` 中裸 `with sqlite3.connect(...)` 未关闭文件句柄导致的 Windows `WinError 32`。 |
+| `.\.venv\Scripts\python.exe -X utf8 -B main.py --config config.example.yaml --check-config` | 输出 `Configuration valid.`，退出码 `0`。 |
+| `.\.venv\Scripts\python.exe -X utf8 -B -m unittest discover -s tests -q` | **853 项运行，0 失败，0 错误，8 项显式跳过（`OK (skipped=8)`）**；其中 5 项为未安装本地 Ninjabrain JAR 的引擎/校准跳过，3 项为离线环境下 `test_speedrun_portal.py` 未连接实服的显式跳过。 |
+
+## 历史：工作区赛事任务验证（2026-11-15，基线 `c21d623`）
 
 本轮只跑离线测试，没有连接 Minecraft、mc-agent-api、RCON 或模型。赛事目录和工作区代码尚未提交；任何结果均不得解释为真实比赛执行验证。
 

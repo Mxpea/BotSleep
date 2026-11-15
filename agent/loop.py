@@ -1,4 +1,11 @@
-"""Agent Main Decision Loop (Observe - Think - Act)"""
+"""Legacy Agent Main Decision Loop Skeleton (NOT the active survival loop).
+
+NOTE: This module is a historical prototype kept only for backward compatibility.
+The active starter, daily, and competition survival loops are driven by
+`main.py` -> `core/survival_harness.py` (`SurvivalHarness`), `agent/llm_planner.py`,
+`agent/survival_planner.py`, and `agent/daily_survival.py`. Do not infer overall
+project status from the TODO placeholders in this file.
+"""
 
 import time
 from typing import Dict, Any, Optional

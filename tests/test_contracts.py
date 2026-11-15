@@ -277,6 +277,7 @@ class DomainPrimitivesTests(unittest.TestCase):
         self.assertEqual(len(extract_blocks(obs, include_terrain=True)), 2)
         hostiles = extract_hostiles(obs, [0, 64, 0])
         self.assertEqual([pos for _, pos in hostiles], [[2, 64, 0], [4, 64, 0]])
+        self.assertEqual(extract_hostiles(obs, None), [])
         self.assertTrue(set(SAFE_FOOD).issubset(set(FOOD_POINTS)))
         self.assertEqual(len(LOG_NAMES), len(PLANK_NAMES))
         self.assertEqual(len(BED_NAMES), 16)

@@ -173,11 +173,11 @@ def extract_blocks(observation: Mapping[str, Any], *, include_terrain: bool = Fa
     ]
 
 
-def extract_hostiles(observation: Mapping[str, Any], origin: Iterable[float]) -> List[Tuple[float, List[float]]]:
+def extract_hostiles(observation: Mapping[str, Any], origin: Any) -> List[Tuple[float, List[float]]]:
     """Return distance-sorted (dist, pos) pairs for hostile entities in observation."""
-    if not isinstance(observation, Mapping):
+    origin_list = parse_pos(origin)
+    if not isinstance(observation, Mapping) or origin_list is None:
         return []
-    origin_list = list(origin)
     found: List[Tuple[float, List[float]]] = []
     for entity in observation.get("entities") or []:
         if not isinstance(entity, dict) or entity.get("type") != "hostile":
