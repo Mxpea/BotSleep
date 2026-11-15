@@ -1,8 +1,8 @@
 # Harness 接口契约与架构决策
 
-更新：2026-11-14；源码核对基线 `ed685f7`。状态：**第 2 节为现有运行接口；第 4～9 节为赛事设计及提案，未实现入口未冻结**。路径均相对本仓库；部署地址、账号与凭据由配置提供。
+更新：2026-11-15；源码核对基线为当前工作区赛事任务改动。状态：**第 2 节与第 5 节赛事任务子集为现有运行接口；其余未实现入口仍是设计提案**。路径均相对本仓库；部署地址、账号与凭据由配置提供。
 
-合并说明：本页保留 dev-aure 的赛事接口设计访谈，不是当前全部运行能力清单。合并后的配置入口、原生模型反馈、日常技能、单模型请求门禁及本地安全运行时见 [README.md](../README.md)、[DAILY_SURVIVAL.md](DAILY_SURVIVAL.md) 和 [TESTING.md](TESTING.md)。这些实现不代表第5节入口、完整赛事阶段控制器、浮水/搭桥执行器等未来提案已经落地。
+合并说明：本页保留 dev-aure 的赛事接口设计访谈，不是当前全部运行能力清单。合并后的配置入口、原生模型反馈、日常技能、单模型请求门禁及本地安全运行时见 [README.md](../README.md)、[DAILY_SURVIVAL.md](DAILY_SURVIVAL.md) 和 [TESTING.md](TESTING.md)。这些实现不代表完整阶段 skill 加载、compact/handoff、浮水/搭桥执行器等未来提案已经落地。
 
 ## 1. 目标与术语
 
@@ -32,11 +32,12 @@
 | 模型选择 | `LLMSurvivalPlanner.choose(observation,context,cancel_event)` | 返回一个 Decision；`observe_result(decision,result,observation)` 回传配对原生工具结果 |
 | 模型门禁 | `ModelRequestGate.request(cancel_event)`、`snapshot()` | 本机线程/进程串行化；传输未知持久化锁定；不自动清锁 |
 | 进度/记忆 | `SurvivalJournal.update/record`、`SurvivalMemory.recall/record_result` | 已有按世界隔离的检查点及有界 SQLite；不是新赛事 checkpoint schema |
-| 模型工具目录 | `tools_for_objective("starter"/"daily")` | 9/31 个已注册工具，参数与后验受限；具体 skill 见生存指南 |
-| 要塞 | `EyeObservationCollector.capture()`、`CalculateStrongholdSkill.execute(...)` | 独立 Python/CLI；STRONGHOLD_TOOL_DEFINITION 未加入 starter/daily 工具目录 |
+| 模型工具目录 | `tools_for_objective("starter"/"daily"/"competition")` | 9/31/36 个已注册工具；competition 的 5 个任务工具由本地任务管理器执行，游戏工具仍受后验门禁 |
+| 赛事任务 | `CompetitionTasks`、`tools_for_objective("competition")`、`MinecraftAgentClient.advancements()` | 规则目录、目标选择、progress/finish/force-exit/end、服务器 advancement 计分和终态检查点已实现；模型自报不算证据 |
+| 要塞 | `EyeObservationCollector.capture()`、`CalculateStrongholdSkill.execute(...)` | 独立 Python/CLI；STRONGHOLD_TOOL_DEFINITION 未加入 starter/daily/competition 工具目录 |
 | Markdown skill | `skills/stronghold_localization/SKILL.md` | 策略文档，无运行时按需加载器 |
 
-目标与能力差异：daily 的 13 项证据任务板不等于赛事 advancement 清单；starter 的 `goal_complete` 不等于未来“所有目标检测后由模型正常退出”的通用接口；daily 不提供最终 goal_complete。
+目标与能力差异：daily 的 13 项证据任务板不等于赛事 advancement 清单；competition 现在提供 advancement 任务板和结束 gate，但尚未实现完整阶段清单、动态 skill 加载或导航执行器；starter 的 `goal_complete` 与 competition 的 `end_competition` 是两套退出语义。
 
 模型与动作两个恢复入口必须分清：`--resume` 只处理游戏 pending；`--acknowledge-model-idle` 只在已确认 provider 空闲后解除模型不确定锁。不能用重启/清文件绕过门禁；当前脚本退出会登出游戏，不是 handoff 保持在线功能。
 
@@ -78,18 +79,30 @@
 
 建议：同一能力注册信息生成 schema，避免实现与 skill 漂移。所有执行路径，包括调试和恢复，都经过动作协调器。读取独立并行；stop 独立通道；posture/look 虽不占服务器锁，也有受控资源所有权。网关不负责目标规划，导航策略负责路点、风险和进展。计划/进度卡保持简短，不要求模型逐个预批 API 动作；校验比赛规则、阶段范围、工具权限和明确安全护栏。
 
+### 当前已实现的 competition 模型工具
+
+| 工具 | 参数 | 语义 |
+|---|---|---|
+| `select_task(goal_id)` | 规则 ID | 仅选择 scored、未确认且当前 availability 为 ready/needs_prerequisites 的目标；进入单活动任务阶段。 |
+| `update_progress(summary)` | 简短进度文本 | 只改进度卡，不是完成证据。 |
+| `finish_task(reason)` | 原因 | 要求 fresh 的活动目标检查；只有服务端 advancement 显示 completed 且规则 eligibility 为 scored 才加分，然后回到选择。 |
+| `force_exit_task(reason)` | 原因 | 结束当前目标并 cooldown，回到选择；不清游戏 pending 或模型 uncertain。 |
+| `end_competition(reason)` | 原因 | 只在 selection 且 fresh 全目录检测后进入 terminal；未知目标留 unknown、不计分。 |
+
+工具定义见 `agent/tools.py`，状态由 `core/competition_tasks.py` 保存至 scoped journal。`competition` 目录共 36 个工具（31 个日常生存动作 + 5 个生命周期工具）；规则目录 125 项，只有 7 个 scored 目标有当前行动计划。
+
 ## 5. 程序入口草案
 
-以下名称是未来统一赛事接口草案，尚未作为该名称/协议实现；已有相近能力见第 2 节，不能将这些新名称注册给模型。正常退出须先对预设项目目标完成检测；检测结果齐全后模型可选择结束。force-exit 当前任务应 stop/核验后回任务选择，并保留未完成状态。
+除上方已标明“当前已实现”的五个工具外，下表均是统一赛事接口的抽象草案；不要把未绑定名称注册给模型。正常退出须先对预设项目目标完成检测；检测结果齐全后模型可选择结束。force-exit 当前任务应 stop/核验后回任务选择，并保留未完成状态。
 
 | 入口候选 | 输入 | 结果 |
 |---|---|---|
 | `observe()` | 范围/新鲜度要求 | 时间、会话、维度、状态和缺失字段 |
-| `select_task(goal_id)` | 当前阶段可做目标 ID | task_id，进入目标 |
-| `update_progress_card(task_id, summary)` | 目标、已确认进度、下一意图 | 版本号；供下一轮模型保持方向，不是细计划 |
-| `get_task(task_id)` | 标识 | 阶段、目标检测结果、动作状态、错误 |
-| `finish_task(task_id, reason, evidence)` | 标识、原因及检测证据 | 目标全部经过检测后才允许正常结束；不把未完成目标记为成功 |
-| `force_exit_task(task_id, reason)` | 标识及原因 | 停止/核验后回到任务选择，保留未完成目标 |
+| `select_task(goal_id)` | 当前阶段可做目标 ID | 已实现；实际语义见上表 |
+| `update_progress_card(task_id, summary)` | 目标、已确认进度、下一意图 | 未实现；当前仅有 `update_progress(summary)` |
+| `get_task(task_id)` | 标识 | 未实现；模型通过上下文接收完整目录和当前进度卡 |
+| `finish_task(task_id, reason, evidence)` | 标识、原因及检测证据 | 草案接口未实现；当前 `finish_task(reason)` 用最新服务器证据结束单任务 |
+| `force_exit_task(task_id, reason)` | 标识及原因 | 草案接口未实现；当前 `force_exit_task(reason)` 结束活动目标并 cooldown |
 | `execute_action(spec)` | 内部动作和截止时间 | action_id、已确认或不确定的执行结果 |
 
 任务状态候选：queued/running/waiting/interrupted/succeeded/failed/cancelled。动作状态单独管理，需表达 stopping 与 outcome_unknown。预设目标检测状态候选：unchecked/completed/not_completed/blocked/unknown；“检测完毕”表示每个预设目标均有检测结果，不表示全部目标都已完成。
@@ -106,7 +119,7 @@
 
 规划器按已观测地形构建局部移动图，执行器按移动类型落实路点。可参考 Baritone 的移动可行性、时间/材料代价和执行校验，但无法直接接入其客户端控制与设置。公开 API 不提供避水配置，不得假造 `liquidCost` 参数。未知区域不能当作安全路径；材料不足或无可验证通路时报告 route_blocked。
 
-预设目标检测器逐项给证据与状态。所有预设目标均经过检测后，正常结束才可开放给模型决定；模型也可 force-exit 当前目标并回任务选择。相关接口尚未实现。
+预设目标检测器逐项给证据与状态。`CompetitionTasks` 已用 `/advancements` 的 fresh 响应完成该 gate：缺失目标仍记录 unknown，未知不计分；所有非根目标被检查后，`end_competition` 才能进入 terminal。模型也可 force-exit 当前目标并回任务选择。
 
 ## 7. 已确认方向与设计树
 
@@ -185,14 +198,14 @@ Pi 的实现使用可配置 reserve/keepRecent 预算、摘要和保留消息边
 
 ### 本次拉取后的设计状态
 
-本轮方向已汇总为：阶段清单与模型自主选目标；简短进度卡；harness 管动作、导航和 reflex；最小 checkpoint；compact 自动、handoff 显式；目标检查 gate、正常/强制退出；重复输出兜底。这里的完整赛事接口尚未实现，不能与合并后已有的日常生存运行时混为一谈。
+本轮方向已汇总为：阶段清单与模型自主选目标；简短进度卡；harness 管动作、导航和 reflex；最小 checkpoint；compact 自动、handoff 显式；目标检查 gate、正常/强制退出；重复输出兜底。当前已落地规则目录、任务选择、服务器证据、得分、退出 gate、终态恢复和只读赛事面板；完整阶段清单、语义 compact、reflex、水面/搭路导航仍未实现。
 
-本轮只同步文档状态，不视为授权直接实施全部赛事草案。后续确认实施范围后，再按接口/执行器补齐最小闭环。不把尚未验证的参数、网络重试或导航策略写成已有能力。比赛维护只能是最后手段，不能成为正常自动恢复链。
+本轮按请求实现规则计分任务的基础生命周期和只读状态面板；未实现能力仍需单独限定范围并验证，不把尚未验证的参数、网络重试或导航策略写成已有能力。比赛维护只能是最后手段，不能成为正常自动恢复链。
 
 ## 10. 实施缺口与验收候选
 
-旧分支的 get_blocks/look_at 路径、move_to 的 timeout 参数、配置加载和错误归一化已由合并后的统一客户端处理；这些不再是新的待办。接下来仍须针对本页尚未绑定的赛事目标、导航和采眼工具补齐最小闭环，不能注册空报成功的占位技能。
+旧分支的 get_blocks/look_at 路径、move_to 的 timeout 参数、配置加载和错误归一化已由合并后的统一客户端处理；这些不再是新的待办。接下来应扩展可执行 scored 目标计划、阶段清单与导航/采眼整合；当前不把 unsupported 目标注册为可执行工具，也不添加空报成功的占位技能。
 
-状态对照：已有离线回归覆盖单动作互斥、取消/安全反馈、模型串行门禁、pending 恢复和后验验证；不等于完整赛事导航/恢复验收。仍待补齐的主要是：赛事目标检测和退出工具、重复输出触发 compact 的兜底链、语义 compact/显式 handoff、阶段 skill 加载、受协调的要塞工具和水面/搭路导航。模型服务未知状态当前需明确确认后才能恢复，不能承诺完全自主长期故障恢复。最新验证见 [TESTING.md](TESTING.md)。
+状态对照：已有离线回归覆盖单动作互斥、取消/安全反馈、模型串行门禁、pending 恢复和后验验证；不等于完整赛事导航/恢复验收。仍待补齐的主要是：阶段目标清单和动态 skill 加载、重复输出触发 compact 的兜底链、语义 compact/显式 handoff、受协调的要塞工具和水面/搭路导航。赛事目标检测、退出工具和基础监控已接入。模型服务未知状态当前需明确确认后才能恢复，不能承诺完全自主长期故障恢复。最新验证见 [TESTING.md](TESTING.md)。
 
 维护：标明事实/提案/已确认；接口修改同步实现、schema、skill 与测试；不记机器路径、凭据、token 或原始大日志。

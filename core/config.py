@@ -24,6 +24,8 @@ DEFAULTS: Dict[str, Any] = {
     "agent": {"name": "SleepBot", "password": "", "mode": "sleep"},
     "survival": {
         "objective": "starter",
+        "competition": {"eligibility_overrides": {}, "defer_seconds": 300,
+                        "advancement_poll_seconds": 5, "max_seconds": 28800, "max_steps": 100000},
         "daily": {"food_reserve": 8, "wood_reserve": 8, "fuel_reserve": 8, "maintenance_interval_seconds": 30},
         "world_id": "default",
         "state_dir": "runtime/survival",
@@ -168,8 +170,26 @@ def _validate(config: Dict[str, Any], config_dir: Path) -> None:
     survival = config["survival"]
     if set(survival) - set(DEFAULTS["survival"]):
         raise ConfigError("survival contains unsupported options")
-    if survival["objective"] not in {"starter", "daily"}:
-        raise ConfigError("survival.objective must be starter or daily")
+    if survival["objective"] not in {"starter", "daily", "competition"}:
+        raise ConfigError("survival.objective must be starter, daily or competition")
+    competition = _mapping(survival["competition"], "survival.competition")
+    if set(competition) - set(DEFAULTS["survival"]["competition"]):
+        raise ConfigError("survival.competition contains unsupported options")
+    for key, maximum in (("defer_seconds", 3600), ("advancement_poll_seconds", 60), ("max_seconds", 28800), ("max_steps", 1000000)):
+        _positive(competition[key], f"survival.competition.{key}")
+        if competition[key] > maximum:
+            raise ConfigError(f"survival.competition.{key} must not exceed {maximum}")
+    if type(competition["max_steps"]) is not int or competition["max_steps"] < 1:
+        raise ConfigError("survival.competition.max_steps must be a positive integer")
+    overrides = _mapping(competition["eligibility_overrides"], "survival.competition.eligibility_overrides")
+    if any(not key.startswith("minecraft:") or type(value) is not bool for key, value in overrides.items()):
+        raise ConfigError("Eligibility overrides require Minecraft advancement IDs and boolean values")
+    if overrides:
+        from core.competition_rules import scoring_catalog
+        try:
+            scoring_catalog(overrides)
+        except ValueError:
+            raise ConfigError("Invalid competition scoring override") from None
     daily = _mapping(survival["daily"], "survival.daily")
     if set(daily) - set(DEFAULTS["survival"]["daily"]):
         raise ConfigError("survival.daily contains unsupported options")

@@ -1,8 +1,8 @@
 # BotSleep
 
-基于 mc-agent-api 的睡眠与生存机器人。默认模式在夜间或雷暴时找床并验证睡眠；`--mode survival` 运行初期石器目标，增加 `--objective daily` 后运行食物、工具升级、熔炼、床与住所、储物、死亡掉落恢复和持续维护。生存模式支持确定性规划和可选模型规划；默认不调用模型，正常运行无需 RCON。
+基于 mc-agent-api 的睡眠、生存与赛事机器人。默认模式在夜间或雷暴时找床并验证睡眠；`--mode survival` 支持 starter、daily 和 competition：starter 运行初期石器目标，daily 运行食物、工具升级、熔炼、床与住所、储物、死亡掉落恢复和持续维护，competition 按规则 advancement 目录选择得分任务并以服务器状态计分。生存模式支持确定性规划和可选模型规划；默认不调用模型，正常运行无需 RCON。
 
-模型决策循环已接入原生工具调用、技能执行和结果反馈；搭高、落地水与高频反射仍未完成。生存运行方式见 [SURVIVAL.md](docs/SURVIVAL.md)，睡眠契约见 [SKILL_SPEC.md](docs/SKILL_SPEC.md)；[ARCHITECTURE.md](docs/ARCHITECTURE.md) 还包含尚未实现的设计目标。
+模型决策循环已接入原生工具调用、技能执行和结果反馈；赛事任务系统与只读赛事面板已接入，搭高、落地水与高频反射仍未完成。生存运行方式见 [SURVIVAL.md](docs/SURVIVAL.md)，睡眠契约见 [SKILL_SPEC.md](docs/SKILL_SPEC.md)；[ARCHITECTURE.md](docs/ARCHITECTURE.md) 还包含尚未实现的设计目标。
 
 ### 日常生存链路（2026-11-14）
 
@@ -18,11 +18,23 @@
 python -B main.py --config config.yaml --mode survival --objective daily
 ```
 
-配置中开启 `llm.enabled` 和 `debug.monitor.enabled` 后，可在本机监控查看任务板、记忆统计、模型原始返回、请求槽状态和技能证据。步骤、时间、死亡预算依然有效，到达预算会结束本次运行；不承诺无限无人值守。详细模块与限制见 [DAILY_SURVIVAL.md](docs/DAILY_SURVIVAL.md)。
+配置中开启 `llm.enabled` 和 `debug.monitor.enabled` 后，可在本机监控查看任务板、记忆统计、模型原始返回、请求槽状态和技能证据。步骤、时间、死亡预算依然有效，到达预算会结束本次运行；不承诺无限无人值守。详细模块与限制见 [DAILY_SURVIVAL.md](docs/DAILY_SURVIVAL.md)；赛事配置与任务规则见 [HARNESS_INTERFACES.md](docs/HARNESS_INTERFACES.md)。
+
+### 赛事得分任务链路（2026-11-15）
+
+`survival.objective: competition` 需要 `agent.mode: survival`、`llm.enabled: true`，并关闭聊天调试。规则快照 `data/competition/rules_v2.json` 包含 125 项（120 个 advancement、5 个根节点）：45 项明确计分、54 项条件待确认、26 项不计分。只有服务器 advancement 状态可确认得分；未知不计分，条件项须经配置显式确认，归一化得分暂为 `null`。
+
+Harness 每次只维护一个活动目标，提供完整目录与资源/技能可用性；模型决定先后与具体策略。当前已有明确行动计划的只有 7 个早期目标，其余可计分项保留在目录和监控中，但标为 unsupported，不会假称可执行。`finish_task` 只能在 fresh advancement 检测后回到选择；正常 `end_competition` 要 fresh 检测完整目录，未知目标可记录为 unknown 但不加分。终态写入检查点，重启后不再调用模型。当前不是完整赛事执行器，尚无所有成就的技能计划、阶段 skill 加载、compact/handoff 或水面/搭路导航。
+
+```powershell
+.\.venv\Scripts\python.exe main.py --config config.yaml --mode survival --objective competition
+```
+
+只读监控会呈现原始分、目标阶段、全目录评估新鲜度、模型请求槽、游戏 pending 和最近结果；监控方案与当前缺项见 [MONITORING.md](docs/MONITORING.md)。
 
 ## 已合并的主要改动
 
-更新日期：2026-11-14；本轮核对基于 `HEAD ed685f7`。原 dev-ink 实现已合并，当前入口支持配置驱动的睡眠、初期生存和日常生存。
+更新日期：2026-11-15；本节原合并记录是历史快照（`ed685f7`）。当前工作区基线为 `c21d623`，赛事任务改动尚未提交；当前验证见下方最新状态与 [TESTING.md](docs/TESTING.md)。
 
 | 模块 | 本次改动 |
 | --- | --- |
@@ -47,14 +59,14 @@ python -B main.py --config config.yaml --mode survival --objective daily
 
 本分支仅修改 **BotSleep**，适配原版 **mc-agent-api**，不要求修改相邻 API 仓库。此前本地 API 实验补丁已撤回，未提交或上传。`can_dig`、`can_see`、`collection` 等额外元数据按可选字段处理；早期验收使用的原版 API（`e11f2f3`）没有前述视线字段；后续 `1cfecc3` 的独立实测见下表。原版 API 缺少这些字段时，BotSleep 用局部体素查询补充保守判断，未知形状或读取预算不足不会当作可见。该判断不是完整碰撞模型，不能保证消除底层寻路卡住，也不等于天然地图长期生存已通过。
 
-### 当前验证状态（2026-11-14，HEAD ed685f7）
+### 当前验证状态（2026-11-15，工作区基线 `c21d623`）
 
-**本轮全套离线测试未全绿：772 项，17.131 秒，0 跳过，`FAILED (errors=1)`。** 唯一错误位于 SQLite 记忆测试的临时目录清理，定向复跑再次出现同类错误；根因尚未确认。安装 `requirements.txt` 后 PyYAML 为 6.0.3；示例配置检查明确输出 `Configuration valid.`，通过。详细命令与错误边界见 [TESTING.md](docs/TESTING.md)。本轮没有新增实服或模型验收，表中游戏记录均为历史。
+**本轮全套离线测试：839 项，25.143 秒，1 项 ERROR；赛事定向回归与监控定向回归通过。** 唯一 ERROR 是 Windows 临时目录清理 `memory.sqlite3` 时的 WinError32/267；不是业务断言失败，但全套不算全绿。完整证据、复现命令与边界见 [TESTING.md](docs/TESTING.md)。本轮没有连接游戏、API、RCON 或模型，也没有实服赛事验收。
 
 | 范围 | 已有证据与边界 |
 | --- | --- |
-| 离线自动化 | **本轮 772 项，1 项 ERROR，0 跳过（17.131 秒）**；`test_survival_memory.SurvivalMemoryTests.test_corrupt_and_future_schema_databases_are_preserved` 在清理 `memory.sqlite3` 时出现 Windows 文件占用错误。不是业务断言失败，仍不能算全套通过。历史合并记录为 772 项通过（17.137 秒，0 跳过），不替代本轮结果。 |
-| 本轮独立核对 | 实际导入确认 starter 9项、daily 31项工具及13项日常任务，两个目录均不含 `calculate_stronghold`；固定 JAR 校验、83个 Python 文件 AST 语法检查和60个相对 Markdown 链接核对通过。上述结果不改变全套测试仍有1项ERROR的结论。 |
+| 离线自动化 | 最新全量 839 项，1 项 ERROR（Windows 临时 SQLite 清理），不能算全绿；赛事及监控定向回归通过，见 [TESTING.md](docs/TESTING.md)。 |
+| 赛事任务系统 | 125 项规则目录、fresh advancement 证据计分、pending/excluded 不计分、任务强退/终止、终态恢复与只读赛事面板均有离线覆盖；仍只有 7 个早期计分目标有明确计划，未完成实服验证。 |
 | 自动睡眠 | 已有独立测试世界的真实找床、入睡和醒来验收记录，详见 [TESTING.md](docs/TESTING.md)。 |
 | 确定性生存规划 | 此前在独立、和平难度的平坦靶场，从空背包完成初期石器工具链；不代表模型规划在天然地图上的同等能力。 |
 | 真实模型接入 | 已收到 `default` 路由的原生工具调用，响应 `model` 为 `qwen3.6-35b-a3b`，实际动作失败结果已回传。这是当时服务自报的模型标识，不保证该路由以后固定指向同一模型。 |
@@ -116,7 +128,7 @@ Copy-Item config.example.yaml config.yaml
 
 持续运行到目标完成退出 0，步骤/时间预算耗尽退出 2；`--once` 只执行一次观察决策，退出 0 仅说明该步成功（也可能为等待），不代表完整目标完成。普通连续失败或未知动作结果会保持连接并暂停，等待调试恢复；模型瞬时错误按下述策略退避。未开启调试时可 Ctrl+C 退出再检查日志。
 
-以上描述 `starter` 初期工具链；它不启用食物获取、狩猎、熔炼、床与住所等 `daily` 技能。日常模式的实现与验证边界见 [DAILY_SURVIVAL.md](docs/DAILY_SURVIVAL.md)，通关规划仍未接入。危险地形没有已确认的逃生办法时会等待；不保证实时救援。采集只允许指定木石煤类型，但 API 无法区分玩家放置与自然生成。工具调用返回、移动达到容差和真正取得物品是不同证据，不能据此互相代替；天然地形中的寻路、采集和制作需逐项验收。
+以上描述 `starter` 初期工具链；它不启用食物获取、狩猎、熔炼、床与住所等 `daily` 技能，也不代表 competition 的 advancement 计分闭环。日常模式的实现与验证边界见 [DAILY_SURVIVAL.md](docs/DAILY_SURVIVAL.md)，通关规划仍未接入。危险地形没有已确认的逃生办法时会等待；不保证实时救援。采集只允许指定木石煤类型，但 API 无法区分玩家放置与自然生成。工具调用返回、移动达到容差和真正取得物品是不同证据，不能据此互相代替；天然地形中的寻路、采集和制作需逐项验收。
 
 ## 模型规划与本机监控
 
@@ -220,7 +232,7 @@ HTTP 超时不能证明服务端动作停止。客户端不自动重发写操作
 
 ## Harness 接口设计
 
-[接口契约与架构决策](docs/HARNESS_INTERFACES.md) 持续记录底层 API 事实、接口草案与架构访谈结论。当前配置入口、单动作执行、单模型 worker 和原生工具反馈已接通；赛事阶段接口、compact/handoff、完整 reflex、水面导航与自动浮水/搭桥仍属提案，不能作为已实现工具调用。
+[接口契约与架构决策](docs/HARNESS_INTERFACES.md) 持续记录底层 API 事实、赛事接口和架构访谈结论。competition 已接通规则目录、目标选择、服务器 advancement 计分、fresh 全目录结束检测、检查点恢复和只读监控；语义 compact/handoff、完整 reflex、水面导航与自动浮水/搭桥仍属提案，不能作为已实现工具调用。
 
 ## 代码入口
 

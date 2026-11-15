@@ -1,8 +1,20 @@
-# 配置、客户端、睡眠与生存验证
+# 配置、客户端、生存、赛事与监控验证
 
-最近独立复核：2026-11-14（Asia/Shanghai），`HEAD ed685f7`。当前结果见首节；后续各节均为历史记录，不代表当前进程在线或本轮实服验收。
+最近独立复核：2026-11-15（Asia/Shanghai），基线 `HEAD c21d623` 加未提交赛事任务改动。首节为本轮离线结果；后续各节为历史证据，不代表当前进程在线或本轮实服验收。
 
-## 本轮独立复核（2026-11-14）
+## 当前工作区赛事任务验证（2026-11-15）
+
+本轮只跑离线测试，没有连接 Minecraft、mc-agent-api、RCON 或模型。赛事目录和工作区代码尚未提交；任何结果均不得解释为真实比赛执行验证。
+
+| 检查 | 本轮结果 |
+| --- | --- |
+| `python -B -m unittest discover -s tests -p 'test_competition_*.py' -q` | **67 项通过**，覆盖规则目录、服务器计分、缓存过期、任务生命周期、终态恢复、赛事预算、配置、客户端与赛事面板。 |
+| `python -B -m unittest discover -s tests -p test_monitor.py -q` | **23 项通过**，覆盖事件监控与只读 HTTP。 |
+| `python -X utf8 -B -m unittest discover -s tests -q` | **839 项，25.143 秒，1 项 ERROR**；唯一错误为 SQLite 临时文件清理 WinError32，后续 WinError267。不是业务断言失败，但不能报告全绿。 |
+
+赛事边界：45 项明确计分目标中只有 7 项有显式行动计划，其余 scored 项虽可由服务器 advancement 评估和计分，但当前标记 unsupported、不可选择。54 项 conditional 默认不计分，只有显式 eligibility override 才启用；规则来源是 draft v2。score 只纳入服务器确认，不推算 normalized。结束检测评估 120 个非根目标；未知值可被记录为 unknown，但不能得分。
+
+## 历史独立复核（2026-11-14）
 
 旧虚拟环境缺少 PyYAML；安装 `requirements.txt` 后为 PyYAML 6.0.3，再进行全量验证。缺依赖时的首次运行含导入错误，不作为有效全量结果。
 

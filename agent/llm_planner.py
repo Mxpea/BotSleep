@@ -123,11 +123,12 @@ class LLMSurvivalPlanner:
         self._secret = _setting(settings, "api_key", "") or ""
         self.rules = SurvivalPlanner(survival_settings)
         self.objective = survival_settings.get("objective", "starter")
-        if self.objective == "daily":
+        if self.objective in {"daily", "competition"}:
             self.MAX_REQUEST_BYTES = 48000
         self.tool_definitions = tools_for_objective(self.objective)
         self.tool_schemas = {tool["function"]["name"]: tool["function"]["parameters"] for tool in self.tool_definitions}
-        self.system_prompt = DAILY_SYSTEM_PROMPT if self.objective == "daily" else SYSTEM_PROMPT
+        self.system_prompt = (COMPETITION_SYSTEM_PROMPT if self.objective == "competition"
+                              else DAILY_SYSTEM_PROMPT if self.objective == "daily" else SYSTEM_PROMPT)
         self.max_history_turns = self._limit(settings, "max_history_turns", 8, 1, 100)
         self.max_repair_attempts = self._limit(settings, "max_repair_attempts", 1, 0, 3)
         if _setting(settings, "enabled", False) is not True:
@@ -190,7 +191,13 @@ class LLMSurvivalPlanner:
             # Coordinates are atomic evidence, including inside route/crop rows.
             if len(value) == 3 and all(type(item) in (int, float) and -30000000 <= item <= 30000000 for item in value):
                 return list(value)
-            return ([cls._compact_value(item, depth + 1) for item in value[:64]] if depth < 5
+            # Competition catalogue rows are compact fixed-width records. Keep
+            # the full preset list: truncating it would hide legal scoring goals.
+            is_competition_catalog = (len(value) <= 256 and bool(value) and all(
+                isinstance(item, list) and len(item) in (5, 7) and isinstance(item[0], str)
+                for item in value))
+            limit = 256 if is_competition_catalog else 64
+            return ([cls._compact_value(item, depth + 1) for item in value[:limit]] if depth < 5
                     else {"summary_omitted": True})
         return value
 
@@ -355,7 +362,7 @@ class LLMSurvivalPlanner:
 
     def _append_turn(self, messages):
         compact = copy.deepcopy(messages)
-        if self.objective == "daily":
+        if self.objective in {"daily", "competition"}:
             # The next current observation supersedes old inputs. Preserve the
             # native assistant/tool transaction without duplicating its map.
             compact = [message for message in compact if message.get("role") != "user"]
@@ -488,6 +495,10 @@ class LLMSurvivalPlanner:
         if name in defaults:
             key, value = defaults[name]
             args.setdefault(key, value)
+        if self.objective == "competition" and name in {"select_task", "update_progress", "finish_task", "force_exit_task", "end_competition"}:
+            if name in {"finish_task", "force_exit_task", "end_competition"}:
+                args["reason"] = reason[:300]
+            return Decision(name, args, reason, "competition")
         status = observation.get("status") or {}
         origin = self.rules._pos(status.get("pos"))
         counts = self.rules._counts(observation)
@@ -571,13 +582,17 @@ class LLMSurvivalPlanner:
                 raise LLMError("llm_unsafe_action", "Model planning requires a fresh observation")
             prompt_context = {key: context[key] for key in ("blocked_targets", "explore_index", "failures", "last_result",
                                                           "death_count", "spawn", "remaining_steps", "remaining_seconds",
-                                                          "daily_tasks", "action_hints", "memory", "survival_constraints") if key in context}
+                                                          "daily_tasks", "action_hints", "memory", "survival_constraints", "competition") if key in context}
             prompt_context["failed_actions"] = [{"action": failure["decision"].name, "args": failure["decision"].args,
                                                   "error_code": failure["code"]}
                                                  for failure in list(self._failed_actions.values())[-8:]
                                                  if self._unchanged_failure(failure, observation, failure["decision"])]
+            competition_context = prompt_context.pop("competition", None)
+            compact_context = self._compact_value(prompt_context)
+            if competition_context is not None:
+                compact_context["competition"] = competition_context
             turn.append({"role": "user", "content": json.dumps(self._redact({"observation": self._snapshot(observation),
-                        "progress": self.progress(observation), "context": self._compact_value(prompt_context)}), ensure_ascii=False, allow_nan=False)})
+                        "progress": self.progress(observation), "context": compact_context}), ensure_ascii=False, allow_nan=False)})
             for attempt in range(self.max_repair_attempts + 1):
                 self._check_cancel(cancel_event)
                 messages = self._messages(turn)
@@ -650,7 +665,9 @@ class LLMSurvivalPlanner:
         signature = self._signature(decision)
         data = payload.get("data") or {}
         no_motion = decision.name == "move_to" and (data.get("moved") is False or data.get("already_in_range") is True)
-        if not payload["success"] or no_motion:
+        task_transition = self.objective == "competition" and decision.name in {
+            "select_task", "update_progress", "finish_task", "force_exit_task"}
+        if (not payload["success"] or no_motion) and not task_transition:
             self._failed_actions.pop(signature, None)
             self._failed_actions[signature] = {"decision": decision, "state": self._failure_state(observation or {}, decision),
                                                "code": payload.get("error_code") or "no_movement"}
@@ -659,3 +676,20 @@ class LLMSurvivalPlanner:
         else:
             self._failed_actions.pop(signature, None)
         self._record("INFO" if payload["success"] else "WARN", "LLM_TOOL_RESULT", {"decision": asdict(decision), **feedback})
+
+
+COMPETITION_SYSTEM_PROMPT = """
+You control a Minecraft competition agent. Score only the configured advancement catalogue within its remaining time.
+Read context.competition. task_columns defines concise rows for ALL catalogue goals.
+Eligibility scored means approved by rules; pending/excluded goals are not selectable.
+Availability is computed by the harness. needs_prerequisites requires preparation; unsupported is not executable.
+When phase is selection, choose select_task(goal_id) from selectable_goal_ids; if nothing is feasible use wait.
+While active, use registered survival skills to pursue the goal. You decide strategy.
+Keep a short update_progress card when intent/progress changes. If replan_required, change strategy or force_exit_task.
+Only server advancement records count as completion. Inventory/crafting results are preparation.
+Use finish_task after goal checks are available; use force_exit_task to defer a blocked goal.
+Call end_competition only after every preset advancement was freshly assessed; checking all goals does not mean completing them all.
+Never claim points for pending/excluded conditions or hide unknown advancement evidence.
+Do not call unregistered tools, admin commands, RCON or act outside your island.
+The daily task board is supporting survival information, not the competition score.
+"""

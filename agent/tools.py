@@ -57,6 +57,21 @@ TOOL_SCHEMAS = {entry["function"]["name"]: entry["function"]["parameters"] for e
 def tools_for_objective(objective="starter"):
     """Expose only the selected runtime's executable skills, never future plans."""
     tools = copy.deepcopy(TOOL_DEFINITIONS)
+    if objective == "competition":
+        tools = tools_for_objective("daily") + competition_tools()
+        # Preserve full implemented capability while trimming prose-only schema
+        # text so the entire rule catalogue fits the bounded small-model input.
+        for tool in tools:
+            function = tool["function"]
+            function["description"] = function.get("description", "")[:140]
+            parameters = function.get("parameters", {})
+            for schema in parameters.get("properties", {}).values():
+                if isinstance(schema, dict) and isinstance(schema.get("description"), str):
+                    schema["description"] = schema["description"][:90]
+                items = schema.get("items") if isinstance(schema, dict) else None
+                if isinstance(items, dict) and isinstance(items.get("description"), str):
+                    items["description"] = items["description"][:90]
+        return tools
     if objective != "daily":
         return tools
     from skills.daily_survival import DailySurvivalSkills as Daily
@@ -162,3 +177,20 @@ STRONGHOLD_TOOL_DEFINITION = {'type': 'function',
                                                       'maximum': 100,
                                                       'default': 5}},
                              'required': ['throws']}}}
+
+
+def competition_tools():
+    """Task lifecycle tools; executed locally by the competition runtime."""
+    reason = {"type": "string", "minLength": 1, "maxLength": 300}
+    return [
+        _tool("select_task", "Select ONE scored goal ID from the competition board. This does not grant items or complete it. Pending/excluded scoring goals cannot be selected.",
+              {"goal_id": {"type": "string", "minLength": 1, "maxLength": 160}}, ("goal_id",)),
+        _tool("update_progress", "Save a short progress card: verified progress and next intent. Do not invent completion or paste logs.",
+              {"summary": {"type": "string", "minLength": 1, "maxLength": 500}}, ("summary",)),
+        _tool("finish_task", "Return to goal selection ONLY after current server advancement checks are available. Unfinished/unknown goals never earn points; only server-completed scored goals count.",
+              {"reason": reason}, ("reason",)),
+        _tool("force_exit_task", "Abandon the current goal and return to selection. The goal stays unfinished and enters cooldown. No effect on provider uncertainty or game-action pending state.",
+              {"reason": reason}, ("reason",)),
+        _tool("end_competition", "End the competition run ONLY after every preset advancement has a fresh server assessment. This does not claim every goal was completed.",
+              {"reason": reason}, ("reason",)),
+    ]

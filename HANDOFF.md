@@ -1,14 +1,14 @@
 # BotSleep / Minecraft Agent Harness 交接
 
-更新日期：2026-11-14（Asia/Shanghai）。路径均相对仓库根目录；跨机器需要自行配置部署地址、账号和凭据，不依赖原机器的进程或在线会话。提交、合并和远端同步结果以 Git 记录为准，不据本文推断已经 push。
+更新日期：2026-11-15（Asia/Shanghai）。路径均相对仓库根目录；跨机器需要自行配置部署地址、账号和凭据，不依赖原机器的进程或在线会话。提交、合并和远端同步结果以 Git 记录为准，不据本文推断已经 push。
 
-**本轮状态（HEAD `ed685f7`）**：安装 `requirements.txt` 后 PyYAML 为 6.0.3；全套离线测试 772 项、17.131 秒、0 跳过，`FAILED (errors=1)`，不能报告全绿。唯一错误为 `test_survival_memory.SurvivalMemoryTests.test_corrupt_and_future_schema_databases_are_preserved` 在临时目录清理 `memory.sqlite3` 时出现 WinError32，随后 WinError267；定向复跑 1 项、0.049 秒再次出现同类错误。不是业务断言失败，根因尚未确认，本轮未修代码。
+**本轮状态（HEAD `c21d623` + 未提交工作树改动）**：赛事任务系统基础闭环已写入；125 项规则目录（120 个 advancement、5 个根节点），45 项明确计分、54 项条件待确认、26 项不计分。服务器 advancement 才是计分证据；fresh 全目录评估后才允许正常结束，终态可恢复。只有 7 个早期 scored 目标有明确行动计划，其余 scored 目标仍 unsupported；未完成完整赛事技能覆盖或实服验证。
 
-示例配置检查已明确输出 `Configuration valid.`，通过；Ninjabrain 合成示例 CLI 计算成功，首选区块 `[128,0]`。工具目录实际导入确认 starter 9项、daily 31项、daily 13项任务，两个目录均不含 `calculate_stronghold`；固定 JAR 校验、83个 Python 文件 AST 语法检查及60个相对 Markdown 链接核对通过。本轮未运行游戏、API 或模型，不推断历史进程仍在线。完整命令和证据边界见 [TESTING.md](docs/TESTING.md)。
+最新全量离线复核为 **839 项、25.143 秒、1 项 Windows SQLite 临时文件清理 ERROR**；赛事定向 67 项、通用监控定向 23 项通过。该 ERROR 不是业务断言失败，但整套测试不能报全绿。详见 [TESTING.md](docs/TESTING.md)。本轮不连接游戏、API、RCON 或模型；不得把离线成绩或旧现场记录当作本轮实服验收。
 
 ## 1. 当前入口、范围与历史现场
 
-当前主入口为 `main.py`，支持 YAML、环境变量与命令行参数，默认 sleep，生存模式按 objective 分为 starter/daily；`bot_sleep.py`、根 `client.py` 分别兼容转发至主入口和统一客户端。普通运行依赖已列于 `requirements.txt`，RCON 为可选开发依赖。不存在“修改 YAML 不生效、必须运行旧独立睡眠脚本”的启动前提。
+当前主入口为 `main.py`，支持 YAML、环境变量与命令行参数，默认 sleep，生存模式按 objective 分为 starter/daily/competition；`bot_sleep.py`、根 `client.py` 分别兼容转发至主入口和统一客户端。普通运行依赖已列于 `requirements.txt`，RCON 为可选开发依赖。不存在“修改 YAML 不生效、必须运行旧独立睡眠脚本”的启动前提。
 
 ```powershell
 python -m venv .venv
@@ -16,6 +16,7 @@ python -m venv .venv
 Copy-Item config.example.yaml config.yaml
 .\.venv\Scripts\python.exe main.py --config config.yaml --check-config
 .\.venv\Scripts\python.exe main.py --config config.yaml --mode survival --objective daily
+.\.venv\Scripts\python.exe main.py --config config.yaml --mode survival --objective competition
 ```
 
 先填写 API 地址、允许登录的账号及口令。`--check-config` 不连接游戏。`llm.enabled` 默认关闭；需要模型时填写服务配置或 `BOTSLEEP_LLM_BASE_URL`、`BOTSLEEP_LLM_MODEL`、`BOTSLEEP_LLM_API_KEY` 环境变量，不假设 `.env` 自动加载。模型与监控配置详见 [README.md](README.md)。
@@ -28,11 +29,14 @@ Copy-Item config.example.yaml config.yaml
 
 `survival.objective: starter` 执行初期石器工具链；`daily` 持续计算13项基于当前证据的任务，包含食物、材料、铁器、熔炼、床与住所、储物、死亡掉落恢复及维护。日常模式已注册31个工具，仍受步骤、时间、死亡及安全预算限制，不承诺无限无人值守。详情见 [DAILY_SURVIVAL.md](docs/DAILY_SURVIVAL.md)。
 
+`competition` 需要模型规划，已接入规则版本、完整规则目录、条件 override、任务选择/进度/完成/强退/正常结束、服务器 advancement 计分与终态检查点。模型每轮可看到全部目录；只有 7 个早期目标具备明确行动计划。详细监控信号及缺口见 [MONITORING.md](docs/MONITORING.md)。
+
 | 模块 | 当前状态 |
 | --- | --- |
 | `core/client.py`、`core/config.py` | 统一公开 API 封装、业务错误与未知结果区分、配置加载校验；旧路径和移动 timeout 参数已适配 |
-| `core/survival_harness.py` | 单动作执行、独立单模型 worker、安全抢占、失败冷却、检查点及预算；不是旧 `agent/loop.py` 骨架 |
-| `agent/llm_planner.py`、`agent/tools.py` | 原生 tool call/result 配对、参数验证、有限请求预算；starter 9项与 daily 31项可执行工具 |
+| `core/survival_harness.py` | 单动作执行、独立单模型 worker、安全抢占、失败冷却、检查点及分 objective 预算；不是旧 `agent/loop.py` 骨架 |
+| `core/competition_rules.py`、`core/competition_tasks.py` | 规则核对、任务状态、server advancement 计分、全目录终止 gate 与 terminal restore；非计分来源不授权得分 |
+| `agent/llm_planner.py`、`agent/tools.py` | 原生 tool call/result 配对、参数验证、有限请求预算；starter 9项、daily 31项、competition 36项工具 |
 | `core/model_gate.py` | 同服务及凭据作用域的跨线程/进程请求串行门禁，未知请求持久化锁定 |
 | `core/daily_observation.py`、`core/daily_policy.py`、`core/survival_memory.py` | 新鲜证据、本地安全决策、按账号/世界隔离的 SQLite 记忆；记忆不是库存真值 |
 | 睡眠与生存技能 | 已接入真实动作及后验验证；搭高、落地水和20Hz反射仍未接入 |
@@ -54,7 +58,7 @@ API 1.3.7（官方 `1cfecc3`）已实际返回 `speed/velocity`，速度进入�
 - 面向游戏 AI 的 skill 放在本仓库，默认约300～600中文字、明确接口调用表与最多五步流程；公式、原理及长示例放 `references/`。未绑定接口明确标注，不虚构工具。
 - 模型选择目标和下一行动；会话、坐标转换、采样、数学计算与并发监控由 harness 承担。普通动作串行，未知副作用先核验，完成必须有证据。
 
-[HARNESS_INTERFACES.md](docs/HARNESS_INTERFACES.md) 保留赛事阶段目标、进度卡、导航、reflex、compact/handoff等设计访谈与未冻结入口；compact/reflex、水面导航与自动浮水/搭桥仍属提案。当前 daily 运行时解决了部分基础链路，但不等于已经实现该文档中的全部未来赛事接口；`select_task`、`finish_task`、自动浮水/搭桥等不得作为现成工具调用。
+[HARNESS_INTERFACES.md](docs/HARNESS_INTERFACES.md) 中 `select_task`、`update_progress`、`finish_task`、`force_exit_task`、`end_competition` 已作为 competition 工具实现；其余通用接口抽象、compact/handoff、自动 reflex、水面导航与搭路仍属提案。该基础闭环不等于完整赛事策略，也不保证 45 项 scored 目标都可执行。
 
 ## 4. Ninjabrain Bot 集成
 
@@ -128,7 +132,7 @@ python -B -m unittest discover -s tests -v
 | --- | --- |
 | `README.md`、`AGENTS.md` | 当前启动、验证边界及贡献/skill约定 |
 | `docs/DAILY_SURVIVAL.md`、`docs/SURVIVAL.md`、`docs/TESTING.md` | 日常与初期生存契约、实际验证记录 |
-| `docs/HARNESS_INTERFACES.md` | 未来赛事接口、已确认设计方向与未实现提案 |
+| `docs/HARNESS_INTERFACES.md` | 当前 competition 任务工具子集、已确认方向与未实现提案 |
 | `integrations/ninjabrain/`、`skills/stronghold.py` | 独立官方计算桥接、采样器和CLI |
 | `skills/stronghold_localization/SKILL.md`、其 `references/research.md` | 精简策略与误差研究，尚非运行时加载器 |
 | `tests/test_stronghold.py`、`data/examples/stronghold_throws.json` | 要塞计算回归及合成输入 |

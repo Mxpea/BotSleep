@@ -7,6 +7,7 @@
 <title>BotSleep · 实时运行监控</title>
 <style>
 :root{--bg:#10151d;--panel:#18202b;--panel2:#1c2733;--line:#2a3848;--text:#e7edf5;--muted:#98a8bb;--mint:#80e2c2;--blue:#9ac4ff;--amber:#f4ce82;--red:#ff9eaa}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px/1.6 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif}button,input,select{font:inherit}button,select,input{color:var(--text);background:#111923;border:1px solid var(--line);border-radius:8px;padding:7px 12px}button{cursor:pointer}button:hover,button.active{border-color:var(--mint);color:var(--mint)}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--mint);outline-offset:2px}main{max-width:1540px;margin:auto;padding:25px 30px 36px}.top{display:flex;justify-content:space-between;gap:20px;align-items:center;margin-bottom:24px}.brand{display:flex;gap:14px;align-items:center}.mark{height:43px;width:43px;display:grid;place-items:center;background:#23423d;color:var(--mint);font-size:20px;border-radius:12px}.eyebrow{font-size:11px;letter-spacing:2px;color:var(--mint)}h1{font-size:23px;letter-spacing:.3px;line-height:1.25;margin:2px 0 0}h2{font-size:16px;margin:0}h3{font-size:13px;font-weight:500;color:var(--muted);margin:0 0 7px}.muted,.sub{color:var(--muted)}.sub{font-size:12px}.right{text-align:right}.pill{display:inline-flex;align-items:center;gap:7px;padding:5px 10px;border-radius:99px;background:#26313e;color:var(--muted);font-size:12px}.pill.good{color:var(--mint);background:#203d36}.pill.bad{color:var(--red);background:#402b35}.pill.warn{color:var(--amber);background:#3d3526}.dot{width:6px;height:6px;border-radius:50%;background:currentColor}.summary{display:grid;grid-template-columns:1fr 1.1fr 1.25fr 1.4fr;gap:14px;margin-bottom:18px}.card,.panel{background:var(--panel);border:1px solid var(--line);border-radius:13px}.card{padding:16px 19px;min-width:0}.value{font-size:20px;font-weight:650;line-height:1.35;overflow-wrap:anywhere}.card .sub{margin-top:6px}.mono,pre{font-family:Consolas,"Cascadia Code",ui-monospace,monospace}.stats{display:flex;gap:20px}.stat{flex:1}.track{height:4px;border-radius:6px;background:#2b3745;margin-top:8px;overflow:hidden}.fill{height:100%;background:var(--mint);width:0}.fill.food{background:var(--amber)}.workspace{display:grid;grid-template-columns:minmax(0,1.65fr) minmax(320px,1fr);gap:18px;margin-bottom:18px}.panel-head{padding:16px 20px;border-bottom:1px solid var(--line);display:flex;align-items:center;justify-content:space-between;gap:10px}.panel-body{padding:18px 20px}.tabs{display:flex;flex-wrap:wrap;gap:6px;padding:12px 18px 0}.tabs button{font-size:12px;padding:5px 10px}.model-body{min-height:275px;max-height:440px;overflow:auto;padding:18px 20px}.model-body pre{margin:0;font-size:13px;line-height:1.75;white-space:pre-wrap;overflow-wrap:anywhere}.empty{display:flex;flex-direction:column;justify-content:center;align-items:center;min-height:245px;color:var(--muted);gap:7px;text-align:center}.empty strong{color:var(--text);font-size:16px;font-weight:500}.metrics{display:flex;flex-wrap:wrap;gap:18px;padding:10px 20px;border-top:1px solid var(--line);font-size:12px;color:var(--muted)}.metrics b{color:var(--text);font-weight:500}.stack{display:grid;gap:18px}.decision{font-size:19px;color:var(--blue);font-weight:600;overflow-wrap:anywhere}.reason{margin:6px 0 12px;color:var(--muted);overflow-wrap:anywhere}.label-row{display:flex;gap:12px;align-items:center;justify-content:space-between;margin-bottom:8px}.kv{display:grid;grid-template-columns:70px 1fr;gap:6px;font-size:13px}.kv span:nth-child(odd){color:var(--muted)}details>summary{color:var(--muted);cursor:pointer;user-select:none;font-size:12px}details pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px;max-height:300px;overflow:auto;margin:9px 0 0;background:#111923;border-radius:8px;padding:12px}.result{font-size:14px;white-space:pre-wrap;overflow-wrap:anywhere}.toolbar{display:flex;gap:9px;align-items:center;flex-wrap:wrap}.toolbar input{width:205px;font-size:12px}.toolbar select,.toolbar button{font-size:12px}.timeline{height:360px;overflow:auto;padding:0 20px 10px}.event{padding:12px 0;border-bottom:1px solid var(--line)}.event-line{display:grid;grid-template-columns:78px 125px 1fr;gap:12px;align-items:baseline}.event-time{color:var(--muted);font-size:12px}.event-name{font-size:11px;letter-spacing:.2px;color:var(--blue);overflow-wrap:anywhere}.event-name.warn{color:var(--amber)}.event-name.error{color:var(--red)}.event-description{overflow-wrap:anywhere;font-size:13px}.event details{margin:3px 0 0 215px}.timeline-empty{padding:55px 0;text-align:center;color:var(--muted)}.notice{color:var(--amber);font-size:12px;padding:0 20px 8px}.footer{display:flex;justify-content:space-between;gap:15px;margin-top:14px;color:var(--muted);font-size:12px}.hidden{display:none!important}.banner{padding:10px 15px;border:1px solid #615137;background:#302a21;color:var(--amber);border-radius:9px;margin-bottom:16px;font-size:13px}@media(max-width:1050px){.summary{grid-template-columns:1fr 1fr}.workspace{grid-template-columns:1fr}.stack{grid-template-columns:1fr 1fr}}@media(max-width:650px){main{padding:16px}.top{align-items:flex-start}.summary{gap:9px}.card{padding:13px}.value{font-size:17px}.stack{grid-template-columns:1fr}.panel-head{align-items:flex-start;flex-direction:column}.event-line{grid-template-columns:68px 1fr}.event-description{grid-column:1/-1}.event details{margin-left:0}.footer{flex-direction:column;gap:3px}.toolbar input{width:155px}.right .sub{max-width:140px}.brand{gap:10px}h1{font-size:20px}}
+.system-summary{grid-template-columns:repeat(3,minmax(0,1fr))}.competition-panel{margin-bottom:18px}.competition-cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-bottom:12px}.competition-cards pre{white-space:pre-wrap;overflow-wrap:anywhere;margin:6px 0}.task-table-wrap{overflow:auto}table{width:100%;border-collapse:collapse;font-size:13px}th,td{text-align:left;vertical-align:top;padding:10px;border-bottom:1px solid var(--line);min-width:95px;max-width:330px;white-space:pre-wrap;overflow-wrap:anywhere}th{color:var(--muted)}@media(max-width:650px){.system-summary{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -20,6 +21,21 @@
 <div class="card"><h3>当前位置</h3><div id="position" class="value mono">— · — · —</div><div id="environment" class="sub">维度与昼夜信息尚未到达</div><div id="motion" class="sub">速度（格/秒） · 水平 未确认 · 垂直 未确认</div></div>
 <div class="card"><div class="stats"><div class="stat"><h3>生命</h3><div id="health" class="value">— / 20</div><div class="track"><div id="health-bar" class="fill"></div></div></div><div class="stat"><h3>饥饿值</h3><div id="food" class="value">— / 20</div><div class="track"><div id="food-bar" class="fill food"></div></div></div></div><div id="steps" class="sub">已执行 0 步</div></div>
 </section>
+<section class="summary system-summary" aria-label="系统状态">
+<div class="card"><h3>模型请求槽</h3><div id="model-slot" class="value">未确认</div><div id="model-slot-note" class="sub">等待已发布状态</div></div>
+<div class="card"><h3>游戏动作</h3><div id="game-state" class="value">未确认</div><div id="game-state-note" class="sub">busy / pending / paused 独立显示</div></div>
+<div class="card"><h3>Heartbeat 新鲜度</h3><div id="heartbeat-state" class="value">未确认</div><div class="sub">15 秒为显示阈值；时间由浏览器计算，不代表游戏成功</div></div>
+</section>
+<section id="competition-panel" class="panel competition-panel hidden" aria-label="赛事得分任务">
+<div class="panel-head"><h2>赛事得分任务</h2><span id="competition-phase" class="pill">未确认</span></div>
+<div class="panel-body"><div class="competition-cards">
+<div class="card"><h3>当前目标</h3><div id="competition-goal" class="value">未确认</div><div id="competition-rules" class="sub">规则版本未确认</div></div>
+<div class="card"><h3>原始分</h3><div id="competition-score" class="value">未确认</div><div id="competition-completed" class="sub">已完成数量未确认</div><div id="competition-normalized" class="sub">归一化分未确认</div></div>
+<div class="card"><h3>Difficulty counts</h3><pre id="competition-counts">未确认</pre></div>
+<div class="card"><h3>进度卡</h3><pre id="competition-progress">未确认</pre></div>
+</div><div id="competition-freshness" class="sub"></div><div id="competition-message" class="sub"></div><div id="competition-exit" class="sub"></div>
+<div class="task-table-wrap"><table><caption class="sub">待条件确认 / 已完成 / 待前置 / blocked 按发布字段展示；完成不由前端推断</caption><thead><tr><th scope="col">任务 / 完整规则 ID</th><th scope="col">分值 / 难度</th><th scope="col">计分资格 eligibility</th><th scope="col">可用性 availability</th><th scope="col">完成评估 assessment</th><th scope="col">完成证据 completion</th></tr></thead><tbody id="competition-tasks"></tbody></table></div>
+<details><summary>完整赛事快照（脱敏）</summary><pre id="competition-json">{}</pre></details></div></section>
 <section id="daily-panel" class="panel hidden" aria-label="日常生存任务"><div class="panel-head"><h2>日常生存任务与记忆</h2><span id="daily-phase" class="pill">待观察</span></div><div class="panel-body"><div id="memory-summary" class="sub"></div><div id="daily-tasks"></div><details><summary>任务证据与前置条件</summary><pre id="daily-json">{}</pre></details></div></section>
 <section class="workspace">
 <article class="panel"><div class="panel-head"><h2>模型请求与返回</h2><span id="llm-state" class="pill">等待模型事件</span></div><nav class="tabs" aria-label="模型内容"><button class="active" data-tab="content">回复内容</button><button data-tab="tools">工具调用</button><button data-tab="reasoning">附带推理信息</button><button data-tab="response">完整返回 JSON</button><button data-tab="request">完整请求 JSON</button></nav><div class="model-body"><div id="model-empty" class="empty"><strong>尚未收到模型返回</strong><span>确定性规划模式下也会展示 Agent 状态和操作。</span></div><pre id="model-content" class="hidden"></pre></div><div class="metrics"><span>耗时 <b id="latency">—</b></span><span>输入 token <b id="input-tokens">—</b></span><span>输出 token <b id="output-tokens">—</b></span><span>总 token <b id="total-tokens">—</b></span></div></article>
@@ -68,8 +84,70 @@ function renderModel() {
     $('model-empty').replaceChildren(label,note);
   }
 }
+const object = value => value && typeof value==='object' && !Array.isArray(value) ? value : {};
+const display = value => value == null || value === '' ? '未确认' : pretty(value);
+const scoreValue = value => Number.isFinite(value) ? String(value) : '未确认';
+const competitionLabels = {selection:'选择任务',active:'执行任务',scored:'可计分',pending:'待条件确认',excluded:'不计分',ready:'可推进',needs_prerequisites:'待前置',unsupported:'不支持（blocked）',unknown:'未确认',completed:'已完成',not_completed:'未完成',blocked:'blocked（受阻）'};
+function taskValue(value) {
+  if (typeof value==='string') return competitionLabels[value] ? competitionLabels[value]+' · '+value : value;
+  if (value && typeof value==='object' && typeof value.status==='string') return (competitionLabels[value.status] || value.status)+' · '+pretty(value);
+  return display(value);
+}
+function ageText(timestamp) {
+  const parsed=typeof timestamp==='string' ? Date.parse(timestamp) : NaN;
+  return Number.isFinite(parsed) ? Math.max(0,Math.floor((Date.now()-parsed)/1000))+' 秒前' : '时间未确认';
+}
+function renderFreshness() {
+  const state=currentState || {}, stamp=state.heartbeat_at;
+  const parsed=typeof stamp==='string' ? Date.parse(stamp) : NaN;
+  const stale=Number.isFinite(parsed) && Date.now()-parsed>15000;
+  txt('heartbeat-state',!Number.isFinite(parsed) ? '未确认 · 尚无有效心跳时间' : (stale ? 'stale · ' : '新鲜 · ')+ageText(stamp));
+  const board=object(object(state.competition).board);
+  txt('competition-freshness','快照更新：'+ageText(board.updated_at)+' · stale：'+(board.stale===true ? '是（运行时标记）' : board.stale===false ? '否（运行时标记）' : '未确认')+'；保留发布时的状态');
+}
+function renderSystem(state) {
+  const run=object(state.run), llm=object(state.llm);
+  const slot=run.model_blocked || llm.slot_state==='uncertain' ? 'uncertain' : llm.slot_state || (run.model_pending===true || llm.state==='requesting' ? 'inflight' : state.has_data && llm.state==='idle' ? 'idle' : 'unknown');
+  txt('model-slot',({idle:'idle · 无在途请求',inflight:'inflight · 等待请求结果',uncertain:'uncertain · 请求结果不明'})[slot] || '未确认');
+  txt('model-slot-note',slot==='uncertain' ? '持久化未知状态；监控不会重试、清锁或恢复请求' : '模型槽与游戏动作独立；空闲不代表任务完成');
+  const busy=state.has_data ? run.busy : null;
+  const flag=value => value===true ? '是' : value===false ? '否' : '未确认';
+  txt('game-state','busy '+flag(busy)+' · paused '+flag(state.has_data ? run.paused : null));
+  const pending=Object.prototype.hasOwnProperty.call(run,'pending') && run.pending===null ? '无待核验意图' : run.pending == null ? '未确认' : typeof run.pending==='boolean' ? flag(run.pending) : display(run.pending);
+  txt('game-state-note','pending '+pending+' · 后端 busy '+display(object(state.status).busy)+' · '+(run.pause_reason ? '暂停原因：'+display(run.pause_reason) : '暂停原因未发布')+'；pending 结果须核验，监控不重放动作');
+}
+function renderCompetition(state) {
+  const competition=object(state.competition), board=object(competition.board);
+  const objective=object(state.run).objective;
+  $('competition-panel').classList.toggle('hidden',objective ? objective!=='competition' : !competition.board);
+  badge('competition-phase',competitionLabels[board.phase] || display(board.phase));
+  txt('competition-goal',display(board.active_goal_id));
+  txt('competition-rules','规则版本：'+display(board.rules_version));
+  const score=object(board.score);
+  txt('competition-score',scoreValue(score.raw));
+  txt('competition-completed','已完成数量：'+scoreValue(score.completed_count));
+  txt('competition-normalized','归一化分：'+scoreValue(score.normalized));
+  txt('competition-counts',display(score.difficulty_counts));
+  txt('competition-progress',display(board.progress_card));
+  const assessment=object(board.catalog_assessment);
+  txt('competition-message','全目录检测：'+scoreValue(assessment.checked)+' / '+scoreValue(assessment.total)+' · 明确状态：'+scoreValue(assessment.known_count)+' · complete：'+display(assessment.complete)+' · 结束原因：'+display(board.end_reason)+' · '+display(board.message));
+  txt('competition-exit','上次退出：'+display(board.last_exit));
+  const rows=document.createDocumentFragment(), tasks=Array.isArray(board.tasks) ? board.tasks : [];
+  for (const item of tasks) {
+    const task=object(item), row=document.createElement('tr');
+    const values=[display(task.title)+' / '+display(task.id),scoreValue(task.points)+' / '+display(task.difficulty),taskValue(task.eligibility),taskValue(task.availability),taskValue(task.assessment),taskValue(task.completion)];
+    for (const value of values) { const cell=document.createElement('td'); cell.textContent=value; row.append(cell); }
+    rows.append(row);
+  }
+  if (!tasks.length) { const row=document.createElement('tr'), cell=document.createElement('td'); cell.colSpan=6; cell.textContent='尚无任务明细；未确认完成状态'; row.append(cell); rows.append(row); }
+  $('competition-tasks').replaceChildren(rows);
+  txt('competition-json',pretty(board));
+}
 function renderState(state) {
   currentState=state;
+  renderSystem(state);
+  renderCompetition(state);
+  renderFreshness();
   const run=state.run || {}, status=state.status || {}, llm=state.llm || {};
   const phase=phaseNames[run.phase] || run.phase;
   txt('run-state', state.has_data ? (run.state==='running' && phase ? phase : stateNames[run.state] || run.state) : '等待 Agent 数据');
@@ -86,10 +164,10 @@ function renderState(state) {
   ['health','food'].forEach(key => { const v=status[key]; txt(key,(Number.isFinite(v) ? v : '—')+' / 20'); $(key+'-bar').style.width=(Number.isFinite(v) ? Math.max(0,Math.min(100,v*5)) : 0)+'%'; });
   txt('steps','已执行 '+(run.steps || 0)+' 步');
   $('paused-banner').classList.toggle('hidden',!run.paused);
-  txt('paused-banner','自动运行已暂停'+(run.pause_reason ? ' · 原因：'+run.pause_reason : '')+'。监控仍在更新；游戏内使用 #resume 恢复。');
+  txt('paused-banner','自动运行已暂停'+(run.pause_reason ? ' · 原因：'+run.pause_reason : '')+(run.objective==='competition' ? '。查看 pending 与最近结果；监控不提供恢复操作。' : '。监控仍在更新；游戏内使用 #resume 恢复。'));
   const blocked=!!run.model_blocked || llm.slot_state==='uncertain';
   $('model-blocked-banner').classList.toggle('hidden',!blocked);
-  txt('model-blocked-banner','模型请求结果不明，已停止发送新请求。本地安全观察与避险继续；须先确认服务端已空闲，再通过 --acknowledge-model-idle 显式恢复。');
+  txt('model-blocked-banner',run.objective==='competition' ? '模型请求结果不明；持久化未知状态须由运行时处理。监控不触发重试、清锁或恢复。' : '模型请求结果不明，已停止发送新请求。本地安全观察与避险继续；须先确认服务端已空闲，再通过 --acknowledge-model-idle 显式恢复。');
   const daily=state.daily || {}, board=daily.board || {};
   $('daily-panel').classList.toggle('hidden',run.objective!=='daily' && !daily.board);
   const partialBoard=board.fresh===false;
@@ -136,6 +214,7 @@ function describe(event) {
   if (event.event==='DECISION') return ((d.decision || {}).name || '决策')+' · '+((d.decision || {}).reason || '');
   if (event.event==='STEP_RESULT') return ((d.result || {}).success ? '成功 · ' : '失败 · ')+((d.result || {}).message || '');
   if (event.event==='HEARTBEAT') return '状态更新 · '+(d.paused ? '已暂停' : d.busy ? '执行中' : '等待下一步')+' · 步数 '+(d.steps || 0);
+  if (event.event==='COMPETITION_TASKS') return '赛事任务快照 · '+display(object(d.board).phase);
   if (event.event==='AGENT_PHASE') return phaseNames[d.phase] || String(d.phase || '阶段更新');
   if (event.event==='LLM_REQUEST') return '请求模型 '+(d.model || '')+' · 展开查看完整请求';
   if (event.event==='LLM_RESPONSE') return '模型已返回 · 展开查看完整内容与工具调用';
@@ -193,6 +272,7 @@ async function poll() {
     txt('updated',lastGood ? '保留最后一次收到的数据，尚未重新连接' : '请确认本机监控服务已启动');
   } finally { clearTimeout(timer); setTimeout(poll,500); }
 }
+setInterval(renderFreshness,1000);
 poll();
 })();
 </script>
