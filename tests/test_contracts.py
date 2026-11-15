@@ -17,6 +17,22 @@ from agent.daily_survival import DAILY_SKILLS
 from agent.tools import tools_for_objective
 from core.competition_tasks import _KNOWN_SKILLS
 from core.config import DEFAULTS
+from core.domain import (
+    BED_NAMES,
+    FOOD_POINTS,
+    LOG_NAMES,
+    PLANK_NAMES,
+    SAFE_FOOD,
+    block_key,
+    blocked_targets,
+    cell_coords,
+    extract_blocks,
+    extract_hostiles,
+    finite_number,
+    has_tool_tier,
+    inventory_counts,
+    parse_pos,
+)
 from core.survival_state import SurvivalInstanceError, SurvivalJournal
 from skills.batch import BatchSkills
 from skills.daily_survival import DailySurvivalSkills
@@ -190,6 +206,54 @@ class SurvivalInstanceLockTests(unittest.TestCase):
         self.assertIn("already owns survival scope", stderr.getvalue())
         client.login.assert_not_called()
         client.logout.assert_not_called()
+
+
+class DomainPrimitivesTests(unittest.TestCase):
+    def test_finite_number_and_parse_pos_reject_booleans_and_non_finite_values(self):
+        self.assertTrue(finite_number(0))
+        self.assertTrue(finite_number(-3.5))
+        self.assertFalse(finite_number(True))
+        self.assertFalse(finite_number(float("nan")))
+        self.assertFalse(finite_number(float("inf")))
+
+        self.assertEqual(parse_pos((1, 2.5, -3)), [1, 2.5, -3])
+        self.assertIsNone(parse_pos([1, True, 3]))
+        self.assertIsNone(parse_pos([1, 2]))
+        self.assertEqual(parse_pos([1, 2, -3], integer=True), [1, 2, -3])
+        self.assertIsNone(parse_pos([1.0, 2, 3], integer=True))
+
+    def test_cell_coords_block_key_and_blocked_targets_normalize_coordinates(self):
+        self.assertEqual(cell_coords([1.99995, 64.0, -2.5]), (2, 64, -3))
+        self.assertEqual(block_key([1.9, 64.0, -2.1]), "1,64,-3")
+        self.assertEqual(blocked_targets({"blocked_targets": ["1.9,64,-2.1", "custom_tag"]}), {"1,64,-3", "custom_tag"})
+
+    def test_inventory_counts_blocks_hostiles_and_tool_tiers(self):
+        obs = {
+            "inventory": [
+                {"name": "oak_log", "count": 2},
+                {"name": "oak_log", "count": 3},
+                {"name": "stone_pickaxe", "count": 1},
+                {"name": "dirt", "count": 0},
+            ],
+            "blocks": [{"name": "oak_log", "pos": [2, 64, 0]}, {"name": "bad", "pos": [1, 2]}],
+            "terrain": [{"name": "grass_block", "pos": [0, 63, 0]}],
+            "entities": [
+                {"type": "hostile", "name": "zombie", "pos": [4, 64, 0]},
+                {"type": "passive", "name": "cow", "pos": [1, 64, 0]},
+                {"type": "hostile", "name": "skeleton", "pos": [2, 64, 0]},
+            ],
+        }
+        counts = inventory_counts(obs)
+        self.assertEqual(counts, {"oak_log": 5, "stone_pickaxe": 1})
+        self.assertTrue(has_tool_tier(counts, "pickaxe"))
+        self.assertFalse(has_tool_tier(counts, "axe", wooden=True))
+        self.assertEqual(len(extract_blocks(obs, include_terrain=False)), 1)
+        self.assertEqual(len(extract_blocks(obs, include_terrain=True)), 2)
+        hostiles = extract_hostiles(obs, [0, 64, 0])
+        self.assertEqual([pos for _, pos in hostiles], [[2, 64, 0], [4, 64, 0]])
+        self.assertTrue(set(SAFE_FOOD).issubset(set(FOOD_POINTS)))
+        self.assertEqual(len(LOG_NAMES), len(PLANK_NAMES))
+        self.assertEqual(len(BED_NAMES), 16)
 
 
 if __name__ == "__main__":

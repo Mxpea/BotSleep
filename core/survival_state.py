@@ -14,14 +14,12 @@ from pathlib import Path
 
 from core.client import APIError
 from core.block_geometry import trace_block_visibility
+from core.domain import BED_NAMES, LOG_NAMES
 from skills.survival import SurvivalSkills
 
 
-LOGS = [f"{wood}_log" for wood in (
-    "oak", "spruce", "birch", "jungle", "acacia", "dark_oak", "mangrove", "cherry", "pale_oak")]
-BEDS = [f"{color}_bed" for color in (
-    "white", "orange", "magenta", "light_blue", "yellow", "lime", "pink", "gray",
-    "light_gray", "cyan", "purple", "blue", "brown", "green", "red", "black")]
+LOGS = list(LOG_NAMES)
+BEDS = list(BED_NAMES)
 
 
 def utc_now():

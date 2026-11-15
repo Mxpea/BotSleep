@@ -11,7 +11,8 @@ import copy
 import math
 import re
 
-from agent.survival_planner import Decision, LOG_NAMES, PLANK_NAMES, SAFE_FOOD, SurvivalPlanner
+from agent.survival_planner import Decision, SurvivalPlanner
+from core.domain import LOG_NAMES, PLANK_NAMES, SAFE_FOOD, TOOL_KINDS, parse_pos
 from skills.daily_survival import DailySurvivalSkills
 
 
@@ -32,7 +33,6 @@ COOKING = {"beef": "cooked_beef", "porkchop": "cooked_porkchop", "mutton": "cook
            "deepslate_iron_ore": "iron_ingot", **{name: "charcoal" for name in LOG_NAMES}}
 CROPS = {"wheat": (7, "wheat_seeds"), "carrots": (7, "carrot"),
          "potatoes": (7, "potato"), "beetroots": (3, "beetroot_seeds")}
-TOOL_KINDS = ("pickaxe", "axe", "sword")
 BUILDING_MATERIALS = ("oak_planks", "birch_planks", "spruce_planks", "cobblestone")
 
 
@@ -53,7 +53,7 @@ class DailySurvivalGoals:
 
     @staticmethod
     def _pos(value):
-        return SurvivalPlanner._pos(value)
+        return parse_pos(value)
 
     @staticmethod
     def _rows(value):
