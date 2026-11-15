@@ -69,3 +69,9 @@ Copy-Item config.example.yaml config.yaml
 - 接口写明真实名称或 HTTP 方法/路径、参数示例、单位及关键返回字段。尚未绑定的入口必须注明，不虚构可调用工具。
 - 原理、公式、来源和长示例放入 `references/`，不默认注入模型上下文。只给当前任务需要的状态与结果摘要。
 - 会话管理、坐标转换、采样、数学计算及并发监控由 harness 负责；skill 只让模型选择行动，并给出明确的完成、失败和中止条件。
+
+## 文档状态同步
+
+- `docs/ARCHITECTURE.md` 描述当前 starter/daily 运行链路；`docs/HARNESS_INTERFACES.md` 分开记录现有程序接口和未来赛事提案。不得因旧 `agent/loop.py` 有 TODO 就宣称生存主循环未接通。
+- 现有历史裁剪按请求字节预算执行，不等于 Pi/OMP 式语义 compact；通用赛事清单、handoff、Markdown skill 加载、水面优先导航和自动搭路仍待实现。
+- 测试结果注明源码基线、环境与是否本轮复核；历史全绿不能覆盖另一环境中的失败。最新结果与已知差异统一放 `docs/TESTING.md`。

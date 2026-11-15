@@ -12,7 +12,7 @@
 
 参考 `with-you.exe` 的事件反馈、任务标识和分层记忆思路，增加按世界与账号隔离的 SQLite 经验、地点和失败策略记忆。记忆有来源、期限和数量限制，只用于召回候选；执行仍依赖新鲜观察。上一动作的原生工具反馈会保留到下一次模型响应，日常任务会在死亡、物品损失或设施变化后重新计算。
 
-模型请求使用线程与跨进程锁串行化，慢模型期间本地安全观察和撤退仍可运行。客户端超时不能证明服务端已结束：此时持久化锁定后续模型请求，保留本地安全处理；不会通过重启或自动重试绕过。确认服务端请求已经结束后，才可使用 `--acknowledge-model-idle`。这与游戏动作未知结果需要 `--resume` 重新观察是两个独立恢复过程。
+生存 harness 串行执行一个技能，独立单模型 worker 与跨进程门禁串行化模型请求，慢模型期间本地安全观察和撤退仍可运行。客户端超时不能证明服务端已结束：此时持久化锁定后续模型请求，保留本地安全处理；不会通过重启或自动重试绕过。确认服务端请求已经结束后，才可使用 `--acknowledge-model-idle`。这与游戏动作未知结果需要 `--resume` 重新观察是两个独立恢复过程。
 
 ```powershell
 python -B main.py --config config.yaml --mode survival --objective daily
@@ -20,9 +20,9 @@ python -B main.py --config config.yaml --mode survival --objective daily
 
 配置中开启 `llm.enabled` 和 `debug.monitor.enabled` 后，可在本机监控查看任务板、记忆统计、模型原始返回、请求槽状态和技能证据。步骤、时间、死亡预算依然有效，到达预算会结束本次运行；不承诺无限无人值守。详细模块与限制见 [DAILY_SURVIVAL.md](docs/DAILY_SURVIVAL.md)。
 
-## dev-ink 分支改动说明
+## 已合并的主要改动
 
-更新日期：2026-11-14。此分支将原有架构骨架补齐为可配置的睡眠、生存与模型运行流程。
+更新日期：2026-11-14；本轮核对基于 `HEAD ed685f7`。原 dev-ink 实现已合并，当前入口支持配置驱动的睡眠、初期生存和日常生存。
 
 | 模块 | 本次改动 |
 | --- | --- |
@@ -47,20 +47,23 @@ python -B main.py --config config.yaml --mode survival --objective daily
 
 本分支仅修改 **BotSleep**，适配原版 **mc-agent-api**，不要求修改相邻 API 仓库。此前本地 API 实验补丁已撤回，未提交或上传。`can_dig`、`can_see`、`collection` 等额外元数据按可选字段处理；早期验收使用的原版 API（`e11f2f3`）没有前述视线字段；后续 `1cfecc3` 的独立实测见下表。原版 API 缺少这些字段时，BotSleep 用局部体素查询补充保守判断，未知形状或读取预算不足不会当作可见。该判断不是完整碰撞模型，不能保证消除底层寻路卡住，也不等于天然地图长期生存已通过。
 
-### 当前验证状态
+### 当前验证状态（2026-11-14，HEAD ed685f7）
+
+**本轮全套离线测试未全绿：772 项，17.131 秒，0 跳过，`FAILED (errors=1)`。** 唯一错误位于 SQLite 记忆测试的临时目录清理，定向复跑再次出现同类错误；根因尚未确认。安装 `requirements.txt` 后 PyYAML 为 6.0.3；示例配置检查明确输出 `Configuration valid.`，通过。详细命令与错误边界见 [TESTING.md](docs/TESTING.md)。本轮没有新增实服或模型验收，表中游戏记录均为历史。
 
 | 范围 | 已有证据与边界 |
 | --- | --- |
-| 离线自动化 | **合并后 772 项测试通过（17.137 秒，0 跳过）**；包含原 dev-ink 的740项基线、31项要塞回归及1项目录隔离回归。覆盖本机假 HTTP、串行门禁、未知结果、原生反馈、日常集成和固定官方计算引擎，不代表真实游戏技能全部成功。 |
+| 离线自动化 | **本轮 772 项，1 项 ERROR，0 跳过（17.131 秒）**；`test_survival_memory.SurvivalMemoryTests.test_corrupt_and_future_schema_databases_are_preserved` 在清理 `memory.sqlite3` 时出现 Windows 文件占用错误。不是业务断言失败，仍不能算全套通过。历史合并记录为 772 项通过（17.137 秒，0 跳过），不替代本轮结果。 |
+| 本轮独立核对 | 实际导入确认 starter 9项、daily 31项工具及13项日常任务，两个目录均不含 `calculate_stronghold`；固定 JAR 校验、83个 Python 文件 AST 语法检查和60个相对 Markdown 链接核对通过。上述结果不改变全套测试仍有1项ERROR的结论。 |
 | 自动睡眠 | 已有独立测试世界的真实找床、入睡和醒来验收记录，详见 [TESTING.md](docs/TESTING.md)。 |
 | 确定性生存规划 | 此前在独立、和平难度的平坦靶场，从空背包完成初期石器工具链；不代表模型规划在天然地图上的同等能力。 |
 | 真实模型接入 | 已收到 `default` 路由的原生工具调用，响应 `model` 为 `qwen3.6-35b-a3b`，实际动作失败结果已回传。这是当时服务自报的模型标识，不保证该路由以后固定指向同一模型。 |
-| API 1.3.7 适配 | 官方 `1cfecc3` 的跟踪文件保持干净；新版状态字段已实际观察。`dig_unconfirmed` 有界复核、未知结果保留、树冠分段撤退和日常生产技能有离线测试；本次未自然触发 `dig_unconfirmed`。当前实测详情见 [TESTING.md](docs/TESTING.md)。 |
+| API 1.3.7 适配 | 历史记录基于官方 `1cfecc3`，新版状态字段曾实际观察；BotSleep 不依赖相邻 API 仓库的本地补丁。`dig_unconfirmed` 有界复核、未知结果保留、树冠分段撤退和日常生产技能有离线覆盖；历史实测未自然触发 `dig_unconfirmed`，见 [TESTING.md](docs/TESTING.md)。 |
 | 自然地图自主采集与制作 | 2026-11-14 15:50–15:56，原版 API `1cfecc3` 下同会话真实完成清叶、两次采木、制板、制木棍和木镐；目标方块或库存变化已确认。工作台制作缺料、移动未到达后，失败结果以配对工具消息返回模型，模型改换落点、补采并制作。16:03 夜间撤退期间被僵尸击杀，重生后继续观察；完整石器及长期日常生存仍未验收。 |
 
 较早同会话的后端失败恢复证据（2026-11-14，UTC）：**04:56:40** 制作木镐返回 `missing_ingredients`；**04:56:47** 下一模型请求带对应的失败工具反馈；**04:57:19** 模型改为采木；**04:57:27** 原木库存增加 1，目标方块已移除。此前的 `llm_no_progress` 则是本地在执行前拒绝原地移动，再让模型修复调用，不能与后端实际执行失败混为一谈。
 
-上段04:56–04:57历史证据对应 `mc-agent-api` **`e11f2f3` 原版**；表内15:50–15:56是新版 `1cfecc3` 的独立实测。两次运行之间仅继承检查点失败上下文，没有恢复旧原生工具消息历史；同会话请求的工具配对另行验证。详细时间线见 [TESTING.md](docs/TESTING.md)，脱敏报告分别保存在本地忽略目录的 `live-survival-verification-20261114.json` 和 `live-clear-gather-craft-b8b27ada1620.json`。
+上段04:56–04:57历史证据对应 `mc-agent-api` **`e11f2f3` 原版**；表内15:50–15:56是新版 `1cfecc3` 的独立实测。两次运行之间仅继承检查点失败上下文，没有恢复旧原生工具消息历史；同会话请求的工具配对另行验证。详细时间线见 [TESTING.md](docs/TESTING.md)。原始报告位于本地忽略目录 `.test-runtime/`，要塞历史证据另见 `logs/`；两者均不随 Git 拉取分发，接收端需取得脱敏副本或重新验证。
 
 ## 安装与配置
 
@@ -209,13 +212,15 @@ HTTP 超时不能证明服务端动作停止。客户端不自动重发写操作
 .\.venv\Scripts\python.exe -m integrations.ninjabrain calculate --input data/examples/stronghold_throws.json
 ```
 
+本轮合成示例 CLI 计算成功，首选区块为 `[128,0]`；这不是实际世界的定位结果。
+
 `calculate_stronghold` 的 schema 单独保存在 `STRONGHOLD_TOOL_DEFINITION`；纯计算 Python Skill 与 CLI 可用，但它没有进入 starter/daily 的 9/31 工具目录，也未接入日常模型分派。
 
 真实投眼采样、误差假设和限制见 [要塞计算集成指南](docs/STRONGHOLD.md)。采样会消耗末影之眼；2026-11-13 已有 5 次真实投眼采样与多观测计算实测记录；尚未挖掘确认传送门房。
 
 ## Harness 接口设计
 
-[接口契约与架构决策](docs/HARNESS_INTERFACES.md) 持续记录底层 API 事实、接口草案与架构访谈结论；未决设计不代表已实现。
+[接口契约与架构决策](docs/HARNESS_INTERFACES.md) 持续记录底层 API 事实、接口草案与架构访谈结论。当前配置入口、单动作执行、单模型 worker 和原生工具反馈已接通；赛事阶段接口、compact/handoff、完整 reflex、水面导航与自动浮水/搭桥仍属提案，不能作为已实现工具调用。
 
 ## 代码入口
 

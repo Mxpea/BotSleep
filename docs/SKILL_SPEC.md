@@ -6,14 +6,17 @@
 
 ## 一、技能基础契约 (BaseSkill Contract)
 
-单一宏技能采用 `BaseSkill` 契约，提供以下生命周期钩子。生存基础动作通过 `SurvivalSkills.execute(name, args, cancel_event)` 注册分派，同样返回 `SkillResult`，实际契约见 [SURVIVAL.md](SURVIVAL.md)，不会注册未实现的搭高/落地水骨架：
-- `validate_preconditions(context) -> bool`：校验背包资源、空间高度、网络状态。
-- `execute(context, **params) -> SkillResult`：核心动作逻辑。
-- `rollback(context, reason) -> None`：动作异常中断时的安全恢复（如清空跳跃、恢复正常视线）。
+单一宏技能采用 `skills/__init__.py` 的 `BaseSkill` 契约，客户端由构造函数 `BaseSkill(client)` 注入，生命周期钩子为：
+
+- `validate_preconditions(**kwargs) -> bool`：校验动作前置条件。
+- `execute(**kwargs) -> SkillResult`：核心动作逻辑。
+- `rollback(reason: str) -> None`：异常中断时的恢复钩子，基类默认不执行动作；具体恢复以各技能实现为准。
+
+`SkillResult` 包含 `success`、`message`、`data`、`error_code`。生存基础动作通过 `SurvivalSkills.execute(name, args, cancel_event=None, *, recovery_context=None)` 分派；`recovery_context` 由 harness 内部提供，不是模型参数。当前运行时为 `main.py` 启动的 `core/survival_harness.py`，不使用 `agent/loop.py` 旧骨架。starter/daily 分别公开9/31项模型工具，仅接受已注册动作；实际契约见 [SURVIVAL.md](SURVIVAL.md) 与 [DAILY_SURVIVAL.md](DAILY_SURVIVAL.md)。
 
 ---
 
-日常生产技能及验证边界见 [DAILY_SURVIVAL.md](DAILY_SURVIVAL.md)。下面的 `pillar_up` 和 `mlg_water` 是未接入的设计规范，不属于可执行模型工具。
+日常生产技能及验证边界见 [DAILY_SURVIVAL.md](DAILY_SURVIVAL.md)。下面的 `pillar_up`、`mlg_water` 及其 `telemetry.ReflexDaemon` 触发机制是未接入的设计规范，不属于可执行模型工具。
 
 ## 二、核心技能规范
 

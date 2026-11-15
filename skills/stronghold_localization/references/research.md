@@ -66,7 +66,7 @@ s² = max(Σe²/(n−2), q²/12)
 
 ## 6. Harness 绑定说明（不给小模型默认加载）
 
-主 skill 只保留调用表和五步流程，推导、原始轨迹、研究资料由程序保存或按需提供。表中 Python 入口需要由 harness 绑定为工具；不是让游戏 AI 获得 Python 执行权限。当前通用分发和 Markdown skill 加载仍未实现，不能声称已经可自主调用。
+主 skill 只保留调用表和五步流程，推导、原始轨迹、研究资料由程序保存或按需提供。表中 Python 入口需要由 harness 绑定为工具；不是让游戏 AI 获得 Python 执行权限。当前 `core/survival_harness.py` 已有生存技能分派与本地安全门禁，但采眼与要塞计算均未注册到 starter/daily 的9/31项模型工具；Markdown skill 按需加载也未实现，不能声称要塞流程已经可自主调用。
 
 ```python
 from integrations.ninjabrain.observations import EyeObservationCollector
@@ -81,6 +81,6 @@ result = CalculateStrongholdSkill().execute(
 )
 ```
 
-HTTP 适配可复用 `client._checked_request(method, path, payload, timeout=...)`；网络等待时间（秒）应大于请求体中的动作 `timeout`（毫秒）。目前 `client.move_to()` 仍发送错误字段 `timeout_ms`，应使用表中的真实 HTTP 契约，不能声称旧封装已修复。所有 HTTP 调用检查 `ok`，技能调用检查 `success`，失败即返回错误。
+HTTP 适配优先复用 `core/client.py` 的公开方法；底层统一为 `_request(method, endpoint, *, payload=None, params=None, timeout_seconds=None, authenticated=True)`，没有 `_checked_request`。`move_to(..., timeout_ms=15000)` 的 Python 参数仍以毫秒计，但已正确映射到 HTTP 请求体 `timeout`；客户端按动作时限换算秒并加等待余量，网络超时不代表后端动作已停止。`inventory()` 与兼容名 `get_inventory()` 均返回完整 `ok/result` envelope，不能当成物品列表。客户端统一校验 HTTP/业务响应并抛出 `APIError`；直接使用 HTTP 时检查 `ok`，技能结果检查 `success`，失败即返回错误。
 
 给模型的采样结果保留观测与摘要即可，原始实体采样不展开到上下文。候选只返回前两项、状态只返回决策字段。会话、采样并发、拟合、误差估计和移动监控由 harness 执行，不让小模型手算或逐帧轮询。统计 σ 与导航优化仍为待实现方案，当前采样器行为不因本文精简而改变。

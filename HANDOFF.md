@@ -2,9 +2,13 @@
 
 更新日期：2026-11-14（Asia/Shanghai）。路径均相对仓库根目录；跨机器需要自行配置部署地址、账号和凭据，不依赖原机器的进程或在线会话。提交、合并和远端同步结果以 Git 记录为准，不据本文推断已经 push。
 
-## 1. 当前入口、范围与现场状态
+**本轮状态（HEAD `ed685f7`）**：安装 `requirements.txt` 后 PyYAML 为 6.0.3；全套离线测试 772 项、17.131 秒、0 跳过，`FAILED (errors=1)`，不能报告全绿。唯一错误为 `test_survival_memory.SurvivalMemoryTests.test_corrupt_and_future_schema_databases_are_preserved` 在临时目录清理 `memory.sqlite3` 时出现 WinError32，随后 WinError267；定向复跑 1 项、0.049 秒再次出现同类错误。不是业务断言失败，根因尚未确认，本轮未修代码。
 
-当前主入口为 `main.py`，支持 YAML、环境变量与命令行参数；`bot_sleep.py`、根 `client.py` 分别兼容转发至主入口和统一客户端。普通运行依赖已列于 `requirements.txt`，RCON 为可选开发依赖。不存在“修改 YAML 不生效、必须运行旧独立睡眠脚本”的启动前提。
+示例配置检查已明确输出 `Configuration valid.`，通过；Ninjabrain 合成示例 CLI 计算成功，首选区块 `[128,0]`。工具目录实际导入确认 starter 9项、daily 31项、daily 13项任务，两个目录均不含 `calculate_stronghold`；固定 JAR 校验、83个 Python 文件 AST 语法检查及60个相对 Markdown 链接核对通过。本轮未运行游戏、API 或模型，不推断历史进程仍在线。完整命令和证据边界见 [TESTING.md](docs/TESTING.md)。
+
+## 1. 当前入口、范围与历史现场
+
+当前主入口为 `main.py`，支持 YAML、环境变量与命令行参数，默认 sleep，生存模式按 objective 分为 starter/daily；`bot_sleep.py`、根 `client.py` 分别兼容转发至主入口和统一客户端。普通运行依赖已列于 `requirements.txt`，RCON 为可选开发依赖。不存在“修改 YAML 不生效、必须运行旧独立睡眠脚本”的启动前提。
 
 ```powershell
 python -m venv .venv
@@ -16,9 +20,9 @@ Copy-Item config.example.yaml config.yaml
 
 先填写 API 地址、允许登录的账号及口令。`--check-config` 不连接游戏。`llm.enabled` 默认关闭；需要模型时填写服务配置或 `BOTSLEEP_LLM_BASE_URL`、`BOTSLEEP_LLM_MODEL`、`BOTSLEEP_LLM_API_KEY` 环境变量，不假设 `.env` 自动加载。模型与监控配置详见 [README.md](README.md)。
 
-**2026-11-14 18:32 交接记录**：原运行目录的 dev-ink 机器人仍使用合并前已加载代码；PID40544、会话 `2a30267e20eb` 已运行270步，因 `death_limit` 安全暂停，重生后生命/饥饿20、位置 `[-2.5,125,10.5]`，监控 HTTP 200、模型槽 `idle`。这不是合并造成的停止；本次合并不重置死亡预算、不重启机器人，也不替换其运行目录。PID、位置及状态仅是此时间点的记录，后续必须重新观察。
+**历史现场（2026-11-14）**：原 dev-ink 运行在18:32的记录中已因 `death_limit` 安全暂停；16:26加载修复后，16:35仍处于雷暴/近敌下的本地避险阶段。这些记录不代表当前进程或连接状态，也不是合并后新增实服验收。恢复前须按实际部署重新观察，独立处理动作 pending 与模型未知请求。
 
-16:26安全空闲时加载过对角清叶、几何改变后解除旧失败、紧急撤退短观察等修复；16:35仍是雷暴/近敌下的本地避险阶段，该状态现为历史。当前实时信息以私有 `.test-runtime/processes.json`、现场报告和只读监控时间戳为准；禁止根据历史 PID 或旧配置启动第二个同名机器人。
+`.test-runtime/`、`.survival-test-runtime/` 和 `logs/` 均为本地忽略目录，不随 Git 拉取分发。接收端不能假定历史现场报告存在；需要时获取脱敏副本或另行验证，不根据历史记录启动第二个同名机器人。
 
 ## 2. 已实现链路与验证边界
 
@@ -35,9 +39,9 @@ Copy-Item config.example.yaml config.yaml
 | `integrations/ninjabrain/`、`skills/stronghold.py` | 独立采样与官方计算核心；未纳入日常模型工具目录 |
 | `skills/stronghold_localization/SKILL.md` | 小模型策略文档，尚未自动加载到运行上下文 |
 
-合并后全套 **772项测试通过（17.137秒，0跳过）**：包含原 dev-ink 的740项基线、31项要塞回归及1项目录隔离回归。固定 Ninjabrain Bot 1.5.2 JAR 已下载并通过 SHA-256 校验，真实计算引擎用例没有跳过；compileall、示例配置检查和监控 JavaScript 语法检查通过。合并前 dev-ink 的 **740项/15.126秒** 仅保留为历史基线。
+**历史合并验证**曾记录 772 项通过（17.137 秒，0 跳过），包含原 dev-ink 的740项基线、31项要塞回归及1项目录隔离回归；当时固定 Ninjabrain Bot 1.5.2 JAR 通过 SHA-256 校验，compileall、示例配置检查和监控 JavaScript 语法检查通过。合并前740项/15.126秒同为历史基线。当前以本文开头的本轮结果为准，历史通过记录不能覆盖本轮 ERROR。
 
-真实自然地图记录：15:50–15:56的会话 `b8b27ada1620` 完成清叶、两次采木、木板/木棍/木镐制作，11个动作的后续原生工具反馈配对正确；工作台缺料、移动失败后模型改选行动。16:03被僵尸击杀并空背包重生。不得把死亡前物品当作当前持有，也不能用此记录证明后续新会话或完整日常链通过。睡眠与确定性石器靶场另有历史验证，完整食物、熔炼、建屋、储物及长期生存仍待验收，证据见 [TESTING.md](docs/TESTING.md)。
+历史真实自然地图记录：2026-11-14 15:50–15:56的同一会话完成清叶、两次采木、木板/木棍/木镐制作，11个动作的后续原生工具反馈配对正确；工作台缺料、移动失败后模型改选行动。16:03被僵尸击杀并空背包重生。不得把死亡前物品当作当前持有，也不能用此记录证明后续新会话或完整日常链通过。睡眠与确定性石器靶场另有历史验证，完整食物、熔炼、建屋、储物及长期生存仍待验收，证据见 [TESTING.md](docs/TESTING.md)。
 
 API 1.3.7（官方 `1cfecc3`）已实际返回 `speed/velocity`，速度进入模型与监控；缺失/null表示未知，不是零。`dig_unconfirmed`、树冠分段撤退等有离线回归，但不能把离线检查当作真实恢复成功。原模型服务路由为 `default`，历史响应自报 `qwen3.6-35b-a3b`；路由或模型列表不保证实际后端身份，当前响应缺失时应显示“未确认”。
 
@@ -50,7 +54,7 @@ API 1.3.7（官方 `1cfecc3`）已实际返回 `speed/velocity`，速度进入�
 - 面向游戏 AI 的 skill 放在本仓库，默认约300～600中文字、明确接口调用表与最多五步流程；公式、原理及长示例放 `references/`。未绑定接口明确标注，不虚构工具。
 - 模型选择目标和下一行动；会话、坐标转换、采样、数学计算与并发监控由 harness 承担。普通动作串行，未知副作用先核验，完成必须有证据。
 
-[HARNESS_INTERFACES.md](docs/HARNESS_INTERFACES.md) 保留赛事阶段目标、进度卡、导航、reflex、compact/handoff等设计访谈与未冻结入口。当前 daily 运行时解决了部分基础链路，但不等于已经实现该文档中的全部未来赛事接口；`select_task`、`finish_task`、自动浮水/搭桥等不得作为现成工具调用。
+[HARNESS_INTERFACES.md](docs/HARNESS_INTERFACES.md) 保留赛事阶段目标、进度卡、导航、reflex、compact/handoff等设计访谈与未冻结入口；compact/reflex、水面导航与自动浮水/搭桥仍属提案。当前 daily 运行时解决了部分基础链路，但不等于已经实现该文档中的全部未来赛事接口；`select_task`、`finish_task`、自动浮水/搭桥等不得作为现成工具调用。
 
 ## 4. Ninjabrain Bot 集成
 
@@ -79,7 +83,7 @@ API 的 `use_item(ender_eye)` 会返回 `landed_at/eye_vector/bearing_deg`，但
 
 最终投眼目标 `x=-1376,z=-1184`，下挖参考 `x=-1372,z=-1180`；次选 `(-87,-73)` 约 1.58%。**这是原测试世界的推断，不能用于其他世界；地下 Y、入口实物和传送门房均未挖掘确认。**
 
-消耗 5 只眼（64→59）。寻路曾入河超时、沉水并降到 18 生命值，随后通过正常上浮/游泳恢复到 20。最终记录为地面空闲；原会话当时保持在线，但跨机器不得假设它仍存在。全过程未用 RCON、管理员定位、存档或挖掘。
+消耗 5 只眼（64→59）。寻路曾入河超时、沉水并降到 18 生命值，随后通过正常上浮/游泳恢复到 20。当时最终记录为地面空闲；跨机器不得假设原会话仍存在。全过程未用 RCON、管理员定位、存档或挖掘。
 
 原始证据文件名：`logs/live_test_result.json`、`logs/probe_result.json`、`logs/eyes-local-test-2026-11-13.json`、`logs/stronghold_live_result.json`、`logs/stronghold_live_prediction.json`。**logs 被忽略，不随正常 Git 拉取分发**；缺文件时向产出者获取脱敏副本，或重新采样，不能把路径当作已有文件。
 
@@ -116,7 +120,7 @@ python -m integrations.ninjabrain calculate --input data/examples/stronghold_thr
 python -B -m unittest discover -s tests -v
 ```
 
-`setup` 下载固定官方1.5.2 JAR并检查 SHA-256，后续计算可离线；`.cache/ninjabrain/` 不提交。缺少引擎时测试会明确跳过，不能报告为引擎全部通过。合成示例指向 `[128,0]`，与实际世界无关。
+`setup` 下载固定官方1.5.2 JAR并检查 SHA-256，后续计算可离线；`.cache/ninjabrain/` 不提交。缺少引擎时测试会明确跳过，不能报告为引擎全部通过。本轮合成示例 CLI 已成功计算，首选区块为 `[128,0]`，与实际世界无关。
 
 `capture` 会登录、消耗末影之眼并在结束时登出，可能替换同名旧会话。需要实机采样时按 [STRONGHOLD.md](docs/STRONGHOLD.md) 使用自己的部署配置；持续 harness 进程应使用受协调的注入 client 入口，不能另起同名 CLI 采样。禁止把独立采样器误当作已注册的日常模型动作。
 
