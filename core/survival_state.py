@@ -1,11 +1,14 @@
 """Fresh, bounded observations and atomic checkpoints for one bot/world scope."""
 
+import copy
 import hashlib
 import json
 import math
 import os
 import threading
 import time
+import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -297,17 +300,38 @@ class ObservationCollector:
         return observation
 
 
+class SurvivalInstanceError(RuntimeError):
+    """Raised when another active runner already owns the same bot/world scope."""
+
+    def __init__(self, code: str, message: str, details=None):
+        super().__init__(message)
+        self.code = code
+        self.details = details or {}
+
+
+_JOURNAL_LOCKS = {}
+_INSTANCE_LOCKS = {}
+_JOURNAL_REGISTRY_LOCK = threading.Lock()
+
+
 class SurvivalJournal:
     """Store intentions before writes; never replay a pending intention on load."""
 
     def __init__(self, directory, *, endpoint, username, world_id):
         scope = {"endpoint": endpoint.rstrip("/"), "username": username, "world_id": world_id}
+        self.scope = scope
         digest = hashlib.sha256(json.dumps(scope, sort_keys=True).encode()).hexdigest()[:16]
         self.directory = Path(directory) / digest
         self.directory.mkdir(parents=True, exist_ok=True)
         self.path = self.directory / "checkpoint.json"
         self.events_path = self.directory / "episodes.jsonl"
-        self._lock = threading.RLock()
+        self.lock_path = self.directory / "checkpoint.lock"
+        self.instance_lock_path = self.directory / "instance.lock"
+        self.instance_meta_path = self.directory / "instance.json"
+        with _JOURNAL_REGISTRY_LOCK:
+            self._lock = _JOURNAL_LOCKS.setdefault(str(self.lock_path.resolve()), threading.RLock())
+            self._instance_thread_lock = _INSTANCE_LOCKS.setdefault(str(self.instance_lock_path.resolve()), threading.Lock())
+        self._lock_depth = 0
         self.state = {"version": 1, "scope": scope, "context": {}, "pending": None, "last_result": None}
         if self.path.exists():
             try:
@@ -320,17 +344,178 @@ class SurvivalJournal:
                 raise ValueError("Survival checkpoint is unreadable or incompatible; preserve it before choosing a new state_dir") from None
             self.state = loaded
 
-    def update(self, **changes):
-        with self._lock:
-            self.state.update(changes, updated_at=utc_now())
-            temporary = self.path.with_suffix(".tmp")
-            with temporary.open("w", encoding="utf-8") as stream:
-                json.dump(self.state, stream, ensure_ascii=False, indent=2, allow_nan=False)
+    @staticmethod
+    def _os_lock(handle):
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    @staticmethod
+    def _os_unlock(handle):
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+    @contextmanager
+    def _file_lock(self, wait_seconds=5.0):
+        deadline = time.monotonic() + wait_seconds
+        while not self._lock.acquire(timeout=0.05):
+            if time.monotonic() >= deadline:
+                raise SurvivalInstanceError("journal_lock_busy", "Timed out waiting for survival checkpoint lock")
+        handle = None
+        acquired_os = False
+        try:
+            self._lock_depth += 1
+            if self._lock_depth == 1:
+                handle = self.lock_path.open("a+b")
+                if handle.tell() == 0:
+                    handle.write(b"0")
+                    handle.flush()
+                while True:
+                    try:
+                        self._os_lock(handle)
+                        acquired_os = True
+                        break
+                    except OSError:
+                        if time.monotonic() >= deadline:
+                            raise SurvivalInstanceError("journal_lock_busy", "Another process is holding the survival checkpoint lock") from None
+                        time.sleep(0.02)
+            yield
+        finally:
+            self._lock_depth -= 1
+            if acquired_os and handle is not None:
+                try:
+                    self._os_unlock(handle)
+                except OSError:
+                    pass
+            if handle is not None:
+                handle.close()
+            self._lock.release()
+
+    def _write_json_atomic(self, target_path: Path, payload: dict) -> None:
+        temporary = target_path.with_suffix("." + uuid.uuid4().hex + ".tmp")
+        try:
+            with temporary.open("x", encoding="utf-8") as stream:
+                json.dump(payload, stream, ensure_ascii=False, indent=2, allow_nan=False)
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(temporary, self.path)
+            os.replace(temporary, target_path)
+        finally:
+            if temporary.exists():
+                try:
+                    temporary.unlink()
+                except OSError:
+                    pass
+
+    def _read_instance_meta(self) -> dict:
+        if not self.instance_meta_path.exists():
+            return {}
+        try:
+            data = json.loads(self.instance_meta_path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    @contextmanager
+    def instance_lock(self):
+        """Hold an OS-level exclusive runner lock for this bot/world scope."""
+        if not self._instance_thread_lock.acquire(blocking=False):
+            meta = self._read_instance_meta()
+            raise SurvivalInstanceError(
+                "instance_already_running",
+                f"Another BotSleep runner already owns survival scope {self.scope['username']}@{self.scope['world_id']}",
+                {"scope": copy.deepcopy(self.scope), "holder_pid": meta.get("pid")},
+            )
+        handle = None
+        acquired_os = False
+        try:
+            handle = self.instance_lock_path.open("a+b")
+            if handle.tell() == 0:
+                handle.write(b"0")
+                handle.flush()
+            try:
+                self._os_lock(handle)
+                acquired_os = True
+            except OSError:
+                meta = self._read_instance_meta()
+                holder_pid = meta.get("pid")
+                suffix = f" (pid={holder_pid})" if holder_pid is not None else ""
+                raise SurvivalInstanceError(
+                    "instance_already_running",
+                    f"Another BotSleep process{suffix} already owns survival scope {self.scope['username']}@{self.scope['world_id']}",
+                    {"scope": copy.deepcopy(self.scope), "holder_pid": holder_pid},
+                ) from None
+            self._write_json_atomic(self.instance_meta_path, {
+                "state": "running",
+                "pid": os.getpid(),
+                "started_at": utc_now(),
+                "scope": self.scope,
+            })
+            yield self
+        finally:
+            if acquired_os:
+                try:
+                    self._write_json_atomic(self.instance_meta_path, {
+                        "state": "idle",
+                        "pid": os.getpid(),
+                        "stopped_at": utc_now(),
+                        "scope": self.scope,
+                    })
+                except OSError:
+                    pass
+                try:
+                    self._os_unlock(handle)
+                except OSError:
+                    pass
+            if handle is not None:
+                handle.close()
+            self._instance_thread_lock.release()
+
+    def instance_status(self) -> dict:
+        """Probe whether an active runner currently holds the scope instance lock."""
+        meta = self._read_instance_meta()
+        if not self._instance_thread_lock.acquire(blocking=False):
+            return {"locked": True, "holder_pid": meta.get("pid", os.getpid()),
+                    "started_at": meta.get("started_at"), "scope": copy.deepcopy(self.scope)}
+        handle = None
+        locked = False
+        try:
+            if self.instance_lock_path.exists():
+                handle = self.instance_lock_path.open("a+b")
+                if handle.tell() == 0:
+                    handle.write(b"0")
+                    handle.flush()
+                try:
+                    self._os_lock(handle)
+                    self._os_unlock(handle)
+                except OSError:
+                    locked = True
+        finally:
+            if handle is not None:
+                handle.close()
+            self._instance_thread_lock.release()
+        return {
+            "locked": locked,
+            "holder_pid": meta.get("pid") if locked else None,
+            "started_at": meta.get("started_at") if locked else None,
+            "stopped_at": None if locked else meta.get("stopped_at"),
+            "scope": copy.deepcopy(self.scope),
+        }
+
+    def update(self, **changes):
+        with self._file_lock():
+            self.state.update(changes, updated_at=utc_now())
+            self._write_json_atomic(self.path, self.state)
 
     def record(self, event, data):
-        with self._lock, self.events_path.open("a", encoding="utf-8") as stream:
+        with self._file_lock(), self.events_path.open("a", encoding="utf-8") as stream:
             stream.write(json.dumps({"timestamp": utc_now(), "event": event, "data": data},
                                     ensure_ascii=False, allow_nan=False) + "\n")

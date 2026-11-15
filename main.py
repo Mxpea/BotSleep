@@ -63,6 +63,8 @@ def main(argv=None) -> int:
     monitor = None
     client = None
     controller = None
+    instance_lock = None
+    login_attempted = False
     exit_code = 0
     survival = config["agent"]["mode"] == "survival"
     try:
@@ -82,12 +84,23 @@ def main(argv=None) -> int:
             password=config["agent"]["password"],
             timeout_seconds=config["mc_api"]["timeout_seconds"],
         )
+        if survival:
+            from core.survival_state import SurvivalJournal
+            journal_guard = SurvivalJournal(
+                config["survival"]["state_dir"],
+                endpoint=client.base_url,
+                username=client.username,
+                world_id=config["survival"]["world_id"],
+            )
+            instance_lock = journal_guard.instance_lock()
+            instance_lock.__enter__()
         if recorder:
             recorder.record("INFO", "main", "STARTUP", {"username": client.username, "mode": config["agent"]["mode"],
                             "planner": "llm" if survival and config["llm"]["enabled"] else "rules",
                             "objective": config["survival"]["objective"] if survival else None,
                             "model": config["llm"]["model"] if config["llm"]["enabled"] else None,
                             "monitor_url": monitor.address if monitor else None})
+        login_attempted = True
         status = client.login(max_wait_seconds=config["mc_api"]["login_timeout_seconds"])
         if recorder:
             recorder.add_secret(client.token)
@@ -190,12 +203,18 @@ def main(argv=None) -> int:
             except Exception as exc:
                 exit_code = 1
                 print(f"Runner cleanup failed: {exc}", file=sys.stderr)
-        if client:
+        if client and login_attempted:
             try:
                 client.logout()
             except Exception as exc:
                 exit_code = 1
                 print(f"Logout failed: {exc}", file=sys.stderr)
+        if instance_lock is not None:
+            try:
+                instance_lock.__exit__(None, None, None)
+            except Exception as exc:
+                exit_code = 1
+                print(f"Instance lock release failed: {exc}", file=sys.stderr)
         if recorder:
             recorder.record("INFO", "main", "SHUTDOWN", {"exit_code": exit_code})
         if monitor:
