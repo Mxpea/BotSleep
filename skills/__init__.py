@@ -32,3 +32,26 @@ class BaseSkill(ABC):
     def rollback(self, reason: str) -> None:
         """Restores safe posture/view on abnormal interruption."""
         pass
+
+
+from .movement import PillarUpSkill
+from .clutch import MLGWaterSkill
+from .sleep import AutoSleepSkill
+from .exploration import ContinuousRadarSkill
+from .mining import ChopTreeSkill
+from .crafting import CraftItemSkill
+from .portal_speedrun import NetherPortalSpeedrunSkill
+CastNetherPortalSkill = NetherPortalSpeedrunSkill
+
+__all__ = [
+    "BaseSkill",
+    "SkillResult",
+    "PillarUpSkill",
+    "MLGWaterSkill",
+    "AutoSleepSkill",
+    "ContinuousRadarSkill",
+    "ChopTreeSkill",
+    "CraftItemSkill",
+    "CastNetherPortalSkill",
+    "NetherPortalSpeedrunSkill",
+]

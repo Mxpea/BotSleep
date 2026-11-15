@@ -1,10 +1,33 @@
 # BotSleep
 
-基于 mc-agent-api 的睡眠与生存机器人。默认模式在夜间或雷暴时找床并验证睡眠；`--mode survival` 运行初期石器目标，增加 `--objective daily` 后运行食物、工具升级、熔炼、床与住所、储物、死亡掉落恢复和持续维护。生存模式支持确定性规划和可选模型规划；默认不调用模型，正常运行无需 RCON。
+基于 mc-agent-api 的 Minecraft 智能 Agent 系统。支持自动睡眠管理、日常生存链、3D 方块雷达勘探、速通级地狱门水桶浇筑、智能配方合成与伐木。默认模式在夜间或雷暴时找床并验证睡眠；`--mode survival` 运行初期石器目标，增加 `--objective daily` 后运行食物、工具升级、熔炼、床与住所、储物、死亡掉落恢复和持续维护。生存模式支持确定性规则规划与大模型慢思考规划；默认不调用模型，正常运行无需 RCON。
 
-模型决策循环已接入原生工具调用、技能执行和结果反馈；搭高、落地水与高频反射仍未完成。生存运行方式见 [SURVIVAL.md](docs/SURVIVAL.md)，睡眠契约见 [SKILL_SPEC.md](docs/SKILL_SPEC.md)；[ARCHITECTURE.md](docs/ARCHITECTURE.md) 还包含尚未实现的设计目标。
+采用 **“大模型慢思考 + 本地宏技能快反应 + 3D 方块雷达感知 + 双向协同调试网关”** 的分层设计。
 
-### 日常生存链路（2026-11-14）
+---
+
+## 👥 协作分支规范 (Multi-Developer Workflow)
+
+- **`main` 分支**：经过全面矩阵验证的稳定发布主线。
+- **`develop-tianya` 分支**：TianYa 个人专属功能开发与迭代工作分支。
+- **存档隔离**：Minecraft 运行世界（`world/`）物理隔离在独立服务端，不混入代码仓库。
+- **密钥安全**：本地实际配置保存在 `config.yaml`（已配置 `.gitignore` 绝不入库），示例配置见 `config.example.yaml`。
+
+---
+
+## 📑 核心文档索引
+
+在进行开发与调试前，请查阅以下核心文档：
+
+- **[系统架构设计规范 (docs/ARCHITECTURE.md)](docs/ARCHITECTURE.md)**：大模型认知层、Sub-Agent 派发、3D 方块雷达与空间知识库。
+- **[人机协同调试指南 (docs/DEBUG_GUIDE.md)](docs/DEBUG_GUIDE.md)**：游戏内 `#` 聊天指令（`#radar`、`#chop`、`#craft`、`#inv` 等）、RCON 上帝视角靶场演练及飞行记录仪说明。
+- **[技能契约与规范 (docs/SKILL_SPEC.md)](docs/SKILL_SPEC.md)**：常态化雷达勘探 (`ContinuousRadarSkill`)、速通地狱门水桶浇筑 (`NetherPortalSpeedrunSkill`)、智能合成 (`CraftItemSkill`)、整树伐木 (`ChopTreeSkill`) 与智能睡眠 (`auto_sleep`)。
+- **[日常生存系统说明 (docs/DAILY_SURVIVAL.md)](docs/DAILY_SURVIVAL.md)**：13 项日常生存任务、5x5 庇护所施工与设施维护。
+- **[测试与回归规范 (docs/TESTING.md)](docs/TESTING.md)**：离线回归套件与自动化矩阵评测。
+
+---
+
+### 日常生存链路
 
 按当前物品、方块、容器槽位和生命状态计算 13 项任务，不接受模型自报完成。新增作物收种、耕地、有界狩猎、铁矿采集、装备、熔炼装填与取出、箱桶存取、床与门、5×5 住所检查及分步施工；小批采集和施工最多 8 步，每步复核，遇到失败或未知结果立即停止。住所只验证结构，不能据此保证光照足够或完全防怪。
 
@@ -73,6 +96,80 @@ Copy-Item config.example.yaml config.yaml
 ```
 
 编辑配置中的 `mc_api.base_url`、`agent.name`、`agent.password`，与 mc-agent-api 的认证配置匹配。用户名必须被服务端允许。配置与口令不应提交 Git。
+=======
+## 📂 模块结构概览
+
+```
+BotSleep/
+├── docs/                         # 📚 项目架构与调试规范文档
+│   ├── ARCHITECTURE.md           # 系统总体架构设计规范
+│   ├── DEBUG_GUIDE.md            # 游戏内聊天调试与 RCON 靶场指南
+│   └── SKILL_SPEC.md             # 程序化宏技能契约规范
+│
+├── core/                         # 🔌 基础设施与驱动
+│   ├── client.py                 # mc-agent-api HTTP REST 接口客户端
+│   ├── recipes.py                # 配方管理器与多层级原料预算规划器 (RecipeBook)
+│   ├── radar.py                  # 3D 方块雷达与地形高度图引擎 (BlockRadar)
+│   ├── memory.py                 # 空间记忆与 Sub-Agent 知识库 (MemoryEngine)
+│   ├── rcon.py                   # RCON 客户端管理者
+│   └── telemetry.py              # 环境感知与 20Hz 应急反射监听环
+│
+├── skills/                       # 📦 程序化宏技能库 (快反应)
+│   ├── crafting.py               # 智能合成技能 (CraftItemSkill: 2x2/3x3 自适应/自动放回收工作台)
+│   ├── mining.py                 # 智能伐木与清理整树 (ChopTreeSkill)
+│   ├── exploration.py            # 常态化雷达自动勘探技能 (ContinuousRadarSkill)
+│   ├── movement.py               # 自动搭高 (pillar_up)、搭桥、潜行
+│   ├── clutch.py                 # 自动落地水 (mlg_water)
+│   └── sleep.py                  # 寻床入睡核心流程 (auto_sleep)
+│
+├── agent/                        # 🧠 大模型认知层 (慢思考)
+│   ├── brain.py                  # OpenAI 兼容接口封装 (支持任何兼容端点)
+│   ├── tools.py                  # Function Calling 技能工具定义 (含合成、雷达与记忆检索)
+│   └── loop.py                   # Observe-Think-Act 状态机循环
+│
+├── data/                         # 💾 游戏逻辑数据与空间知识库
+│   ├── recipes.json              # Minecraft 1.21.11 完整 886 种配方库
+│   └── game_logic/
+│       ├── bot_state.json        # Bot 坐标与生命体征实时快照
+│       ├── landmarks.json        # 战略 POI 数据库 (床/箱子/工作台/矿物/液体)
+│       ├── spatial_grid.json     # 已探索区块与航迹
+│       ├── world_context.json    # 生态与昼夜环境上下文
+│       └── episodic_memory.jsonl # 探索时序回忆流水日志
+│
+├── tests/                        # 🧪 自动化场景验收测试集
+│   └── test_crafting.py          # 智能逆向合成木镐全链路实机验收测试
+│
+├── debug/                        # 🛠️ 人机协同调试工具箱
+│   ├── chat_debugger.py          # 游戏内 # 聊天调试指令分发器 (#radar, #status 等)
+│   ├── playground.py             # RCON 自动化模拟靶场 (测落地水/测搭高)
+│   └── logger.py                 # 结构化飞行记录仪 (Flight Recorder)
+│
+├── .venv/                        # 隔离 Python 虚拟环境
+├── config.example.yaml           # 全局配置模板
+├── main.py                       # 项目主启动入口 (支持 --radar, --debug)
+├── .gitignore                    # Git 忽略配置
+└── README.md
+```
+
+---
+
+## 🚀 快速启动
+
+### 1. 启动 Agent 并开启常态雷达勘探
+在当前项目的隔离虚拟环境中运行：
+```powershell
+.\.venv\Scripts\python.exe main.py --radar --debug
+```
+
+### 2. 游戏内交互调试
+在 HMCL 游戏内聊天框按 `T` 输入：
+- `#help`：查看当前已加载的调试指令
+- `#status`：实时回显 Bot 坐标、血量与雷达状态
+- `#stop`：紧急打断 Bot 当前动作
+- `#radar on` / `#radar off`：实时开关常态自动化雷达勘探
+- `#radar scan`：强制执行一次 3D 全景雷达测绘
+- `#radar poi`：查询距离最近的 4 个关键战略兴趣点
+>>>>>>> develop-tianya
 
 配置优先级：
 

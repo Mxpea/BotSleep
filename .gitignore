@@ -22,3 +22,8 @@ server/
 
 # Downloaded calculator and compiled bridge
 .cache/ninjabrain/
+
+# Scratch & temporary workspace files
+scratch/
+data/game_logic/spatial_grid.json
+

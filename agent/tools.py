@@ -51,6 +51,93 @@ TOOL_DEFINITIONS = [
           "stone pickaxe, stone axe, stone sword, and furnace. Historical claims are insufficient.", {}),
 ]
 
+PROCEDURAL_TOOL_DEFINITIONS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "pillar_up",
+            "description": "Jump and place solid blocks underneath to tower up vertically. Useful to evade ground monsters (zombies, creepers, spiders).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "height": {
+                        "type": "integer",
+                        "description": "Number of blocks to pillar up (default: 3, max: 10).",
+                        "default": 3,
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Explanation of why the bot is pillaring up.",
+                    },
+                },
+                "required": ["height"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "chop_tree",
+            "description": "Locate nearest trees and cleanly chop down all wood logs until target count or time limit is reached.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target_count": {
+                        "type": "integer",
+                        "description": "Target number of wood logs to harvest (default: 5).",
+                        "default": 5,
+                    },
+                    "max_duration_seconds": {
+                        "type": "number",
+                        "description": "Maximum work time in seconds before stopping (default: 60.0).",
+                        "default": 60.0,
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "radar_sweep",
+            "description": "Trigger a 3D block radar scan around the bot to discover POIs (beds, chests, crafting tables, minerals, hazards).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "radius": {
+                        "type": "integer",
+                        "description": "Radar radius in blocks (1-32, default: 24).",
+                        "default": 24,
+                    },
+                    "categories": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional specific categories to scan: 'bed', 'crafting', 'container', 'mineral', 'liquid_and_hazard'.",
+                    },
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cast_nether_portal",
+            "description": "Speedrun bucket-cast a Nether Portal at a lava lake with 10 obsidian blocks, light it with flint and steel, and verify activation.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "axis": {
+                        "type": "string",
+                        "enum": ["x", "z"],
+                        "description": "Portal frame alignment axis ('x' for east-west, 'z' for north-south).",
+                        "default": "x",
+                    },
+                },
+            },
+        },
+    },
+]
+
 TOOL_SCHEMAS = {entry["function"]["name"]: entry["function"]["parameters"] for entry in TOOL_DEFINITIONS}
 
 
