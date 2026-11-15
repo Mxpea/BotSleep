@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import sys
 import time
 import unittest
@@ -10,20 +11,28 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.client import MinecraftAgentClient
-from core.rcon import RconManager
 from skills.portal_speedrun import NetherPortalSpeedrunSkill
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 logger = logging.getLogger("BotSleepTest.SpeedrunPortal")
 
 
+@unittest.skipUnless(os.environ.get("BOTSLEEP_RUN_LIVE_TESTS") == "1",
+                     "Live RCON arena test; set BOTSLEEP_RUN_LIVE_TESTS=1 only for a disposable test world")
 class BotSleepTest(unittest.TestCase):
     """Test suite for Nether Portal Speedrun casting using BotSleepTest."""
 
     @classmethod
     def setUpClass(cls):
-        cls.rcon = RconManager(host="127.0.0.1", port=25575, password="agent-rcon-pass")
-        cls.client = MinecraftAgentClient(password="agent-secret-pass")
+        from core.rcon import RconManager
+        # Arena commands below intentionally address the fixture account SleepBot.
+        if os.environ.get("MC_AGENT_USER", "SleepBot") != "SleepBot":
+            raise ValueError("This fixed arena fixture requires MC_AGENT_USER=SleepBot")
+        cls.rcon = RconManager(host=os.environ.get("MC_RCON_HOST", "127.0.0.1"),
+                               port=int(os.environ.get("MC_RCON_PORT", "25575")),
+                               password=os.environ["MC_RCON_PASSWORD"])
+        cls.client = MinecraftAgentClient(base_url=os.environ["MC_AGENT_API"], username="SleepBot",
+                                           password=os.environ["MC_AGENT_PASSWORD"])
 
     def setUp(self):
         """Prepare world state and bot before each test."""
