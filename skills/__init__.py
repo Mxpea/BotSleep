@@ -40,8 +40,8 @@ from .sleep import AutoSleepSkill
 from .exploration import ContinuousRadarSkill
 from .mining import ChopTreeSkill
 from .crafting import CraftItemSkill
-from .portal import CastNetherPortalSkill
 from .portal_speedrun import NetherPortalSpeedrunSkill
+CastNetherPortalSkill = NetherPortalSpeedrunSkill
 
 __all__ = [
     "BaseSkill",
