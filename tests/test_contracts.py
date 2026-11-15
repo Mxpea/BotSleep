@@ -34,6 +34,12 @@ from core.domain import (
     parse_pos,
 )
 from core.survival_state import SurvivalInstanceError, SurvivalJournal
+from core.skill_registry import (
+    SKILL_REGISTRY,
+    destination_checked_skills,
+    resolve_skill_runner,
+    skills_for_objective,
+)
 from skills.batch import BatchSkills
 from skills.daily_survival import DailySurvivalSkills
 from skills.doors import DoorSkills
@@ -86,8 +92,28 @@ class ArchitectureContractTests(unittest.TestCase):
         daily_tools = {t["function"]["name"]: t["function"] for t in tools_for_objective("daily")}
         competition_tools = {t["function"]["name"]: t["function"] for t in tools_for_objective("competition")}
 
+        self.assertEqual(set(starter_tools), set(skills_for_objective("starter")))
         self.assertEqual(set(daily_tools), set(DAILY_SKILLS))
+        self.assertEqual(set(daily_tools), set(skills_for_objective("daily")))
+        self.assertEqual(set(competition_tools), set(skills_for_objective("competition")))
+        self.assertEqual(set(SKILL_REGISTRY), set(starter_tools) | set(competition_tools))
         self.assertTrue(_KNOWN_SKILLS.issubset(set(daily_tools)))
+        self.assertEqual(destination_checked_skills(daily=False), {"move_to", "gather_block", "place_item"})
+        self.assertEqual(len(destination_checked_skills(daily=True)), 22)
+
+        dummy_harness = Mock(
+            daily=True,
+            skills="base_runner",
+            shelter_skills="shelter_runner",
+            batch_skills="batch_runner",
+            door_skills="door_runner",
+            positioning_skills="pos_runner",
+        )
+        self.assertEqual(resolve_skill_runner(dummy_harness, "gather_block"), "base_runner")
+        self.assertEqual(resolve_skill_runner(dummy_harness, "plan_shelter"), "shelter_runner")
+        self.assertEqual(resolve_skill_runner(dummy_harness, "gather_materials"), "batch_runner")
+        self.assertEqual(resolve_skill_runner(dummy_harness, "set_door"), "door_runner")
+        self.assertEqual(resolve_skill_runner(dummy_harness, "position_for_task"), "pos_runner")
         self.assertEqual(
             set(competition_tools) - set(daily_tools),
             {"select_task", "update_progress", "finish_task", "force_exit_task", "end_competition"},

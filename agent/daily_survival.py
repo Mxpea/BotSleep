@@ -13,17 +13,11 @@ import re
 
 from agent.survival_planner import Decision, SurvivalPlanner
 from core.domain import LOG_NAMES, PLANK_NAMES, SAFE_FOOD, TOOL_KINDS, parse_pos
+from core.skill_registry import skills_for_objective
 from skills.daily_survival import DailySurvivalSkills
 
 
-DAILY_SKILLS = frozenset({
-    "gather_block", "gather_resource", "craft_item", "place_item", "eat_food", "move_to",
-    "retreat_from", "auto_sleep", "harvest_crop", "plant_crop", "till_soil", "hunt_animal",
-    "equip_armor", "smelt_start", "smelt_collect", "inspect_container", "store_items",
-    "take_items", "collect_drops", "place_bed", "place_door", "wait",
-    "plan_shelter", "inspect_shelter", "build_shelter_step", "position_for_task",
-    "gather_materials", "build_shelter_batch", "set_door", "gather_seeds", "clear_foliage",
-})
+DAILY_SKILLS = skills_for_objective("daily")
 TASK_IDS = ("recover_drops", "food_reserve", "wood_reserve", "starter_tools", "furnace",
             "fuel_reserve", "iron_tools", "base_site", "bed", "shelter", "storage",
             "food_production", "maintain")
