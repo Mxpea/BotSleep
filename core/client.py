@@ -46,6 +46,12 @@ class MinecraftAgentClient:
 
     ACTION_MARGIN_SECONDS = 5.0
     PATHFINDING_SECONDS = 60.0
+    # A worker can exit after a write reached Minecraft but before its IPC reply.
+    # Observations and connection management keep their ordinary retry semantics.
+    WRITE_ENDPOINTS = frozenset({
+        "chat", "move_to", "look", "posture", "equip", "window/view", "window/act",
+        "attack", "dig", "craft", "place", "interact", "use_item", "control",
+    })
 
     def __init__(
         self,
@@ -110,6 +116,10 @@ class MinecraftAgentClient:
                 if secret:
                     message = message.replace(secret, "[redacted]")
             details = {key: value for key, value in error.items() if key not in {"code", "message"}}
+            if code == "not_connected" and endpoint in self.WRITE_ENDPOINTS:
+                details.update(api_code=code, action_state="unknown", executed=True)
+                raise APIError("action_unconfirmed", f"{endpoint} disconnected before its outcome was confirmed",
+                               status_code, details)
             raise APIError(code, message, status_code, details)
         if data.get("ok") is not True:
             raise APIError("invalid_response", f"{endpoint} response has no boolean ok=true", status_code)
@@ -358,6 +368,12 @@ class MinecraftAgentClient:
     ) -> Dict[str, Any]:
         """Allow approach, digging and pickup paths, supporting coordinate triplet or pos list."""
         if isinstance(pos_or_x, (list, tuple)) and len(pos_or_x) == 3:
+            # The original API accepted dig(pos, collect); y now also occupies
+            # that positional slot for the upstream dig(x, y, z) convenience.
+            if z is not None or (y is not None and type(y) is not bool):
+                raise APIError("bad_args", "dig with pos accepts only an optional boolean collect")
+            if y is not None:
+                collect = y
             px, py, pz = pos_or_x[0], pos_or_x[1], pos_or_x[2]
         elif y is not None and z is not None:
             px, py, pz = pos_or_x, y, z

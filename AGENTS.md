@@ -4,7 +4,7 @@
 
 BotSleep 基于 mc-agent-api 控制 Minecraft 机器人，采用大模型决策与本地技能分层设计。
 
-- **用户约束（2026-11-14）**：不要修改或提交相邻 `mc-agent-api` 仓库。所有适配和修复在 BotSleep 内完成；上游行为不足时记录限制，不依赖本地 API 补丁。
+- **用户约束（2026-11-16）**：允许拉取相邻 `mc-agent-api` 的官方更新；不要在该仓库修改或提交本地源码补丁。所有适配和修复在 BotSleep 内完成；上游行为不足时记录限制，不依赖本地 API 补丁。
 
 - `main.py`：配置驱动的睡眠/生存入口；`survival.objective` 区分 starter、daily 与 competition。日常任务图在 `agent/daily_survival.py`，技能、观察、策略与 SQLite 记忆见 `docs/DAILY_SURVIVAL.md`。开启 `llm.enabled` 后使用原生工具调用与结果反馈。
 - `core/`：HTTP 客户端、RCON、状态感知和记忆管理。

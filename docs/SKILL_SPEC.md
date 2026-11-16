@@ -14,6 +14,8 @@
 
 `SkillResult` 包含 `success`、`message`、`data`、`error_code`。生存基础动作通过 `SurvivalSkills.execute(name, args, cancel_event=None, *, recovery_context=None)` 分派；`recovery_context` 由 harness 内部提供，不是模型参数。当前运行时为 `main.py` 启动的 `core/survival_harness.py`，不使用 `agent/loop.py` 旧骨架。starter/daily/competition 分别公开9/31/36项模型工具，仅接受已注册动作；实际契约见 [SURVIVAL.md](SURVIVAL.md) 与 [DAILY_SURVIVAL.md](DAILY_SURVIVAL.md)。
 
+2026-11-16 API 1.3.14 适配：写请求或写后验证的 `not_connected` 不证明动作未执行，须返回 `action_unconfirmed` 与 `action_state: unknown`，保留原 API 错误。`cleanup_skipped: disconnected_unknown` 表示本次断线后不再发送清理动作，组合技能须向上传递此标记；harness 保留 pending 并暂停，重启不得自动重放。普通前置读取断线与原有 `dig_unconfirmed` 的有界恢复契约保持不变。
+
 ---
 
 日常生产技能及验证边界见 [DAILY_SURVIVAL.md](DAILY_SURVIVAL.md)。下面的 `pillar_up`、`mlg_water` 及其 `telemetry.ReflexDaemon` 触发机制是未接入的设计规范，不属于可执行模型工具。

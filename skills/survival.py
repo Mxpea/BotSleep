@@ -106,9 +106,34 @@ class SurvivalSkills:
             raise _Failure("recovery_budget_exhausted", "Dig recovery observation budget expired")
         return {"timeout_seconds": remaining}
 
+    @staticmethod
+    def _disconnection_error(error, context):
+        details = getattr(error, "details", None)
+        details = details if isinstance(details, dict) else {}
+        if (getattr(error, "code", None) == "action_unconfirmed"
+                and details.get("api_code") == "not_connected"):
+            context["disconnected_unknown"] = True
+            context["disconnection_details"] = details
+        if getattr(error, "code", None) != "not_connected" or not context.get("write_sent"):
+            return error
+        context["disconnected_unknown"] = True
+        details = {**details, "api_code": "not_connected", "action_state": "unknown", "executed": True}
+        context["disconnection_details"] = details
+        return APIError("action_unconfirmed", "Connection lost before the action outcome was verified",
+                        getattr(error, "status_code", None), details)
+
+    def _call_result(self, context, operation, *args, **kwargs):
+        try:
+            return self._result(operation(*args, **kwargs))
+        except Exception as error:
+            converted = self._disconnection_error(error, context)
+            if converted is not error:
+                raise converted from None
+            raise
+
     def _status(self, context):
         self._check(context)
-        status = self._result(self.client.get_status(**self._read_options(context)))
+        status = self._call_result(context, self.client.get_status, **self._read_options(context))
         self._check(context)
         if status.get("alive") is False:
             raise _Failure("dead", "Bot is dead")
@@ -135,7 +160,7 @@ class SurvivalSkills:
 
     def _inventory(self, context):
         self._check(context)
-        result = self._result(self.client.inventory(**self._read_options(context)))
+        result = self._call_result(context, self.client.inventory, **self._read_options(context))
         self._check(context)
         items = result.get("items")
         if not isinstance(items, list):
@@ -149,7 +174,7 @@ class SurvivalSkills:
 
     def _block(self, pos, context):
         self._check(context)
-        block = self._result(self.client.get_block(pos, **self._read_options(context)))
+        block = self._call_result(context, self.client.get_block, pos, **self._read_options(context))
         self._check(context)
         if not isinstance(block.get("name"), str):
             raise _Failure("invalid_response", "Block query has no name")
@@ -160,7 +185,9 @@ class SurvivalSkills:
         if _validate_status is not None:
             _validate_status(status)
         context["acted"] = True
-        result = self._result(operation(*args, **kwargs))
+        if not context.get("daily_readonly_operation"):
+            context["write_sent"] = True
+        result = self._call_result(context, operation, *args, **kwargs)
         self._check(context)
         if result.get("interrupted_by"):
             raise _Failure("interrupted", "Backend action was interrupted", {"interrupted_by": result["interrupted_by"]})
@@ -384,7 +411,7 @@ class SurvivalSkills:
         try:
             self._action(context, self.client.craft, item, count=count)
         except Exception as error:
-            if getattr(error, "code", "") in {"request_timeout", "network_error", "invalid_json", "invalid_response", "cancelled", "interrupted"}:
+            if getattr(error, "code", "") in {"request_timeout", "network_error", "invalid_json", "invalid_response", "cancelled", "interrupted", "not_connected", "action_unconfirmed"}:
                 raise
             after, _ = self._inventory(context)
             gained = after.get(item, 0) - before.get(item, 0)
@@ -801,6 +828,7 @@ class SurvivalSkills:
                        else f"{name} verified from fresh game state")
             return SkillResult(True, message, data)
         except Exception as error:
+            error = self._disconnection_error(error, context)
             code = getattr(error, "code", "internal_error")
             data.update(context.get("retreat_evidence", {}))
             if code == "cancelled" and context.get("dig_recovery") is not None:
@@ -818,7 +846,13 @@ class SurvivalSkills:
             if isinstance(details, dict) and details:
                 data["api_details"] = details
             data.update(getattr(error, "data", {}))
-            if context["acted"] and code != "busy" and not context.get("cleanup_attempted"):
+            if code == "action_unconfirmed" and context.get("write_sent"):
+                data.update(executed=True, action_state="unknown")
+            if context.get("disconnected_unknown"):
+                data.update(cleanup_skipped="disconnected_unknown", action_state="unknown", executed=True,
+                            api_details=context["disconnection_details"])
+            if (context["acted"] and code != "busy" and not context.get("cleanup_attempted")
+                    and not context.get("disconnected_unknown")):
                 try:
                     self.client.stop()
                     data["cleanup"] = "stop_requested"

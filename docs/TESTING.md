@@ -1,8 +1,32 @@
 # 配置、客户端、生存、赛事与监控验证
 
-最近独立复核：2026-11-15（Asia/Shanghai），源码基线 `HEAD 3801be9`，另含本轮文档同步、实服测试门禁与 3 项隔离回归。首节为本轮结果；后续各节均是历史证据，不代表当前进程在线。
+最近复核：2026-11-16（Asia/Shanghai），`dev-ink` 已快进同步 `origin/main c53f70a`，另含下述 API 与赛事兼容修复。首节为本轮结果；后续各节均是历史证据，不代表当前进程在线。
 
-## 最新拉取后复核（3801be9）
+## 最新：官方 API 更新与 dev-ink 同步（2026-11-16）
+
+相邻 `mc-agent-api` 按用户要求从官方 `1cfecc3`（1.3.7）快进至 `37be500`（1.3.14），无本地源码补丁。BotSleep 从 `8ae68e9` 快进至主线 `c53f70a`，保留主线新增的赛事任务、独立门户/合成/伐木/雷达及实服测试门禁。
+
+环境：Windows、Python 3.10.9、requests 2.33.1、PyYAML 6.0.2、JDK/javac 24.0.2。固定 Ninjabrain 1.5.2 JAR 已校验；本轮不安装或更换依赖，不启动实际 API、机器人或游戏，不连接模型、RCON 或 Minecraft。监控 HTTP 测试只使用本机临时服务。
+
+| 检查 | 本轮结果 |
+| --- | --- |
+| `$env:BOTSLEEP_RUN_LIVE_TESTS='0'; python -X utf8 -B -m unittest discover -s tests -q` | **874 项，16.446 秒：871 项通过、3 项跳过，`OK (skipped=3)`**。3 项均为门户实服测试；Ninjabrain 引擎/离线 CLI 用例实际执行。 |
+| `python -m compileall -q main.py agent core skills debug integrations` | 通过。 |
+| `python -X utf8 -B main.py --config config.example.yaml --check-config` | `Configuration valid.`；私有配置另以 `load_config(..., environ={})` 检查通过，文件 SHA-256 与更新前一致。 |
+| 监控页面 JavaScript | 提取 `debug/monitor.html` 的 1 段脚本，以 `node --check` 解析通过；未做浏览器视觉验收。 |
+| 官方 API `npm run check` / `npm ls --depth=0` | 源码语法与已安装依赖检查通过；跟踪文件无本地修改，原有未跟踪的锁文件保持不变。 |
+
+新增 29 项回归验证本次同步发现的问题：
+
+- **18 项 API 兼容回归**：新版独立 worker 可能在写动作执行后返回 `not_connected`；客户端和技能将写请求或写后验证断线标为 `action_unconfirmed`，保留原 API 错误与 pending，暂停且不补发动作或 `stop`。普通前置读取断线保持原语义；睡眠、清叶、住所、远处容器的接近移动和批量技能子步骤均覆盖。`dig(pos, False)` 的旧拾取参数与新版 `dig(x, y, z)` 均保留。
+- **6 项赛事预算回归**：`--max-steps` 作用于当前 objective，模型收到的剩余步数/时间与实际执行门禁一致；一步耗尽退出 `2`，最后一步完成赛事仍退出 `0`。
+- **5 项赛事上下文回归**：保留当前熔炉、容器、护甲、住所及证据；仅去除与原生工具结果完全相同的副本，并无损压缩 JSON。48,000 字节预算、125 项完整目录和最新工具事务不变；四轮离线请求为 44,367 / 45,791 / 47,384 / 47,270 字节，超限用例拒绝发送且保留反馈供后续使用。
+
+主线提供 starter/daily/competition 9/31/36 个模型工具，赛事 45 个明确计分项目中仅 7 个有行动计划；独立门户、整树伐木、配方合成和雷达没有自动绑定到模型执行链。本轮离线通过不等于新增实服采集、制作、门户或完整生存验收。
+
+下方 Python 3.11.3 的 SQLite 清理 ERROR 在本机 Python 3.10.9 未复现；本轮未修改该测试或记忆模块，不能据此宣称跨环境问题已经修复。
+
+## 历史：拉取后复核（2026-11-15，3801be9）
 
 环境：Windows、Python 3.11.3、requests 2.34.2、PyYAML 6.0.3、Temurin OpenJDK/javac 25.0.2。已有虚拟环境，本轮未安装依赖。只使用离线测试和本机临时假 HTTP 服务，没有连接 Minecraft、实际 mc-agent-api、RCON 或模型，也未修改相邻 API 仓库。
 
@@ -59,7 +83,7 @@
 
 在隔离工作区合并 `dev-ink 8ae68e9` 与远端 `main 65478da`，保留日常生存实现和上游要塞计算、投眼采样、接口设计文档。运行中的原工作区、API与游戏服务未重启或替换。下方15:40–16:35的实服记录属于原 `dev-ink` 运行，不代表合并后重新做过实服验收。
 
-- 历史合并记录 `python -B -m unittest discover -s tests -q`：**772项通过，17.137秒，0跳过**；不替代本文首节772项中1项ERROR的结果。包含740项日常/原有回归、31项要塞模块测试及1项合并工具目录回归。
+- 历史合并记录 `python -B -m unittest discover -s tests -q`：**772项通过，17.137秒，0跳过**；不替代其他环境的 ERROR 记录或本文首节的新结果。包含740项日常/原有回归、31项要塞模块测试及1项合并工具目录回归。
 - Ninjabrain 1.5.2 官方JAR按固定SHA-256校验；JDK24.0.2下全部5项引擎/离线CLI测试运行通过。缓存JAR与编译产物受Git忽略，不纳入提交。
 - `python -m compileall -q main.py agent core skills debug integrations`、示例配置 `--check-config`、监控JavaScript语法检查通过。
 - 保留新版统一HTTP及未知动作处理；兼容 `MinecraftAPIError` 旧异常名称，投眼采样通过 `inventory()["result"]` 读取经验证的背包。7项新增回归覆盖实际客户端与模拟HTTP的返回结构、offhand、业务失败、非法库存、超时不重投及异常兼容。

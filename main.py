@@ -51,7 +51,9 @@ def main(argv=None) -> int:
         if args.max_steps is not None:
             if not 1 <= args.max_steps <= 10000:
                 raise ConfigError("--max-steps must be between 1 and 10000")
-            config["survival"]["max_steps"] = args.max_steps
+            budget = (config["survival"]["competition"]
+                      if config["survival"]["objective"] == "competition" else config["survival"])
+            budget["max_steps"] = args.max_steps
     except (ConfigError, OSError) as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 1

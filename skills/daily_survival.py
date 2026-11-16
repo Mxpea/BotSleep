@@ -129,7 +129,7 @@ class DailySurvivalSkills(SurvivalSkills):
 
     def _action(self, context, operation, *args, _validate_status=None, **kwargs):
         def send(*a, **kw):
-            if "retreat_evidence" in context and not context.get("daily_readonly_operation") and not context.get("inspect_only"):
+            if "retreat_evidence" in context and not context.get("daily_readonly_operation"):
                 context["retreat_evidence"]["executed"] = True
             return operation(*a, **kw)
         return super()._action(context, send, *args, _validate_status=_validate_status, **kwargs)
@@ -511,7 +511,6 @@ class DailySurvivalSkills(SurvivalSkills):
 
     def _inspect_container(self, args, context):
         pos = self._pos(args["pos"], block=True)
-        context["inspect_only"] = True
         self._prepare(context)
         window = self._window(pos, context, self.CONTAINERS | self.FURNACES)
         self._prepare(context)

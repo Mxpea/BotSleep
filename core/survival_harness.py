@@ -373,15 +373,22 @@ class SurvivalHarness:
             return False
         return self._start(Decision("auto_sleep", {}, "Player requested sleep", "sleep"))
 
+    def _remaining_budget(self):
+        """Use the enforced objective budget for both scheduling and model context."""
+        if self.competition is not None:
+            step_limit = self.settings.get("competition", {}).get("max_steps", 100000)
+            remaining_seconds = self.competition.snapshot().get("remaining_seconds", 0)
+        else:
+            step_limit = self.settings["max_steps"]
+            remaining_seconds = self.settings["max_runtime_seconds"] - (time.monotonic() - self._started)
+        return {"remaining_steps": max(0, step_limit - self.steps),
+                "remaining_seconds": max(0, remaining_seconds)}
+
     def _start(self, manual=None):
         if self._closed or self.busy or self.paused or self.finished:
             return False
-        step_limit = (self.settings.get("competition", {}).get("max_steps", 100000)
-                      if self.competition_mode else self.settings["max_steps"])
-        time_expired = (self.competition.snapshot().get("remaining_seconds", 0) <= 0
-                        if self.competition is not None else
-                        time.monotonic() - self._started >= self.settings["max_runtime_seconds"])
-        if self.steps >= step_limit or time_expired:
+        budget = self._remaining_budget()
+        if budget["remaining_steps"] <= 0 or budget["remaining_seconds"] <= 0:
             self.finished = True
             self.pause_reason = "budget_exhausted"
             self._record("WARN", "BUDGET_EXHAUSTED", {"steps": self.steps})
@@ -637,8 +644,7 @@ class SurvivalHarness:
             observation = self._observe()
             self.latest_status = observation["status"]
             self._prepare_context(observation)
-            self.context.update(remaining_steps=max(0, self.settings["max_steps"] - self.steps),
-                                remaining_seconds=max(0, self.settings["max_runtime_seconds"] - (time.monotonic() - self._started)))
+            self.context.update(self._remaining_budget())
             if self._cancel.is_set():
                 return decision, SkillResult(False, "Cancelled before action", error_code="cancelled"), observation
             if self.context["death_count"] >= self.settings["max_deaths"]:
@@ -852,10 +858,8 @@ class SurvivalHarness:
     def tick(self, automatic=True):
         if self._closed:
             return None
-        time_expired = (self.competition.snapshot().get("remaining_seconds", 0) <= 0
-                        if self.competition is not None else
-                        time.monotonic() - self._started >= self.settings["max_runtime_seconds"])
-        if not self.finished and time_expired:
+        budget = self._remaining_budget()
+        if not self.finished and budget["remaining_seconds"] <= 0:
             self._budget_exhausted = True
             if self._future is not None and not self._future.done() and not self._cancel.is_set():
                 self._cancel.set()
@@ -935,7 +939,10 @@ class SurvivalHarness:
                 # second default-timeout request; the unknown result stays paused.
                 dig_cleanup_attempted = result.error_code == "dig_unconfirmed" and (
                     result.data.get("cleanup") == "stop_requested" or "cleanup_error" in result.data)
-                if uncertain_action and not dig_cleanup_attempted:
+                # A disconnected worker may already have executed the write.
+                # Preserve the pending result without sending more actions.
+                disconnected_unknown = result.data.get("cleanup_skipped") == "disconnected_unknown"
+                if uncertain_action and not dig_cleanup_attempted and not disconnected_unknown:
                     try:
                         options = {"timeout_seconds": 2.0} if result.error_code == "dig_unconfirmed" else {}
                         self.client.stop(**options)
@@ -975,9 +982,7 @@ class SurvivalHarness:
             return result
         if self.finished:
             return None
-        step_limit = (self.settings.get("competition", {}).get("max_steps", 100000)
-                      if self.competition_mode else self.settings["max_steps"])
-        if self.steps >= step_limit or self._budget_exhausted:
+        if budget["remaining_steps"] <= 0 or self._budget_exhausted:
             self.finished = True
             self.pause_reason = "budget_exhausted"
             self._record("WARN", "BUDGET_EXHAUSTED", {"steps": self.steps})

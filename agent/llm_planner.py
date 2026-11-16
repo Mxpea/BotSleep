@@ -286,7 +286,7 @@ class LLMSurvivalPlanner:
                     snapshot[key] = copy.deepcopy(observation[key][:8])
             if "local_geometry_origin" in observation:
                 snapshot["local_geometry_origin"] = copy.deepcopy(observation["local_geometry_origin"])
-            if self.objective == "daily":
+            if self.objective in {"daily", "competition"}:
                 for key in ("daily_evidence", "furnaces", "containers", "armor", "shelter"):
                     if key in observation:
                         snapshot[key] = copy.deepcopy(observation[key])
@@ -587,12 +587,30 @@ class LLMSurvivalPlanner:
                                                   "error_code": failure["code"]}
                                                  for failure in list(self._failed_actions.values())[-8:]
                                                  if self._unchanged_failure(failure, observation, failure["decision"])]
+            if (self.objective == "competition" and "last_result" in prompt_context
+                    and self._undelivered_result and self._turns):
+                # Keep the native tool result as the authoritative copy. The
+                # harness also supplies it in context; omit only an exact match.
+                latest_tool = next((row for row in reversed(self._turns[-1])
+                                    if row.get("role") == "tool"), None)
+                if latest_tool is not None:
+                    try:
+                        feedback = json.loads(latest_tool["content"])
+                    except (KeyError, TypeError, ValueError):
+                        feedback = None
+                    if (isinstance(feedback, dict) and "result" in feedback
+                            and feedback["result"] == self._redact(self._compact_value(prompt_context["last_result"]))):
+                        prompt_context.pop("last_result")
             competition_context = prompt_context.pop("competition", None)
             compact_context = self._compact_value(prompt_context)
             if competition_context is not None:
                 compact_context["competition"] = competition_context
+            # Catalogue rows and fresh evidence must survive intact. JSON
+            # whitespace is dispensable; the hard wire-byte budget still applies.
+            json_options = {"separators": (",", ":")} if self.objective == "competition" else {}
             turn.append({"role": "user", "content": json.dumps(self._redact({"observation": self._snapshot(observation),
-                        "progress": self.progress(observation), "context": compact_context}), ensure_ascii=False, allow_nan=False)})
+                        "progress": self.progress(observation), "context": compact_context}), ensure_ascii=False, allow_nan=False,
+                        **json_options)})
             for attempt in range(self.max_repair_attempts + 1):
                 self._check_cancel(cancel_event)
                 messages = self._messages(turn)
