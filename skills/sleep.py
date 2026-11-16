@@ -318,9 +318,16 @@ class AutoSleepSkill(BaseSkill):
             raise _SleepFailure(last_code, "No candidate bed produced verified sleep")
         except Exception as error:
             code = self._code(error)
+            disconnected_write = owns_action and code in {"disconnected", "action_unconfirmed"}
+            if disconnected_write:
+                code = "action_unconfirmed"
+                data.update(executed=True, action_state="unknown", api_code=getattr(error, "code", "not_connected"),
+                            cleanup_skipped="disconnected_unknown")
+                if isinstance(getattr(error, "details", None), dict):
+                    data["api_details"] = error.details
             data["state"] = "cancelled" if code == "cancelled" else "failed"
             data["elapsed_seconds"] = round(time.monotonic() - started, 3)
-            if owns_action:
+            if owns_action and not disconnected_write:
                 try:
                     self.client.stop()
                     data["cleanup"] = "stop_requested; bed was not clicked"

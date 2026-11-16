@@ -69,6 +69,10 @@ class EventMonitor:
                     "steps": 0, "busy": False, "paused": False, "goal": None,
                     "phase": "idle", "pause_reason": None},
             "status": {}, "decision": None, "last_result": None,
+            "status_updated_at": None, "status_fresh": False,
+            "status_connection": "unknown", "status_error": None,
+            "playbook": None, "combat": None, "combat_result": None,
+            "task_execution": None,
             "daily": {"board": None, "memory_counts": {}},
             "competition": {"board": None},
             "llm": {"state": "idle", "request": None, "response": None, "error": None,
@@ -152,14 +156,61 @@ class EventMonitor:
             self._update_state(cleaned)
             return self._seq
 
+    def _update_status(self, record, data, event):
+        """Keep the last observation, independently of later agent/model events."""
+        state = self._state
+        incoming = data.get("status")
+        if isinstance(incoming, dict) and incoming:
+            previous_error = state["status_error"]
+            was_unavailable = state["status_connection"] == "unavailable"
+            state["status"] = incoming
+            stamp = data.get("status_updated_at") or incoming.get("last_observed_at")
+            state["status_updated_at"] = stamp if isinstance(stamp, str) else record["timestamp"]
+            unavailable = (incoming.get("connected") is False or incoming.get("ready") is False
+                           or incoming.get("maintenance") is True)
+            fresh = (event in {"HEARTBEAT", "AGENT_STATE", "CONNECTED"} and not unavailable
+                     and data.get("status_fresh") is not False and data.get("fresh") is not False
+                     and incoming.get("fresh") is not False)
+            if fresh and isinstance(stamp, str) and previous_error:
+                try:
+                    observed = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+                    failed = datetime.fromisoformat(previous_error["timestamp"].replace("Z", "+00:00"))
+                    fresh = observed > failed
+                except (TypeError, ValueError):
+                    fresh = False
+            state["status_fresh"] = fresh
+            state["status_connection"] = "available" if fresh else "unavailable" if unavailable or was_unavailable else "unknown"
+            state["status_error"] = None if fresh else previous_error or {
+                "code": "not_connected" if incoming.get("connected") is False else
+                        "status_not_ready" if unavailable else "status_freshness_unconfirmed",
+                "event": event, "timestamp": record["timestamp"],
+            }
+
+        code = None
+        if event in {"HEARTBEAT_FAILED", "IDLE_STATUS_UNAVAILABLE"}:
+            code = data.get("code") or "status_unavailable"
+        elif event in {"STEP_RESULT", "SLEEP_RESULT"}:
+            result = data.get("result", data)
+            candidate = result.get("error_code") if isinstance(result, dict) else None
+            if candidate in {"not_connected", "death_loop", "death_loop_cooldown", "unauthorized", "invalid_credentials"}:
+                code = candidate
+        elif event == "PAUSED" and data.get("reason") == "status_unavailable_during_action":
+            code = data["reason"]
+        elif event == "SHUTDOWN":
+            code = "agent_stopped"
+        if code is not None:
+            # A failed read says nothing about current health/alive. Preserve
+            # the original payload and its observation time as historical data.
+            state.update(status_fresh=False, status_connection="unavailable",
+                         status_error={"code": code, "event": event, "timestamp": record["timestamp"]})
+
     def _update_state(self, record):
         state = self._state
         state.update(has_data=True, last_seq=record["seq"], updated_at=record["timestamp"])
         data = record["data"] if isinstance(record["data"], dict) else {}
         event = str(record["event"]).upper()
         run = state["run"]
-        if isinstance(data.get("status"), dict):
-            state["status"] = data["status"]
+        self._update_status(record, data, event)
         status = state["status"]
         for key in ("username", "planner", "model", "steps", "busy", "paused", "goal", "phase", "pause_reason",
                     "objective", "model_blocked", "model_pending", "pending"):
@@ -171,6 +222,23 @@ class EventMonitor:
             run["state"] = "starting"
         if event == "HEARTBEAT":
             state["heartbeat_at"] = record["timestamp"]
+        if event in {"HEARTBEAT", "AGENT_STATE"}:
+            for key in ("playbook", "combat"):
+                if key in data and (data[key] is None or isinstance(data[key], dict)):
+                    state[key] = data[key]
+        if event in {"HEARTBEAT", "AGENT_STATE", "TASK_STARTED", "TASK_PROGRESS", "TASK_SUSPENDED",
+                     "TASK_COMPLETED", "TASK_NEEDS_AI", "TASK_UNKNOWN", "TASK_CANCELLED"}:
+            if "task_execution" in data:
+                task = data["task_execution"]
+                if task is None:
+                    state["task_execution"] = None
+                elif isinstance(task, dict):
+                    # Complete published snapshots replace old evidence. Never
+                    # infer completion or increment counters from event names.
+                    task = dict(task)
+                    if isinstance(task.get("recent_results"), list):
+                        task["recent_results"] = task["recent_results"][-8:]
+                    state["task_execution"] = task
         if event in {"COMPETITION_TASKS", "HEARTBEAT", "AGENT_STATE"}:
             if event == "COMPETITION_TASKS":
                 board = data.get("board")
@@ -208,6 +276,10 @@ class EventMonitor:
             result = state["last_result"] if isinstance(state["last_result"], dict) else {}
             run.update(busy=False, state="paused" if run["paused"] else "running")
             result_data = result.get("data") if isinstance(result.get("data"), dict) else {}
+            decision = data.get("decision") if isinstance(data.get("decision"), dict) else {}
+            skill = result_data.get("skill") or decision.get("name")
+            if isinstance(skill, str) and skill in {"hunt_animal", "fight_hostile", "hunt_with_lava", "collect_liquid", "release_defense"}:
+                state["combat_result"] = {"skill": skill, "result": result, "updated_at": record["timestamp"]}
             if result_data.get("goal_complete") or (
                     result.get("success") is True and result_data.get("completed_session") is True
                     and result_data.get("phase") == "completed"):

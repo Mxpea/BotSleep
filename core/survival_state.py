@@ -9,6 +9,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from agent.survival_planner import RANGED_HOSTILES
 from core.client import APIError
 from core.block_geometry import trace_block_visibility
 from skills.survival import SurvivalSkills
@@ -89,16 +90,28 @@ class ObservationCollector:
         first = read_status()
         nearby = first.get("nearest_hostile") or {}
         distance = nearby.get("dist") if isinstance(nearby, dict) else None
-        near = type(distance) in (int, float) and math.isfinite(distance) and 0 <= distance <= threat_radius
+
+        def near_summary(status):
+            row = status.get("nearest_hostile")
+            gap = row.get("dist") if isinstance(row, dict) else None
+            limit = max(threat_radius, 16) if isinstance(row, dict) and row.get("name") in RANGED_HOSTILES else threat_radius
+            return type(gap) in (int, float) and math.isfinite(gap) and 0 <= gap <= limit
+
+        near = near_summary(first)
+        # The nearest enemy can be a harmlessly distant melee mob while a
+        # slightly farther skeleton can still shoot. One bounded entity read
+        # resolves that ambiguity, rather than starting a full terrain scan.
+        possible_ranged = (type(distance) in (int, float) and math.isfinite(distance)
+                           and 0 <= distance <= max(threat_radius, 16))
         idle = first["ready"] and first["alive"] and (first["busy"] is None or first["busy"] is False)
-        if not force and not near and idle:
+        if not force and not near and not possible_ranged and idle:
             return None
         observation = {"status": first, "inventory": [], "counts": {}, "blocks": [], "entities": [],
                        "fresh": True, "observed_at": utc_now(), "observation_scope": "safety",
                        "inventory_fresh": False, "terrain_fresh": False}
         if not idle:
             return observation  # Local wait only; never overlap a backend action.
-        entities = self.client.get_entities(radius=min(64, max(8, threat_radius + 2)), **options())
+        entities = self.client.get_entities(radius=min(64, max(18, threat_radius + 2)), **options())
         self._check_cancel(cancel_event)
         if not isinstance(entities, list) or len(entities) > 64:
             raise APIError("invalid_response", "Short safety entity list is invalid")
@@ -115,6 +128,10 @@ class ObservationCollector:
         if self._cell(origin) != self._cell(endpoint) or abs(origin[1] - endpoint[1]) >= .5:
             raise APIError("observation_changed", "Position changed during short safety observation")
         options()  # Enforce the same total budget after the final response.
+        dangerous = any(entity["type"] == "hostile" and math.dist(endpoint, entity["pos"]) <= (
+            max(threat_radius, 16) if entity.get("name") in RANGED_HOSTILES else threat_radius) for entity in entities)
+        if not force and not near_summary(final) and not dangerous:
+            return None  # A distant melee-only scan must not starve full observations.
         observation.update(status=final, entities=entities, duration_seconds=round(time.monotonic() - started, 3))
         return observation
 

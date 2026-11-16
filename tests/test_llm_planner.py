@@ -280,7 +280,10 @@ class LLMPlannerTests(unittest.TestCase):
         obs["terrain"] = [{"name": "grass_block", "pos": [1, 63, 0], "dist": 1.2, "count": 10}]
         planner.choose(obs, {})
         messages = self.brain.requests[0]["messages"]
-        self.assertEqual(json.loads(messages[-1]["content"])["observation"]["terrain"], obs["terrain"])
+        sent = json.loads(messages[-1]["content"])["observation"]
+        self.assertNotIn("terrain", sent)
+        self.assertEqual(sent["terrain_summary"], {"actionable": False, "rows": [
+            {"name": "grass_block", "nearest_pos": [1, 63, 0], "dist": 1.2, "count": 10}]})
         self.assertIn("nearest-per-type summary", messages[0]["content"])
         self.assertIn("Placement skills", messages[0]["content"])
 
@@ -445,7 +448,7 @@ class LLMPlannerTests(unittest.TestCase):
                 args = {"pos": target, "expected_name": "birch_leaves"}
                 brain = Brain(response("clear_foliage", args), response("clear_foliage", args, "retry_2"))
                 planner = LLMSurvivalPlanner({"enabled": True, "max_repair_attempts": 0},
-                                             {"objective": "daily"}, brain=brain)
+                                             {"objective": "daily", "autonomy": {"enabled": False}}, brain=brain)
                 before = observation(pos=start)
                 before["blocks"] = [{"name": "birch_leaves", "pos": target, "can_see": True,
                                      "properties": {"waterlogged": False}}]
@@ -459,7 +462,7 @@ class LLMPlannerTests(unittest.TestCase):
         args = {"pos": [0, 122, -1], "expected_name": "birch_leaves"}
         brain = Brain(response("clear_foliage", args), response("clear_foliage", args, "retry_2"))
         planner = LLMSurvivalPlanner({"enabled": True, "max_repair_attempts": 0},
-                                     {"objective": "daily"}, brain=brain)
+                                     {"objective": "daily", "autonomy": {"enabled": False}}, brain=brain)
         before = observation(pos=[1.5, 122, 0.5])
         before["blocks"] = [{"name": "birch_leaves", "pos": args["pos"], "can_see": True}]
         decision = planner.choose(before, {})

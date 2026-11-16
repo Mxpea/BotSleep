@@ -1,7 +1,10 @@
 """Offline competition lifecycle through real planner/worker/journal; no remote calls."""
 
 import copy
+from contextlib import redirect_stderr, redirect_stdout
+import io
 import json
+from pathlib import Path
 import tempfile
 import time
 import unittest
@@ -27,6 +30,7 @@ class CompetitionRuntimeTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.settings = copy.deepcopy(DEFAULTS["survival"])
         self.settings.update(objective="competition", state_dir=self.directory.name)
+        self.settings["autonomy"]["enabled"] = False  # Exercise the legacy atomic/competition-meta protocol.
         self.settings["competition"]["advancement_poll_seconds"] = .001
         self.obs = ready_world()
         self.obs["status"].update(time_of_day=1000)
@@ -68,6 +72,37 @@ class CompetitionRuntimeTests(unittest.TestCase):
                 return result
             time.sleep(.002)
         self.fail("competition worker did not finish")
+
+    def run_entrypoint(self, *messages):
+        config = copy.deepcopy(DEFAULTS)
+        config["agent"]["mode"] = "survival"
+        config["llm"]["enabled"] = True
+        config["debug"]["flight_recorder"]["enabled"] = False
+        config["debug"]["monitor"].update(enabled=False, console=False)
+        config["survival"] = copy.deepcopy(self.settings)
+        config["survival"]["poll_interval_seconds"] = .001
+        self.client.login.return_value = copy.deepcopy(self.obs["status"])
+        brain = Brain(*messages)
+        runners = []
+
+        def planner_factory(settings, survival_settings, recorder=None):
+            return LLMSurvivalPlanner(settings, survival_settings, recorder=recorder, brain=brain)
+
+        def harness_factory(client, settings, sleep_settings, recorder=None, planner=None):
+            runner = SurvivalHarness(client, settings, sleep_settings, recorder=recorder,
+                                     planner=planner, skills=self.skills, collector=self.collector)
+            runners.append(runner)
+            self.addCleanup(runner.close)
+            return runner
+
+        output = io.StringIO()
+        with patch("main.load_config", return_value=config), \
+                patch("main.MinecraftAgentClient", return_value=self.client), \
+                patch("agent.llm_planner.LLMSurvivalPlanner", side_effect=planner_factory), \
+                patch("core.survival_harness.SurvivalHarness", side_effect=harness_factory), \
+                redirect_stdout(output), redirect_stderr(output):
+            code = main(["--objective", "competition", "--max-steps", "1"])
+        return code, runners[0], brain, output.getvalue()
 
     def test_native_selection_progress_and_server_finish_are_checkpointed(self):
         runner, brain = self.harness(response("select_task", {"goal_id": GOAL}),
@@ -183,6 +218,83 @@ class CompetitionRuntimeTests(unittest.TestCase):
         self.assertFalse(runner.completed)
         self.assertEqual(runner.pause_reason, "budget_exhausted")
 
+    def test_model_receives_competition_steps_and_persisted_clock_budget(self):
+        self.settings.update(max_steps=1, max_runtime_seconds=1)
+        self.settings["competition"].update(max_steps=7, max_seconds=90)
+        runner, brain = self.harness(response("select_task", {"goal_id": GOAL}))
+        runner.steps = 2
+        runner._started = time.monotonic() - 100
+        contest_start = runner.competition.state()["started_at"]
+        runner.competition._clock = lambda: contest_start + 17
+        self.assertTrue(self.step(runner).success)
+        context = json.loads([row["content"] for row in brain.requests[0]["messages"]
+                              if row["role"] == "user"][-1])["context"]
+        self.assertEqual(context["remaining_steps"], 5)
+        self.assertEqual(context["remaining_seconds"], 73)
+        self.assertEqual(context["remaining_seconds"], context["competition"]["remaining_seconds"])
+        self.assertFalse(runner.finished)
+
+    def test_expired_competition_clock_blocks_manual_and_automatic_steps(self):
+        runner, brain = self.harness()
+        contest_start = runner.competition.state()["started_at"]
+        runner.competition._clock = lambda: contest_start + self.settings["competition"]["max_seconds"] + 1
+        self.assertFalse(runner.request_step())
+        self.assertFalse(runner.request_sleep())
+        runner.tick(automatic=True)
+        self.assertTrue(runner.finished)
+        self.assertFalse(runner.completed)
+        self.assertEqual(runner.pause_reason, "budget_exhausted")
+        self.assertEqual(brain.requests, [])
+        self.collector.collect.assert_not_called()
+        self.skills.execute.assert_not_called()
+
+    def test_starter_and_daily_models_keep_development_budgets(self):
+        for objective in ("starter", "daily"):
+            with self.subTest(objective=objective):
+                self.settings.update(objective=objective, max_steps=7, max_runtime_seconds=90,
+                                     state_dir=str(Path(self.directory.name) / objective))
+                self.settings["competition"].update(max_steps=1, max_seconds=1)
+                runner, brain = self.harness(response("wait"))
+                runner.steps = 2
+                runner._started = time.monotonic() - 17
+                self.assertTrue(self.step(runner).success)
+                context = json.loads([row["content"] for row in brain.requests[0]["messages"]
+                                      if row["role"] == "user"][-1])["context"]
+                self.assertEqual(context["remaining_steps"], 5)
+                self.assertGreater(context["remaining_seconds"], 70)
+                self.assertLessEqual(context["remaining_seconds"], 73)
+                self.assertFalse(runner.finished)
+
+    def test_main_cli_one_step_exits_incomplete_without_second_model_request(self):
+        # A spare terminal response makes the old ignored-CLI bug exit rather than hang.
+        code, runner, brain, output = self.run_entrypoint(
+            response("select_task", {"goal_id": GOAL}),
+            response("end_competition", {"reason": "All goals assessed"}, call_id="unexpected_second"))
+        self.assertEqual(code, 2, output)
+        self.assertEqual(runner.steps, 1)
+        self.assertTrue(runner.finished)
+        self.assertFalse(runner.completed)
+        self.assertEqual(len(brain.requests), 1)
+        self.assertEqual(runner.settings["competition"]["max_steps"], 1)
+        self.assertEqual(runner.settings["max_steps"], DEFAULTS["survival"]["max_steps"])
+        self.assertEqual(runner.journal.state["context"]["competition"]["phase"], "active")
+        self.assertIsNone(runner.journal.state["pending"])
+        self.skills.execute.assert_not_called()
+        self.client.logout.assert_called_once()
+
+    def test_main_terminal_result_on_last_step_remains_successful(self):
+        code, runner, brain, output = self.run_entrypoint(
+            response("end_competition", {"reason": "All goals assessed"}))
+        self.assertEqual(code, 0, output)
+        self.assertEqual(runner.steps, 1)
+        self.assertTrue(runner.finished)
+        self.assertTrue(runner.completed)
+        self.assertEqual(len(brain.requests), 1)
+        self.assertEqual(runner.journal.state["context"]["competition"]["phase"], "completed")
+        self.assertIsNone(runner.journal.state["pending"])
+        self.skills.execute.assert_not_called()
+        self.client.logout.assert_called_once()
+
     def test_full_catalogue_prompt_fits_competition_request_budget(self):
         from core.competition_rules import scoring_catalog
         from core.competition_tasks import CompetitionTasks
@@ -237,6 +349,25 @@ class CompetitionClientTests(unittest.TestCase):
 
 
 class CompetitionConfigTests(unittest.TestCase):
+    def test_cli_step_limit_overrides_only_the_selected_objective_budget(self):
+        for objective in ("starter", "daily", "competition", None):
+            with self.subTest(objective=objective):
+                config = copy.deepcopy(DEFAULTS)
+                config["agent"]["mode"] = "survival"
+                config["llm"]["enabled"] = True
+                config["survival"].update(objective="competition", max_steps=31)
+                config["survival"]["competition"]["max_steps"] = 43
+                args = ["--max-steps", "1", "--check-config"]
+                if objective is not None:
+                    args += ["--objective", objective]
+                with patch("main.load_config", return_value=config), \
+                        patch("main.MinecraftAgentClient") as client_factory, redirect_stdout(io.StringIO()):
+                    self.assertEqual(main(args), 0)
+                competition = objective in {"competition", None}
+                self.assertEqual(config["survival"]["max_steps"], 31 if competition else 1)
+                self.assertEqual(config["survival"]["competition"]["max_steps"], 1 if competition else 43)
+                client_factory.assert_not_called()
+
     def test_config_requires_valid_conditions_and_bounded_clock(self):
         import yaml
         with tempfile.TemporaryDirectory() as directory:

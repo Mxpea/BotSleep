@@ -116,6 +116,7 @@ class DailyRuntimeTests(unittest.TestCase):
     def make_harness(self, replies=None, *, state_dir=None, timeout=1):
         self.index += 1
         settings = {**copy.deepcopy(DEFAULTS["survival"]), "objective": "daily",
+            "autonomy": {"enabled": False},  # This fixture verifies individual native atomic calls.
             "state_dir": state_dir or str(Path(self.temp.name) / str(self.index)),
             "poll_interval_seconds": .001, "retry_seconds": .001, "max_steps": 30, "max_runtime_seconds": 30}
         endpoint, planner = None, None
@@ -164,7 +165,8 @@ class DailyRuntimeTests(unittest.TestCase):
         self.assertEqual(self.world.counts.get("iron_ingot", 0), 0)
         self.assertEqual(harness.context["smelting_jobs"][0]["expected_output"], "iron_ingot")
         tools = {entry["function"]["name"] for entry in endpoint.requests[0]["body"]["tools"]}
-        self.assertTrue(set(DailySurvivalSkills.ARGUMENTS).issubset(tools))
+        self.assertTrue((set(DailySurvivalSkills.ARGUMENTS) - {"canopy_escape"}).issubset(tools))
+        self.assertNotIn("canopy_escape", tools)  # Internal local safety, never a model command.
         self.assertIn("plan_shelter", tools)
         self.assertNotIn("goal_complete", tools)
         self.assertTrue(self.step(harness).success)

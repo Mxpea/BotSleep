@@ -7,6 +7,7 @@ entire smelting job. A window inspection itself can walk/open/close a GUI.
 
 import math
 import re
+import time
 
 from core.block_geometry import trace_block_visibility
 from core.client import APIError
@@ -58,8 +59,8 @@ class DailySurvivalSkills(SurvivalSkills):
                     "place_bed": ("pos", "item"), "place_door": ("pos", "item"),
                 }.items()}}
 
-    def execute(self, name, args, cancel_event=None, *, recovery_context=None):
-        result = super().execute(name, args, cancel_event, recovery_context=recovery_context)
+    def execute(self, name, args, cancel_event=None, *, recovery_context=None, cautious=False):
+        result = super().execute(name, args, cancel_event, recovery_context=recovery_context, cautious=cautious)
         if name not in SurvivalSkills.ARGUMENTS:
             result.data.setdefault("executed", False)
             if (not result.success and result.data["executed"] and result.data.get("action_state") != "verified"
@@ -79,6 +80,17 @@ class DailySurvivalSkills(SurvivalSkills):
                 raise _Failure("action_unconfirmed", "Cancelled before the daily write result was verified",
                                {**evidence, "action_state": "unknown", "recovery_error": "cancelled"})
         SurvivalSkills._check(context)
+
+    @staticmethod
+    def _read_options(context):
+        options = SurvivalSkills._read_options(context)
+        if "operation_deadline" not in context:
+            return options
+        remaining = context["operation_deadline"] - time.monotonic()
+        if remaining <= 0:
+            raise _Failure("operation_budget_exhausted", "Daily operation time budget exhausted")
+        return {"timeout_seconds": min(remaining, context.get("read_timeout", 1.5),
+                                       options.get("timeout_seconds", remaining))}
 
     def _prepare(self, context):
         context.setdefault("retreat_evidence", {"executed": False})
@@ -129,7 +141,7 @@ class DailySurvivalSkills(SurvivalSkills):
 
     def _action(self, context, operation, *args, _validate_status=None, **kwargs):
         def send(*a, **kw):
-            if "retreat_evidence" in context and not context.get("daily_readonly_operation") and not context.get("inspect_only"):
+            if "retreat_evidence" in context and not context.get("daily_readonly_operation"):
                 context["retreat_evidence"]["executed"] = True
             return operation(*a, **kw)
         return super()._action(context, send, *args, _validate_status=_validate_status, **kwargs)
@@ -395,8 +407,11 @@ class DailySurvivalSkills(SurvivalSkills):
     def _entity(self, entity_id, expected_name, context, *, dropped=False):
         if type(entity_id) is not int or entity_id < 0:
             raise _Failure("bad_args", "entity_id must be a nonnegative integer")
-        entities = self.client.get_entities(radius=16, types=["item"] if dropped else None)
         self._check(context)
+        entities = self.client.get_entities(radius=16, types=["item"] if dropped else None,
+                                            **self._read_options(context))
+        self._check(context)
+        self._read_options(context)  # A late response cannot authorize another write.
         entity = next((e for e in entities if e.get("id") == entity_id), None)
         if entity is None or (not dropped and entity.get("name") != expected_name):
             raise _Failure("target_changed", "The requested entity is not freshly observed with the expected identity")
@@ -408,33 +423,8 @@ class DailySurvivalSkills(SurvivalSkills):
         return entity
 
     def _hunt_animal(self, args, context):
-        name = self._item(args["expected_name"])
-        if name not in self.ANIMALS:
-            raise _Failure("unsafe_target", "Only cows, pigs, sheep and chickens may be hunted")
-        status = self._prepare(context)
-        if status["health"] < 12 or status.get("food", 0) < 10:
-            raise _Failure("unsafe", "Hunting requires at least 12 health and 10 food")
-        entity = self._entity(args["entity_id"], name, context)
-        before, _ = self._inventory(context)
-        if not any(count and (item.endswith("_sword") or item.endswith("_axe")) for item, count in before.items()):
-            raise _Failure("missing_tool", "A sword or axe is required for bounded hunting")
-        if math.dist(status["pos"], entity["pos"]) > 8:
-            raise _Failure("out_of_range", "Hunting is limited to observed animals within eight blocks")
-
-        def target(status):
-            fresh = self._entity(args["entity_id"], name, context)
-            if math.dist(status["pos"], fresh["pos"]) > 8:
-                raise _Failure("target_changed", "The animal moved outside the hunting limit")
-
-        result = self._daily_action(context, self.client.attack, args["entity_id"], timeout_ms=6000, max_hits=6, validate=target)
-        self._prepare(context)
-        after, _ = self._inventory(context)
-        gained = {item: after.get(item, 0) - before.get(item, 0) for item in self.ANIMALS[name] if after.get(item, 0) > before.get(item, 0)}
-        data = {"entity_id": args["entity_id"], "animal": name, "gained": gained, "killed_reported": result.get("killed") is True}
-        if not gained:
-            self._uncollected_drops(entity["pos"], self.ANIMALS[name], context, data)
-            raise _Failure("hunt_unverified", "The attack did not produce a verified inventory gain", data)
-        return self._verified(context, **data)
+        from .hunting import hunt_animal
+        return hunt_animal(self, args, context)
 
     def _equip_armor(self, args, context):
         item, slot = self._item(args["item"]), args["slot"]
@@ -511,7 +501,6 @@ class DailySurvivalSkills(SurvivalSkills):
 
     def _inspect_container(self, args, context):
         pos = self._pos(args["pos"], block=True)
-        context["inspect_only"] = True
         self._prepare(context)
         window = self._window(pos, context, self.CONTAINERS | self.FURNACES)
         self._prepare(context)

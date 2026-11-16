@@ -1,6 +1,14 @@
 # 日常生存：任务、反馈与长期记忆
 
-本页描述 2026-11-14 的 BotSleep 日常生存实现。`survival.objective: daily` 在初期工具链之上持续检查食物、材料、设施与安全，不以取得石器后的 `goal_complete` 结束。已完成源码接线并有历史离线回归记录；最新复测有1项错误，见本页验证记录。普通地图的完整日常闭环仍须真实验收。历史采木、制作或专用平坦场石器成功不能替代这项验收，具体记录见 [TESTING.md](TESTING.md)。
+当前说明更新于 2026-11-16；下方保留较早的测试与实服记录。`survival.objective: daily` 在初期工具链之上持续检查食物、材料、设施与安全，不以取得石器后的 `goal_complete` 结束。当前 starter/daily/competition 工具数为 9/35/40；新增战斗、取液与条件岩浆狩猎已接入源码及离线回归，普通地图的完整日常闭环仍须真实验收。历史采木、制作或专用平坦场石器成功不能替代这项验收，统一验证记录见 [TESTING.md](TESTING.md)。
+
+## 目标程序与原子动作
+
+默认启用的 `run_survival_task` 支持 12 类目标：`gather/craft/smelt/food/starter_tools/iron_tools/shelter/bed/storage/farm/recover_drops/maintenance`。模型授权目标后，程序复用现有任务前置与技能，一步一观察、一动作一 pending、一结果一核验；不用每采一块或放一块都重新询问模型。现有 13 项日常证据任务板、12 类可执行目标程序和赛事得分目录是不同层次，数量不能混用。
+
+autonomy 启用时，正常任务阶段的实际模型请求只携带目标工具及必要安全/赛事管理工具；程序报告 `needs_ai` 才开放原子修复工具。模型不能仅因忽略 prefer 提示就持续绕过目标程序逐块操作。9/35/40 指完整注册目录，实际请求暴露数量随阶段变化。
+
+默认每目标 128 步/600 秒、4 次连续本地失败、8 次无进展、8 次局部探索；到边界返回真实进度、缺口与原因。安全应急挂起目标并由本地策略先处理，未知副作用冻结，不自动重放。正常子步骤没有独立模型工具调用；原生目标反馈在完成、需要 AI、未知或显式暂停/取消边界配对一次。关闭 `survival.autonomy.enabled` 则移除目标工具，原单步模式保留。详细参数、配方子集、恢复与监控见 [AUTONOMOUS_TASKS.md](AUTONOMOUS_TASKS.md)。
 
 ## 入口与执行链
 
@@ -19,9 +27,13 @@ python main.py --config config.yaml --mode survival --objective daily
 | 模块 | 当前职责 |
 | --- | --- |
 | [core/daily_observation.py](../core/daily_observation.py) | 在基础观察上取得作物、熔炉/容器、住所和短返家路线的当前证据。 |
+| [core/autonomous_tasks.py](../core/autonomous_tasks.py)、[core/autonomy_runtime.py](../core/autonomy_runtime.py) | 根据已授权目标与每轮观察规划一个原子子步，处理目标预算、本地恢复和一次原生终态反馈。 |
 | [agent/daily_survival.py](../agent/daily_survival.py) | 根据当前库存和设施生成任务板、缺口、依赖、行动建议与待重新核验的记忆地点。 |
 | [core/daily_policy.py](../core/daily_policy.py) | 纯本地安全决策；近敌、生命、饥饿、暮夜与返家门禁优先于一般生产任务。 |
 | [skills/daily_survival.py](../skills/daily_survival.py) | 采矿、农作、狩猎、护甲、熔炼、容器、掉落回收、床和门等有后验检查的技能。 |
+| [skills/combat.py](../skills/combat.py) | 对白名单敌人的单次攻击/射击或短退步，按装备自动选择有盾/无盾分支，维护交战预算及防御释放。 |
+| [skills/buckets.py](../skills/buckets.py) | `collect_liquid` 与已有不燃容纳坑内的 `hunt_with_lava`，核验桶内容、源液与实际收益。 |
+| [core/survival_playbook.py](../core/survival_playbook.py) | 从已有证据生成 survival/speedrun 阶段建议、缺口和已绑定动作，不调用模型或游戏。 |
 | [skills/shelter.py](../skills/shelter.py) | 有界勘测、固定小屋蓝图、逐块建造与住所几何检查。 |
 | [skills/batch.py](../skills/batch.py) | 最多 8 步的采集或施工，每步重新校验，失败立即停止，不额外请求模型。 |
 | [skills/doors.py](../skills/doors.py)、[skills/positioning.py](../skills/positioning.py) | 门的显式开闭与双半状态确认；同层 3 格内的精确工作站位和完整身体净空检查。 |
@@ -29,7 +41,9 @@ python main.py --config config.yaml --mode survival --objective daily
 | [core/model_gate.py](../core/model_gate.py) | 同一模型服务及凭据下的本机跨线程、跨进程互斥与未知请求台账。 |
 | [core/survival_harness.py](../core/survival_harness.py) | 串行观察、模型请求、安全复查、意图落盘、技能执行、结果反馈与检查点。 |
 
-每轮先观察，再更新记忆与任务板。模型得到压缩后的当前证据、缺口和记忆候选，一次只选择一个注册工具；返回后再次观察并检查安全条件。实际技能结果进入配对的 `tool_call_id` 反馈，下一轮据此调整。日志的模型名采用服务返回的 `response.model`，请求路由 `default` 本身不证明实际型号。
+每轮先观察，再更新记忆与任务板。没有活动目标且安全策略允许时，模型得到当前证据、缺口和记忆候选，选择一个注册工具；返回后再次观察并检查安全条件。普通技能结果直接进入配对的 `tool_call_id`；目标工具保留这一事务，由程序执行多次已核验子步后，在目标边界回传汇总。日志的模型名采用服务返回的 `response.model`，请求路由 `default` 本身不证明实际型号。
+
+`survival.intent` 默认 `survival`；显式 `speedrun` 只改变 `context.playbook` 的阶段建议，不扩大工具权限或自动执行队列。完整观察才更新建议；短安全观察保留旧阶段但标记 `fresh=false`。盾、桶和铁镐是阶段前置，已观察到的副手盾不重复制作，已有储存备份工具也不会因补盾而被忽略。下界移动、交易、要塞采样执行和末地战斗等尚未绑定环节必须显示缺口，详见 [SURVIVAL_PLAYBOOK.md](SURVIVAL_PLAYBOOK.md)。
 
 ```mermaid
 flowchart LR
@@ -62,6 +76,16 @@ BotSleep 的实现适配 Minecraft 的外部副作用：使用原生工具调用
 默认食物、木材和燃料目标分别为 8、8、8，维护间隔为 30 秒，可在 `survival.daily` 中调整。木材按原木当量统计；食物项数和燃料项数不是饱食度或燃烧时长保证。
 
 ## 观察与技能证据
+
+### 短步战斗、狩猎与桶
+
+`fight_hostile{entity_id,expected_name}` 仅面向当前观察的骷髅、僵尸、苦力怕。近敌短观察可有界补读新鲜库存，由与技能共享的纯规则决定防御或撤退；仍是 safety scope，不能授权采集、制作等生产。每步重验生命、目标、武器与地形，不长距离追击；苦力怕点火状态未知，不做近战击杀。交战预算、连续未证伤害或 `retreat_required` 会使后续本地动作优先撤退，不需等待另一轮模型。规则与模型共用该门禁；已知战斗失败要求撤退时不受普通生产失败退避/熔断阻断，仍保留真实失败反馈。慢模型提案可被取消，返回后也必须重新校验。
+
+单次短步成功不等于命中或击杀，目标消失也不等于死亡；比赛分数只认服务器 advancement。确认无威胁后才释放本技能举起的盾，该内部步骤独立写 pending，未知结果仍暂停。技能结果、退避要求和后验数据进入事件、记忆与监控，不能将它们变成未经复查的行动队列。
+
+普通 `hunt_animal` 在 2.8 格内站定攻击猪、牛、羊、鸡；更远的已观察目标先给安全接近建议，然后重新观察，不边追边打。只认当前生/熟肉等库存净增；`hunt_unverified` 后先观察实际掉落，不能盲目重打。`collect_liquid{pos,expected_name}` 使用已有空桶取水/岩浆源；`hunt_with_lava{entity_id,expected_name}` 只接受已有不燃容纳坑，短点燃后立即核验回收源液，取得食物仍须库存后验。
+
+`action_unconfirmed`、`action_state=unknown` 保留 pending。`combat_unknown`、`unknown_bucket`、`disconnected_unknown` 等明确清理限制不得被上层覆盖为追加 stop、重击或重倒岩浆。详细条件及限制见 [COMBAT_AND_HUNTING.md](COMBAT_AND_HUNTING.md)。
 
 ### 容器与熔炉
 
@@ -111,7 +135,7 @@ BotSleep 的实现适配 Minecraft 的外部副作用：使用原生工具调用
 
 历史记录：较早一轮 **740 项通过（15.126 秒）**，后续曾有 **772 项全部通过（17.137 秒）**；两者均不是最新复测结果。
 
-最新复测（2026-11-14，源码基线 `ed685f7`）：补齐 `requirements.txt` 中的 PyYAML 依赖后，运行 `python -X utf8 -B -m unittest discover -s tests -q`，共 **772 项，17.131 秒，0 skipped，1 error**，其余771项无错误。错误来自 `test_survival_memory.SurvivalMemoryTests.test_corrupt_and_future_schema_databases_are_preserved`，发生在 Windows 临时目录清理 SQLite 文件时（`WinError 32/267`）；不能记为全套通过。
+历史复测（2026-11-14，源码基线 `ed685f7`）：补齐 `requirements.txt` 中的 PyYAML 依赖后，运行 `python -X utf8 -B -m unittest discover -s tests -q`，共 **772 项，17.131 秒，0 skipped，1 error**，其余771项无错误。错误来自 `test_survival_memory.SurvivalMemoryTests.test_corrupt_and_future_schema_databases_are_preserved`，发生在 Windows 临时目录清理 SQLite 文件时（`WinError 32/267`）；不能记为全套通过。
 
 离线用例检查有界读取、未知不作空、状态变化、门与路线证据、逐块库存验证、记忆隔离与容量、崩溃后请求不重发等；不连接真实 Minecraft 或模型服务，也不证明完整生存目标完成。
 

@@ -178,6 +178,10 @@ class BatchSkills:
             if code in self.UNKNOWN or result.data.get("action_state") == "unknown":
                 details["action_state"] = "unknown"
                 code = code if code in self.UNKNOWN else "action_unconfirmed"
+                if result.data.get("cleanup_skipped") == "disconnected_unknown":
+                    details["cleanup_skipped"] = "disconnected_unknown"
+                    if isinstance(result.data.get("api_details"), dict):
+                        details["api_details"] = copy.deepcopy(result.data["api_details"])
             raise _Failure(code, "Batch stopped at the first failed child; it will not be replayed", details)
         return result
 

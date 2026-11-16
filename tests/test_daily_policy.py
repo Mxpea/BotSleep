@@ -164,9 +164,10 @@ class DailyPolicyTests(unittest.TestCase):
         self.assertIsNotNone(self.policy.validate(decision, obs))
         obs["blocks"] = []
         self.crop(obs, pos=[1, 64, 0], complete=True)
-        self.assertIsNone(self.policy.choose(obs, self.baseline))
+        self.assertEqual(self.policy.choose(obs, self.baseline).name, "harvest_crop")
         self.assertIsNone(self.policy.validate(decision, obs))
         self.assertEqual(self.policy.constraints(obs)["max_action_distance"], 2)
+        self.assertFalse(self.policy.constraints(obs)["model_allowed"])
         obs["terrain"] = [{"name": "fire", "pos": [1, 65, 0]}]
         self.assertEqual(self.policy.choose(obs, self.baseline).name, "wait")
 
@@ -182,6 +183,307 @@ class DailyPolicyTests(unittest.TestCase):
         self.crop(obs, pos=[1, 64, 0], complete=True)
         self.assertEqual(self.policy.choose(obs, self.baseline).name, "wait")
         self.assertFalse(self.policy.constraints(obs)["model_allowed"])
+
+    def test_food_seventeen_is_not_described_as_waiting_for_regeneration(self):
+        obs = observed(health=6, food=17)
+        decision = self.policy.choose(obs, self.baseline)
+        self.assertEqual(decision.name, "wait")
+        self.assertIn("cannot regenerate", decision.reason)
+        self.assertIn("below 18", self.policy.constraints(obs)["reason"])
+        obs["status"]["food"] = 18
+        self.assertIn("Observe natural regeneration", self.policy.choose(obs, self.baseline).reason)
+
+    def canopy(self, obs):
+        origin = obs["status"]["pos"]
+        x, y, z = self.policy._cell(origin)
+        obs["footing"] = {"pos": [x, y - 1, z], "name": "oak_leaves", "properties": {"waterlogged": False},
+                          "fresh": True, "verified": True, "source": "api_verified"}
+        obs["footing_origin"] = list(origin)
+        return obs
+
+    def test_low_health_empty_inventory_can_escape_current_verified_canopy(self):
+        obs = self.canopy(observed(health=6, food=17, pos=[-4.5, 124, 5.7]))
+        before = copy.deepcopy(obs)
+        decision = self.policy.choose(obs, self.baseline)
+        self.assertEqual((decision.name, decision.args, decision.goal), ("canopy_escape", {}, "safety"))
+        self.assertIsNone(self.policy.validate(decision, obs))
+        self.assertEqual(self.policy.constraints(obs)["scenario"], "canopy_escape")
+        self.assertFalse(self.policy.constraints(obs)["model_allowed"])
+        self.assertEqual(obs, before)
+
+    def test_canopy_requires_exact_fresh_dry_support_not_a_diagnostic_leaf(self):
+        for change in ("stale", "unverified", "wrong_source", "solid", "wrong_cell", "wet", "unknown_dry", "numeric_dry", "moved", "partial"):
+            obs = self.canopy(observed(health=6, food=17))
+            if change == "stale": obs["footing"]["fresh"] = False
+            elif change == "unverified": obs["footing"]["verified"] = False
+            elif change == "wrong_source": obs["footing"]["source"] = "memory"
+            elif change == "solid": obs["footing"]["name"] = "dirt"
+            elif change == "wrong_cell": obs["footing"]["pos"][1] += 1
+            elif change == "wet": obs["footing"]["properties"]["waterlogged"] = True
+            elif change == "unknown_dry": obs["footing"]["properties"] = {}
+            elif change == "numeric_dry": obs["footing"]["properties"]["waterlogged"] = 0
+            elif change == "moved": obs["footing_origin"][0] += .3
+            elif change == "partial": obs["scope"] = "safety"
+            with self.subTest(change=change):
+                self.assertNotEqual(self.policy.choose(obs, self.baseline).name, "canopy_escape")
+                self.assertIsNotNone(self.policy.validate(action("canopy_escape"), obs))
+
+    def test_canopy_meal_hostile_and_existing_cooldown_take_priority(self):
+        obs = self.canopy(observed(health=6, food=17))
+        obs["counts"] = {"apple": 1}
+        self.assertEqual(self.policy.choose(obs, self.baseline).name, "eat_food")
+        obs["entities"] = [{"type": "hostile", "name": "skeleton", "pos": [12.5, 64, .5]}]
+        self.assertEqual(self.policy.choose(obs, self.baseline).name, "retreat_from")
+        self.assertIsNotNone(self.policy.validate(action("canopy_escape"), obs))
+        obs["entities"] = []
+        cooldown = Decision("wait", {"seconds": 5}, "Do not repeat the unchanged failed search", "safety")
+        self.assertIs(self.policy.choose(obs, cooldown), cooldown)
+
+    def test_canopy_escape_precedes_normal_resource_work(self):
+        obs = self.canopy(observed())
+        self.assertEqual(self.policy.choose(obs, action("gather_block", pos=[2, 64, 0], expected_name="oak_log")).name, "canopy_escape")
+        self.assertEqual(self.policy.validate(action("gather_block", pos=[2, 64, 0], expected_name="oak_log"), obs), "canopy_escape_required")
+
+    def trunk_scene(self):
+        # Minimal deterministic extract of canopy-scene-20261116T090539Z:
+        # the bot descended from leaves onto a natural trunk, not the ground.
+        obs = observed(health=6, food=17, pos=[4.3, 121, 6.5], is_day=False, time_of_day=20149)
+        obs["footing"] = {"pos": [4, 120, 6], "name": "oak_log", "properties": {"axis": "y"},
+                          "fresh": True, "verified": True, "source": "api_verified"}
+        obs["footing_origin"] = [4.3, 121, 6.5]
+        obs["blocks"] = [{"name": "oak_leaves", "pos": [x, y, z],
+                          "properties": {"waterlogged": False, "persistent": False, "distance": 1 if y == 120 else 2}}
+                         for x, z in ((3, 6), (5, 6), (4, 5), (4, 7)) for y in (120, 121)]
+        context = {"canopy_recovery": {"dimension": "overworld", "life": None, "origin": [-4.5, 124, 5.7],
+                                       "steps": 18, "evacuating": True, "visited": [[4, 121, 6]], "excluded_until": {}}}
+        return obs, context
+
+    def test_natural_trunk_snapshot_continues_current_evacuation_even_at_night(self):
+        obs, context = self.trunk_scene()
+        before = copy.deepcopy((obs, context))
+        decision = self.policy.choose(obs, self.baseline, context=context)
+        self.assertEqual(decision.name, "canopy_escape")
+        self.assertEqual(self.policy.constraints(obs, context)["scenario"], "canopy_escape")
+        self.assertIsNone(self.policy.validate(decision, obs, context))
+        self.assertEqual((obs, context), before)
+
+    def test_logs_and_wood_continue_only_an_existing_current_life_evacuation(self):
+        for name in ("oak_log", "oak_wood", "birch_log", "mangrove_wood"):
+            obs, context = self.trunk_scene()
+            obs["footing"]["name"] = name
+            with self.subTest(name=name):
+                self.assertEqual(self.policy.choose(obs, self.baseline, context=context).name, "canopy_escape")
+                self.assertNotEqual(self.policy.choose(obs, self.baseline).name, "canopy_escape")
+                self.assertEqual(self.policy.validate(action("canopy_escape"), obs), "canopy_support_unverified")
+
+    def test_trunk_recovery_cannot_use_old_life_dimension_unknown_or_completed_state(self):
+        for change in ("life", "dimension", "unknown", "completed", "ground", "invalid_origin", "not_started"):
+            obs, context = self.trunk_scene()
+            state = context["canopy_recovery"]
+            if change == "life": state["life"] = {"time": "previous_life"}
+            elif change == "dimension": state["dimension"] = "the_nether"
+            elif change == "unknown": state["unknown"] = True
+            elif change == "completed": state["retreat_complete"] = True
+            elif change == "ground": state["evacuation_stage"] = "ground"
+            elif change == "invalid_origin": state["origin"] = [None, 124, 5.7]
+            elif change == "not_started": state.update(steps=0, evacuating=False)
+            with self.subTest(change=change):
+                self.assertNotEqual(self.policy.choose(obs, self.baseline, context=context).name, "canopy_escape")
+
+    def test_failed_first_canopy_step_still_continues_from_fresh_trunk(self):
+        obs, context = self.trunk_scene()
+        context["canopy_recovery"].update(steps=1, evacuating=False)
+        self.assertEqual(self.policy.choose(obs, self.baseline, context=context).name, "canopy_escape")
+        cooldown = Decision("wait", {"seconds": 2}, "Preserve bounded failed-route cooldown", "safety")
+        self.assertIs(self.policy.choose(obs, cooldown, context=context), cooldown)
+
+    def test_trunk_continuation_still_requires_fresh_support_and_preserves_hostile_priority(self):
+        obs, context = self.trunk_scene()
+        obs["footing"]["fresh"] = False
+        self.assertNotEqual(self.policy.choose(obs, self.baseline, context=context).name, "canopy_escape")
+        obs["footing"]["fresh"] = True
+        obs["entities"] = [{"type": "hostile", "name": "skeleton", "pos": [10, 121, 6]}]
+        self.assertEqual(self.policy.choose(obs, self.baseline, context=context).name, "retreat_from")
+        self.assertIsNotNone(self.policy.validate(action("canopy_escape"), obs, context))
+
+    def test_tree_trunk_never_qualifies_as_cautious_bootstrap_or_ground_food_search(self):
+        for recovering in (True, False):
+            obs, context = self.trunk_scene()
+            obs["status"].update(is_day=True, time_of_day=3000)
+            obs["local_geometry_origin"] = list(obs["status"]["pos"])
+            obs["safe_stand_candidates"] = [{"pos": [5.5, 121, 6.5], "support": "dirt"}]
+            if not recovering:
+                context.pop("canopy_recovery")
+            with self.subTest(recovering=recovering):
+                self.assertIsNone(self.policy._food_search(obs, context))
+                context["food_recovery"] = {"needs_ai": True, "steps": 8}
+                self.assertFalse(self.policy.cautious_bootstrap(obs, context))
+                self.assertIsNotNone(self.policy.validate(action("run_survival_task", task="gather", resource="logs", count=2), obs, context))
+
+    def test_normal_ground_log_does_not_initiate_canopy_escape(self):
+        obs, _ = self.trunk_scene()
+        obs["status"].update(health=20, food=20, is_day=True, time_of_day=3000)
+        obs["blocks"] = []
+        self.assertFalse(self.policy._canopy(obs))
+        self.assertIsNone(self.policy.choose(obs, action("gather_block", pos=[6, 121, 6], expected_name="oak_log")))
+
+    def test_ranged_danger_is_not_hidden_by_a_nearer_out_of_range_spider(self):
+        obs = observed(health=6, food=17)
+        obs["entities"] = [{"type": "hostile", "name": "spider", "pos": [9.5, 64, .5]},
+                           {"type": "hostile", "name": "skeleton", "pos": [15.5, 64, .5]}]
+        decision = self.policy.choose(obs, self.baseline)
+        self.assertEqual(decision.name, "retreat_from")
+        self.assertEqual(decision.args["pos"], [15.5, 64, .5])
+        self.assertIsNone(self.policy.validate(decision, obs))
+
+    def test_unshielded_ranged_threat_prevents_fighting_instead_of_withdrawing(self):
+        obs = observed()
+        obs["entities"] = [{"type": "hostile", "name": "skeleton", "pos": [5, 64, 0]}]
+        with patch("core.daily_policy.combat_options", return_value={"allowed": True, "shield": False,
+                "target": {"id": 1, "name": "skeleton"}}):
+            self.assertEqual(self.policy.choose(obs, self.baseline).name, "retreat_from")
+
+    def test_ranged_summary_without_position_blocks_food_and_canopy(self):
+        obs = self.canopy(observed(health=6, food=17, nearest_hostile={"name": "stray", "dist": 12}))
+        self.assertEqual(self.policy.constraints(obs)["scenario"], "hostile_position_unknown")
+        self.assertEqual(self.policy.choose(obs, self.baseline).name, "wait")
+
+    def ground_search(self, obs):
+        self.canopy(obs)
+        obs["footing"]["name"] = "grass_block"
+        obs["local_geometry_origin"] = list(obs["status"]["pos"])
+        obs["safe_stand_candidates"] = [{"pos": [1.5, 64, .5], "support": "grass_block"},
+                                         {"pos": [.5, 64, 1.5], "support": "dirt"}]
+        return obs
+
+    def test_low_health_food_search_is_one_fresh_ground_move_not_a_route(self):
+        obs = self.ground_search(observed(health=6, food=17))
+        context = {"food_recovery": {"steps": 0, "visited": [], "excluded_until": {}}}
+        before = copy.deepcopy((obs, context))
+        decision = self.policy.choose(obs, self.baseline, context=context)
+        self.assertEqual(decision.name, "position_for_task")
+        self.assertEqual(decision.goal, "food_recovery")
+        self.assertEqual(self.policy.constraints(obs, context)["scenario"], "food_recovery")
+        self.assertIsNone(self.policy.validate(decision, obs, context))
+        self.assertEqual((obs, context), before)
+
+    def test_food_search_skips_visited_failed_and_current_cells(self):
+        obs = self.ground_search(observed(health=6, food=17))
+        context = {"food_recovery": {"steps": 2, "visited": [[0, 64, 1]], "excluded_until": {}}}
+        decision = self.policy.choose(obs, self.baseline, context=context)
+        self.assertEqual(decision.args["pos"], [1.5, 64, .5])
+        context["food_recovery"]["excluded_until"] = {"1,64,0": 9999999999}
+        self.assertEqual(self.policy.choose(obs, self.baseline, context=context).name, "wait")
+        self.assertEqual(self.policy.constraints(obs, context)["scenario"], "food_recovery_blocked")
+
+    def test_food_search_stops_after_eight_steps_and_never_claims_regeneration(self):
+        obs = self.ground_search(observed(health=6, food=17))
+        context = {"food_recovery": {"steps": 8}}
+        decision = self.policy.choose(obs, self.baseline, context=context)
+        self.assertEqual(decision.name, "wait")
+        self.assertIn("cannot regenerate", decision.reason)
+        self.assertEqual(self.policy.constraints(obs, context)["scenario"], "food_recovery_blocked")
+
+    def test_food_search_rejects_night_stale_geometry_height_leaf_and_far_targets(self):
+        for change in ("night", "moved", "height", "leaf", "far", "water", "safety"):
+            obs = self.ground_search(observed(health=6, food=17))
+            obs["safe_stand_candidates"] = obs["safe_stand_candidates"][:1]
+            if change == "night": obs["status"]["is_day"] = False
+            elif change == "moved": obs["local_geometry_origin"][0] += .3
+            elif change == "height": obs["safe_stand_candidates"][0]["pos"][1] += 1
+            elif change == "leaf": obs["safe_stand_candidates"][0]["support"] = "oak_leaves"
+            elif change == "far": obs["safe_stand_candidates"][0]["pos"][0] = 4.5
+            elif change == "water": obs["blocks"] = [{"name": "water", "pos": [1, 64, 0]}]
+            elif change == "safety": obs["scope"] = "safety"
+            with self.subTest(change=change):
+                self.assertNotEqual(self.policy.choose(obs, self.baseline).name, "position_for_task")
+
+    def test_partial_safety_does_not_claim_food_search_has_been_exhausted(self):
+        obs = observed(health=6, food=17)
+        obs["observation_scope"] = "safety"
+        self.assertEqual(self.policy.constraints(obs)["scenario"], "food_observation_required")
+        self.assertEqual(self.policy.choose(obs, self.baseline).goal, "observe")
+
+    def test_verified_food_is_taken_locally_before_search_or_canopy_escape(self):
+        obs = self.canopy(observed(health=6, food=17))
+        self.crop(obs, [1, 64, 0], complete=True)
+        decision = self.policy.choose(obs, self.baseline)
+        self.assertEqual(decision.name, "harvest_crop")
+        self.assertFalse(self.policy.constraints(obs)["model_allowed"])
+        self.assertIsNone(self.policy.validate(decision, obs))
+
+    def test_food_drop_requires_real_item_shape_and_complete_short_standing_corridor(self):
+        obs = self.ground_search(observed(health=6, food=17))
+        obs["entities"] = [{"id": 3, "type": "item", "name": "item", "item": "applex1", "pos": [1.5, 64, .5]}]
+        cells = {(1, 64, 0), (0, 64, 0), (2, 64, 0), (1, 63, 0), (1, 65, 0), (1, 64, -1), (1, 64, 1),
+                 (0, 63, 0), (0, 65, 0)}
+        obs["blocks"] = [{"pos": list(pos), "name": "dirt" if pos[1] == 63 else "air"} for pos in cells]
+        decision = self.policy.choose(obs, self.baseline)
+        self.assertEqual((decision.name, decision.args), ("collect_drops", {"entity_id": 3, "expected_item": "apple"}))
+        self.assertIsNone(self.policy.validate(decision, obs))
+        obs["entities"][0]["item"] = "applex0"
+        self.assertIsNotNone(self.policy.validate(decision, obs))
+        obs["entities"][0]["item"] = "applex1"
+        obs["blocks"] = [row for row in obs["blocks"] if row["pos"] != [0, 65, 0]]
+        self.assertIsNotNone(self.policy.validate(decision, obs))
+
+    def test_exhausted_food_search_permits_only_small_wooden_goals_on_safe_ground(self):
+        obs = self.ground_search(observed(health=6, food=17))
+        context = {"food_recovery": {"steps": 8, "needs_ai": True}}
+        self.assertTrue(self.policy.cautious_bootstrap(obs, context))
+        self.assertIsNone(self.policy.choose(obs, self.baseline, context=context))
+        limits = self.policy.constraints(obs, context)
+        self.assertEqual(limits["scenario"], "cautious_bootstrap")
+        self.assertEqual(limits["allowed_actions"], ["run_survival_task", "wait"])
+        for args in ({"task": "gather", "resource": "logs", "count": 8},
+                     {"task": "craft", "item": "wooden_pickaxe", "count": 1}):
+            self.assertIsNone(self.policy.validate(action("run_survival_task", **args), obs, context))
+        for args in ({"task": "gather", "resource": "logs", "count": 9}, {"task": "gather", "resource": "coal"},
+                     {"task": "starter_tools"}, {"task": "food"}, {"task": "craft", "item": "stone_pickaxe"}):
+            self.assertIsNotNone(self.policy.validate(action("run_survival_task", **args), obs, context))
+
+    def test_bootstrap_rechecks_full_health_hunger_day_support_and_all_hostiles_sixteen(self):
+        context = {"food_recovery": {"needs_ai": True}}
+        for change in ("health", "food", "night", "wet", "leaf", "partial", "enemy", "saturated", "ready", "dead"):
+            obs = self.ground_search(observed(health=6, food=17))
+            if change == "health": obs["status"]["health"] = 4
+            elif change == "food": obs["status"]["food"] = 11
+            elif change == "night": obs["status"]["is_day"] = False
+            elif change == "wet": obs["status"]["in_water"] = True
+            elif change == "leaf": obs["footing"]["name"] = "oak_leaves"
+            elif change == "partial": obs["scope"] = "safety"
+            elif change == "enemy": obs["entities"] = [{"type": "hostile", "name": "zombie", "pos": [15, 64, 0]}]
+            elif change == "saturated": obs["entities"] = [{"type": "passive", "name": "cow"}] * 40
+            elif change == "ready": obs["status"]["ready"] = False
+            elif change == "dead": obs["status"]["alive"] = False
+            with self.subTest(change=change):
+                self.assertFalse(self.policy.cautious_bootstrap(obs, context))
+
+    def test_bootstrap_atomic_requires_trusted_goal_and_current_visible_reachable_log(self):
+        obs = self.ground_search(observed(health=6, food=17))
+        obs["blocks"] = [{"name": "oak_log", "pos": [2, 64, 0], "can_see": True, "can_dig": True}]
+        context = {"food_recovery": {"needs_ai": True}}
+        gather = action("gather_block", pos=[2, 64, 0], expected_name="oak_log")
+        self.assertIsNotNone(self.policy.validate(gather, obs, context))
+        context["cautious_bootstrap"] = True
+        self.assertIsNone(self.policy.validate(gather, obs, context))
+        for field in ("can_see", "can_dig"):
+            obs["blocks"][0][field] = None
+            self.assertIsNotNone(self.policy.validate(gather, obs, context))
+            obs["blocks"][0][field] = True
+        for name, args in (("move_to", {"pos": [2, 64, 0]}), ("clear_foliage", {"pos": [2, 64, 0], "expected_name": "oak_leaves"}),
+                           ("hunt_animal", {"entity_id": 1, "expected_name": "cow"}), ("craft_item", {"item": "stone_pickaxe", "count": 1})):
+            self.assertIsNotNone(self.policy.validate(action(name, **args), obs, context))
+
+    def test_bootstrap_tool_crafting_requires_nearby_table_not_implicit_approach(self):
+        obs = self.ground_search(observed(health=6, food=17))
+        context = {"food_recovery": {"needs_ai": True}, "cautious_bootstrap": True}
+        craft = action("craft_item", item="wooden_pickaxe", count=1)
+        self.assertIsNotNone(self.policy.validate(craft, obs, context))
+        obs["blocks"] = [{"name": "crafting_table", "pos": [10, 64, 0]}]
+        self.assertIsNotNone(self.policy.validate(craft, obs, context))
+        obs["blocks"][0]["pos"] = [2, 64, 0]
+        self.assertIsNone(self.policy.validate(craft, obs, context))
 
     def test_stale_lifecycle_mode_hazard_and_airborne_never_release_food_plan(self):
         cases = [({"alive": False}, "dead"), ({"ready": False}, "not_ready"), ({"busy": "dig"}, "busy"),

@@ -46,6 +46,12 @@ class MinecraftAgentClient:
 
     ACTION_MARGIN_SECONDS = 5.0
     PATHFINDING_SECONDS = 60.0
+    # A worker can exit after a write reached Minecraft but before its IPC reply.
+    # Observations and connection management keep their ordinary retry semantics.
+    WRITE_ENDPOINTS = frozenset({
+        "chat", "move_to", "look", "posture", "equip", "window/view", "window/act",
+        "attack", "dig", "craft", "place", "interact", "use_item", "control", "shoot",
+    })
 
     def __init__(
         self,
@@ -110,6 +116,10 @@ class MinecraftAgentClient:
                 if secret:
                     message = message.replace(secret, "[redacted]")
             details = {key: value for key, value in error.items() if key not in {"code", "message"}}
+            if code == "not_connected" and endpoint in self.WRITE_ENDPOINTS:
+                details.update(api_code=code, action_state="unknown", executed=True)
+                raise APIError("action_unconfirmed", f"{endpoint} disconnected before its outcome was confirmed",
+                               status_code, details)
             raise APIError(code, message, status_code, details)
         if data.get("ok") is not True:
             raise APIError("invalid_response", f"{endpoint} response has no boolean ok=true", status_code)
@@ -223,11 +233,48 @@ class MinecraftAgentClient:
             timeout_seconds=self._action_timeout(deadline),
         )
 
-    def look_at(self, x: float, y: float, z: float) -> Dict[str, Any]:
-        return self._request("POST", "look", payload={"x": x, "y": y, "z": z})
+    def look_at(self, x: float, y: float, z: float, *, timeout_seconds: Optional[float] = None) -> Dict[str, Any]:
+        return self._request("POST", "look", payload={"x": x, "y": y, "z": z}, timeout_seconds=timeout_seconds)
 
-    def posture(self, sneak: bool = False, shield: bool = False, jump: bool = False) -> Dict[str, Any]:
-        return self._request("POST", "posture", payload={"sneak": sneak, "shield": shield, "jump": jump})
+    def posture(self, sneak: bool = False, shield: bool = False, jump: bool = False, *,
+                timeout_seconds: Optional[float] = None) -> Dict[str, Any]:
+        return self._request("POST", "posture", payload={"sneak": sneak, "shield": shield, "jump": jump}, timeout_seconds=timeout_seconds)
+
+    def control(self, *, forward=False, back=False, left=False, right=False, jump=False,
+                sneak=False, sprint=False, yaw=None, pitch=None, ms=50, hit=None,
+                hit_interval_ms=None, wait=True, timeout_seconds=None) -> Dict[str, Any]:
+        """One bounded native-control request; returned hits identify sent attacks."""
+        flags = {"forward": forward, "back": back, "left": left, "right": right,
+                 "jump": jump, "sneak": sneak, "sprint": sprint}
+        if any(type(value) is not bool for value in flags.values()) or type(wait) is not bool:
+            raise APIError("bad_args", "control flags and wait must be booleans")
+        if type(ms) is not int or not 50 <= ms <= 3000:
+            raise APIError("bad_args", "control ms must be an integer from 50 to 3000")
+        if hit is not None and (type(hit) is not int or not 1 <= hit <= 20):
+            raise APIError("bad_args", "control hit must be an integer from 1 to 20")
+        payload = {**flags, "ms": ms, "wait": wait, "stop_on": ["hurt", "death"]}
+        for key, value in (("yaw", yaw), ("pitch", pitch), ("hit_interval_ms", hit_interval_ms)):
+            if value is not None:
+                if type(value) not in (int, float) or not math.isfinite(value):
+                    raise APIError("bad_args", f"control {key} must be finite")
+                payload[key] = value
+        if hit is not None:
+            payload["hit"] = hit
+        budget = self._action_timeout(ms / 1000) if timeout_seconds is None else self._positive(timeout_seconds, "timeout_seconds")
+        return self._request("POST", "control", payload=payload, timeout_seconds=budget)
+
+    def shoot(self, entity_id: int, *, weapon: str = "bow", charge_ms: Optional[int] = None,
+              timeout_seconds: Optional[float] = None) -> Dict[str, Any]:
+        """Fire once without pursuing; fired/projectiles do not prove damage."""
+        if type(entity_id) is not int or entity_id < 0 or weapon not in {"bow", "crossbow"}:
+            raise APIError("bad_args", "shoot requires an entity id and bow or crossbow")
+        if charge_ms is None:
+            charge_ms = 1400 if weapon == "crossbow" else 1100
+        if type(charge_ms) is not int or not 200 <= charge_ms <= 5000:
+            raise APIError("bad_args", "charge_ms must be an integer from 200 to 5000")
+        budget = self._action_timeout(charge_ms / 1000 + 1) if timeout_seconds is None else self._positive(timeout_seconds, "timeout_seconds")
+        return self._request("POST", "shoot", payload={"entity_id": entity_id, "weapon": weapon,
+                             "charge_ms": charge_ms, "stop_on": ["hurt", "death"]}, timeout_seconds=budget)
 
     def get_blocks(self, radius: int = 16, types: Optional[List[str]] = None, limit: int = 64) -> List[Dict[str, Any]]:
         """Typed queries return blocks; untyped queries return one row per type.
@@ -305,8 +352,8 @@ class MinecraftAgentClient:
                 counts[name] = counts.get(name, 0) + cnt
         return counts
 
-    def equip(self, item: str, slot: str = "hand") -> Dict[str, Any]:
-        return self._request("POST", "equip", payload={"item": item, "slot": slot})
+    def equip(self, item: str, slot: str = "hand", *, timeout_seconds: Optional[float] = None) -> Dict[str, Any]:
+        return self._request("POST", "equip", payload={"item": item, "slot": slot}, timeout_seconds=timeout_seconds)
 
     def stop(self, *, timeout_seconds: Optional[float] = None) -> Dict[str, Any]:
         """Request an immediate stop; this does not guarantee task cancellation."""
@@ -358,6 +405,12 @@ class MinecraftAgentClient:
     ) -> Dict[str, Any]:
         """Allow approach, digging and pickup paths, supporting coordinate triplet or pos list."""
         if isinstance(pos_or_x, (list, tuple)) and len(pos_or_x) == 3:
+            # The original API accepted dig(pos, collect); y now also occupies
+            # that positional slot for the upstream dig(x, y, z) convenience.
+            if z is not None or (y is not None and type(y) is not bool):
+                raise APIError("bad_args", "dig with pos accepts only an optional boolean collect")
+            if y is not None:
+                collect = y
             px, py, pz = pos_or_x[0], pos_or_x[1], pos_or_x[2]
         elif y is not None and z is not None:
             px, py, pz = pos_or_x, y, z

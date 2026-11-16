@@ -379,11 +379,15 @@ class ShelterSkills(SurvivalSkills):
             self._check(context)
             return SkillResult(True, "Shelter geometry observed; completion is reported separately", data)
         except Exception as error:
+            error = self._disconnection_error(error, context)
             data.update(context.get("evidence", {}))
             data.update(getattr(error, "data", {}))
             data["executed"] = context["acted"]
             code = getattr(error, "code", "internal_error")
-            if context["acted"]:
+            if context.get("disconnected_unknown"):
+                data.update(action_state="unknown", cleanup_skipped="disconnected_unknown")
+                data["api_details"] = context["disconnection_details"]
+            if context["acted"] and not context.get("disconnected_unknown"):
                 try:
                     self.client.stop()
                     data["cleanup"] = "stop_requested"

@@ -50,6 +50,70 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config["survival"]["state_dir"], str(self.root / "runtime/survival"))
         self.assertFalse((self.root / "runtime").exists())
 
+    def test_survival_intent_defaults_and_speedrun_are_explicit_without_new_objective(self):
+        config = load_config(self.write({}), environ={})
+        self.assertEqual(config["survival"]["intent"], "survival")
+        config = load_config(self.write({"survival": {"objective": "daily", "intent": "speedrun"}}), environ={})
+        self.assertEqual(config["survival"]["intent"], "speedrun")
+        self.assertEqual(config["survival"]["objective"], "daily")
+        for bad in ("dragon_autopilot", None, 1, [], {}):
+            with self.subTest(value=bad), self.assertRaises(ConfigError):
+                load_config(self.write({"survival": {"intent": bad}}), environ={})
+
+    def test_operator_goal_is_optional_bounded_owner_text(self):
+        self.assertEqual(load_config(self.write({}), environ={})["survival"]["operator_goal"], "")
+        for goal in ("", "采足木头并制作一把木镐；失败先本地恢复。", "木" * 1000):
+            with self.subTest(length=len(goal)):
+                config = load_config(self.write({"survival": {"operator_goal": goal}}), environ={})
+                self.assertEqual(config["survival"]["operator_goal"], goal)
+
+    def test_operator_goal_rejects_wrong_types_blanks_controls_and_oversize(self):
+        for goal in (None, True, 3, [], {}, "   ", "木" * 1001, "goal\nnext", "goal\t", "goal\x00",
+                     "goal\x7f", "goal\x85", "goal\u200b", "goal\u202e", "goal\ud800"):
+            with self.subTest(kind=type(goal).__name__), self.assertRaises(ConfigError):
+                load_config(self.write({"survival": {"operator_goal": goal}}), environ={})
+
+    def test_operator_goal_validation_does_not_echo_private_text(self):
+        private = "PRIVATE_OWNER_GOAL_SHOULD_NOT_APPEAR"
+        with self.assertRaises(ConfigError) as caught:
+            load_config(self.write({"survival": {"operator_goal": private + "\n"}}), environ={})
+        self.assertNotIn(private, str(caught.exception))
+
+    def test_autonomy_defaults_and_partial_disable_preserve_run_budget(self):
+        config = load_config(self.write({"survival": {"objective": "daily"}}), environ={})
+        self.assertEqual(config["survival"]["autonomy"], {"enabled": True, "max_steps": 128,
+            "max_seconds": 600, "max_local_failures": 4, "max_no_progress_steps": 8, "max_explore_steps": 8})
+        config = load_config(self.write({"survival": {"autonomy": {"enabled": False, "max_explore_steps": 0}}}), environ={})
+        self.assertFalse(config["survival"]["autonomy"]["enabled"])
+        self.assertEqual(config["survival"]["autonomy"]["max_explore_steps"], 0)
+        self.assertEqual(config["survival"]["autonomy"]["max_steps"], 128)
+        self.assertEqual(config["survival"]["max_steps"], 256)
+        self.assertFalse((self.root / "runtime").exists())
+
+    def test_autonomy_limits_are_bounded_and_do_not_accept_boolean_numbers(self):
+        for key, low, high in (("max_steps", 1, 2048), ("max_local_failures", 1, 32),
+                               ("max_no_progress_steps", 1, 128), ("max_explore_steps", 0, 64)):
+            for value in (low, high):
+                with self.subTest(key=key, valid=value):
+                    config = load_config(self.write({"survival": {"autonomy": {key: value}}}), environ={})
+                    self.assertEqual(config["survival"]["autonomy"][key], value)
+            for value in (low - 1, high + 1, True, 1.5, "1", None):
+                with self.subTest(key=key, invalid=value), self.assertRaises(ConfigError):
+                    load_config(self.write({"survival": {"autonomy": {key: value}}}), environ={})
+        for value in (0, -1, 3600.1, float("nan"), float("inf"), True, "600"):
+            with self.subTest(seconds=value), self.assertRaises(ConfigError):
+                load_config(self.write({"survival": {"autonomy": {"max_seconds": value}}}), environ={})
+        for value in (0.5, 3600):
+            config = load_config(self.write({"survival": {"autonomy": {"max_seconds": value}}}), environ={})
+            self.assertEqual(config["survival"]["autonomy"]["max_seconds"], value)
+
+    def test_autonomy_rejects_malformed_or_secret_unknown_options(self):
+        for value in (None, [], "enabled", {"enabled": "true"}, {"enabled": 1},
+                      {"parallel_models": "private-autonomy-value"}):
+            with self.subTest(value=value), self.assertRaises(ConfigError) as caught:
+                load_config(self.write({"survival": {"autonomy": value}}), environ={})
+            self.assertNotIn("private-autonomy-value", str(caught.exception))
+
     def test_survival_rejects_unsafe_or_mistyped_limits(self):
         for changes in ({"max_steps": True}, {"max_deaths": 0}, {"scan_radius": 65},
                         {"world_id": "../private"}, {"explore_distance": 33}, {"food_threshold": 21},

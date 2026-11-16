@@ -4,7 +4,7 @@
 
 BotSleep 基于 mc-agent-api 控制 Minecraft 机器人，采用大模型决策与本地技能分层设计。
 
-- **用户约束（2026-11-14）**：不要修改或提交相邻 `mc-agent-api` 仓库。所有适配和修复在 BotSleep 内完成；上游行为不足时记录限制，不依赖本地 API 补丁。
+- **用户约束（2026-11-16）**：允许拉取相邻 `mc-agent-api` 的官方更新；不要在该仓库修改或提交本地源码补丁。所有适配和修复在 BotSleep 内完成；上游行为不足时记录限制，不依赖本地 API 补丁。
 
 - `main.py`：配置驱动的睡眠/生存入口；`survival.objective` 区分 starter、daily 与 competition。日常任务图在 `agent/daily_survival.py`，技能、观察、策略与 SQLite 记忆见 `docs/DAILY_SURVIVAL.md`。开启 `llm.enabled` 后使用原生工具调用与结果反馈。
 - `core/`：HTTP 客户端、RCON、状态感知和记忆管理。
@@ -12,10 +12,13 @@ BotSleep 基于 mc-agent-api 控制 Minecraft 机器人，采用大模型决策�
 - `debug/`：聊天指令、RCON 靶场、脱敏结构化日志和本机只读监控；`data/game_logic/` 保存开发雷达/独立技能复用的状态、地标与事件记忆，不用于当前运行检查点，部分文件仍受版本控制。
 - `docs/`：架构、技能契约和调试规范。修改相关行为前先阅读对应文档。
 - `integrations/ninjabrain/`：无界面要塞计算与坐标采样；`tests/` 为 unittest 回归测试，`data/examples/` 存合成输入。
-- `skills/portal_speedrun.py`、`skills/crafting.py`、`skills/mining.py` 和 `core/radar.py` 是已合并的独立/调试能力；独立 schema 不等于已绑定模型工具。模型目录仍为 starter 9、daily 31、competition 36；详见 `docs/SKILL_SPEC.md`。门户主动采样不等于只读 EventMonitor。
+- `skills/portal_speedrun.py`、`skills/crafting.py`、`skills/mining.py` 和 `core/radar.py` 是已合并的独立/调试能力；独立 schema 不等于已绑定模型工具。模型目录为 starter 9、daily 35、competition 40；详见 `docs/SKILL_SPEC.md`。门户主动采样不等于只读 EventMonitor。
 - 根目录 `bot_sleep.py`、`client.py` 是兼容入口，分别复用 `main.py` 和 `core/client.py`，不要再复制实现。
 - `core/survival_harness.py` 串行执行生存任务，`core/survival_state.py` 按 API/账号/world_id 保存检查点；有 pending 意图时不得自动重放。`skills/survival.py` 的动作需要真实状态变化验证。
-- `core/competition_rules.py` 与 `core/competition_tasks.py` 实现 competition 规则快照、advancement 证据计分、任务状态与终态恢复；只读面板见 `docs/MONITORING.md`。计分以服务端状态为准，条件项须显式 override。当前 45 个明确计分项目中仅 7 个有明确行动计划；其余目录虽可评估计分但标为 unsupported。不得把离线覆盖说成完整比赛执行验收。
+- `core/autonomous_tasks.py` 是无模型/客户端 I/O 的有界目标程序；`core/autonomy_runtime.py` 把 `run_survival_task` 接入现有 harness，保留一次原生目标反馈，每个子步骤仍独立 fresh 检查和 pending。默认 12 类目标、128 步/600 秒、4 次连续本地失败/8 次无进展/8 次探索；紧急安全挂起目标，unknown 不重放。只覆盖明确常用配方子集，不能宣称全部配方或全部任务实服通过；见 `docs/AUTONOMOUS_TASKS.md`。
+- autonomy 正常规划采用实际动态工具目录：目标工具与必要安全/赛事管理工具可见，`needs_ai` 后开放原子修复；不只依赖 prompt 的 prefer。9/35/40 是完整注册数，不是每次模型请求的暴露数；禁用 autonomy 保留原单步目录。
+- `core/competition_rules.py` 与 `core/competition_tasks.py` 实现 competition 规则快照、advancement 证据计分、任务状态与终态恢复；只读面板见 `docs/MONITORING.md`。计分以服务端状态为准，条件项须显式 override。当前 45 个明确计分项目中仅 8 个有明确行动计划（含有条件的怪物猎人）；其余目录虽可评估计分但标为 unsupported。不得把离线覆盖说成完整比赛执行验收。
+- `skills/combat.py`、`skills/hunting.py`、`skills/buckets.py` 分别实现短步战斗、静止狩猎和受限液体操作。攻击已发、伤害已证实、击杀与实际掉落增量分开；未知副作用保持 pending，不补发 stop/攻击/收桶。`core/survival_playbook.py` 的版本化阶段建议经 `survival.intent` 选择，未绑定的下界/末地技能保持 blocked；参见 `docs/COMBAT_AND_HUNTING.md` 与 `docs/SURVIVAL_PLAYBOOK.md`。
 - 模型只能选择已注册技能；返回后须重新观察并通过本地安全门禁。所有模型请求必须经过 `core/model_gate.py`，禁止并发请求；传输超时/连接中断留下持久化未知状态，不得自动重试或擅自清锁。明确 HTTP 失败可有界退避，不回退为规则采集。`llm.model` 是请求路由，实际模型仅采用 `response.model`，缺失时显示“未确认”。
 
 ## 构建、测试与开发命令
@@ -77,5 +80,5 @@ Copy-Item config.example.yaml config.yaml
 ## 文档状态同步
 
 - `docs/ARCHITECTURE.md` 描述当前 starter/daily/competition 运行链路；`docs/HARNESS_INTERFACES.md` 分开记录现有比赛得分任务子集和未来提案。不得因旧 `agent/loop.py` 有 TODO 就宣称生存主循环未接通。
-- 当前只读面板聚合 heartbeat、Agent 阶段、模型槽、pending、competition 任务快照；API 端点延迟、检查点写入健康度、无进展/重复输出告警与可靠性汇总仍待补。历史裁剪按请求字节预算执行，不等于 Pi/OMP 式语义 compact；阶段目标清单、handoff、Markdown skill 加载、水面优先导航和自动搭路仍待实现。
+- 当前只读面板聚合 heartbeat、Agent 阶段、模型槽、pending、competition 任务快照、生存阶段建议及最近战斗证据；API 端点延迟、检查点写入健康度、无进展/重复输出告警与可靠性汇总仍待补。历史裁剪按请求字节预算执行，不等于 Pi/OMP 式语义 compact；阶段建议已实现，自动 handoff、Markdown skill 加载、水面优先导航和自动搭路仍待实现。
 - 测试结果注明源码基线、环境与是否本轮复核；历史全绿不能覆盖另一环境中的失败。最新结果与已知差异统一放 `docs/TESTING.md`。

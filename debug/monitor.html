@@ -19,13 +19,26 @@
 <div class="card"><h3>Agent 状态</h3><div id="run-state" class="value">等待 Agent 数据</div><div id="account" class="sub">账号 —</div></div>
 <div class="card"><h3>实际模型 · 服务返回</h3><div id="model-name" class="value">未确认</div><div id="model-route" class="sub">请求路由 —</div><div id="planner-name" class="sub">规划器 —</div></div>
 <div class="card"><h3>当前位置</h3><div id="position" class="value mono">— · — · —</div><div id="environment" class="sub">维度与昼夜信息尚未到达</div><div id="motion" class="sub">速度（格/秒） · 水平 未确认 · 垂直 未确认</div></div>
-<div class="card"><div class="stats"><div class="stat"><h3>生命</h3><div id="health" class="value">— / 20</div><div class="track"><div id="health-bar" class="fill"></div></div></div><div class="stat"><h3>饥饿值</h3><div id="food" class="value">— / 20</div><div class="track"><div id="food-bar" class="fill food"></div></div></div></div><div id="steps" class="sub">已执行 0 步</div></div>
+<div class="card"><div class="stats"><div class="stat"><h3>生命</h3><div id="health" class="value">— / 20</div><div class="track"><div id="health-bar" class="fill"></div></div></div><div class="stat"><h3>饥饿值</h3><div id="food" class="value">— / 20</div><div class="track"><div id="food-bar" class="fill food"></div></div></div></div><div id="status-observation" class="sub">游戏连接与当前生命状态未确认</div><div id="steps" class="sub">已执行 0 步</div></div>
 </section>
 <section class="summary system-summary" aria-label="系统状态">
 <div class="card"><h3>模型请求槽</h3><div id="model-slot" class="value">未确认</div><div id="model-slot-note" class="sub">等待已发布状态</div></div>
 <div class="card"><h3>游戏动作</h3><div id="game-state" class="value">未确认</div><div id="game-state-note" class="sub">busy / pending / paused 独立显示</div></div>
 <div class="card"><h3>Heartbeat 新鲜度</h3><div id="heartbeat-state" class="value">未确认</div><div class="sub">15 秒为显示阈值；时间由浏览器计算，不代表游戏成功</div></div>
 </section>
+<section id="task-panel" class="panel competition-panel hidden" aria-label="程序长任务">
+<div class="panel-head"><h2>程序长任务</h2><span id="task-status" class="pill">未确认</span></div>
+<div class="panel-body"><div class="competition-cards">
+<div class="card"><h3>高层任务</h3><div id="task-name" class="value">未确认</div><div id="task-id" class="sub">任务 ID 未确认</div></div>
+<div class="card"><h3>已发布进度</h3><div id="task-progress" class="value">未确认</div><div id="task-steps" class="sub">原子步骤 未确认</div></div>
+<div class="card"><h3>本地恢复 / 应急中断</h3><div id="task-recoveries" class="value">未确认</div><div id="task-interruptions" class="sub">未确认</div></div>
+<div class="card"><h3>升级询问 AI</h3><div id="task-escalations" class="value">未确认</div><div id="task-model-counts" class="sub">AI 规划与程序子步骤计数未确认</div></div>
+</div><div id="task-freshness" class="sub">快照新鲜度未确认</div><p id="task-reason" class="reason"></p>
+<div class="kv"><span>最近升级询问原因</span><span id="task-escalation-reason">未确认</span></div>
+<h3>当前子步骤</h3><pre id="task-current-step">未确认</pre>
+<details><summary>最近原子动作 · 最多 8 条</summary><pre id="task-recent-results">未确认</pre></details>
+<div class="sub">任务状态与计数由运行时发布；单步成功或数量达到目标不自动代表长任务完成。监控不会执行、恢复或重放动作。</div>
+<details><summary>完整长任务快照（脱敏）</summary><pre id="task-json">{}</pre></details></div></section>
 <section id="competition-panel" class="panel competition-panel hidden" aria-label="赛事得分任务">
 <div class="panel-head"><h2>赛事得分任务</h2><span id="competition-phase" class="pill">未确认</span></div>
 <div class="panel-body"><div class="competition-cards">
@@ -37,6 +50,7 @@
 <div class="task-table-wrap"><table><caption class="sub">待条件确认 / 已完成 / 待前置 / blocked 按发布字段展示；完成不由前端推断</caption><thead><tr><th scope="col">任务 / 完整规则 ID</th><th scope="col">分值 / 难度</th><th scope="col">计分资格 eligibility</th><th scope="col">可用性 availability</th><th scope="col">完成评估 assessment</th><th scope="col">完成证据 completion</th></tr></thead><tbody id="competition-tasks"></tbody></table></div>
 <details><summary>完整赛事快照（脱敏）</summary><pre id="competition-json">{}</pre></details></div></section>
 <section id="daily-panel" class="panel hidden" aria-label="日常生存任务"><div class="panel-head"><h2>日常生存任务与记忆</h2><span id="daily-phase" class="pill">待观察</span></div><div class="panel-body"><div id="memory-summary" class="sub"></div><div id="daily-tasks"></div><details><summary>任务证据与前置条件</summary><pre id="daily-json">{}</pre></details></div></section>
+<section id="survival-panel" class="panel hidden" aria-label="生存阶段与战斗证据"><div class="panel-head"><h2>生存阶段与战斗证据</h2><span id="survival-freshness" class="pill">待观察</span></div><div class="panel-body"><div id="survival-stage" class="decision">未确认</div><div id="survival-missing" class="sub"></div><div id="combat-available" class="sub"></div><p id="combat-evidence" class="result"></p><details><summary>阶段建议与最近战斗原始证据（脱敏）</summary><pre id="survival-json">{}</pre></details></div></section>
 <section class="workspace">
 <article class="panel"><div class="panel-head"><h2>模型请求与返回</h2><span id="llm-state" class="pill">等待模型事件</span></div><nav class="tabs" aria-label="模型内容"><button class="active" data-tab="content">回复内容</button><button data-tab="tools">工具调用</button><button data-tab="reasoning">附带推理信息</button><button data-tab="response">完整返回 JSON</button><button data-tab="request">完整请求 JSON</button></nav><div class="model-body"><div id="model-empty" class="empty"><strong>尚未收到模型返回</strong><span>确定性规划模式下也会展示 Agent 状态和操作。</span></div><pre id="model-content" class="hidden"></pre></div><div class="metrics"><span>耗时 <b id="latency">—</b></span><span>输入 token <b id="input-tokens">—</b></span><span>输出 token <b id="output-tokens">—</b></span><span>总 token <b id="total-tokens">—</b></span></div></article>
 <aside class="stack"><article class="panel"><div class="panel-head"><h2>当前决策</h2><span id="skill-state" class="pill">尚未执行</span></div><div class="panel-body"><div id="decision-name" class="decision">等待下一步决策</div><p id="decision-reason" class="reason">模型或规划器选定动作后将在这里显示。</p><div class="kv"><span>目标</span><span id="goal">—</span><span>执行状态</span><span id="execution">—</span></div><details><summary>查看动作参数</summary><pre id="decision-args">{}</pre></details></div></article><article class="panel"><div class="panel-head"><h2>最近执行结果</h2><span id="result-state" class="pill">暂无结果</span></div><div class="panel-body"><div id="result-message" class="result muted">操作完成或失败后将在这里显示。</div><details><summary>查看完整结果</summary><pre id="result-json">{}</pre></details></div></article></aside>
@@ -104,6 +118,28 @@ function renderFreshness() {
   txt('heartbeat-state',!Number.isFinite(parsed) ? '未确认 · 尚无有效心跳时间' : (stale ? 'stale · ' : '新鲜 · ')+ageText(stamp));
   const board=object(object(state.competition).board);
   txt('competition-freshness','快照更新：'+ageText(board.updated_at)+' · stale：'+(board.stale===true ? '是（运行时标记）' : board.stale===false ? '否（运行时标记）' : '未确认')+'；保留发布时的状态');
+  renderStatusObservation(state);
+}
+function renderStatusObservation(state) {
+  const status=object(state.status), stamp=state.status_updated_at;
+  const parsed=typeof stamp==='string' ? Date.parse(stamp) : NaN;
+  const fresh=state.status_fresh===true && Number.isFinite(parsed) && Date.now()-parsed<=15000;
+  const previous=fresh ? '' : '上次 ';
+  txt('position', Array.isArray(status.pos) ? previous+status.pos.map(v => Number(v).toFixed(1)).join(' · ') : '— · — · —');
+  const weather=status.thundering===true ? '雷暴' : status.raining===true ? '下雨' : status.raining===false ? '无降雨' : '天气未知';
+  txt('environment',previous+(status.dimension || '维度未知')+' · '+(typeof status.is_day==='boolean' ? status.is_day ? '白天' : '夜间' : '昼夜未知')+' · '+weather);
+  const horizontal=Number.isFinite(status.speed) && status.speed>=0 ? status.speed.toFixed(2) : '未确认';
+  const vertical=Array.isArray(status.velocity) && status.velocity.length===3 && status.velocity.every(Number.isFinite) ? status.velocity[1].toFixed(2) : '未确认';
+  txt('motion',previous+'速度（格/秒） · 水平 '+horizontal+' · 垂直 '+vertical);
+  ['health','food'].forEach(key => {
+    const v=status[key]; txt(key,(Number.isFinite(v) ? previous+v : '—')+' / 20');
+    $(key+'-bar').style.width=(Number.isFinite(v) ? Math.max(0,Math.min(100,v*5)) : 0)+'%';
+    $(key+'-bar').style.opacity=fresh ? '1' : '.35';
+  });
+  const connection=state.status_connection==='unavailable' ? '游戏连接不可用' : fresh ? '游戏连接可用' : '游戏连接未确认';
+  const alive=fresh ? (status.alive===true ? '当前存活：是' : status.alive===false ? '当前存活：否' : '当前生命状态未确认') : '当前生命状态未确认';
+  const error=object(state.status_error);
+  txt('status-observation',connection+' · '+(fresh ? '状态观察 ' : '旧观察 ')+ageText(stamp)+' · '+alive+(error.code ? ' · 原因：'+display(error.code) : ''));
 }
 function renderSystem(state) {
   const run=object(state.run), llm=object(state.llm);
@@ -114,7 +150,7 @@ function renderSystem(state) {
   const flag=value => value===true ? '是' : value===false ? '否' : '未确认';
   txt('game-state','busy '+flag(busy)+' · paused '+flag(state.has_data ? run.paused : null));
   const pending=Object.prototype.hasOwnProperty.call(run,'pending') && run.pending===null ? '无待核验意图' : run.pending == null ? '未确认' : typeof run.pending==='boolean' ? flag(run.pending) : display(run.pending);
-  txt('game-state-note','pending '+pending+' · 后端 busy '+display(object(state.status).busy)+' · '+(run.pause_reason ? '暂停原因：'+display(run.pause_reason) : '暂停原因未发布')+'；pending 结果须核验，监控不重放动作');
+  txt('game-state-note','pending '+pending+' · '+(state.status_fresh===true ? '' : '上次 ')+'后端 busy '+display(object(state.status).busy)+' · '+(run.pause_reason ? '暂停原因：'+display(run.pause_reason) : '暂停原因未发布')+'；pending 结果须核验，监控不重放动作');
 }
 function renderCompetition(state) {
   const competition=object(state.competition), board=object(competition.board);
@@ -143,10 +179,50 @@ function renderCompetition(state) {
   $('competition-tasks').replaceChildren(rows);
   txt('competition-json',pretty(board));
 }
+function renderSurvival(state) {
+  const plan=object(state.playbook), combat=object(state.combat), entry=object(state.combat_result);
+  $('survival-panel').classList.toggle('hidden',!state.playbook && !state.combat && !state.combat_result);
+  const stages={opening:'初期工具与食物',iron_defense:'铁器与防御',home_farm:'住所、床与生产点',maintenance:'日常维护',nether_preparation:'下界准备',nether_portal:'下界入口',nether_resources:'下界资源',stronghold:'要塞定位',end_preparation:'末地准备',dragon:'末影龙阶段',post_dragon:'击龙后阶段',recovery:'死亡或未知结果恢复',safety:'本地安全处理'};
+  badge('survival-freshness',plan.fresh===false ? '旧阶段建议 · 待完整观察' : plan.fresh===true ? '完整观察时生成' : '新鲜度未确认',plan.fresh===false ? 'warn' : '');
+  txt('survival-stage',(stages[plan.stage] || display(plan.stage))+' · '+display(plan.state)+' · '+display(plan.goal));
+  txt('survival-missing','缺少前置：'+display(plan.missing)+'；尚未绑定：'+display(plan.unsupported)+'；建议不代表阶段已完成');
+  txt('combat-available','本轮战斗候选：'+display(combat.mode)+' · allowed '+display(combat.allowed)+' · '+display(combat.reason)+'；候选仍须技能复核');
+  const result=object(entry.result), evidence=object(result.data);
+  const labels={attack_sent:'已发攻击',damage_verified:'伤害已确认',killed:'击杀已确认',completed:'动作目标已完成',shield_commanded:'已发举盾',source_recovered:'岩浆源已回收',lava_outstanding:'岩浆尚待回收',retreat_required:'需要撤退'};
+  const flags=Object.entries(labels).map(([key,label])=>label+'：'+(evidence[key]===true ? '是' : evidence[key]===false ? '否' : '未确认'));
+  txt('combat-evidence',entry.skill ? display(entry.skill)+' · '+ageText(entry.updated_at)+'\n'+flags.join(' · ')+'\n'+display(result.error_code)+' · '+display(result.message)+'；单步成功不等于击杀，旧结果不代表当前状态' : '尚无狩猎、战斗或桶类执行结果');
+  txt('survival-json',pretty({playbook:state.playbook,combat:state.combat,last_result:state.combat_result}));
+}
+const taskStatusLabels={idle:'空闲',running:'执行中',suspended:'应急中断 / 已挂起',completed:'已完成（运行时发布）',needs_ai:'需要 AI 决策',unknown:'执行结果未知',cancelled:'已取消'};
+const longTaskLabels={gather:'采集材料',craft:'制作物品',smelt:'熔炼物品',food:'获取食物',starter_tools:'基础工具',iron_tools:'铁器升级',shelter:'住所',bed:'床与睡眠',storage:'储物',farm:'农作',recover_drops:'死亡掉落恢复',maintenance:'持续维护'};
+const taskCount=value=>typeof value==='number' && Number.isFinite(value) && value>=0 ? String(value) : '未确认';
+function renderTask(state) {
+  const task=object(state.task_execution), progress=object(task.progress);
+  $('task-panel').classList.toggle('hidden',state.task_execution==null);
+  const status=Object.prototype.hasOwnProperty.call(task,'status') ? task.status : task.state;
+  badge('task-status',taskStatusLabels[status] || display(status),status==='unknown' ? 'bad' : ['suspended','needs_ai'].includes(status) ? 'warn' : status==='completed' && task.fresh===true ? 'good' : '');
+  txt('task-name',longTaskLabels[task.task] || display(task.task));
+  txt('task-id','任务 ID：'+display(task.task_id));
+  txt('task-progress',taskCount(progress.current)+' / '+taskCount(progress.target)+' · '+display(progress.unit));
+  txt('task-steps','已执行原子步骤：'+taskCount(task.steps)+' / '+taskCount(task.max_steps));
+  txt('task-recoveries','本地恢复：'+taskCount(task.local_recoveries));
+  txt('task-interruptions','应急中断：'+taskCount(task.emergency_interruptions));
+  txt('task-escalations','累计：'+taskCount(task.ai_escalations));
+  txt('task-model-counts','AI规划轮次：'+taskCount(task.model_planning_rounds)+' · 程序子步骤：'+taskCount(task.model_calls_avoided)+'（同检查点累计；规划轮次不等于 HTTP 请求数）');
+  txt('task-freshness',(task.fresh===false ? '旧快照 · 待运行时复核' : task.fresh===true ? '新鲜度：运行时标记为新鲜' : '新鲜度未确认')+' · 更新：'+ageText(task.updated_at));
+  txt('task-reason','当前原因：'+display(task.reason));
+  txt('task-escalation-reason',display(task.last_escalation_reason));
+  txt('task-current-step',display(task.current_step));
+  const recent=Array.isArray(task.recent_results) ? task.recent_results.slice(-8) : null;
+  txt('task-recent-results',recent && recent.length ? pretty(recent) : recent ? '已发布空列表；尚无最近动作证据' : '未确认');
+  txt('task-json',pretty(task));
+}
 function renderState(state) {
   currentState=state;
   renderSystem(state);
   renderCompetition(state);
+  renderSurvival(state);
+  renderTask(state);
   renderFreshness();
   const run=state.run || {}, status=state.status || {}, llm=state.llm || {};
   const phase=phaseNames[run.phase] || run.phase;
@@ -155,13 +231,6 @@ function renderState(state) {
   txt('model-name', llm.actual_model || '未确认');
   txt('model-route', '请求路由 '+(llm.request_model || run.model || '—'));
   txt('planner-name', '规划器 '+(run.planner || '—'));
-  txt('position', Array.isArray(status.pos) ? status.pos.map(v => Number(v).toFixed(1)).join(' · ') : '— · — · —');
-  const weather=status.thundering ? '雷暴' : status.raining ? '下雨' : '无降雨';
-  txt('environment', (status.dimension || '维度未知')+' · '+(typeof status.is_day==='boolean' ? status.is_day ? '白天' : '夜间' : '昼夜未知')+' · '+weather);
-  const horizontal=Number.isFinite(status.speed) && status.speed>=0 ? status.speed.toFixed(2) : '未确认';
-  const vertical=Array.isArray(status.velocity) && status.velocity.length===3 && status.velocity.every(Number.isFinite) ? status.velocity[1].toFixed(2) : '未确认';
-  txt('motion','速度（格/秒） · 水平 '+horizontal+' · 垂直 '+vertical);
-  ['health','food'].forEach(key => { const v=status[key]; txt(key,(Number.isFinite(v) ? v : '—')+' / 20'); $(key+'-bar').style.width=(Number.isFinite(v) ? Math.max(0,Math.min(100,v*5)) : 0)+'%'; });
   txt('steps','已执行 '+(run.steps || 0)+' 步');
   $('paused-banner').classList.toggle('hidden',!run.paused);
   txt('paused-banner','自动运行已暂停'+(run.pause_reason ? ' · 原因：'+run.pause_reason : '')+(run.objective==='competition' ? '。查看 pending 与最近结果；监控不提供恢复操作。' : '。监控仍在更新；游戏内使用 #resume 恢复。'));
@@ -199,7 +268,7 @@ function renderState(state) {
   renderModel();
 }
 function isModel(event) { return /^(LLM_|MODEL_)/.test(String(event.event)); }
-function isAction(event) { return /DECISION|STEP_RESULT|SLEEP_|ACTION|SKILL/.test(String(event.event)); }
+function isAction(event) { return /DECISION|STEP_RESULT|SLEEP_|ACTION|SKILL|^TASK_/.test(String(event.event)); }
 function matches(event) {
   const kind=$('filter').value;
   if (kind==='model' && !isModel(event)) return false;
@@ -214,7 +283,9 @@ function describe(event) {
   if (event.event==='DECISION') return ((d.decision || {}).name || '决策')+' · '+((d.decision || {}).reason || '');
   if (event.event==='STEP_RESULT') return ((d.result || {}).success ? '成功 · ' : '失败 · ')+((d.result || {}).message || '');
   if (event.event==='HEARTBEAT') return '状态更新 · '+(d.paused ? '已暂停' : d.busy ? '执行中' : '等待下一步')+' · 步数 '+(d.steps || 0);
+  if (['HEARTBEAT_FAILED','IDLE_STATUS_UNAVAILABLE'].includes(event.event)) return '游戏状态读取失败 · '+display(d.code)+' · 保留旧观察，当前生命状态未确认';
   if (event.event==='COMPETITION_TASKS') return '赛事任务快照 · '+display(object(d.board).phase);
+  if (/^TASK_/.test(String(event.event))) { const task=object(d.task_execution); return '程序长任务 · '+display(task.task)+' · '+display(task.status == null ? task.state : task.status)+' · '+display(task.reason); }
   if (event.event==='AGENT_PHASE') return phaseNames[d.phase] || String(d.phase || '阶段更新');
   if (event.event==='LLM_REQUEST') return '请求模型 '+(d.model || '')+' · 展开查看完整请求';
   if (event.event==='LLM_RESPONSE') return '模型已返回 · 展开查看完整内容与工具调用';
@@ -264,9 +335,9 @@ async function poll() {
     events=events.concat(incoming).slice(-500); cursor=batch.last_seq; dropped=batch.dropped || 0;
     if(incoming.length || batch.reset) renderTimeline();
     renderState(state); lastGood=Date.now();
-    $('connection').className='pill good'; txt('connection-text','已连接');
+    $('connection').className='pill good'; txt('connection-text','监控已连接');
     const age=state.updated_at ? Math.max(0,Math.floor((Date.now()-Date.parse(state.updated_at))/1000)) : null;
-    txt('updated',!state.has_data ? '监控已连接，等待 Agent 发布数据' : 'Agent 数据更新于 '+(age < 2 ? '刚刚' : age+' 秒前'));
+    txt('updated',!state.has_data ? '监控已连接，等待 Agent 发布数据' : 'Agent 事件更新于 '+(age < 2 ? '刚刚' : age+' 秒前'));
   } catch(error) {
     $('connection').className='pill bad'; txt('connection-text','连接中断 · 重试中');
     txt('updated',lastGood ? '保留最后一次收到的数据，尚未重新连接' : '请确认本机监控服务已启动');

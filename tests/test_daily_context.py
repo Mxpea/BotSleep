@@ -9,7 +9,7 @@ from test_llm_planner import Brain, observation
 
 class DailyContextTests(unittest.TestCase):
     def test_dawn_can_release_a_dusk_safety_rejection_without_erasing_path_failure(self):
-        planner = LLMSurvivalPlanner({"enabled": True, "model": "offline"}, {"objective": "daily"}, brain=Brain())
+        planner = LLMSurvivalPlanner({"enabled": True, "model": "offline"}, {"objective": "daily", "autonomy": {"enabled": False}}, brain=Brain())
         decision = Decision("gather_block", {"pos": [3, 64, 0], "expected_name": "oak_log"}, "Gather", "wood")
         dusk = observation(time_of_day=11500)
         failure = {"decision": decision, "state": planner._failure_state(dusk, decision), "code": "safety_changed"}
@@ -19,7 +19,7 @@ class DailyContextTests(unittest.TestCase):
         self.assertTrue(planner._unchanged_failure(failure, observation(time_of_day=1000), decision))
 
     def test_nested_route_and_crop_coordinates_survive_compaction(self):
-        planner = LLMSurvivalPlanner({"enabled": True, "model": "offline"}, {"objective": "daily"}, brain=Brain())
+        planner = LLMSurvivalPlanner({"enabled": True, "model": "offline"}, {"objective": "daily", "autonomy": {"enabled": False}}, brain=Brain())
         obs = observation(time_of_day=10900)
         path = [[0, 64, -2], [0, 64, -1], [0, 64, 0]]
         crop = {"pos": [2, 64, 1], "farmland_pos": [2, 63, 1], "name": "carrots"}
