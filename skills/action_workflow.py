@@ -7,6 +7,7 @@ BotSleep's safety cancellation and uncertain-write stop-loss contracts.
 """
 
 from dataclasses import dataclass, field
+import inspect
 import math
 import threading
 import time
@@ -92,17 +93,43 @@ class WorkflowGuard:
         timeout_seconds: float = 180.0,
         max_reads: int = 1200,
         allow_damage: bool = False,
+        damage_tolerance: float = 0.0,
+        critical_health: float = 6.0,
     ):
         self.client = client
         self.cancel_event = cancel_event
         self.deadline = time.monotonic() + max(1.0, float(timeout_seconds))
         self.max_reads = max(10, int(max_reads))
         self.allow_damage = allow_damage
+        self.damage_tolerance = max(0.0, float(damage_tolerance))
+        self.critical_health = max(0.0, float(critical_health))
         self.read_calls = 0
         self.writes = 0
         self.life_marker: Optional[Tuple[Any, Any]] = None
         self.initial_health: Optional[float] = None
+        self.last_health: Optional[float] = None
         self.sneaking = False
+        self.jumping = False
+
+    @property
+    def move_stop_on(self) -> Optional[List[str]]:
+        """Override mc-agent-api default ['hurt', 'death'] when minor chip damage is tolerated."""
+        if self.allow_damage or self.damage_tolerance > 0:
+            return ["death"]
+        return None
+
+    def optional_stop_on_kwargs(self, fn: Any) -> Dict[str, Any]:
+        """Return {'stop_on': [...]} only if fn accepts stop_on and guard tolerates chip damage."""
+        stop_on = self.move_stop_on
+        if stop_on is None:
+            return {}
+        try:
+            sig = inspect.signature(fn)
+            if "stop_on" in sig.parameters or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+                return {"stop_on": list(stop_on)}
+        except (TypeError, ValueError):
+            pass
+        return {}
 
     def check_budget(self) -> None:
         if self.cancel_event is not None and self.cancel_event.is_set():
@@ -211,9 +238,27 @@ class WorkflowGuard:
 
         health = status.get("health")
         if isinstance(health, (int, float)) and not isinstance(health, bool) and math.isfinite(health):
+            cur_health = float(health)
+            self.last_health = cur_health
             if self.initial_health is None:
-                self.initial_health = float(health)
-            elif not self.allow_damage and float(health) < self.initial_health:
+                self.initial_health = cur_health
+            elif self.allow_damage:
+                if cur_health <= self.critical_health:
+                    raise WorkflowStepError(
+                        "damage_taken",
+                        f"Health dropped critically to {health} <= {self.critical_health}",
+                        blocker_type="safety_interrupted",
+                        suggested_recovery="retreat_and_heal",
+                    )
+            elif self.damage_tolerance > 0:
+                if cur_health <= self.critical_health or (self.initial_health - cur_health) > self.damage_tolerance:
+                    raise WorkflowStepError(
+                        "damage_taken",
+                        f"Health dropped from {self.initial_health} to {health}",
+                        blocker_type="safety_interrupted",
+                        suggested_recovery="retreat_and_heal",
+                    )
+            elif cur_health < self.initial_health:
                 raise WorkflowStepError(
                     "damage_taken",
                     f"Health dropped from {self.initial_health} to {health}",
@@ -234,18 +279,25 @@ class WorkflowGuard:
     def set_sneak(self, enabled: bool) -> None:
         if self.sneaking == enabled:
             return
-        self.write(self.client.posture, sneak=enabled)
+        self.write(self.client.posture, sneak=enabled, jump=self.jumping)
         self.sneaking = enabled
 
+    def set_jump(self, enabled: bool) -> None:
+        if self.jumping == enabled:
+            return
+        self.write(self.client.posture, sneak=self.sneaking, jump=enabled)
+        self.jumping = enabled
+
     def restore_posture(self) -> None:
-        if not self.sneaking:
+        if not self.sneaking and not self.jumping:
             return
         try:
-            self.client.posture(sneak=False)
+            self.client.posture(sneak=False, jump=False)
         except Exception:
             pass
         finally:
             self.sneaking = False
+            self.jumping = False
 
 
 @dataclass
@@ -394,12 +446,14 @@ def stand_at(
         return {"skipped": True, "pos": pos, "target": world_target, "dist": round(cur_dist, 3)}
 
     init_range = round(max(0.0, min(float(range_param), float(eff_tol)) - 0.5), 3)
+    stop_kw = ctx.guard.optional_stop_on_kwargs(ctx.guard.client.move_to)
     ctx.guard.write(
         ctx.guard.client.move_to,
         world_target[0],
         world_target[1],
         world_target[2],
         range=init_range,
+        **stop_kw,
     )
     after = ctx.guard.check_status(require_safe=True)
     after_pos = parse_pos(after.get("pos")) or pos
@@ -414,6 +468,7 @@ def stand_at(
                 world_target[1],
                 world_target[2],
                 range=0.0,
+                **stop_kw,
             )
             after = ctx.guard.check_status(require_safe=True)
             after_pos = parse_pos(after.get("pos")) or after_pos
@@ -428,6 +483,23 @@ def stand_at(
             suggested_recovery=f"clear_path_or_reposition_near {world_target}",
         )
     return {"skipped": False, "pos": after_pos, "target": world_target, "dist": round(after_dist, 3)}
+
+
+def stand_cell(
+    ctx: WorkflowContext,
+    cell_pos: Sequence[int],
+    *,
+    tolerance: float = 0.85,
+    range_param: float = 0.25,
+) -> Dict[str, Any]:
+    """Stand on the center (+0.5 XZ) of an integer world block coordinate."""
+    return stand_at(
+        ctx,
+        [int(cell_pos[0]) + 0.5, float(int(cell_pos[1])), int(cell_pos[2]) + 0.5],
+        relative=False,
+        tolerance=tolerance,
+        range_param=range_param,
+    )
 
 
 def aim_at(ctx: WorkflowContext, rel_pos: Sequence[float], *, relative: bool = True) -> Dict[str, Any]:
@@ -476,7 +548,8 @@ def place_block(
     try:
         if sneak:
             ctx.guard.set_sneak(True)
-        ctx.guard.write(ctx.guard.client.place_block, item=chosen, x=world[0], y=world[1], z=world[2])
+        stop_kw = ctx.guard.optional_stop_on_kwargs(ctx.guard.client.place_block)
+        ctx.guard.write(ctx.guard.client.place_block, item=chosen, x=world[0], y=world[1], z=world[2], **stop_kw)
     finally:
         if sneak:
             ctx.guard.restore_posture()
@@ -499,6 +572,47 @@ def place_block(
             suggested_recovery=f"reposition_and_retry_place_at {world}",
         )
     return {"skipped": False, "world_pos": world, "item": chosen, "block": after}
+
+
+def place_torch(
+    ctx: WorkflowContext,
+    rel_pos: Sequence[int],
+    *,
+    relative: bool = True,
+    verify_timeout: float = 1.5,
+) -> Dict[str, Any]:
+    """Place a torch at rel_pos and accept either standing torch or wall_torch on verification."""
+    torch_names = ("torch", "wall_torch")
+    world = [int(v) for v in (ctx.world_pos(rel_pos, integer=True) if relative else rel_pos)]
+    current = str(ctx.read_block(world).get("name") or "air")
+    if current in torch_names:
+        return {"skipped": True, "world_pos": world, "block": current}
+    if ctx.select_item(["torch"]) is None:
+        raise WorkflowStepError(
+            "missing_torch",
+            "Inventory lacks 'torch' to light tunnel or cave.",
+            blocker_type="missing_item",
+            suggested_recovery="craft_or_collect_torch",
+        )
+    ctx.guard.write(ctx.guard.client.place_block, item="torch", x=world[0], y=world[1], z=world[2])
+    verified = wait_until(
+        ctx,
+        lambda c: str(c.read_block(world).get("name") or "air") in torch_names,
+        timeout_seconds=verify_timeout,
+        poll_seconds=0.2,
+        description=f"place torch at {world}",
+    )
+    after = str(ctx.read_block(world).get("name") or "air")
+    if not verified:
+        raise WorkflowStepError(
+            "place_failed",
+            f"Placed torch at {world}, but observed {after}",
+            blocker_type="verification_failed",
+            blocker_pos=world,
+            blocker_block=after,
+            suggested_recovery=f"reposition_and_retry_torch_at {world}",
+        )
+    return {"skipped": False, "world_pos": world, "item": "torch", "block": after}
 
 
 def dig_block(
@@ -562,6 +676,352 @@ def dig_block(
             suggested_recovery=f"verify_pickaxe_and_reach_for {world}",
         )
     return {"skipped": False, "world_pos": world, "dug": current, "after": after}
+
+
+def pillar_up(
+    ctx: WorkflowContext,
+    steps: int = 1,
+    *,
+    blocks: Iterable[str] = SCAFFOLD_BLOCKS,
+    allow_dig_headroom: bool = True,
+    max_attempts_per_step: int = 4,
+) -> Dict[str, Any]:
+    """Jump-pillar vertically in place using posture(jump=True) + verified place_block.
+
+    Safely validates overhead headroom before rising, keeps jump posture strictly reset
+    via finally, and returns the exact world coordinates placed so callers can pillar_down.
+    """
+    n_steps = max(0, int(steps))
+    if n_steps == 0:
+        return {"placed": 0, "dug_headroom": 0, "placed_cells": []}
+    if n_steps > 8:
+        raise WorkflowStepError(
+            "pillar_too_high",
+            f"Refusing unbounded pillar height {n_steps} > 8",
+            blocker_type="safety_interrupted",
+        )
+
+    allowed_blocks = tuple(blocks)
+    placed_cells: List[List[int]] = []
+    dug_headroom = 0
+
+    for _ in range(n_steps):
+        st = ctx.guard.check_status(require_safe=True)
+        bp = parse_pos(st.get("pos"))
+        if bp is None:
+            raise WorkflowStepError("invalid_state", "Bot position unavailable before pillar_up")
+        cx, cy, cz = math.floor(bp[0] + 0.0001), math.floor(bp[1] + 0.0001), math.floor(bp[2] + 0.0001)
+
+        # Ensure overhead headroom at cy+2 is hazard-free (dig solid obstacle if allowed)
+        head2 = (cx, cy + 2, cz)
+        head2_blk = ctx.read_block(head2)
+        head2_name = str(head2_blk.get("name") or "air")
+        if head2_name in HAZARDS:
+            raise WorkflowStepError(
+                "hazard_detected",
+                f"Liquid/hazard {head2_name} directly overhead at {list(head2)}",
+                blocker_type="safety_interrupted",
+                blocker_pos=list(head2),
+                blocker_block=head2_name,
+            )
+        if head2_name not in DEFAULT_REPLACEABLE:
+            if not allow_dig_headroom:
+                raise WorkflowStepError(
+                    "pillar_headroom_blocked",
+                    f"Blocked overhead by {head2_name} at {list(head2)}",
+                    blocker_type="obstructed",
+                    blocker_pos=list(head2),
+                    blocker_block=head2_name,
+                )
+            above_top = str(ctx.read_block((cx, cy + 3, cz)).get("name") or "air")
+            if above_top in HAZARDS:
+                raise WorkflowStepError(
+                    "hazard_detected",
+                    f"Hazard {above_top} above ceiling at {[cx, cy + 3, cz]}",
+                    blocker_type="safety_interrupted",
+                    blocker_pos=[cx, cy + 3, cz],
+                )
+            dig_block(ctx, head2, relative=False, allowed_blocks=CAVE_DIGGABLE_BLOCKS, collect=False)
+            dug_headroom += 1
+
+        chosen = ctx.select_item(allowed_blocks)
+        if chosen is None:
+            raise WorkflowStepError(
+                "missing_building_block",
+                f"Inventory lacks scaffold block for pillar_up ({list(allowed_blocks)[:4]})",
+                blocker_type="missing_item",
+            )
+
+        stand_cell(ctx, (cx, cy, cz), tolerance=0.45)
+        ctx.guard.write(ctx.guard.client.equip, item=chosen, slot="hand")
+        ctx.guard.write(ctx.guard.client.look_at, cx + 0.5, cy - 0.5, cz + 0.5)
+
+        step_placed = False
+        last_exc: Optional[WorkflowStepError] = None
+        stop_kw = ctx.guard.optional_stop_on_kwargs(ctx.guard.client.place_block)
+        ctx.guard.set_jump(True)
+        try:
+            for _attempt in range(max(1, int(max_attempts_per_step))):
+                try:
+                    ctx.guard.write(ctx.guard.client.place_block, item=chosen, x=cx, y=cy, z=cz, **stop_kw)
+                    step_placed = True
+                    break
+                except WorkflowStepError as exc:
+                    last_exc = exc
+                    if exc.code not in {"blocked_by_self", "place_failed", "occupied"}:
+                        raise
+                    time.sleep(0.12)
+        finally:
+            ctx.guard.set_jump(False)
+
+        if not step_placed:
+            raise last_exc or WorkflowStepError("pillar_failed", f"Failed placing pillar block at {[cx, cy, cz]}")
+
+        verified = wait_until(
+            ctx,
+            lambda c: str(c.read_block((cx, cy, cz)).get("name") or "air") not in DEFAULT_REPLACEABLE,
+            timeout_seconds=1.5,
+            poll_seconds=0.15,
+            description=f"pillar block at {[cx, cy, cz]}",
+        )
+        if not verified:
+            raise WorkflowStepError("place_failed", f"Pillar placement at {[cx, cy, cz]} not verified", blocker_pos=[cx, cy, cz])
+
+        # Wait briefly to settle cleanly on top of the placed block
+        settled = wait_until(
+            ctx,
+            lambda c: (parse_pos(c.guard.check_status(require_safe=True).get("pos")) or [0, 0, 0])[1] >= cy + 0.85,
+            timeout_seconds=1.2,
+            poll_seconds=0.12,
+            description=f"settle atop pillar {[cx, cy + 1, cz]}",
+        )
+        if not settled:
+            stand_cell(ctx, (cx, cy + 1, cz), tolerance=0.75)
+        placed_cells.append([cx, cy, cz])
+
+    return {"placed": len(placed_cells), "dug_headroom": dug_headroom, "placed_cells": placed_cells}
+
+
+def pillar_down(
+    ctx: WorkflowContext,
+    pillar_cells: Sequence[Sequence[int]],
+    *,
+    allowed_blocks: Optional[Iterable[str]] = None,
+) -> int:
+    """Safely descend by breaking own pillar blocks top-down after checking solid non-liquid landing."""
+    dug = 0
+    for cell in reversed(list(pillar_cells)):
+        cx, cy, cz = int(cell[0]), int(cell[1]), int(cell[2])
+        stand_cell(ctx, (cx, cy + 1, cz), tolerance=0.65)
+        landing_safe = False
+        first_below_name = str(ctx.read_block((cx, cy - 1, cz)).get("name") or "unknown")
+        for depth in (1, 2):
+            b = ctx.read_block((cx, cy - depth, cz))
+            bn = str(b.get("name") or "unknown")
+            if bn in HAZARDS:
+                break
+            if bn not in DEFAULT_REPLACEABLE:
+                landing_safe = True
+                break
+        if not landing_safe:
+            raise WorkflowStepError(
+                "unsafe_pillar_descent",
+                f"Refusing to break pillar block at {[cx, cy, cz]}: unsafe below ({first_below_name})",
+                blocker_type="safety_interrupted",
+                blocker_pos=[cx, cy - 1, cz],
+                blocker_block=first_below_name,
+            )
+        # Step temporarily or break directly via client.dig (dig_block guards feet_floor == world, so use guarded dig)
+        cur_name = str(ctx.read_block((cx, cy, cz)).get("name") or "air")
+        if cur_name in AIR:
+            continue
+        if allowed_blocks is not None and cur_name not in set(allowed_blocks):
+            continue
+        pickaxe = ctx.select_item(PICKAXE_PRIORITY)
+        if pickaxe is not None:
+            ctx.guard.write(ctx.guard.client.equip, item=pickaxe, slot="hand")
+        ctx.guard.write(ctx.guard.client.dig, cx, cy, cz, collect=False, stop_on=["death"])
+        wait_until(
+            ctx,
+            lambda c: str(c.read_block((cx, cy, cz)).get("name") or "air") in AIR,
+            timeout_seconds=1.5,
+            poll_seconds=0.15,
+            description=f"pillar_down at {[cx, cy, cz]}",
+        )
+        wait_until(
+            ctx,
+            lambda c: abs(((parse_pos(c.guard.check_status(require_safe=True).get("pos")) or [0, 0, 0])[1]) - float(cy)) <= 0.35,
+            timeout_seconds=1.0,
+            poll_seconds=0.12,
+            description=f"land on {[cx, cy, cz]}",
+        )
+        dug += 1
+    return dug
+
+
+def scaffold_drop(
+    ctx: WorkflowContext,
+    target_cell: Sequence[int],
+    step_cells: Sequence[Sequence[int]] = (),
+    *,
+    blocks: Iterable[str] = SCAFFOLD_BLOCKS,
+    invalidate: Optional[Callable[[Sequence[int]], None]] = None,
+) -> Dict[str, Any]:
+    """Place cushioning/stepping blocks on descent so each vertical fall is <= 3 blocks (zero fall damage)."""
+    tx, ty, tz = int(target_cell[0]), int(target_cell[1]), int(target_cell[2])
+    placed: List[List[int]] = []
+    allowed = tuple(blocks)
+    replaceable = set(AIR) | set(DEFAULT_REPLACEABLE)
+    for sc in step_cells:
+        sx, sy, sz = int(sc[0]), int(sc[1]), int(sc[2])
+        cur = str(ctx.read_block((sx, sy, sz)).get("name") or "air")
+        if cur in replaceable and ctx.select_item(allowed) is not None:
+            try:
+                res = place_block(ctx, allowed, (sx, sy, sz), relative=False, replaceable=replaceable)
+                if invalidate is not None:
+                    invalidate((sx, sy, sz))
+                if not res.get("skipped"):
+                    placed.append([sx, sy, sz])
+                stand_cell(ctx, (sx, sy + 1, sz), tolerance=0.9)
+                continue
+            except WorkflowStepError:
+                pass
+        # If step block could not be placed/stepped on, continue carefully to target landing
+    stand_cell(ctx, (tx, ty, tz), tolerance=0.9)
+    return {"placed_steps": placed, "landed": [tx, ty, tz]}
+
+
+def escape_to_surface(
+    ctx: WorkflowContext,
+    *,
+    max_ascend: int = 48,
+    blocks: Iterable[str] = SCAFFOLD_BLOCKS,
+    invalidate: Optional[Callable[[Sequence[int]], None]] = None,
+) -> Dict[str, Any]:
+    """Emergency pillar-and-dig upward shaft out of a trapped underground cave to open surface sky."""
+    ascended = 0
+    allowed_dig = set(CAVE_DIGGABLE_BLOCKS) | {"grass_block", "dirt", "coarse_dirt", "sand", "red_sand", "gravel", "oak_leaves", "birch_leaves", "spruce_leaves"}
+    replaceable = set(AIR) | set(DEFAULT_REPLACEABLE)
+
+    def _col_open_sky(col_x: int, base_y: int, col_z: int) -> bool:
+        for dy in range(1, 22):
+            bn = str(ctx.read_block((col_x, base_y + dy, col_z)).get("name") or "air")
+            if bn not in replaceable:
+                return False
+        return True
+
+    def _is_on_surface(cx: int, cy: int, cz: int) -> bool:
+        if not _col_open_sky(cx, cy, cz):
+            return False
+        # Confirm we have climbed out of any pit/shaft: at least 2 adjacent horizontal columns also open to sky
+        open_sides = 0
+        for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            if _col_open_sky(cx + dx, cy, cz + dz):
+                open_sides += 1
+        return open_sides >= 2
+
+    for _ in range(max(1, int(max_ascend))):
+        st = ctx.guard.check_status(require_safe=True)
+        bp = parse_pos(st.get("pos"))
+        if bp is None:
+            break
+        cx, cy, cz = math.floor(bp[0] + 0.0001), math.floor(bp[1] + 0.0001), math.floor(bp[2] + 0.0001)
+        if _is_on_surface(cx, cy, cz):
+            return {"escaped": True, "ascended": ascended, "pos": [cx, cy, cz]}
+
+        # If an adjacent walkable column already opens straight upward (natural chimney or previous shaft), step to it
+        moved_chimney = False
+        for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            nx, nz = cx + dx, cz + dz
+            for dy in (0, 1, -1):
+                ny = cy + dy
+                fl = str(ctx.read_block((nx, ny - 1, nz)).get("name") or "air")
+                f1 = str(ctx.read_block((nx, ny, nz)).get("name") or "air")
+                f2 = str(ctx.read_block((nx, ny + 1, nz)).get("name") or "air")
+                if fl in (replaceable | set(HAZARDS)) or f1 not in replaceable or f2 not in replaceable:
+                    continue
+                if all(str(ctx.read_block((nx, ny + ky, nz)).get("name") or "air") in replaceable for ky in range(2, 6)):
+                    # Prefer only if current column has solid ceiling at cy+2..cy+4
+                    if any(str(ctx.read_block((cx, cy + ky, cz)).get("name") or "air") not in replaceable for ky in (2, 3, 4)):
+                        try:
+                            stand_cell(ctx, (nx, ny, nz), tolerance=0.85)
+                            moved_chimney = True
+                            break
+                        except WorkflowStepError:
+                            pass
+            if moved_chimney:
+                break
+        if moved_chimney:
+            continue
+
+        # Check overhead block (cy+2) and above-ceiling liquid hazard (cy+3)
+        head2 = (cx, cy + 2, cz)
+        above_top_name = str(ctx.read_block((cx, cy + 3, cz)).get("name") or "air")
+        head2_name = str(ctx.read_block(head2).get("name") or "air")
+        if head2_name in HAZARDS or above_top_name in HAZARDS or (head2_name not in replaceable and head2_name not in allowed_dig):
+            # Shift sideways onto an adjacent walkable tile with clear ceiling
+            shifted = False
+            for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                nx, nz = cx + dx, cz + dz
+                for dy in (0, 1, -1):
+                    ny = cy + dy
+                    fl = str(ctx.read_block((nx, ny - 1, nz)).get("name") or "air")
+                    f1 = str(ctx.read_block((nx, ny, nz)).get("name") or "air")
+                    f2 = str(ctx.read_block((nx, ny + 1, nz)).get("name") or "air")
+                    top3 = str(ctx.read_block((nx, ny + 3, nz)).get("name") or "air")
+                    if fl not in (replaceable | set(HAZARDS)) and f1 in replaceable and f2 in replaceable and top3 not in HAZARDS:
+                        try:
+                            stand_cell(ctx, (nx, ny, nz), tolerance=0.85)
+                            shifted = True
+                            break
+                        except WorkflowStepError:
+                            pass
+                if shifted:
+                    break
+            if not shifted:
+                break
+            continue
+
+        if head2_name not in replaceable:
+            dig_block(ctx, head2, relative=False, allowed_blocks=allowed_dig, collect=True)
+            if invalidate is not None:
+                invalidate(head2)
+            # Wait briefly if sand/gravel might fall above
+            if head2_name in {"sand", "red_sand", "gravel"}:
+                time.sleep(0.35)
+                continue
+
+        # Ensure we have a scaffold block (dig side wall with collect=True if out of blocks)
+        if ctx.select_item(blocks) is None:
+            mined_extra = False
+            for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                for sy in (cy + 1, cy):
+                    wpos = (cx + dx, sy, cz + dz)
+                    wname = str(ctx.read_block(wpos).get("name") or "air")
+                    if wname in allowed_dig:
+                        above_w = str(ctx.read_block((wpos[0], wpos[1] + 1, wpos[2])).get("name") or "air")
+                        if above_w not in HAZARDS:
+                            try:
+                                dig_block(ctx, wpos, relative=False, allowed_blocks=allowed_dig, collect=True)
+                                if invalidate is not None:
+                                    invalidate(wpos)
+                                mined_extra = True
+                                break
+                            except WorkflowStepError:
+                                pass
+                if mined_extra:
+                    break
+
+        pres = pillar_up(ctx, steps=1, blocks=blocks, allow_dig_headroom=True)
+        for pc in pres.get("placed_cells") or ():
+            if invalidate is not None:
+                invalidate(pc)
+        ascended += int(pres.get("placed", 0))
+
+    st_end = ctx.guard.check_status(require_safe=True)
+    bp_end = parse_pos(st_end.get("pos")) or [0, 0, 0]
+    ec = [math.floor(bp_end[0] + 0.0001), math.floor(bp_end[1] + 0.0001), math.floor(bp_end[2] + 0.0001)]
+    return {"escaped": _is_on_surface(ec[0], ec[1], ec[2]), "ascended": ascended, "pos": ec}
 
 
 def use_on(

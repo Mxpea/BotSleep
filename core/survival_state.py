@@ -11,6 +11,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Dict, Optional
 
 from core.client import APIError
 from core.block_geometry import trace_block_visibility
@@ -512,6 +513,29 @@ class SurvivalJournal:
         with self._file_lock():
             self.state.update(changes, updated_at=utc_now())
             self._write_json_atomic(self.path, self.state)
+
+    def has_pending_intent(self) -> bool:
+        """Return True iff an unverified pending game-action intent is recorded."""
+        return isinstance(self.state.get("pending"), dict)
+
+    def get_mining_progress(self) -> Optional[Dict[str, Any]]:
+        """Return a deep copy of persisted mining_progress context if present."""
+        raw = self.state.get("context", {}).get("mining_progress")
+        return copy.deepcopy(raw) if isinstance(raw, dict) else None
+
+    def save_mining_progress(self, progress: Dict[str, Any]) -> None:
+        """Atomically persist mining_progress into checkpoint context."""
+        if not isinstance(progress, dict):
+            raise ValueError("mining_progress must be a dictionary")
+        with self._file_lock():
+            ctx = self.state.setdefault("context", {})
+            ctx["mining_progress"] = copy.deepcopy(progress)
+            self.state["updated_at"] = utc_now()
+            self._write_json_atomic(self.path, self.state)
+
+    def can_resume_mining(self) -> bool:
+        """Return True only when mining_progress exists and no pending intent blocks resume."""
+        return (not self.has_pending_intent()) and (self.get_mining_progress() is not None)
 
     def record(self, event, data):
         with self._file_lock(), self.events_path.open("a", encoding="utf-8") as stream:

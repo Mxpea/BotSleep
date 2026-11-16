@@ -367,6 +367,19 @@ class ClientTests(unittest.TestCase):
                 self.client.move_to(1, 64, 2, timeout_ms=value)
         self.request.assert_not_called()
 
+    def test_attach_or_login_reuses_saved_token_without_login_or_logout(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            sf = Path(tmp) / "session.json"
+            self.client.token = "cached-tok-123"
+            self.client.save_session(sf)
+            fresh = MinecraftAgentClient(base_url=self.client.base_url, username=self.client.username, password="pw")
+            self.request.return_value = response({"ok": True, "result": {"ready": True, "pos": [1, 64, 2]}})
+            st = fresh.attach_or_login(session_file=sf)
+            self.assertEqual(st["pos"], [1, 64, 2])
+            self.assertEqual(self.request.call_count, 1)
+            self.assertTrue(self.request.call_args.args[1].endswith("/status"))
+
 
 class OptionalDependencyTests(unittest.TestCase):
     def test_core_and_debug_exports_do_not_import_optional_rcon(self):

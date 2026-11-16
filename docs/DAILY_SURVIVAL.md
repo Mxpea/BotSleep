@@ -122,3 +122,10 @@ BotSleep 的实现适配 Minecraft 的外部副作用：使用原生工具调用
 本轮仅核对文档和离线行为，未新增完整真实日常验收：需分别记录自然地图上的食物净增与进食、熔炼产物收取、铁器制作、真实建屋/开门进入/关门、储取物品、种植后的后续生长收获，以及一次实际失败后的配对反馈和新行动。没有自然发生的失败不能靠注入故障凑数；不能给物、传送、改时间或改地图来冒充普通世界自主成果。最终会话、模型实际返回名、动作后验与未完成项由现场验收记录补充。
 
 开发维护页已于15:17结束。15:40会话 `b8b27ada1620` 随后真实完成清叶、两次采木、木板/木棍和木镐制作，并在缺料、移动失败后调整行动；实际响应自报 `qwen3.6-35b-a3b`。16:03夜间撤退期间被僵尸击杀，重生后继续观察。它证明了部分生产与反馈链，仍未通过食物、熔炼、建屋、储物和持续安全生存的整体验收。最新运行和历史证据区分见 [TESTING.md](TESTING.md) 顶部。
+
+## Plan v2 地下工作站休整与检查点续探边界
+
+- `DailySurvivalGoals.mining_rest_action(observation, context)` 与 `MineShaftSkill.run_with_journal`、`MineShaftSkill.rest_at_workstation` 复用现有 `store_items`、`smelt_start`、`eat_food`、`auto_sleep` 与 `CraftItemSkill` 动作原语。
+- 休整优先使用地下矿道平台已部署并验证的 4×3×2 工作站（双箱子、熔炉、工作台、床）；无地下工作站时仅安全退回地表入口 `surface_entry` 交给上层 `daily` 策略处理（`DailyPolicy._return_home` 仍仅覆盖距地表庇护所 `<= 5` 格的短距返家，不包含远距离地表寻路）。
+- 续探必须经过 `SurvivalJournal.can_resume_mining()` 与 `inspect_mine_shaft` 核心结构核验；若存在未完成 `pending` 意图，严格拒绝自动重放或续掘（返回 `pending_intent_active`）。
+- 已知风险：地下/矿洞遇怪暂不迎战，掉血即安全中止，待后续专门的攻击与防御模块补齐。

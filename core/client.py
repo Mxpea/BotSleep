@@ -4,9 +4,12 @@ Actions are sent once. A transport timeout does not prove that the server stoppe
 the action; callers must inspect status or stop it before deciding to retry.
 """
 
+import json
 import math
+import os
+from pathlib import Path
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 import requests
 
@@ -195,6 +198,70 @@ class MinecraftAgentClient:
                     self.token = None
             raise
 
+    def save_session(self, session_file: Union[str, Path]) -> Optional[Path]:
+        """Persist active bearer token metadata so sequential runs attach without logging out."""
+        if not self.token:
+            return None
+        path = Path(session_file)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "base_url": self.base_url,
+            "username": self.username,
+            "token": self.token,
+            "saved_at": time.time(),
+        }
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
+        return path
+
+    def load_session(self, session_file: Union[str, Path]) -> bool:
+        """Load a previously saved token if it matches this base_url and username."""
+        path = Path(session_file)
+        if not path.is_file():
+            return False
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return False
+        if not isinstance(data, dict):
+            return False
+        if str(data.get("base_url") or "").rstrip("/") != self.base_url:
+            return False
+        if data.get("username") != self.username:
+            return False
+        token = data.get("token")
+        if not isinstance(token, str) or not token:
+            return False
+        self.token = token
+        return True
+
+    def attach_or_login(
+        self,
+        session_file: Optional[Union[str, Path]] = None,
+        *,
+        max_wait_seconds: float = 15,
+    ) -> Dict[str, Any]:
+        """Reuse an already-online session when valid; otherwise perform full login."""
+        max_wait_seconds = self._positive(max_wait_seconds, "max_wait_seconds")
+        if not self.token and session_file is not None:
+            self.load_session(session_file)
+        if self.token:
+            try:
+                status = self._result(self.get_status(timeout_seconds=min(self.timeout_seconds, max_wait_seconds)))
+                if status.get("ready") is True:
+                    if session_file is not None:
+                        self.save_session(session_file)
+                    return status
+            except APIError as err:
+                if err.code not in {"unauthorized", "invalid_token", "not_connected", "wrong_server", "not_ready"}:
+                    raise
+                self.token = None
+        status = self.login(max_wait_seconds=max_wait_seconds)
+        if session_file is not None:
+            self.save_session(session_file)
+        return status
+
     def logout(self) -> Dict[str, Any]:
         """Revoke the session; clear the local token even if the request fails."""
         if not self.token:
@@ -226,6 +293,7 @@ class MinecraftAgentClient:
         z: Optional[float] = None,
         timeout_ms: int = 15000,
         range: float = 1,
+        stop_on: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """Pathfind within range (default one block), with a server deadline."""
         deadline = self._positive(timeout_ms, "timeout_ms") / 1000
@@ -234,6 +302,8 @@ class MinecraftAgentClient:
             payload["y"] = y
         if z is not None:
             payload["z"] = z
+        if stop_on is not None:
+            payload["stop_on"] = stop_on
         return self._request(
             "POST",
             "move_to",
@@ -413,6 +483,7 @@ class MinecraftAgentClient:
         x: Optional[float] = None,
         y: Optional[float] = None,
         z: Optional[float] = None,
+        stop_on: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {}
         if isinstance(arg1, str):
@@ -439,6 +510,8 @@ class MinecraftAgentClient:
             payload["y"] = target_y
         if target_z is not None:
             payload["z"] = target_z
+        if stop_on is not None:
+            payload["stop_on"] = stop_on
 
         return self._request("POST", "place", payload=payload, timeout_seconds=self._action_timeout(self.PATHFINDING_SECONDS))
 
@@ -471,10 +544,12 @@ class MinecraftAgentClient:
         t = self._action_timeout(self.PATHFINDING_SECONDS) if eff_timeout is None else self._positive(eff_timeout, "timeout_seconds")
         return self._request("POST", "interact", payload=payload, timeout_seconds=t)
 
-    def use_item(self, item: str, ms: Optional[int] = None) -> Dict[str, Any]:
+    def use_item(self, item: str, ms: Optional[int] = None, *, stop_on: Optional[List[str]] = None) -> Dict[str, Any]:
         payload: Dict[str, Any] = {"item": item}
         if ms is not None:
             payload["ms"] = ms
+        if stop_on is not None:
+            payload["stop_on"] = stop_on
         return self._request("POST", "use_item", payload=payload, timeout_seconds=self._action_timeout(self.PATHFINDING_SECONDS))
 
     def find_nearest_block(self, name_contains: str = "_bed", radius: int = 16) -> Optional[Dict[str, Any]]:

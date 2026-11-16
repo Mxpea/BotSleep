@@ -154,3 +154,41 @@ execute(item="wooden_pickaxe", count=1, auto_prerequisites=True,
 `PROCEDURAL_TOOL_DEFINITIONS` 的 `cast_nether_portal(axis)` 尚无与之匹配的完整 handler，不可直接注册给模型；当前没有自动搜池、选锚、任意朝向整流程或 harness 中断恢复契约。门户方块形成也不等于机器人已进入下界，更不等于服务器 advancement 已完成。
 
 `PortalTelemetryRecorder.record_step(...)` 主动查询 API，可执行传入的 `action_func`；`dump_json()` 默认写 `logs/telemetry/`，未接入 EventMonitor。`LavaLakeGenerator.generate_random_lake(...)` 通过 RCON 生成地形，只用于专用靶场。三步实服测试默认跳过，随机矩阵是独立脚本；本轮未验证零伤害、零溢水或任何实服成功率。入口和门禁见 [DEBUG_GUIDE.md](DEBUG_GUIDE.md)。
+
+### 9. `MineShaftSkill` 与独立 `CaveExploreSkill`（Plan v2）
+
+- 模块拆分：`skills/mining.py`（`MineShaftSkill`，楼梯 + 4×3×2 侧边连通工作站平台 + 分支 + 封口换向 + 检查点恢复）与 `skills/cave_explore.py`（`CaveExploreSkill`，可单独调起调试的洞穴/废弃矿井有界探索技能），共用纯逻辑模块 `core/cave_probe.py`、`core/mining_targets.py` 与 `core/structure_spec.py` 常量。二者均未放入 `starter 9 / daily 31 / competition 36` 模型目录。
+- **洞穴分类决策与探索策略**：
+  - `unsafe`（矿道主支路遇险时封口并返回平台、`cave_abandoned` 上限 3 次）：任意岩浆/刷怪笼、水类方块 `>= 3`、空腔高度 `>= 10`、落差 `>= 4`；`min_enter_torches` 默认为 `0`（无火把仍允许进入自然洞穴采煤铁；背包有煤/木炭与木棍或木板时先自动合成火把，仅当显式配置 `min_enter_torches >= 1` 时才返回 `missing_torch`）。
+  - `small_bubble`：空气 `<= 4` 且无水/岩浆/刷怪笼，最多连续补 1 格地板后继续直挖。
+  - `enter`：`mineshaft`（木板/栅栏/铁轨合计 `>= 3`）或低矮安全洞（`height < 10` 且 `drop < 4`），默认按水平 `<= 48` 格、最多访问 `600` 格、超时 `360s`、**每 `24` 格插一支火把**（空间去重 `>= 18` 格）探索；废弃矿井仅在持有剑或剪刀时清理 `cobweb`，不碰 `chest_minecart`。
+- **洞中防卡死、防兜圈、消除无意义搭高与两级 3D 穷尽扩图**：
+  - `lateral_air_clearance` 优先引导机器人在洞穴/通道中线行走，避开贴墙刮边。
+  - `flood_safe_cave_graph`（[`core/cave_probe.py`](../core/cave_probe.py)）支持基于锚点边界 `anchor_pos` / `anchor_radius` 过滤越界节点（返回前 `32` 个有效前沿），在四邻列先完整评估所有自由步行高差（`dy in 0,+1,-1`），再评估 `micro_dig` / `drop` / `bridge`，避免 1 格台阶被 `dy=0` 挖掘截断；`pillar_up` 仅在确实遇到 ≥2 格高台/裂缝或正上方悬空矿脉时触发（消除平地/单格台阶无意义搭高，并禁止在地下钻穿薄顶冲入露天高空）。图搜索允许穿过连通裂缝扩展 `frontiers`，对已覆盖邻域 `covered_cells` 施加轻度穿行惩罚并结合 `goal_hints`（`find_blocks`）高频刷新，跳过同格原地空站。
+  - [`explore_cave`](../skills/cave_explore.py) 在独立洞穴探索 / `discover_and_explore_caves` 模式下开启 `allow_bridge`（最多 4 格）、`allow_drop`、`allow_micro_dig`（最多 3 格）与 `allow_pillar`，并采用**按剩余读预算自适应的两级 3D 洪水扩图**：日常以 ≤700 节点推进并按 `remaining_reads // 12` 对共享小预算守护封顶；当局部前沿耗尽且非邻接可走、剩余读预算充足（`>= 12000`）时，自动在缓存内存中升级至 **最多 `4500` 节点**全连通图重扫，直接规划长达 `48` 步跨洞前往远处分支、高台或悬空矿脉直至全图穷尽；单独调用读预算提升至 `explore_cave=150000` / `discover_and_explore_caves=200000`。单个移动/挖掘步 `stalled` / `path_not_found` 时于循环内同步真实坐标、局部失效缓存并重新规划路径，不半途弃洞。
+  - 环路面包屑支持按 `pillar_undo` 最大柱索引安全剪枝；撤退 `_retreat_breadcrumbs` 无条件优先尝试直接 `stand_cell(entry_cell, tolerance=1.25)` 与 `_recover_step_with_graph` 跳跃撤回，拆柱返回时显式校验实际回到 `entry_cell`，最坏再触发 `escape_to_surface` 逐格清理安全顶板并 `pillar_up` 返回地面；`navigate_with_ops` 在扩展至 420 节点的本地洪水图仍无法接近目标时快速失败，不折返误入已探区域。**保持游戏会话在线**：`MinecraftAgentClient.attach_or_login` 与 `main.py --keep-connected` / `mc_api.keep_session_on_exit` / `competition` 模式退出时不调用 `auth/logout`，跨脚本直接复用玩家会话；外置只读/调试 MCP（`minecraft-debug`）可零干扰采样玩家 NBT、运动轨迹与体素状态。
+- **目标挖矿与实地踩捡边界**：所有 `dig` 调用均传 `collect=False`（步行踩捡）。主矿道每步复用缓存读取 8 个新暴露邻面；洞内与洪水图扫描覆盖 `oy in (-2..5)` 且同时校验眼距 `<= 4.5` 与高位矿脚底角距 `feet_corner_dist <= 3.95`（匹配 `mc-agent-api` 的 `goNear(3.5)` 零寻路阈值）；挖爆矿块后若未直接入包，`_collect_mined_drop` 会结合 `get_entities` 掉落物位置及矿点下方真实落脚层主动走进安全落点（校验升格防顶头，受阻后复核背包避免重复卡等）并同步返回后的实时坐标；按 `targets` 区分 `mined / skipped_quota / skipped_tool / skipped_hazard / unreachable / seen`；单条矿脉延伸 `<= 16` 格。
+- **原地柱搭高与洪水安全子图**：
+  - `skills/action_workflow.py` 提供 `pillar_up`、`pillar_down`、`scaffold_drop`（分段垫脚无伤下落）与 `escape_to_surface`（避液清顶原地搭柱逃回地表）。
+  - `core/cave_probe.py` 提供 `flood_safe_cave_graph`、`reconstruct_flood_path` 与 `lateral_air_clearance`。
+  - `CaveExploreSkill.discover_and_explore_caves`（结合岩石顶板检索与陡坡/熔岩/落差全图导航）可由 `MineShaftSkill.run_with_journal(..., prefer_caves_first=True)` 联动调用。
+- **回家/休整与检查点**：每推进 `4` 格分支及每次探索结束后评估 `home_thresholds`（空槽 `<= 3`、生命 `< 12`、饥饿 `< 10` 且无食物、火把 `< 4`、可放置方块 `< 16`、无可用镐或剩余耐久 `< 10%`；剩余时间 `< 30s` 安全收尾）。洞内优先自动进食回血（`DEFAULT_EDIBLE_FOODS`），仅在背包满、断镐或无食物且血量危急时早退。
+- **深层鱼骨挖矿与检查点续挖**：`MineShaftSkill.build_mine_shaft` / `run_with_journal` 支持 `target_y`、`mining_mode="single"|"fishbone"`、`rib_length=12`、`rib_spacing=4`、`max_trunk_steps=40`。
+- **伤害容忍与战斗限制**：`MineShaftSkill` 与 `CaveExploreSkill` 默认 `allow_damage=True`、`critical_health=6.0`，并在移动/放置动作上向 `mc-agent-api` 传递 `stop_on=["death"]`，不再因 `1~2` 点擦伤/摔伤立即中断动作或退洞；仍不主动迎战或清理怪物，近战攻击与防御留待后续单独模块补齐。
+
+---
+
+### 10. `ContainerSkill`（独立容器存取与熔炉烧制）
+
+模块 `skills/container.py`，封装对双箱/单箱/木桶与熔炉的确定性窗口操作（基于 `mc-agent-api` 的 `window_view` 与 `window_act`，单次批操作上限 `8` 项、自动拆批），未加入 `starter 9 / daily 31 / competition 36` 模型目录：
+
+```python
+execute(action="inspect|deposit|withdraw|smelt", pos=[x, y, z], ...)
+inspect(pos)
+deposit(pos, items, *, count=None, section="container", ensure_all=True)
+withdraw(pos, items, *, count=None, section=None, ensure_all=True)
+smelt(pos, input_item, count=1, *, fuel_item=None, wait_complete=True, collect_output=True)
+```
+
+- **存取特性**：支持 `str` 或 `{item: count}` 映射，支持大箱子 `54` 槽 `"container"` 段、空箱满箱 `partial` 部分成功回报，以及熔炉默认按 `"output"` 段取出；要求箱子上方无实心遮挡方块（如工作台顶部放熔炉、箱子上方保留空气）。
+- **熔炉自动烧制**：基于 `FUEL_BURN_ITEMS`（煤炭/木炭按 `8` 格、木板/原木 `1.5`、木棍 `0.5`）自动选配最小必需燃料；开炉前先清理既有 `"output"` 成品，支持 `count > 16` 多组轮询、`input==0 and output==0` 早退及 `iron_ingot` 等产物的严格确认。

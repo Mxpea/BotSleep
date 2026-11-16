@@ -220,11 +220,13 @@ class DailySafetyPolicy:
         door = shelter.get("door")
         if not isinstance(door, dict):
             return None
+        orientation = str(shelter.get("orientation") or "north").lower()
+        allowed_facings = {"east", "west"} if orientation in {"east", "west"} else {"north", "south"}
         pos = self._point(door.get("pos"))
         if (pos is None or any(value != math.floor(value) for value in pos)
                 or door.get("name") not in DailySurvivalSkills.DOORS
                 or door.get("frame_verified") is not True or type(door.get("open")) is not bool
-                or door.get("facing") not in {"north", "south"}):
+                or door.get("facing") not in allowed_facings):
             return None
         return door
 

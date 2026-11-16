@@ -359,9 +359,14 @@ class DailySurvivalGoals:
         if self.rules._key(pos) in self.rules._blocked(context):
             return None
         shelter = observation.get("shelter")
+        orient = base.get("orientation") if isinstance(base.get("orientation"), str) else None
+        inspect_args = {"pos": pos}
+        build_extra = {"orientation": orient} if orient and orient != "north" else {}
+        if build_extra:
+            inspect_args["orientation"] = orient
         if (not isinstance(shelter, dict) or shelter.get("fresh") is not True
                 or shelter.get("dimension") != observation["status"]["dimension"] or shelter.get("pos") != pos):
-            return self._action("inspect_shelter", {"pos": pos}, "Reinspect the base before selecting one construction step", "shelter")
+            return self._action("inspect_shelter", inspect_args, "Reinspect the base before selecting one construction step", "shelter")
         geometry = shelter.get("geometry") or {}
         if (geometry.get("floor_verified") is not True or geometry.get("exit_verified") is not True
                 or shelter.get("hazards") or shelter.get("occupied_blueprint_cells")):
@@ -377,7 +382,7 @@ class DailySurvivalGoals:
         if type(shelter.get("missing_blocks")) is int and shelter["missing_blocks"] > 0:
             material = next((name for name in BUILDING_MATERIALS if counts.get(name, 0)), None)
             if material:
-                return self._action("build_shelter_step", {"pos": pos, "material": material},
+                return self._action("build_shelter_step", {"pos": pos, "material": material, **build_extra},
                                     "Build at most one checked blueprint block", "shelter")
             log = next((name for name in ("oak_log", "birch_log", "spruce_log") if counts.get(name, 0)), None)
             if log:
@@ -404,7 +409,7 @@ class DailySurvivalGoals:
             needed = self.rules._need_planks(6, observation, context)
             if needed:
                 return self._action(needed.name, needed.args, needed.reason, "shelter")
-        return self._action("inspect_shelter", {"pos": pos}, "Confirm the complete roof, walls, doorway and exit", "shelter")
+        return self._action("inspect_shelter", inspect_args, "Confirm the complete roof, walls, doorway and exit", "shelter")
 
     def build(self, observation, memory=None, context=None):
         """Return current facts, actionable prerequisites and explicit unmet goals."""
@@ -667,6 +672,41 @@ class DailySurvivalGoals:
                 "tasks": tasks, "maintenance_ready": maintenance_ready,
                 "needs": [row["id"] for row in tasks if row["status"] not in {"satisfied"} and row["id"] != "maintain"],
                 "revalidate_candidates": candidates}
+
+    def mining_rest_action(self, observation, context=None):
+        """Choose the next verified rest/resupply daily action for a paused mining checkpoint."""
+        ctx = context or {}
+        if ctx.get("pending") is not None:
+            return None  # Never auto-replay while pending intention exists.
+        progress = ctx.get("mining_progress")
+        if not isinstance(progress, dict):
+            return None
+        status = observation.get("status") or {}
+        counts = self.rules._counts(observation)
+        dimension = status.get("dimension")
+
+        # 1. Store excess cobblestone / clutter if a verified chest exists nearby
+        for row in self._safe_rows(observation, DailySurvivalSkills.CONTAINERS, context=ctx):
+            excess = next((item for item in ("cobblestone", "cobbled_deepslate", "dirt", "andesite", "diorite", "granite")
+                           if counts.get(item, 0) > (32 if item == "cobblestone" else 0)), None)
+            if excess:
+                take_n = counts[excess] - (32 if excess == "cobblestone" else 0)
+                return self._action("store_items", {"pos": row["pos"], "item": excess, "count": min(64, take_n)},
+                                    "Store excess mined blocks in nearby verified chest during mining rest", "storage")
+
+        # 2. Smelt raw ore if furnace + fuel + input exist
+        smelt_step = self._smelt({"iron_ingot", "gold_ingot"}, observation, counts, "iron_tools", context=ctx)
+        if smelt_step is not None:
+            return smelt_step
+
+        # 3. Restock torches or stone pickaxe if needed and craftable
+        if counts.get("torch", 0) < 4 and counts.get("coal", 0) >= 1 and counts.get("stick", 0) >= 1:
+            return self._action("craft_item", {"item": "torch", "count": 1}, "Restock torches at mining rest", "maintain")
+        if not any(counts.get(p, 0) > 0 for p in ("wooden_pickaxe", "stone_pickaxe", "iron_pickaxe", "diamond_pickaxe")):
+            if counts.get("cobblestone", 0) >= 3 and counts.get("stick", 0) >= 2:
+                return self._action("craft_item", {"item": "stone_pickaxe", "count": 1}, "Craft replacement stone_pickaxe during mining rest", "starter_tools")
+
+        return None
 
     def choose(self, observation, memory=None, context=None):
         """Rules-mode convenience only; LLM mode receives the board as context."""

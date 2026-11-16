@@ -5,6 +5,7 @@ import math
 
 from core.block_geometry import trace_block_visibility
 from core.client import APIError
+from core.structure_spec import normalize_orientation, transform_rel_pos
 from core.survival_state import ObservationCollector
 from skills.survival import SurvivalSkills
 
@@ -288,8 +289,13 @@ class DailyObservationCollector(ObservationCollector):
             return
         if math.dist(status["pos"], pos) > 16:
             return
+        orientation = project.get("orientation")
+        norm_orient = normalize_orientation(orientation) if isinstance(orientation, str) else "north"
+        inspect_args = {"pos": pos}
+        if isinstance(orientation, str) and norm_orient != "north":
+            inspect_args["orientation"] = norm_orient
         from skills.shelter import ShelterSkills
-        result = ShelterSkills(self.client).execute("inspect_shelter", {"pos": pos}, cancel_event=cancel_event)
+        result = ShelterSkills(self.client).execute("inspect_shelter", inspect_args, cancel_event=cancel_event)
         self._check_cancel(cancel_event)
         if not result.success:
             observation["shelter_error"] = {"error_code": result.error_code, "fresh": False}
@@ -314,7 +320,7 @@ class DailyObservationCollector(ObservationCollector):
         if (geometry.get("floor_verified") is True and geometry.get("exit_verified") is True
                 and data.get("hazards") == [] and data.get("occupied_blueprint_cells") == []):
             observation["daily_evidence"]["base_site"] = {"pos": pos, "dimension": status["dimension"],
-                "verified": True, "fresh": True, "source": "api_verified"}
+                "orientation": norm_orient, "verified": True, "fresh": True, "source": "api_verified"}
         required = ("floor_verified", "walls_complete", "roof_complete", "exit_verified")
         door = data.get("door") or {}
         if (data.get("structure_complete") is True and all(geometry.get(key) is True for key in required)
@@ -322,12 +328,13 @@ class DailyObservationCollector(ObservationCollector):
             # Preserve the skill's AABB-based inside result, not floor rounding.
             observation["daily_evidence"]["shelter"] = {**data, "verified": True,
                 "geometry_complete": data.get("shelter_verified") is True, "structure_complete": True}
-            route = self._return_route(status, pos, cancel_event) if not data["inside"] or door["open"] else None
+            route = self._return_route(status, pos, cancel_event, orientation=norm_orient) if not data["inside"] or door["open"] else None
             if route:
                 observation["daily_evidence"]["shelter"]["return_route"] = route
 
-    def _return_route(self, status, center, cancel_event):
+    def _return_route(self, status, center, cancel_event, *, orientation="north"):
         origin, center = self._position(status), self._block_pos(center)
+        norm_orient = normalize_orientation(orientation)
         start = self._cell(origin)
         if (status.get("on_ground") is not True or abs(origin[1] - start[1]) > .1
                 or start[1] != center[1] or abs(start[0] - center[0]) + abs(start[2] - center[2]) > 4):
@@ -350,15 +357,15 @@ class DailyObservationCollector(ObservationCollector):
             if block["name"] in self.PASSABLE:
                 return True
             from skills.shelter import ShelterSkills
-            lower = (center[0], center[1], center[2] - 2)
-            upper = (center[0], center[1] + 1, center[2] - 2)
+            lower = tuple(transform_rel_pos((0, 0, 2), center, norm_orient, integer=True))
+            upper = tuple(transform_rel_pos((0, 1, 2), center, norm_orient, integer=True))
             if block["name"] not in ShelterSkills.DOORS or tuple(pos) not in (lower, upper):
                 return False
             if checked_door is None:
                 halves = {lower: read(lower), upper: read(upper)}
                 if not all(SurvivalSkills._safe_block(value) for value in halves.values()):
                     return False
-                checked_door = ShelterSkills(self.client)._door(center, halves)
+                checked_door = ShelterSkills(self.client)._door(center, halves, orientation=norm_orient)
             if not checked_door["frame_verified"] or type(checked_door["open"]) is not bool:
                 return False
             if checked_door["open"] is False:
