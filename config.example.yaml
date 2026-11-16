@@ -11,7 +11,16 @@ agent:
   mode: "sleep"                           # sleep or survival; --mode overrides this.
 
 survival:
+  intent: survival                         # survival or speedrun; phase hints never enable unbound actions.
   objective: "starter"                     # starter, daily, competition (requires llm.enabled; no chat debug).
+  operator_goal: ""                        # Optional current user goal (<=1000 visible characters); safety still wins.
+  autonomy:                               # Daily/competition: one model goal, locally verified child steps.
+    enabled: true                         # False retains atomic model tools; no new long task may start.
+    max_steps: 128                        # Per task; 1..2048. Overall run/death budgets still apply.
+    max_seconds: 600                      # Per task; finite positive seconds, at most 3600.
+    max_local_failures: 4                 # 1..32 before returning a real failure summary for replanning.
+    max_no_progress_steps: 8              # 1..128; waits/no-ops do not prove progress.
+    max_explore_steps: 8                  # 0..64; zero disables task exploration.
   competition:
     # Conditions in the draft are NOT enabled automatically. Set final-table IDs explicitly.
     eligibility_overrides: {}              # e.g. minecraft:story/follow_ender_eye: true (only if final rules score it).

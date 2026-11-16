@@ -161,6 +161,7 @@ class EmergencyRetreatTests(unittest.TestCase):
         self.assertTrue(harness.context["retreat_recovery"]["evacuating"])
         self.skills.execute.side_effect = None
         self.skills.execute.return_value = SkillResult(True, "Ground", {"retreat_complete": True, "evacuation_stage": "ground"})
+        self.collector.allow_full = True  # Quiet evacuation must inspect actual footing before resuming production.
         reads = len(self.client.calls)
         harness.tick()
         self.assertTrue(self.finish(harness).success)
@@ -253,6 +254,37 @@ class EmergencyRetreatTests(unittest.TestCase):
                 self.collector.collect_safety()
         self.assertEqual(caught.exception.code, "observation_changed")
         self.assertEqual([options["timeout_seconds"] for _, options in self.client.calls], [2, 1.5, .5])
+
+    def test_ranged_enemy_at_sixteen_uses_bounded_short_observation(self):
+        self.client.status["nearest_hostile"] = {"name": "skeleton", "dist": 16}
+        self.client.entities = [{"type": "hostile", "name": "skeleton", "pos": [16.5, 64, .5]}]
+        result = self.collector.collect_safety()
+        self.assertEqual(result["observation_scope"], "safety")
+        self.assertEqual([name for name, _ in self.client.calls], ["status", "entities", "status"])
+        self.assertGreaterEqual(self.client.calls[1][1]["radius"], 18)
+        self.assertFalse(result["inventory_fresh"])
+
+    def test_nearer_distant_melee_enemy_does_not_hide_a_ranged_threat(self):
+        self.client.status["nearest_hostile"] = {"name": "spider", "dist": 10}
+        self.client.entities = [{"type": "hostile", "name": "spider", "pos": [10.5, 64, .5]},
+                                {"type": "hostile", "name": "stray", "pos": [14.5, 64, .5]}]
+        result = self.collector.collect_safety()
+        self.assertEqual(result["observation_scope"], "safety")
+        self.assertEqual(SurvivalPlanner().choose(result).args["pos"], [14.5, 64, .5])
+
+    def test_distant_melee_only_scan_returns_none_so_full_observation_can_proceed(self):
+        self.client.status["nearest_hostile"] = {"name": "spider", "dist": 10}
+        self.client.entities = [{"type": "hostile", "name": "spider", "pos": [10.5, 64, .5]}]
+        self.assertIsNone(self.collector.collect_safety())
+        self.assertEqual([name for name, _ in self.client.calls], ["status", "entities", "status"])
+        self.client.calls.clear()
+        forced = self.collector.collect_safety(force=True)
+        self.assertEqual(forced["observation_scope"], "safety")
+
+    def test_enemy_beyond_ranged_radius_does_not_add_an_entity_scan(self):
+        self.client.status["nearest_hostile"] = {"name": "skeleton", "dist": 16.1}
+        self.assertIsNone(self.collector.collect_safety())
+        self.assertEqual([name for name, _ in self.client.calls], ["status"])
 
     def test_failed_or_malformed_entity_read_cannot_reuse_old_threats(self):
         for value in (None, [{"type": "hostile", "pos": [float("nan"), 64, 0]}]):

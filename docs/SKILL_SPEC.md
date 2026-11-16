@@ -1,6 +1,6 @@
 # BotSleep 技能规范文档 (SKILL SPECIFICATION)
 
-源码核对：2026-11-15，`3801be9`。本文区分模型已绑定技能、独立开发技能和未接入提案；实现存在不等于实服验收。验证结果见 [TESTING.md](TESTING.md)。
+当前说明更新：2026-11-16，包含此前 `3801be9` 基线之后的适配与技能扩展；该哈希仅为历史核对基线。本文区分模型已绑定技能、独立开发技能和未接入提案；实现存在不等于实服验收。验证结果见 [TESTING.md](TESTING.md)。
 
 ---
 
@@ -12,9 +12,35 @@
 - `execute(**kwargs) -> SkillResult`：核心动作逻辑。
 - `rollback(reason: str) -> None`：异常中断时的恢复钩子，基类默认不执行动作；具体恢复以各技能实现为准。
 
-`SkillResult` 包含 `success`、`message`、`data`、`error_code`。生存基础动作通过 `SurvivalSkills.execute(name, args, cancel_event=None, *, recovery_context=None)` 分派；`recovery_context` 由 harness 内部提供，不是模型参数。当前运行时为 `main.py` 启动的 `core/survival_harness.py`，不使用 `agent/loop.py` 旧骨架。starter/daily/competition 分别公开9/31/36项模型工具，仅接受已注册动作；实际契约见 [SURVIVAL.md](SURVIVAL.md) 与 [DAILY_SURVIVAL.md](DAILY_SURVIVAL.md)。
+`SkillResult` 包含 `success`、`message`、`data`、`error_code`。生存基础动作通过 `SurvivalSkills.execute(name, args, cancel_event=None, *, recovery_context=None)` 分派；`recovery_context` 由 harness 内部提供，不是模型参数。当前运行时为 `main.py` 启动的 `core/survival_harness.py`，不使用 `agent/loop.py` 旧骨架。starter/daily/competition 分别公开 9/35/40 项模型工具，仅接受已注册动作；实际契约见 [SURVIVAL.md](SURVIVAL.md) 与 [DAILY_SURVIVAL.md](DAILY_SURVIVAL.md)。
 
 2026-11-16 API 1.3.14 适配：写请求或写后验证的 `not_connected` 不证明动作未执行，须返回 `action_unconfirmed` 与 `action_state: unknown`，保留原 API 错误。`cleanup_skipped: disconnected_unknown` 表示本次断线后不再发送清理动作，组合技能须向上传递此标记；harness 保留 pending 并暂停，重启不得自动重放。普通前置读取断线与原有 `dig_unconfirmed` 的有界恢复契约保持不变。
+
+### 当前已绑定的目标程序
+
+`run_survival_task({task, resource?, item?, count?, radius?})` 只在 daily/competition 启用；默认目录为 9/35/40，`survival.autonomy.enabled=false` 时从模型请求移除该工具。`task` 限 12 类，`count` 为 1～64、默认 8，`radius` 为 4～64、默认 32；不接受位置队列或任意技能名。`gather` 必须有 `resource`，`craft/smelt` 必须有受支持的产物 `item`，其余不接受二者。
+
+上述数量是完整注册数。正常目标规划阶段动态过滤为目标工具与必要安全/赛事管理工具；无 pending/unknown 的 `needs_ai` 每个 task_id 最多接受 2 次生产原子修复。明确低血/饥饿情境仅额外开放受限食物动作。模型响应即使包含完整目录中存在的原子动作，也必须通过当前请求阶段的允许集合，不能绕过目标授权。
+
+`AutonomousTaskController` 从 fresh 观察规划一个原子动作，`AutonomyRuntime` 使用普通 harness 的 pending/技能/后验检查执行；它不是任意命令宏，也不调用独立 `CraftItemSkill` 的全部配方。默认限制为 128 步/600 秒、4 次连续本地失败、8 次无进展和 8 次探索。程序子步不产生额外模型 tool call，完成/升级/未知或显式暂停边界只对原目标反馈一次；unknown 保留意图，不能自动补发。完整任务表、计数语义和恢复接口见 [AUTONOMOUS_TASKS.md](AUTONOMOUS_TASKS.md)。
+
+### 当前已绑定的战斗与桶类扩展
+
+以下三项只加入 daily/competition，starter 仍为 9 项。模型参数须通过严格 schema；harness 分派到对应类后，技能还会重新读取并核验现场。
+
+| 模型动作 | 分派与参数 | 成功和中止边界 |
+|---|---|---|
+| `fight_hostile` | `CombatSkills.execute(name, {entity_id, expected_name}, cancel_event=None)`；目标限 skeleton/zombie/creeper | 每次至多单击、单发或短退；核验目标、生命、武器/盾和落脚。低血、多敌或未知证据拒绝进攻；苦力怕无引信证据，不做近战击杀。 |
+| `collect_liquid` | `BucketSkills.execute(name, {pos, expected_name}, cancel_event=None)`；整数三元坐标，water/lava | 已有空桶、近距明确源方块；核验桶增减，取岩浆还须核验源移除。 |
+| `hunt_with_lava` | 同上，参数 `{entity_id, expected_name}`；pig/cow/sheep/chicken | 仅已存在的不燃单格容纳坑；短点燃后立即核验收回源。只有实际库存收益才成功，没有收益为 `hunt_unverified`。 |
+
+`fight_hostile` 的 `success` 仅表示这一步有结果，不等于命中或击杀。`phase`、`attack_sent`、`damage_verified`、`target_missing`、`completed`、`killed`、`retreat_required` 分别表达证据；目标消失不算 kill，赛事计分另需服务端 advancement。按实体和生命周期限制交战次数、持续时间及连续未证实伤害；要求撤退时共享本地门禁优先撤退，不让规则或模型重复攻击。已知失败的实际反馈仍写入模型工具事务、检查点与监控，需撤退的续段不受普通生产失败退避/熔断阻断；未知和致命错误不享受此例外。
+
+现有 `hunt_animal` 是 2.8 格内站定短狩猎，不自动追击。食物与床的羊毛任务对较远动物先给接近步骤，再凭新观察决定能否狩猎；生肉、熟肉及相应副产物只按实际库存增加核验。未拾取掉落可由后续 `collect_drops` 处理，不能把动物消失或挥击次数当成收益。
+
+战斗/液体未知副作用继续返回 `action_unconfirmed`、`action_state: unknown`，可携带 `cleanup_skipped: combat_unknown/unknown_bucket`；上层不得再补 stop、攻击、点燃或收桶。源坐标和 `lava_outstanding/recovery_required` 须随 pending 保存。`CombatSkills.release_defense(cancel_event=None)` 是内部清理步骤，不是模型工具：仅本实例确实举盾、无既有 pending、fresh 状态确认无近敌时尝试，独立记录意图并验证；未知解除也暂停。完整契约见 [COMBAT_AND_HUNTING.md](COMBAT_AND_HUNTING.md)。
+
+工具调用仍串行：所有模型请求经过同一门禁，慢请求结束前不发第二个；本地安全短步可以取消过期提案的消费。`SurvivalPlaybook` 是纯阶段建议，不是新增模型工具，也不自行执行动作。`survival.intent` 默认 survival，显式 speedrun 仅改变建议；未绑定的下界、交易、要塞采样执行和末地战斗保持 unsupported/blocked，不因文档描述完整路线就可执行。见 [SURVIVAL_PLAYBOOK.md](SURVIVAL_PLAYBOOK.md)。
 
 ---
 

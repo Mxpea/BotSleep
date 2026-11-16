@@ -20,6 +20,7 @@ SAFE_FOOD = {
 }
 HAZARDS = {"lava", "water", "fire", "soul_fire", "magma_block", "cactus", "campfire", "soul_campfire", "powder_snow"}
 AIR = {"air", "cave_air", "void_air"}
+RANGED_HOSTILES = frozenset({"skeleton", "stray", "bogged", "pillager"})
 STONE_TIERS = ("stone", "iron", "diamond", "netherite")
 RECIPES = {
     "wooden_pickaxe": {"planks": 3, "stick": 2},
@@ -141,7 +142,23 @@ class SurvivalPlanner:
                 found.append((math.dist(pos, origin), pos))
         return sorted(found, key=lambda value: (value[0], value[1]))
 
-    def _safe_target(self, block, origin, blocks, blocked, hostiles):
+    def _threat_distance(self, name):
+        """Ranged enemies remain dangerous beyond the melee avoidance radius."""
+        return max(self.threat_radius, 16) if name in RANGED_HOSTILES else self.threat_radius
+
+    def _dangerous_hostiles(self, observation, origin):
+        found = []
+        for entity in observation.get("entities") or []:
+            if not isinstance(entity, dict) or entity.get("type") != "hostile":
+                continue
+            pos = self._pos(entity.get("pos"))
+            if pos is not None:
+                distance = math.dist(pos, origin)
+                if distance <= self._threat_distance(entity.get("name")):
+                    found.append((distance, pos, entity))
+        return sorted(found, key=lambda value: (value[0], value[1]))
+
+    def _safe_target(self, block, origin, blocks, blocked, hostiles, observation=None):
         pos = block["pos"]
         if self._key(pos) in blocked or math.dist(pos, origin) > 32:
             return False
@@ -153,6 +170,8 @@ class SurvivalPlanner:
             return False
         if any(math.dist(pos, b["pos"]) <= 1.01 and b["name"] in HAZARDS for b in blocks):
             return False
+        if observation is not None and self._dangerous_hostiles(observation, pos):
+            return False
         return not any(math.dist(pos, hostile_pos) <= self.threat_radius for _, hostile_pos in hostiles)
 
     def _gather(self, names, goal, observation, context):
@@ -160,7 +179,8 @@ class SurvivalPlanner:
         blocks = self._blocks(observation)
         blocked = self._blocked(context)
         hostiles = self._hostiles(observation, origin)
-        candidates = [b for b in blocks if b["name"] in names and self._safe_target(b, origin, blocks, blocked, hostiles)]
+        candidates = [b for b in blocks if b["name"] in names
+                      and self._safe_target(b, origin, blocks, blocked, hostiles, observation=observation)]
         if candidates:
             target = min(candidates, key=lambda b: (math.dist(b["pos"], origin), b["name"], b["pos"]))
             return Decision("gather_block", {"pos": list(target["pos"]), "expected_name": target["name"]}, f"Gather {target['name']} for {goal}", goal)
@@ -176,7 +196,6 @@ class SurvivalPlanner:
         directions = ((1, 0), (0, 1), (-1, 0), (0, -1), (1, 1), (-1, 1), (-1, -1), (1, -1))
         blocked = self._blocked(context)
         blocks = self._blocks(observation)
-        hostiles = self._hostiles(observation, origin)
         for step in range(index, self.max_explore_steps):
             dx, dz = directions[step % len(directions)]
             radius = self.explore_distance * (1 + step // len(directions))
@@ -191,7 +210,7 @@ class SurvivalPlanner:
             target = [round(v, 3) for v in target]
             if self._key(target) in blocked or any(b["name"] in HAZARDS and math.dist(b["pos"], target) <= 2 for b in blocks):
                 continue
-            if any(math.dist(target, hostile_pos) <= self.threat_radius for _, hostile_pos in hostiles):
+            if self._dangerous_hostiles(observation, target):
                 continue
             return Decision("move_to", {"pos": target, "range": 2}, reason + "; inspect again after this bounded move", "explore")
         return self._wait(f"No unblocked exploration target: {reason}", "explore", 5)
@@ -213,10 +232,9 @@ class SurvivalPlanner:
         origin = observation["status"]["pos"]
         blocks = self._blocks(observation)
         blocked = self._blocked(context)
-        hostiles = self._hostiles(observation, origin)
         tables = [b for b in blocks if b["name"] == "crafting_table"
                   and math.dist(b["pos"], origin) <= 32 and self._key(b["pos"]) not in blocked
-                  and not any(math.dist(b["pos"], hostile_pos) <= self.threat_radius for _, hostile_pos in hostiles)
+                  and not self._dangerous_hostiles(observation, b["pos"])
                   and not any(other["name"] in HAZARDS and math.dist(b["pos"], other["pos"]) <= 1.01 for other in blocks)]
         if tables:
             table = min(tables, key=lambda b: (math.dist(b["pos"], origin), b["pos"]))
@@ -233,6 +251,8 @@ class SurvivalPlanner:
                 if self._key(target) in blocked or (at and at["name"] not in AIR) or (below and below["name"] in AIR | HAZARDS):
                     continue
                 if any(b["name"] in HAZARDS and math.dist(b["pos"], target) <= 1.01 for b in blocks):
+                    continue
+                if self._dangerous_hostiles(observation, target):
                     continue
                 return Decision("place_item", {"item": "crafting_table", "pos": target}, "Propose an adjacent workspace; the skill must verify air and solid support", "crafting_table")
             return self._wait("No unblocked workspace placement candidate", "crafting_table")
@@ -285,10 +305,11 @@ class SurvivalPlanner:
             return self._wait("Immediate environmental hazard; no safe recovery route is verified", "recover", 0.5)
         if status.get("on_ground") is False and not status.get("is_sleeping"):
             return self._wait("Wait for stable footing before starting a resource action", "recover", 0.5)
-        if hostiles and hostiles[0][0] <= self.threat_radius:
-            return Decision("retreat_from", {"pos": hostiles[0][1], "distance": 8}, "A hostile is close; the skill must verify a safe retreat corridor", "safety")
+        dangers = self._dangerous_hostiles(observation, origin)
+        if dangers:
+            return Decision("retreat_from", {"pos": dangers[0][1], "distance": 8}, "A hostile is within its danger radius; the skill must verify a safe retreat corridor", "safety")
         nearby = status.get("nearest_hostile") or {}
-        if isinstance(nearby, dict) and self._number(nearby.get("dist")) and nearby["dist"] <= self.threat_radius:
+        if isinstance(nearby, dict) and self._number(nearby.get("dist")) and nearby["dist"] <= self._threat_distance(nearby.get("name")):
             return self._wait("A nearby hostile has no observed position for safe retreat")
         foods = [name for name in SAFE_FOOD if counts.get(name, 0) > 0]
         if status["food"] < 20 and foods and (status["health"] <= self.low_health or status["food"] <= self.food_threshold):
@@ -297,7 +318,8 @@ class SurvivalPlanner:
             food = min(fitting, key=lambda name: (-SAFE_FOOD[name], name)) if fitting else min(foods, key=lambda name: (SAFE_FOOD[name], name))
             return Decision("eat_food", {"item": food}, "Use existing safe food before resource work", "food")
         if status["health"] <= self.low_health:
-            return self._wait("Health is low; wait for recovery or food instead of gathering", "recover")
+            return self._wait("Health is low; food is below 18 so natural regeneration cannot restore health; verified food recovery is required"
+                              if status["food"] < 18 else "Health is low; observe natural regeneration before gathering", "recover")
         if status["food"] <= 6 and not foods:
             return self._wait("Food is critically low; food acquisition is not implemented", "food", 5)
         if status.get("is_sleeping"):

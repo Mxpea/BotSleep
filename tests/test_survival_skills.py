@@ -450,7 +450,7 @@ class TerrainRetreatTests(unittest.TestCase):
         self.assertEqual(self.retreat(world).error_code, "unsafe")
         self.assertFalse(world.writes())
 
-    def test_leaf_fields_exhaust_node_or_read_budget_without_moving(self):
+    def test_leaf_fields_can_take_a_verified_relay_without_claiming_ground(self):
         for stepped in (False, True):
             with self.subTest(stepped=stepped):
                 world = World()
@@ -464,16 +464,17 @@ class TerrainRetreatTests(unittest.TestCase):
 
                 world.get_block = read
                 result = self.retreat(world)
-                self.assertEqual(result.error_code, "unsafe")
+                self.assertTrue(result.success, result)
                 stats = result.data["terrain_search"]
-                self.assertIn(stats["termination"], {"node_budget", "read_budget"})
+                self.assertEqual(stats["termination"], "verified_leaf_relay")
+                self.assertIn(stats["search_boundary"], {"node_budget", "read_budget"})
                 self.assertLessEqual(stats["nodes"], 64)
-                self.assertLessEqual(stats["block_reads"], 248)
+                self.assertLessEqual(stats["block_reads"], 256)
                 self.assertEqual(stats["block_reads"], len([call for call in world.calls if call[0] == "get_block"]))
-                if stepped:
-                    self.assertEqual(stats["block_reads"], 248)
                 self.assertLessEqual(len(result.data["blocked_cells"]), 4)
-                self.assertFalse(world.writes())
+                self.assertFalse(result.data["ground_route_verified"])
+                self.assertFalse(result.data["retreat_complete"])
+                self.assertEqual([call[0] for call in world.writes()], ["move_to"])
 
     def test_position_change_across_cell_or_half_block_height_rejects_before_move(self):
         for updated in ([1.05, 64, 0.5], [0.5, 64.5, 0.5]):
@@ -534,7 +535,7 @@ class TerrainRetreatTests(unittest.TestCase):
                 result = self.retreat(world)
                 self.assertEqual(result.error_code, "retreat_unverified" if after_move else "unsafe")
                 self.assertIn({"pos": [1, 64, 0], "name": "lava", "reason": "hazard"}, result.data["blocked_cells"])
-                self.assertEqual([call[0] for call in world.writes()], ["move_to", "stop"] if after_move else [])
+                self.assertEqual([call[0] for call in world.writes()], ["move_to"] if after_move else [])
 
     def test_actual_arrival_must_match_the_step_even_when_backend_claims_the_goal(self):
         for actual in ([0.5, 64, 0.5], [2.0, 66, 0.5]):
@@ -548,7 +549,7 @@ class TerrainRetreatTests(unittest.TestCase):
                 world.move_effect = move
                 result = self.retreat(world)
                 self.assertEqual(result.error_code, "retreat_unverified")
-                self.assertEqual([call[0] for call in world.writes()], ["move_to", "stop"])
+                self.assertEqual([call[0] for call in world.writes()], ["move_to"])
 
     def test_path_requiring_a_step_towards_threat_is_rejected(self):
         paths = [
@@ -562,20 +563,40 @@ class TerrainRetreatTests(unittest.TestCase):
              (0, 66, 2, "birch_leaves"), (0, 66, 3, "birch_leaves"),
              (0, 66, 4, "birch_leaves"), (0, 66, 5, "dirt")],
         ]
-        for nodes in paths:
+        for index, nodes in enumerate(paths):
             with self.subTest(nodes=nodes):
                 world = self.terrain(nodes)
                 result = self.retreat(world)
-                self.assertEqual(result.error_code, "unsafe")
-                self.assertFalse(world.writes())
+                if index == 0:
+                    self.assertEqual(result.error_code, "unsafe")
+                    self.assertFalse(world.writes())
+                else:
+                    # The safe first upward/outward step is now a permitted
+                    # partial relay; it does not authorize the later west turn.
+                    self.assertTrue(result.success, result)
+                    self.assertEqual(result.data["target"], [1.5, 65, .5])
+                    self.assertFalse(result.data["retreat_complete"])
+                    self.assertFalse(result.data["ground_route_verified"])
+                    next_result = self.retreat(world)
+                    self.assertEqual(next_result.error_code, "unsafe")
+                    self.assertEqual([row[0] for row in world.writes()], ["move_to"])
 
     def test_two_block_descent_checks_the_entire_swept_head_column(self):
         for obstruction_y in (66, 67):
             with self.subTest(obstruction_y=obstruction_y):
                 world = self.terrain([(0, 66, 0, "birch_leaves"), (1, 64, 0, "dirt"), (2, 64, 0, "dirt")])
                 world.set_block([1, obstruction_y, 0], "stone")
-                self.assertEqual(self.retreat(world).error_code, "unsafe")
-                self.assertFalse(world.writes())
+                result = self.retreat(world)
+                if obstruction_y == 66:
+                    # The obstruction also provides a legitimate +1 floor;
+                    # only its upper surface is reachable, never the drop below.
+                    self.assertTrue(result.success, result)
+                    self.assertEqual(result.data["target"], [1.5, 67, .5])
+                    self.assertFalse(result.data["retreat_complete"])
+                    self.assertTrue(all(point[1] >= 66 for point in result.data["planned_path"]))
+                else:
+                    self.assertEqual(result.error_code, "unsafe")
+                    self.assertFalse(world.writes())
 
     def test_descent_cannot_enter_near_threat_height_without_horizontal_clearance(self):
         world = self.terrain([(0, 66, 0, "birch_leaves"), (1, 64, 0, "dirt"),
@@ -764,10 +785,12 @@ class ObservedCanopyRetreatTests(unittest.TestCase):
         self.assertTrue(first.success, first)
         self.fixture["blocks"]["9,109,-6"] = {"name": "lava", "properties": {}}
         second = self.step({"evacuating": True, "evacuation_origin": self.fixture["origin"]})
-        self.assertEqual(second.error_code, "unsafe")
-        self.assertIsNone(second.data["target"])
-        self.assertFalse(second.data["executed"])
-        self.assertEqual(len(self.world.writes()), 1)
+        self.assertTrue(second.success, second)
+        self.assertFalse(second.data["ground_route_verified"])
+        self.assertFalse(second.data["retreat_complete"])
+        self.assertEqual(second.data["evacuation_stage"], "relay")
+        self.assertNotIn([9.5, 110, -5.5], second.data["planned_path"])
+        self.assertEqual(len(self.world.writes()), 2)
 
     def test_excluded_failed_waypoint_is_never_selected_again(self):
         blocked = [9, 114, -9]
@@ -800,12 +823,14 @@ class SurvivalTests(unittest.TestCase):
     def test_log_gather_requires_removed_block_and_real_inventory_gain(self):
         result = self.gather()
         self.assertTrue(result.success, result)
+        self.assertTrue(result.data["executed"])
         self.assertEqual(result.data["gained"], {"oak_log": 1})
         self.assertEqual([call[0] for call in self.world.writes()], ["dig"])
 
     def test_stone_gather_requires_a_pickaxe_and_checks_actual_drop(self):
         result = self.gather("stone")
         self.assertEqual(result.error_code, "missing_tool")
+        self.assertFalse(result.data["executed"])
         self.assertFalse(self.world.writes())
         self.world.counts["wooden_pickaxe"] = 1
         result = self.gather("stone")
@@ -1086,6 +1111,7 @@ class SurvivalTests(unittest.TestCase):
         self.world.counts["stick"] = 10
         result = self.skills.execute("craft_item", {"item": "stick", "count": 4})
         self.assertTrue(result.success, result)
+        self.assertTrue(result.data["executed"])
         self.assertEqual((result.data["before"], result.data["after"], result.data["gained"]), (10, 14, 4))
 
     def test_partial_craft_has_explicit_partial_result(self):

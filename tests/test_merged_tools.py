@@ -11,7 +11,7 @@ class MergedToolCatalogTests(unittest.TestCase):
         self.assertEqual(function["parameters"]["required"], ["throws"])
         ray = function["parameters"]["properties"]["throws"]["items"]
         self.assertEqual(set(ray["required"]), {"x", "z", "bearing_deg", "sigma_deg"})
-        for objective, expected_count in (("starter", 9), ("daily", 31)):
+        for objective, expected_count in (("starter", 9), ("daily", 35), ("competition", 40)):
             with self.subTest(objective=objective):
                 tools = tools_for_objective(objective)
                 names = {tool["function"]["name"] for tool in tools}

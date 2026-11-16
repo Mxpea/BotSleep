@@ -91,7 +91,19 @@ class DailyWorld:
         self.counts["beef"] = self.counts.get("beef", 0) + 1
         return envelope({"killed": True})
 
-    def equip(self, item, slot="hand"):
+    def control(self, **kwargs):
+        self.calls.append(("control", kwargs))
+        entity = next((row for row in self.entities if row.get("name") in DailySurvivalSkills.ANIMALS), None)
+        if entity is None:
+            return envelope({"hits": [{"entity": None}]})
+        if "attack" in self.effects:
+            self.effects["attack"]()
+        else:
+            self.entities = [row for row in self.entities if row["id"] != entity["id"]]
+            self.counts["beef"] = self.counts.get("beef", 0) + 1
+        return envelope({"hits": [{"entity": {"id": entity["id"], "name": entity["name"]}}]})
+
+    def equip(self, item, slot="hand", **kwargs):
         self.calls.append(("equip", item, slot))
         if "equip" not in self.effects:
             self.armor["chest" if slot == "torso" else slot] = {"name": item, "count": 1}
@@ -562,15 +574,19 @@ class DailySkillTests(unittest.TestCase):
         self.assertEqual(self.act("hunt_animal", entity_id=1, expected_name="cow").error_code, "missing_tool")
         self.assertFalse(self.writes("attack"))
 
-    def test_hunting_has_one_bounded_attack_and_verifies_inventory(self):
+    @patch("skills.hunting._rest", return_value=None)
+    def test_hunting_has_one_bounded_attack_and_verifies_inventory(self, _rest):
         self.world.entities = [{"id": 1, "name": "cow", "type": "mob", "pos": self.pos}]
         self.world.counts["stone_sword"] = 1
         result = self.act("hunt_animal", entity_id=1, expected_name="cow")
         self.assertTrue(result.success, result)
         self.assertEqual(result.data["gained"], {"beef": 1})
-        self.assertEqual(self.writes("attack")[0][2], {"timeout_ms": 6000, "max_hits": 6})
+        self.assertFalse(self.writes("attack"))
+        control = self.writes("control")[0][1]
+        self.assertEqual((control["hit"], control["ms"], control["wait"]), (1, 50, True))
 
-    def test_hunting_killed_flag_without_loot_is_unverified(self):
+    @patch("skills.hunting._rest", return_value=None)
+    def test_hunting_killed_flag_without_loot_is_unverified(self, _rest):
         self.world.entities = [{"id": 1, "name": "cow", "type": "mob", "pos": self.pos}]
         self.world.counts["stone_sword"] = 1
         self.world.effects["attack"] = lambda: envelope({"killed": True})

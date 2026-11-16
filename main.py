@@ -147,14 +147,21 @@ def main(argv=None) -> int:
                 controller.request_step()
             else:
                 controller.request_sleep()
+        poll_interval = config["survival" if survival else "sleep"]["poll_interval_seconds"]
+        # Survival owns action/observation backoff. Poll completed futures promptly
+        # without imposing the configured observation interval a second time.
+        tick_interval = min(.1, poll_interval) if survival else poll_interval
+        next_debug_poll = 0
         next_heartbeat = 0
         while True:
-            if debugger:
+            if debugger and (not survival or time.monotonic() >= next_debug_poll):
                 try:
                     debugger.poll_and_dispatch()
                 except APIError as exc:
                     if recorder:
                         recorder.record("WARN", "debug", "DEBUG_POLL_FAILED", {"code": exc.code})
+                finally:
+                    next_debug_poll = time.monotonic() + poll_interval
             result = controller.tick(automatic=not args.once)
             if monitor and time.monotonic() >= next_heartbeat:
                 next_heartbeat = time.monotonic() + monitor_config["heartbeat_seconds"]
@@ -176,7 +183,7 @@ def main(argv=None) -> int:
                 exit_code = 0 if controller.completed else 2
                 print(controller.summary())
                 break
-            time.sleep(config["survival" if survival else "sleep"]["poll_interval_seconds"])
+            time.sleep(tick_interval)
     except KeyboardInterrupt:
         print("Stopping BotSleep...")
     except Exception as exc:

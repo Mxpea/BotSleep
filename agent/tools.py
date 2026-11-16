@@ -20,6 +20,9 @@ def _tool(name, description, properties, required=()):
 
 
 _ITEM = {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$", "maxLength": 64}
+SURVIVAL_TASK_NAMES = ("gather", "craft", "smelt", "food", "starter_tools", "iron_tools",
+                       "shelter", "bed", "storage", "farm", "recover_drops", "maintenance")
+SURVIVAL_TASK_RESOURCES = ("logs", "cobblestone", "coal", "raw_iron")
 
 TOOL_DEFINITIONS = [
     _tool("gather_block", "Gather ONE observed natural log, stone/cobblestone or coal ore. "
@@ -152,7 +155,14 @@ def tools_for_objective(objective="starter"):
             function = tool["function"]
             function["description"] = function.get("description", "")[:140]
             parameters = function.get("parameters", {})
+            # This identical prose is stated once in the competition prompt.
+            # Preserve the reason field/type/limit and every executable constraint.
+            parameters.get("properties", {}).get("reason", {}).pop("description", None)
             for schema in parameters.get("properties", {}).values():
+                # Repeated coordinate prose is stated once in the competition
+                # prompt; item types, coordinate bounds and arity remain intact.
+                if isinstance(schema, dict) and schema.get("description") == "World coordinates [x, y, z].":
+                    schema.pop("description")
                 if isinstance(schema, dict) and isinstance(schema.get("description"), str):
                     schema["description"] = schema["description"][:90]
                 items = schema.get("items") if isinstance(schema, dict) else None
@@ -174,6 +184,19 @@ def tools_for_objective(objective="starter"):
     entity_id = {"type": "integer", "minimum": 0}
     def add(name, description, properties, required=None):
         tools.append(_tool(name, description, properties, tuple(properties) if required is None else required))
+    add("run_survival_task", "Prefer ONE bounded survival goal over repeated atomic calls. The local executor finds prerequisites, reobserves and verifies child steps without model calls. Stop on safety, unknown writes or budget; only the final summary is tool feedback. gather requires resource; craft/smelt require target item; others accept neither. No coordinates or action queues.",
+        {"task": {"type": "string", "enum": list(SURVIVAL_TASK_NAMES)},
+         "resource": {"type": "string", "enum": list(SURVIVAL_TASK_RESOURCES)},
+         "item": {**_ITEM, "description": "Desired crafted/smelted OUTPUT item, not an ingredient; executor checks supported recipes."},
+         "count": {"type": "integer", "minimum": 1, "maximum": 64, "default": 8,
+                   "description": "Desired new output for gather/craft/smelt; current food reserve target for food."},
+         "radius": {"type": "integer", "minimum": 4, "maximum": 64, "default": 32}}, ("task",))
+    add("fight_hostile", "Perform one bounded defensive step against an observed skeleton, zombie or creeper. The skill selects shield/no-shield handling and rechecks life, target and terrain. A hit, block or missing target is not a verified kill; never chase unknown enemies.",
+        {"entity_id": entity_id, "expected_name": {"type": "string", "enum": ["skeleton", "zombie", "creeper"]}})
+    add("collect_liquid", "Collect one freshly verified water/lava source into an existing empty bucket from safe reachable ground. Source removal and filled-bucket inventory gain must both be verified; never enter the liquid or replay an unknown result.",
+        {**pos, "expected_name": {"type": "string", "enum": ["water", "lava"]}})
+    add("hunt_with_lava", "Use an existing lava bucket only on one observed passive animal in a verified single-cell nonflammable containment pit. No players, enemies or flammables may be nearby. Recollect and verify the source immediately; success requires actual inventory gain. Never use on open terrain.",
+        {"entity_id": entity_id, "expected_name": {"type": "string", "enum": ["pig", "cow", "sheep", "chicken"]}})
     add("gather_resource", "Mine ONE currently observed iron ore with a stone-or-better pickaxe; block removal and raw iron gain are verified.",
         {**pos, "expected_name": {"type": "string", "enum": sorted(Daily.IRON)}})
     add("harvest_crop", "Harvest ONE observed mature crop; maturity, removal and produce gain are checked. Replant when seeds are available.",
@@ -185,7 +208,7 @@ def tools_for_objective(objective="starter"):
     add("plant_crop", "Plant an existing seed/produce on the observed farmland pos (the soil, not the crop cell). Verify the new crop and item consumption.",
         {**pos, "item": {"type": "string", "enum": sorted(Daily.SEEDS)}})
     add("till_soil", "Use an existing hoe on checked dirt/grass near water; verify farmland. Does not grant tools or seeds.", pos)
-    add("hunt_animal", "Attempt a short bounded hunt of an observed cow/pig/sheep/chicken. No players, pets or villagers. Health and threat gates apply; only actual drops gained count as harvest.",
+    add("hunt_animal", "Strike one observed cow/pig/sheep/chicken only within 2.8 blocks from a verified stationary stance; position safely first. Never chase. Target disappearance is not a kill; only raw/cooked inventory gain counts. On hunt_unverified, reobserve current drops before collect_drops.",
         {"entity_id": entity_id, "expected_name": {"type": "string", "enum": sorted(Daily.ANIMALS)}})
     add("collect_drops", "Approach ONE currently observed item entity and verify expected item gain. Used for natural drops and safe death recovery; despawned drops are not success.",
         {"entity_id": entity_id, "expected_item": _ITEM})

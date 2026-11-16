@@ -37,7 +37,7 @@ class CompetitionContextTests(unittest.TestCase):
     def planner(self, *responses):
         brain = Brain(*responses)
         planner = LLMSurvivalPlanner({"enabled": True, "max_repair_attempts": 0},
-                                     {"objective": "competition"}, brain=brain)
+                                     {"objective": "competition", "autonomy": {"enabled": False}}, brain=brain)
         return planner, brain
 
     def current_observation(self, brain):

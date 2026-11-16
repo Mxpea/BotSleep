@@ -15,6 +15,28 @@
 
 快照 `updated_at/stale` 与 heartbeat 分开展示，stale 只展示运行时标记；缺失时间不伪装新鲜。所有赛事字段复用 EventMonitor 脱敏与有界存储：最多 500 条事件，默认 8 MiB 缓存，单条最多 1 MiB（也受总预算约束），另有字符串、数组和嵌套上限。过大事件只留截断提示，面板可能仍保留前一有效快照，应结合时间线判断。
 
+## 程序长任务
+
+`task_execution` 是独立于日常任务板和赛事得分板的运行快照。页面显示高层任务/ID、发布状态、`progress.current/target/unit`、当前子步骤、步骤预算与最近最多 8 条原子动作结果。状态为 `idle/running/suspended/completed/needs_ai/unknown/cancelled`；`fresh=false` 显示旧快照待复核。单步 `success`、进度达到目标或 `TASK_COMPLETED` 事件名称本身都不会让前端推断任务完成，缺失值显示未确认。
+
+| 发布字段 | 页面含义 |
+|---|---|
+| `local_recoveries` | 程序处理的本地失败恢复累计次数，不代表每次都已恢复成功。 |
+| `emergency_interruptions` | 目标被本地应急挂起的累计次数。 |
+| `ai_escalations` / `last_escalation_reason` | 升级询问 AI 的累计次数与最近原因；尚未再次请求模型时仍可有升级状态。 |
+| `model_planning_rounds` | **AI 规划轮次**：同检查点累计的模型规划 worker 启动次数，重启不归零；一次格式 repair 可产生额外 HTTP 请求，不能当作本次登录的 HTTP 请求总数。 |
+| `model_calls_avoided` | **程序子步骤**：已授权目标下由程序选出的子步骤数量；不等于实际成功动作数，也不是测量出的费用节省。 |
+
+`HEARTBEAT/AGENT_STATE` 与 `TASK_STARTED/TASK_PROGRESS/TASK_SUSPENDED/TASK_COMPLETED/TASK_NEEDS_AI/TASK_UNKNOWN` 携带完整同结构快照，前端和事件投影均不重复累加计数。快照继续使用统一脱敏、限长与只读 GET；没有恢复任务、清除 unknown 或重放子步的网页按钮。目标完整契约见 [AUTONOMOUS_TASKS.md](AUTONOMOUS_TASKS.md)。
+
+模型请求原始 JSON/时间线还保留 `LLM_REQUEST.tool_mode` 与 `atomic_repair_remaining`，用于检查本轮是目标规划还是有界原子修复；它们不是新的控制接口，也不代替任务完成证据。
+
+## 生存阶段与战斗证据
+
+`HEARTBEAT` / `AGENT_STATE` 发布的 `playbook` 和 `combat` 原样进入只读状态；短安全观察将旧阶段建议标记 `fresh: false`，页面显示“旧阶段建议 · 待完整观察”。阶段、缺少前置与未绑定能力是规划提示，不是完成证明。`survival.intent: speedrun` 也不会自动绑定门户、下界导航或击龙技能。
+
+`STEP_RESULT` 中 `hunt_animal`、`fight_hostile`、`hunt_with_lava`、`collect_liquid` 及内部 `release_defense` 的最近结果保存为 `combat_result`，包含技能、发布时间与原始结果。页面区分攻击已发、伤害/击杀证据、盾指令、岩浆回收和撤退需求；未发布字段显示“未确认”。普通成功不会推导击杀，旧结果不会冒充当前状态。字段继续采用同一脱敏、大小限制与纯 `textContent` 渲染，没有新增动作或控制端点。
+
 ## 门户调试记录与系统监控的区别
 
 最新合并加入 `skills/portal_telemetry.py` 的 `PortalTelemetryRecorder`：`record_step(...)` 会主动读取机器人、目标方块和可选门框矩阵，也可通过 `action_func` 执行动作；`dump_json(filepath=None)` 默认写 `logs/telemetry/trial_<trial_id>.json`。这些是独立门户靶场证据，未接入 `EventMonitor` 或赛事计分，不是只读监控接口。

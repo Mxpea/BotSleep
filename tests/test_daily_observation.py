@@ -527,7 +527,8 @@ class DailyObservationTests(unittest.TestCase):
         self.client.blocks[(1, 63, 0)] = block("farmland", [1, 63, 0])
         self.client.discovered = [crop]
         result = self.collector.collect()
-        self.assertTrue(DailySafetyPolicy().constraints(result)["model_allowed"])
+        self.assertFalse(DailySafetyPolicy().constraints(result)["model_allowed"])
+        self.assertIn("harvest_crop", DailySafetyPolicy().constraints(result)["allowed_actions"])
         indexed = {tuple(row["pos"]): row for row in result["blocks"]}
         self.assertEqual(indexed[(1, 64, 0)]["properties"]["age"], 7)
         self.assertEqual(indexed[(2, 64, 0)]["name"], "air")

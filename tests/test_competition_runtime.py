@@ -30,6 +30,7 @@ class CompetitionRuntimeTests(unittest.TestCase):
         self.addCleanup(self.directory.cleanup)
         self.settings = copy.deepcopy(DEFAULTS["survival"])
         self.settings.update(objective="competition", state_dir=self.directory.name)
+        self.settings["autonomy"]["enabled"] = False  # Exercise the legacy atomic/competition-meta protocol.
         self.settings["competition"]["advancement_poll_seconds"] = .001
         self.obs = ready_world()
         self.obs["status"].update(time_of_day=1000)

@@ -4,6 +4,7 @@ import copy
 import math
 import os
 import re
+import unicodedata
 from pathlib import Path
 from typing import Any, Dict, Mapping, Optional, Union
 from urllib.parse import urlsplit
@@ -24,6 +25,10 @@ DEFAULTS: Dict[str, Any] = {
     "agent": {"name": "SleepBot", "password": "", "mode": "sleep"},
     "survival": {
         "objective": "starter",
+        "intent": "survival",
+        "operator_goal": "",
+        "autonomy": {"enabled": True, "max_steps": 128, "max_seconds": 600,
+                     "max_local_failures": 4, "max_no_progress_steps": 8, "max_explore_steps": 8},
         "competition": {"eligibility_overrides": {}, "defer_seconds": 300,
                         "advancement_poll_seconds": 5, "max_seconds": 28800, "max_steps": 100000},
         "daily": {"food_reserve": 8, "wood_reserve": 8, "fuel_reserve": 8, "maintenance_interval_seconds": 30},
@@ -172,6 +177,23 @@ def _validate(config: Dict[str, Any], config_dir: Path) -> None:
         raise ConfigError("survival contains unsupported options")
     if survival["objective"] not in {"starter", "daily", "competition"}:
         raise ConfigError("survival.objective must be starter, daily or competition")
+    if not isinstance(survival["intent"], str) or survival["intent"] not in ("survival", "speedrun"):
+        raise ConfigError("survival.intent must be survival or speedrun")
+    goal = survival["operator_goal"]
+    if (not isinstance(goal, str) or len(goal) > 1000 or goal and not goal.strip()
+            or isinstance(goal, str) and any(unicodedata.category(char) in {"Cc", "Cf", "Cs"} for char in goal)):
+        raise ConfigError("survival.operator_goal must be empty or up to 1000 visible characters without control characters")
+    autonomy = _mapping(survival["autonomy"], "survival.autonomy")
+    if set(autonomy) - set(DEFAULTS["survival"]["autonomy"]):
+        raise ConfigError("survival.autonomy contains unsupported options")
+    _boolean(autonomy["enabled"], "survival.autonomy.enabled")
+    for key, minimum, maximum in (("max_steps", 1, 2048), ("max_local_failures", 1, 32),
+                                 ("max_no_progress_steps", 1, 128), ("max_explore_steps", 0, 64)):
+        if type(autonomy[key]) is not int or not minimum <= autonomy[key] <= maximum:
+            raise ConfigError(f"survival.autonomy.{key} must be an integer between {minimum} and {maximum}")
+    _positive(autonomy["max_seconds"], "survival.autonomy.max_seconds")
+    if autonomy["max_seconds"] > 3600:
+        raise ConfigError("survival.autonomy.max_seconds must not exceed 3600")
     competition = _mapping(survival["competition"], "survival.competition")
     if set(competition) - set(DEFAULTS["survival"]["competition"]):
         raise ConfigError("survival.competition contains unsupported options")

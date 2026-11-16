@@ -17,7 +17,7 @@ class EmergencyFeedbackTests(unittest.TestCase):
 
     def test_partial_observation_never_requests_model_production(self):
         brain = Brain(response("wait"))
-        planner = LLMSurvivalPlanner({"enabled": True}, {"objective": "daily"}, brain=brain)
+        planner = LLMSurvivalPlanner({"enabled": True}, {"objective": "daily", "autonomy": {"enabled": False}}, brain=brain)
         with self.assertRaises(LLMError) as caught:
             planner.choose(self.partial(), {})
         self.assertEqual(caught.exception.code, "llm_unsafe_action")
@@ -25,7 +25,7 @@ class EmergencyFeedbackTests(unittest.TestCase):
 
     def test_preempted_model_receives_unknown_inventory_in_paired_feedback(self):
         brain = Brain(response("wait"), response("gather_block", {"pos": [3, 64, 0], "expected_name": "oak_log"}, "after_safety"))
-        planner = LLMSurvivalPlanner({"enabled": True}, {"objective": "daily"}, brain=brain)
+        planner = LLMSurvivalPlanner({"enabled": True}, {"objective": "daily", "autonomy": {"enabled": False}}, brain=brain)
         decision = planner.choose(observation(), {})
         planner.observe_result(decision, SkillResult(False, "Fresh danger", {"executed": False}, "safety_changed"), self.partial())
         planner.choose(observation(), {})

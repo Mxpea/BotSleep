@@ -25,7 +25,7 @@ def verified(pos=None, **extra):
 
 def ready_world():
     obs = observation({"bread": 8, "oak_log": 8, "coal": 8,
-        "iron_pickaxe": 1, "iron_axe": 1, "iron_sword": 1}, [
+        "iron_pickaxe": 1, "iron_axe": 1, "iron_sword": 1, "shield": 1, "bucket": 1}, [
             block("furnace", [2, 64, 0]), block("chest", [2, 64, 2]),
             block("white_bed", [3, 64, 3], part="foot", facing="south", occupied=False),
             block("white_bed", [3, 64, 4], part="head", facing="south", occupied=False)])
@@ -286,6 +286,20 @@ class DailyGoalsTests(unittest.TestCase):
         obs = observation({"stone_axe": 1})
         obs["entities"] = [{"id": 2, "name": "sheep", "pos": [3, 64, 0]}]
         self.assertEqual(self.task(obs, "bed")["next_action"]["name"], "hunt_animal")
+        obs["status"]["health"] = 11
+        self.assertIsNone(self.task(obs, "bed")["next_action"])
+
+    def test_bed_wool_requires_approach_and_fresh_nearby_sheep_before_hunt(self):
+        obs = observation({"stone_axe": 1})
+        obs["entities"] = [{"id": 2, "name": "sheep", "pos": [6, 64, .5]}]
+        action = self.task(obs, "bed")["next_action"]
+        self.assertEqual(action["name"], "move_to")
+        self.assertEqual(action["args"], {"pos": [6, 64, .5], "range": 2})
+        self.assertEqual(action["goal"], "bed")
+        obs["entities"][0]["pos"] = [2.5, 64, .5]
+        action = self.task(obs, "bed")["next_action"]
+        self.assertEqual(action["name"], "hunt_animal")
+        self.assertEqual(action["args"], {"entity_id": 2, "expected_name": "sheep"})
         obs["status"]["health"] = 11
         self.assertIsNone(self.task(obs, "bed")["next_action"])
 

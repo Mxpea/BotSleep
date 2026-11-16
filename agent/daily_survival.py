@@ -22,6 +22,7 @@ DAILY_SKILLS = frozenset({
     "take_items", "collect_drops", "place_bed", "place_door", "wait",
     "plan_shelter", "inspect_shelter", "build_shelter_step", "position_for_task",
     "gather_materials", "build_shelter_batch", "set_door", "gather_seeds", "clear_foliage",
+    "fight_hostile", "collect_liquid", "hunt_with_lava", "run_survival_task",
 })
 TASK_IDS = ("recover_drops", "food_reserve", "wood_reserve", "starter_tools", "furnace",
             "fuel_reserve", "iron_tools", "base_site", "bed", "shelter", "storage",
@@ -77,7 +78,6 @@ class DailySurvivalGoals:
         origin = self._pos(observation["status"].get("pos"))
         if origin is None:
             return []
-        hostiles = self.rules._hostiles(observation, origin)
         blocked = self.rules._blocked(context or {})
         rows = self._rows(observation.get("entities" if entities else "blocks"))
         found = []
@@ -87,7 +87,7 @@ class DailySurvivalGoals:
                 continue
             if self.rules._key(pos) in blocked:
                 continue
-            if any(math.dist(pos, threat) <= self.rules.threat_radius for _, threat in hostiles):
+            if self.rules._dangerous_hostiles(observation, pos):
                 continue
             dangerous = [b for b in self._rows(observation.get("blocks")) + self._rows(observation.get("terrain"))
                          if self._pos(b.get("pos")) is not None and b.get("name") in {
@@ -197,7 +197,7 @@ class DailySurvivalGoals:
             if row["name"] in names and math.dist(origin, row["pos"]) <= 8:
                 current[self.rules._key(row["pos"])] = row
         candidates = sorted((row for row in current.values() if row.get("can_see") is True
-            and self.rules._safe_target(row, origin, blocks, blocked, hostiles)),
+            and self.rules._safe_target(row, origin, blocks, blocked, hostiles, observation=observation)),
             key=lambda row: (math.dist(origin, row["pos"]), row["name"], row["pos"]))
         count = min(8, wanted, len(candidates))
         if count < 2:
@@ -206,7 +206,7 @@ class DailySurvivalGoals:
         # The batch rescans and chooses its own next target. Do not send it into
         # a radius containing a known blocked/occluded alternative it may select.
         if any(math.dist(origin, row["pos"]) <= radius and
-               (row.get("can_see") is not True or not self.rules._safe_target(row, origin, blocks, blocked, hostiles))
+               (row.get("can_see") is not True or not self.rules._safe_target(row, origin, blocks, blocked, hostiles, observation=observation))
                for row in current.values()
                if (math.floor(row["pos"][0]), math.floor(row["pos"][2])) != (math.floor(origin[0]), math.floor(origin[2]))):
             return action
@@ -297,6 +297,9 @@ class DailySurvivalGoals:
             for row in self._safe_rows(observation, {"cow", "pig", "sheep", "chicken"}, entities=True, context=context):
                 entity_id = row.get("id", row.get("entity_id"))
                 if type(entity_id) is int and self._can_hunt(observation, counts, row):
+                    if math.dist(observation["status"]["pos"], row["pos"]) > 2.8:
+                        return self._action("move_to", {"pos": list(row["pos"]), "range": 2},
+                            "Approach the observed passive animal once, then reobserve before the stationary short hunt", "food_reserve")
                     return self._action("hunt_animal", {"entity_id": entity_id, "expected_name": row["name"]},
                                         "Acquire food from one observed passive animal", "food_reserve")
         return None
@@ -520,6 +523,9 @@ class DailySurvivalGoals:
              action=fuel_action, proof={"fuel_items": fuel}, reason="Fuel requires a usable pickaxe and visible coal or a later charcoal job")
 
         missing_iron = [kind for kind in TOOL_KINDS if not any(counts.get(tier + "_" + kind, 0) for tier in ("iron", "diamond", "netherite"))]
+        offhand = status.get("offhand") if isinstance(status.get("offhand"), dict) else {}
+        missing_defense = ([] if counts.get("shield", 0) or offhand.get("name") == "shield" else ["shield"]) + (
+            [] if any(counts.get(item, 0) for item in ("bucket", "water_bucket", "lava_bucket")) else ["bucket"])
         iron_action = None
         if missing_iron:
             kind = missing_iron[0]
@@ -539,7 +545,29 @@ class DailySurvivalGoals:
             backup = self._take_supplies(observation, counts, {tier + "_" + kind for tier in ("iron", "diamond", "netherite")},
                                          1, "iron_tools", context)
             iron_action = backup or self._take_supplies(observation, counts, {"iron_ingot"}, ingots, "iron_tools", context) or iron_action
-        task("iron_tools", 55, not missing_iron, missing=["iron_" + kind for kind in missing_iron], action=iron_action,
+        if missing_defense:
+            tool_action = iron_action
+            item = missing_defense[0]
+            ingots, planks = (1, 6) if item == "shield" else (3, 0)
+            if counts.get("iron_ingot", 0) >= ingots:
+                wood = self.rules._need_planks(planks, observation, context) if planks else None
+                workspace = self.rules._workspace(observation, context)
+                prerequisite = wood or workspace
+                iron_action = (self._action(prerequisite.name, prerequisite.args, prerequisite.reason, "iron_tools") if prerequisite
+                               else self._action("craft_item", {"item": item, "count": 1}, "Prepare defensive equipment before further iron upgrades", "iron_tools"))
+            else:
+                iron_action = self._smelt({"iron_ingot"}, observation, counts, "iron_tools", context)
+                if iron_action is None and progress["stone_pickaxe"] and not counts.get("raw_iron", 0):
+                    iron_action = self._gather(("iron_ore", "deepslate_iron_ore"), observation, context, "iron_tools", iron=True)
+            iron_action = self._take_supplies(observation, counts, {item}, 1, "iron_tools", context) or iron_action
+            # Keep a verified stored replacement or immediately useful tool
+            # prerequisite ahead of speculative mining for defensive equipment.
+            if tool_action and (tool_action["name"] == "take_items" or missing_iron and (
+                    counts.get("iron_ingot", 0) < ingots
+                    or sum(n for name, n in counts.items() if name.endswith("_planks")) < planks)):
+                iron_action = tool_action
+        task("iron_tools", 70 if missing_defense else 55, not missing_iron and not missing_defense,
+             missing=missing_defense + ["iron_" + kind for kind in missing_iron], action=iron_action,
              depends_on=("starter_tools", "furnace", "fuel_reserve"), reason="Need safe observed iron, fuel, smelting output and crafting materials")
 
         base = evidence.get("base_site")
@@ -577,8 +605,12 @@ class DailySurvivalGoals:
                 for row in self._safe_rows(observation, {"sheep"}, entities=True, context=context):
                     entity_id = row.get("id", row.get("entity_id"))
                     if type(entity_id) is int and self._can_hunt(observation, counts, row):
-                        bed_action = self._action("hunt_animal", {"entity_id": entity_id, "expected_name": "sheep"},
-                                                  "Acquire wool from one observed sheep; verify its actual drops", "bed")
+                        if math.dist(observation["status"]["pos"], row["pos"]) > 2.8:
+                            bed_action = self._action("move_to", {"pos": list(row["pos"]), "range": 2},
+                                "Approach the observed sheep once, then reobserve before the stationary wool hunt", "bed")
+                        else:
+                            bed_action = self._action("hunt_animal", {"entity_id": entity_id, "expected_name": "sheep"},
+                                                      "Acquire wool from one observed sheep; verify its actual drops", "bed")
                         break
         task("bed", 74, bool(complete_beds), missing=[] if complete_beds else ["complete_unoccupied_bed"], action=bed_action,
              depends_on=("base_site", "shelter"), proof={"positions": complete_beds[:4]}, reason="Need wool, planks and a safe two-block placement inside the completed shelter; held beds are not deployed beds")
@@ -648,7 +680,7 @@ class DailySurvivalGoals:
                 if (row.get("fresh") is not True or row.get("can_see") is not True
                         or math.dist(origin, row["pos"]) > 4
                         or row["name"] == "tall_grass" and (row.get("properties") or {}).get("half") != "lower"
-                        or not self.rules._safe_target(row, origin, blocks, blocked, hostiles)):
+                        or not self.rules._safe_target(row, origin, blocks, blocked, hostiles, observation=observation)):
                     continue
                 plant_action = self._action("gather_seeds", {"pos": row["pos"], "expected_name": row["name"]},
                     "Try one currently visible grass plant; removal alone is not seed acquisition and only inventory gain advances planting", "food_production")

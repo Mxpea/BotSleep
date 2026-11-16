@@ -29,11 +29,11 @@ _ELIGIBILITY = {"scored": "scored", "pending": "conditional_pending", "excluded"
 _KNOWN_SKILLS = frozenset({"gather_block", "gather_resource", "craft_item", "place_item",
                            "smelt_start", "smelt_collect", "equip_armor", "auto_sleep", "plant_crop",
                            "eat_food", "place_bed", "gather_seeds", "harvest_crop", "till_soil",
-                           "hunt_animal", "wait"})
+                           "hunt_animal", "fight_hostile", "collect_liquid", "hunt_with_lava", "wait"})
 _MAPPED = frozenset({"minecraft:story/mine_stone", "minecraft:story/upgrade_tools",
                      "minecraft:story/smelt_iron", "minecraft:story/iron_tools",
                      "minecraft:story/obtain_armor", "minecraft:adventure/sleep_in_bed",
-                     "minecraft:husbandry/plant_seed"})
+                     "minecraft:husbandry/plant_seed", "minecraft:adventure/kill_a_mob"})
 
 
 def _number(value: Any) -> bool:
@@ -355,8 +355,7 @@ class CompetitionTasks:
                 "missing": [], "next_steps": [], "required_skills": []}
         if ident not in _MAPPED:
             # Unsupported is about this limited planner, not the Minecraft API.
-            plan.update(availability="unsupported", reason="hostile_combat_unavailable"
-                        if ident == "minecraft:adventure/kill_a_mob" else "requires_planning")
+            plan.update(availability="unsupported", reason="requires_planning")
             return plan
         if not known:
             plan["reason"] = "fresh_resources_required"
@@ -397,7 +396,18 @@ class CompetitionTasks:
                 step("Prepare two sticks from planks", "craft_item")
 
         ready = False
-        if path == "mine_stone":
+        if path == "kill_a_mob":
+            from skills.combat import combat_options
+            combat = combat_options(self._observation)
+            ready = combat.get("allowed") is True and combat.get("mode") in {"melee", "ranged"}
+            need(ready, "fresh_safe_hostile_combat_opportunity")
+            if not ready:
+                need(any(has(tier + suffix) for tier in ("stone", "iron", "diamond", "netherite")
+                         for suffix in ("_sword", "_axe")) or has("bow") or has("crossbow"), "usable_weapon")
+                step("Prepare safe health, food and a weapon; shield lowers the permitted health threshold")
+            step("Use one verified fight_hostile step only when the current target and terrain permit it", "fight_hostile")
+            step("Reobserve the server advancement before finish_task; hits and missing targets do not prove a kill")
+        elif path == "mine_stone":
             ready = pick and stone
             if not ready:
                 need(pick, "wooden_or_better_pickaxe")

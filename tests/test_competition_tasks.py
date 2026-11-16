@@ -135,7 +135,33 @@ class CompetitionTasksTests(unittest.TestCase):
     def test_hostile_mob_goal_is_not_advertised_as_hunt_skill(self):
         row = self.task(self.update(), "minecraft:adventure/kill_a_mob")
         self.assertEqual(row["availability"], "unsupported")
-        self.assertEqual(row["reason"], "hostile_combat_unavailable")
+        self.assertEqual(row["reason"], "missing_registered_skills")
+        self.assertIn("fight_hostile", row["required_skills"])
+        self.assertNotIn("hunt_animal", row["required_skills"])
+
+    def test_hostile_goal_requires_safe_combat_and_server_advancement_for_points(self):
+        goal = "minecraft:adventure/kill_a_mob"
+        current = obs({"iron_sword": 1, "shield": 1}, health=20, food=20,
+                      on_ground=True, gamemode="survival")
+        current["inventory"] = [{"name": name, "count": count} for name, count in current["counts"].items()]
+        current["entities"] = [{"id": 44, "name": "skeleton", "type": "hostile", "pos": [2.5, 64, .5]}]
+        capabilities = CAPABILITIES | {"fight_hostile"}
+        row = self.task(self.update(current, capabilities=capabilities), goal)
+        self.assertEqual(row["availability"], "ready")
+        self.assertTrue(self.manager.select(goal)["success"])
+        self.manager.record_action("fight_hostile", {"entity_id": 44, "expected_name": "skeleton"},
+            {"success": True, "data": {"killed": True, "completed": True}}, current)
+        self.assertFalse(self.manager.finish("A local hit was reported")["success"])
+        current["entities"] = []
+        row = self.task(self.update(current, capabilities=capabilities), goal)
+        self.assertEqual(row["completion"], "not_completed")
+        finished = self.manager.finish("The entity disappeared")
+        self.assertTrue(finished["success"])
+        self.assertFalse(finished["data"]["completed"])
+        self.assertEqual(self.manager.snapshot()["score"]["raw"], 0)
+        self.update(current, advancements=api({goal: "completed"}), capabilities=capabilities)
+        self.assertEqual(self.task(self.manager.snapshot(), goal)["completion"], "completed")
+        self.assertGreater(self.manager.snapshot()["score"]["raw"], 0)
 
     def test_story_plans_cover_iron_goals_without_claiming_completion(self):
         world = obs({"iron_ingot": 4, "stick": 2}, [{"name": "crafting_table", "pos": [1, 64, 1]}])

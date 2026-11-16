@@ -1,6 +1,6 @@
 # Harness 接口契约与架构决策
 
-更新：2026-11-15；源码核对基线为合并后的 `3801be9`。状态：**第 2 节与第 5 节赛事任务子集为现有运行接口；其余未实现入口仍是设计提案**。路径均相对本仓库；部署地址、账号与凭据由配置提供。
+更新：2026-11-16；`3801be9` 为此前合并核对基线，当前还包含目标程序扩展。状态：**第 2 节、明确标为当前实现的赛事工具与目标程序是现有接口；其余未实现入口仍是设计提案**。路径均相对本仓库；部署地址、账号与凭据由配置提供。
 
 合并说明：本页保留 dev-aure 的赛事接口设计访谈，不是当前全部运行能力清单。合并后的配置入口、原生模型反馈、日常技能、单模型请求门禁及本地安全运行时见 [README.md](../README.md)、[DAILY_SURVIVAL.md](DAILY_SURVIVAL.md) 和 [TESTING.md](TESTING.md)。这些实现不代表完整阶段 skill 加载、compact/handoff、浮水/搭桥执行器等未来提案已经落地。
 
@@ -30,9 +30,10 @@
 | 生存调度 | `SurvivalHarness.tick(automatic=True)`、`snapshot(status=None)` | 已实现单动作线程、模型 worker、安全检查；快照含阶段/暂停/任务板等 |
 | 调试控制 | `pause(reason)`、`resume()`、`request_step()`、`request_sleep()`、`close()` | 生存内部/白名单调试入口，不是新增赛事模型工具；resume 不重放 pending |
 | 模型选择 | `LLMSurvivalPlanner.choose(observation,context,cancel_event)` | 返回一个 Decision；`observe_result(decision,result,observation)` 回传配对原生工具结果 |
+| 目标程序 | `run_survival_task({task,resource?,item?,count?,radius?})`、`AutonomousTaskController` | daily/competition 的 12 类有界目标；每子步 fresh、复用现有技能和 pending，原目标只产生一次配对反馈，见 [AUTONOMOUS_TASKS.md](AUTONOMOUS_TASKS.md) |
 | 模型门禁 | `ModelRequestGate.request(cancel_event)`、`snapshot()` | 本机线程/进程串行化；传输未知持久化锁定；不自动清锁 |
 | 进度/记忆 | `SurvivalJournal.update/record`、`SurvivalMemory.recall/record_result` | 按 API/账号/world_id 隔离的检查点及有界 SQLite；competition 子状态可恢复终态，pending 不重放 |
-| 模型工具目录 | `tools_for_objective("starter"/"daily"/"competition")` | 9/31/36 个已注册工具；competition 的 5 个任务工具由本地任务管理器执行，游戏工具仍受后验门禁 |
+| 模型工具目录 | `tools_for_objective("starter"/"daily"/"competition")` | 9/35/40 个已注册工具；competition 的 5 个任务工具由本地任务管理器执行，游戏工具仍受后验门禁 |
 | 赛事任务 | `CompetitionTasks`、`tools_for_objective("competition")`、`MinecraftAgentClient.advancements()` | 规则目录、目标选择、progress/finish/force-exit/end、服务器 advancement 计分和终态检查点已实现；模型自报不算证据 |
 | 要塞 | `EyeObservationCollector.capture()`、`CalculateStrongholdSkill.execute(...)` | 独立 Python/CLI；STRONGHOLD_TOOL_DEFINITION 未加入 starter/daily/competition 工具目录 |
 | Markdown skill | `skills/stronghold_localization/SKILL.md` | 策略文档，无运行时按需加载器 |
@@ -46,6 +47,14 @@
 目标与能力差异：daily 的 13 项证据任务板不等于赛事 advancement 清单；competition 现在提供 advancement 任务板和结束 gate，但尚未实现完整阶段清单、动态 skill 加载或导航执行器；starter 的 `goal_complete` 与 competition 的 `end_competition` 是两套退出语义。
 
 模型与动作两个恢复入口必须分清：`--resume` 只处理游戏 pending；`--acknowledge-model-idle` 只在已确认 provider 空闲后解除模型不确定锁。不能用重启/清文件绕过门禁；当前脚本退出会登出游戏，不是 handoff 保持在线功能。
+
+### 当前目标程序与未来阶段调度的区别
+
+`core/autonomous_tasks.py` 是实际执行目标的确定性程序，`start/next_action/record_result/interrupt/snapshot/state` 由 `AutonomyRuntime` 接入主 harness。它不自行发模型或游戏请求，也不保存可重放的写动作队列。已知失败有界换候选，紧急安全优先；未知子动作立即冻结，显式恢复必须在完整新观察下放弃未确认目标。全局运行预算与每目标预算共同约束执行。
+
+这已经允许一个模型工具调用驱动多步材料、制作和设施工作，但不等于完整赛事阶段执行器、886 配方通用求解器、Markdown skill 加载、语义 compact/handoff 或下界/末地自动行动。默认目录为 9/35/40；关闭 autonomy 时模型请求中的 daily/competition 目录移除 `run_survival_task`，回到 34/39。
+
+9/35/40 是完整注册目录。autonomy 正常阶段实际只向模型暴露目标与必要安全/赛事管理工具；任务 `needs_ai` 阶段开放原子修复，解析仍只接受本轮允许的工具。该过滤属于运行时工具路由，不是只在 prompt 中建议目标优先。
 
 ## 3. 底层 API 摘要
 
@@ -95,7 +104,7 @@
 | `force_exit_task(reason)` | 原因 | 结束当前目标并 cooldown，回到选择；不清游戏 pending 或模型 uncertain。 |
 | `end_competition(reason)` | 原因 | 只在 selection 且 fresh 全目录检测后进入 terminal；未知目标留 unknown、不计分。 |
 
-工具定义见 `agent/tools.py`，状态由 `core/competition_tasks.py` 保存至 scoped journal。`competition` 目录共 36 个工具（31 个日常生存动作 + 5 个生命周期工具）；规则目录 125 项，只有 7 个 scored 目标有当前行动计划。
+工具定义见 `agent/tools.py`，状态由 `core/competition_tasks.py` 保存至 scoped journal。`competition` 目录共 40 个工具（35 个日常工具 + 5 个生命周期工具）；规则目录 125 项，8 个 scored 目标有当前行动计划。新增怪物猎人只在当前战斗门禁允许攻击时提供下一步；击中或实体消失不是 advancement 完成证据。
 
 ## 5. 程序入口草案
 
@@ -139,7 +148,7 @@
 | D4 | 模型重复输出触发循环兜底；compact 并允许一次重规划，仍重复则 force-exit 当前任务回任务选择。 |
 | D5 | 有副作用动作结果不明先核验，不盲重发；接受最小 checkpoint 作为进度丢失兜底。 |
 | D6 | 正式比赛关闭聊天调试/人工游戏操作；停机排障和改 prompt 仅为最后手段。 |
-| D7 | 可参考 Pi 和现有 handoff skill，为小模型设计 compact/handoff 等 harness 必需 skill；用户已澄清 combat 是 compact 的笔误，不新增战斗技能范围。 |
+| D7 | 当时需求为参考 Pi 和 handoff skill 设计 compact/handoff，combat 为 compact 的笔误。后续 2026-11-16 用户另行明确要求狩猎与战斗；当前新增范围见 [COMBAT_AND_HUNTING.md](COMBAT_AND_HUNTING.md)，不等同语义 compact 已实现。 |
 | D8 | 上下文超限由 harness 自动 compact，模型不负责决定是否触发。 |
 | D9 | 危险状态可自动打断动作，交给确定性 reflex/“下意识行为”处理；之后程序核验状态并续接任务意图。触发条件待定。 |
 | D10 | 导航由 harness 完全管理；模型只给目的地。可行安全时优先水面路线；水面不潜没不计氧气预算，但继续监控状态。虚空/岩浆等危险区允许搭路。 |
@@ -212,6 +221,6 @@ Pi 的实现使用可配置 reserve/keepRecent 预算、摘要和保留消息边
 
 旧分支的 get_blocks/look_at 路径、move_to 的 timeout 参数、配置加载和错误归一化已由合并后的统一客户端处理；这些不再是新的待办。接下来应扩展可执行 scored 目标计划、阶段清单与导航/采眼整合；当前不把 unsupported 目标注册为可执行工具，也不添加空报成功的占位技能。
 
-状态对照：已有离线回归覆盖单动作互斥、取消/安全反馈、模型串行门禁、pending 恢复和后验验证；不等于完整赛事导航/恢复验收。仍待补齐的主要是：阶段目标清单和动态 skill 加载、重复输出触发 compact 的兜底链、语义 compact/显式 handoff、受协调的要塞工具和水面/搭路导航。赛事目标检测、退出工具和基础监控已接入。模型服务未知状态当前需明确确认后才能恢复，不能承诺完全自主长期故障恢复。最新验证见 [TESTING.md](TESTING.md)。
+状态对照：已有离线回归覆盖单动作互斥、取消/安全反馈、模型串行门禁、pending 恢复和后验验证；不等于完整赛事导航/恢复验收。版本化生存/速通阶段建议已进入上下文与监控，缺少适配的阶段保持 blocked；它不替代可恢复的完整速通执行器。仍待补齐的主要是：动态 skill 加载、重复输出触发 compact 的兜底链、语义 compact/显式 handoff、受协调的要塞工具和水面/搭路导航。赛事目标检测、退出工具和基础监控已接入。模型服务未知状态当前需明确确认后才能恢复，不能承诺完全自主长期故障恢复。最新验证见 [TESTING.md](TESTING.md)。
 
 维护：标明事实/提案/已确认；接口修改同步实现、schema、skill 与测试；不记机器路径、凭据、token 或原始大日志。

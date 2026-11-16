@@ -139,6 +139,60 @@ class SurvivalPlannerTests(unittest.TestCase):
     def test_nearest_hostile_without_position_is_not_ignored(self):
         self.assertEqual(self.planner.choose(observation(nearest_hostile={"dist": 3})).name, "wait")
 
+    def test_ranged_hostiles_have_sixteen_block_danger_radius(self):
+        for name in ("skeleton", "stray", "bogged", "pillager"):
+            obs = observation()
+            obs["entities"] = [{"type": "hostile", "name": name, "pos": [16.5, 64, .5]}]
+            with self.subTest(name=name):
+                self.assertEqual(self.planner.choose(obs).name, "retreat_from")
+                obs["entities"][0]["pos"][0] += .1
+                self.assertNotEqual(self.planner.choose(obs).name, "retreat_from")
+
+    def test_ranged_hostile_summary_and_larger_configured_radius_are_preserved(self):
+        decision = self.planner.choose(observation(nearest_hostile={"name": "skeleton", "dist": 12}))
+        self.assertEqual(decision.goal, "safety")
+        self.assertEqual(decision.name, "wait")
+        planner = SurvivalPlanner({"threat_radius": 20})
+        obs = observation()
+        obs["entities"] = [{"type": "hostile", "name": "skeleton", "pos": [19.5, 64, .5]}]
+        self.assertEqual(planner.choose(obs).name, "retreat_from")
+
+    def test_low_health_food_seventeen_does_not_claim_natural_regeneration(self):
+        decision = self.planner.choose(observation(health=6, food=17))
+        self.assertIn("cannot restore health", decision.reason)
+
+    def test_gather_candidate_must_not_enter_ranged_danger_from_safe_origin(self):
+        obs = observation(blocks=[block("oak_log", 3), block("oak_log", -3)])
+        obs["entities"] = [{"name": "skeleton", "type": "hostile", "pos": [18.5, 64, .5]}]
+        self.assertFalse(self.planner._dangerous_hostiles(obs, obs["status"]["pos"]))
+        choice = self.planner.choose(obs)
+        self.assertEqual(choice.name, "gather_block")
+        self.assertEqual(choice.args["pos"], [-3, 64, 0])
+        self.assertTrue(all(len(row) == 2 for row in self.planner._hostiles(obs, obs["status"]["pos"])))
+
+    def test_exploration_uses_species_radius_at_destination(self):
+        for name, expected in (("skeleton", [.5, 64, 16.5]), ("zombie", [16.5, 64, .5])):
+            obs = observation(blocks=[])
+            obs["entities"] = [{"name": name, "type": "hostile", "pos": [30.5, 64, .5]}]
+            with self.subTest(name=name):
+                choice = self.planner.choose(obs)
+                self.assertEqual(choice.name, "move_to")
+                self.assertEqual(choice.args["pos"], expected)
+
+    def test_workspace_approach_skips_table_inside_ranged_danger(self):
+        obs = observation({"oak_planks": 3, "stick": 2}, [block("crafting_table", 4), block("crafting_table", -4)])
+        obs["entities"] = [{"name": "stray", "type": "hostile", "pos": [18.5, 64, .5]}]
+        choice = self.planner.choose(obs)
+        self.assertEqual(choice.name, "move_to")
+        self.assertEqual(choice.args["pos"], [-4, 64, 0])
+
+    def test_workspace_placement_does_not_propose_step_into_ranged_danger(self):
+        obs = observation({"crafting_table": 1, "oak_planks": 3, "stick": 2}, [])
+        obs["entities"] = [{"name": "pillager", "type": "hostile", "pos": [17.5, 64, .5]}]
+        choice = self.planner.choose(obs)
+        self.assertEqual(choice.name, "place_item")
+        self.assertEqual(choice.args["pos"], [0, 64, 2])
+
     def test_low_health_uses_safe_food_or_waits(self):
         self.assertEqual(self.planner.choose(observation({"bread": 1}, health=5, food=15)).name, "eat_food")
         self.assertEqual(self.planner.choose(observation(health=5, food=15)).name, "wait")
