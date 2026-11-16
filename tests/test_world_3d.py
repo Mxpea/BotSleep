@@ -9,9 +9,12 @@ from pathlib import Path
 
 from core.cave_probe import flood_safe_cave_graph
 from core.pathfinder_3d import Pathfinder3D
-from core.structure_spec import ORE_DROP_MAP
+from core.structure_spec import MINE_SHAFT_SPEC, ORE_DROP_MAP
 from core.world_3d import FrontierNode, OreNode, VoxelWorld3D
+from skills.action_workflow import WorkflowContext, WorkflowGuard
 from skills.cave_explore import CaveExploreSkill
+from skills.ore_harvester import OreHarvester
+from skills.world_navigator import WorldNavigator
 
 
 class _Sim3DCaveClient:
@@ -383,6 +386,176 @@ class VoxelWorld3DTests(unittest.TestCase):
         # Returned near entry after clearing both arms
         end_pos = sim.status["pos"]
         self.assertLessEqual(abs(end_pos[0] - 0.5) + abs(end_pos[2] - 0.5), 3.0)
+
+
+class _StrictPickupSim(_Sim3DCaveClient):
+    """Strict simulator requiring 2-high standable air and close proximity for pickup."""
+
+    def _pickup_near(self, pos):
+        px, py, pz = float(pos[0]), float(pos[1]), float(pos[2])
+        for key in list(self.ground_drops):
+            gx, gy, gz = key
+            if abs(px - (gx + 0.5)) <= 0.72 and abs(py - gy) <= 0.65 and abs(pz - (gz + 0.5)) <= 0.72:
+                bag = self.ground_drops.pop(key)
+                for item_name, cnt in bag.items():
+                    self._add_item(item_name, cnt)
+
+    def dig(self, x, y, z, collect=False, **kwargs):
+        res = super().dig(x, y, z, collect=collect, **kwargs)
+        # Keep dropped item gravity-settled cleanly even if a supporting block underneath is dug
+        if res.get("ok"):
+            for dkey in list(self.ground_drops):
+                dx, dy, dz = dkey
+                ny = dy
+                while ny > -10 and self.reader((dx, ny - 1, dz))["name"] in {"air", "torch", "wall_torch"}:
+                    ny -= 1
+                if ny != dy:
+                    bag = self.ground_drops.pop(dkey)
+                    dst = self.ground_drops.setdefault((dx, ny, dz), {})
+                    for k, v in bag.items():
+                        dst[k] = dst.get(k, 0) + v
+            self._pickup_near(self.status["pos"])
+        return res
+
+    def move_to(self, x, y, z, **kwargs):
+        tx, ty, tz = int(float(x) // 1), int(round(float(y) if y is not None else self.status["pos"][1])), int(float(z) // 1)
+        cur_x, cur_y, cur_z = [int(self.status["pos"][i] // 1) for i in range(3)]
+        if self.reader((tx, ty, tz))["name"] != "air" or self.reader((tx, ty + 1, tz))["name"] != "air":
+            return {"ok": False, "error": {"code": "path_not_found", "message": "not 2-high standable"}}
+        if self.reader((tx, ty - 1, tz))["name"] == "air":
+            return {"ok": False, "error": {"code": "path_not_found", "message": "no solid floor"}}
+        # Reject climbing >=2 blocks UP without pillar_up, multi-block vertical drop-hops, or corner hops through wall
+        if (ty - cur_y >= 2) or (abs(ty - cur_y) >= 2 and abs(tx - cur_x) + abs(tz - cur_z) > 1):
+            return {"ok": False, "error": {"code": "path_not_found", "message": "vertical jump blocked"}}
+        if cur_x == 0 and cur_z == 0 and tx == 1 and tz == 1 and self.reader((1, ty, 0))["name"] != "air":
+            return {"ok": False, "error": {"code": "unreachable_stance", "message": "corner blocked"}}
+        self.status["pos"] = [float(x), float(ty), float(z)]
+        self._pickup_near(self.status["pos"])
+        self.actions.append(("move_to", [float(x), float(ty), float(z)]))
+        return {"ok": True, "result": {"pos": list(self.status["pos"])}}
+
+
+def _make_harvester_ctx(sim):
+    guard = WorkflowGuard(sim, timeout_seconds=30.0, max_reads=5000, allow_damage=True)
+    return WorkflowContext(guard=guard, spec=MINE_SHAFT_SPEC, origin=[0, 59, 0], orientation="south", extra={})
+
+
+class DropCollectionAndStrideTests(unittest.TestCase):
+    def test_collect_mined_drop_handles_one_high_pocket_digging_headroom(self):
+        sim = _StrictPickupSim(bot_pos=(0.5, 59.0, 0.5))
+        sim.carve((0, 1, 2), (59, 60, 61), (0,), "air")
+        for x in (0, 1, 2, 3):
+            sim.set_block(x, 58, 0, "stone")
+        # 1-high pocket at x=3, y=59: (3,59,0) is air (just dug), (3,60,0) is stone ceiling, (3,61,0) is stone roof
+        sim.set_block(3, 59, 0, "air")
+        sim.set_block(3, 60, 0, "stone")
+        sim.set_block(3, 61, 0, "stone")
+        sim.ground_drops[(3, 59, 0)] = {"raw_iron": 1}
+
+        world = VoxelWorld3D()
+        ctx = _make_harvester_ctx(sim)
+        before = sim.get_inventory_counts()
+        after = OreHarvester.collect_mined_drop(
+            ctx,
+            world,
+            (3, 59, 0),
+            (0, 59, 0),
+            "raw_iron",
+            before,
+            sim.reader,
+        )
+        self.assertIsNotNone(after)
+        self.assertEqual(sim.get_inventory_counts().get("raw_iron", 0), before.get("raw_iron", 0) + 1)
+        self.assertEqual(sim.reader((3, 60, 0))["name"], "air")
+
+    def test_collect_mined_drop_handles_two_block_well_and_pillars_out(self):
+        sim = _StrictPickupSim(bot_pos=(0.5, 59.0, 0.5))
+        sim.carve((0, 1, 2, 3), (59, 60, 61), (0,), "air")
+        for x in (0, 1, 3):
+            sim.set_block(x, 58, 0, "stone")
+        # 2-block deep 1x1 well at x=2: bottom floor at y=56, drop settles at (2, 57, 0)
+        sim.carve((2,), (57, 58), (0,), "air")
+        sim.set_block(2, 56, 0, "stone")
+        sim.ground_drops[(2, 57, 0)] = {"raw_iron": 1}
+
+        world = VoxelWorld3D()
+        ctx = _make_harvester_ctx(sim)
+        before = sim.get_inventory_counts()
+        OreHarvester.collect_mined_drop(
+            ctx,
+            world,
+            (2, 59, 0),
+            (0, 59, 0),
+            "raw_iron",
+            before,
+            sim.reader,
+        )
+        self.assertEqual(sim.get_inventory_counts().get("raw_iron", 0), before.get("raw_iron", 0) + 1)
+        # Must pillar out of the 1x1 well and return cleanly to stance y=59
+        self.assertAlmostEqual(sim.status["pos"][1], 59.0, delta=0.1)
+        self.assertEqual(int(sim.status["pos"][0] // 1), 0)
+
+    def test_collect_mined_drop_handles_corner_and_high_cliff_ledge(self):
+        # 1) Corner drop blocked straight across (1, 59, 0), must detour via (0, 59, 1) -> (1, 59, 1)
+        sim_corner = _StrictPickupSim(bot_pos=(0.5, 59.0, 0.5))
+        for p in ((0, 0), (0, 1), (1, 1)):
+            sim_corner.carve((p[0],), (59, 60, 61), (p[1],), "air")
+            sim_corner.set_block(p[0], 58, p[1], "stone")
+        sim_corner.set_block(1, 59, 0, "obsidian")
+        sim_corner.set_block(1, 60, 0, "obsidian")
+        sim_corner.ground_drops[(1, 59, 1)] = {"diamond": 1}
+
+        world_c = VoxelWorld3D()
+        ctx_c = _make_harvester_ctx(sim_corner)
+        before_c = sim_corner.get_inventory_counts()
+        OreHarvester.collect_mined_drop(
+            ctx_c,
+            world_c,
+            (1, 59, 1),
+            (0, 59, 0),
+            "diamond",
+            before_c,
+            sim_corner.reader,
+        )
+        self.assertEqual(sim_corner.get_inventory_counts().get("diamond", 0), before_c.get("diamond", 0) + 1)
+
+        # 2) High cliff ledge (dy=+2) with diggable floor drops item cleanly onto low ground
+        sim_cliff = _StrictPickupSim(bot_pos=(0.5, 59.0, 0.5))
+        sim_cliff.carve((0, 1, 2), (59, 60, 61, 62, 63), (0,), "air")
+        for x in (0, 1, 2):
+            sim_cliff.set_block(x, 58, 0, "stone")
+        sim_cliff.set_block(2, 60, 0, "stone")
+        sim_cliff.ground_drops[(2, 61, 0)] = {"raw_iron": 1}
+
+        world_k = VoxelWorld3D()
+        ctx_k = _make_harvester_ctx(sim_cliff)
+        before_k = sim_cliff.get_inventory_counts()
+        OreHarvester.collect_mined_drop(
+            ctx_k,
+            world_k,
+            (2, 61, 0),
+            (0, 59, 0),
+            "raw_iron",
+            before_k,
+            sim_cliff.reader,
+        )
+        self.assertEqual(sim_cliff.get_inventory_counts().get("raw_iron", 0), before_k.get("raw_iron", 0) + 1)
+
+    def test_world_navigator_follow_path_coalesces_walk_strides(self):
+        sim = _Sim3DCaveClient(bot_pos=(0.5, 59.0, 0.5))
+        sim.carve(range(0, 14), (59, 60, 61), (0,), "air")
+        for x in range(0, 14):
+            sim.set_block(x, 58, 0, "stone")
+        world = VoxelWorld3D()
+        ctx = _make_harvester_ctx(sim)
+        path = Pathfinder3D.find_path(world, (0, 59, 0), (12, 59, 0), sim.reader, allow_dig=False, allow_pillar=False)
+        self.assertEqual(len(path), 12)
+        ok, final_pos = WorldNavigator.follow_path(ctx, world, (0, 59, 0), path, sim.reader)
+        self.assertTrue(ok)
+        self.assertEqual(final_pos, [12, 59, 0])
+        move_calls = [a for a in sim.actions if a[0] == "move_to"]
+        # 12 steps coalesced into 3 strides of 4 blocks each
+        self.assertLessEqual(len(move_calls), 4)
 
 
 if __name__ == "__main__":

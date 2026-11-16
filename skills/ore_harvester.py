@@ -23,13 +23,15 @@ from core.mining_targets import (
     evaluate_ore_block,
     pickaxe_tier,
 )
-from core.structure_spec import MINE_DIGGABLE_BLOCKS, ORE_DROP_MAP
+from core.structure_spec import MINE_DIGGABLE_BLOCKS, ORE_DROP_MAP, SCAFFOLD_BLOCKS
 from core.world_3d import VoxelWorld3D
 from skills.action_workflow import (
     WorkflowContext,
     WorkflowStepError,
     aim_at,
     dig_block,
+    pillar_up,
+    stand_at,
     stand_cell,
 )
 from skills.world_navigator import WorldNavigator
@@ -253,32 +255,81 @@ class OreHarvester:
         before_counts: Mapping[str, int],
         read_fn: Callable[[Sequence[int]], Dict[str, Any]],
     ) -> Optional[Dict[str, int]]:
-        """Step onto item-entity / gravity-settled landing floor of a dug ore drop and return safely."""
+        """Collect settled drops in corners, 1-high pockets, high cliffs, or 1x1 pits and return safely."""
         ox, oy, oz = int(ore_pos[0]), int(ore_pos[1]), int(ore_pos[2])
         sx, sy, sz = int(stance_pos[0]), int(stance_pos[1]), int(stance_pos[2])
+        dig_allowed = set(ORE_DROP_MAP) | set(MINE_DIGGABLE_BLOCKS)
 
         def cached_read(p: Sequence[int]) -> Dict[str, Any]:
             return world.read_block(p, read_fn)
 
-        cand_spots: List[List[int]] = []
-        seen_spots: Set[Tuple[int, int, int]] = {(sx, sy, sz)}
+        def _has_gained(counts_map: Mapping[str, int]) -> bool:
+            return bool(drop_item and counts_map.get(drop_item, 0) > before_counts.get(drop_item, 0))
 
-        def _add_if_standable(cx: int, cy: int, cz: int) -> None:
-            key = (cx, cy, cz)
-            if key in seen_spots or abs(cx - sx) + abs(cz - sz) > 6 or abs(cy - sy) > 2:
-                return
-            seen_spots.add(key)
-            if cy > sy and not is_passable(cached_read((sx, sy + 2, sz))):
-                return
-            if (
+        def _update_best(best_c: Optional[Dict[str, int]], cur_c: Dict[str, int]) -> Dict[str, int]:
+            if best_c is None or (drop_item and cur_c.get(drop_item, 0) > best_c.get(drop_item, 0)):
+                return cur_c
+            return best_c
+
+        def _is_two_high_standable(cx: int, cy: int, cz: int) -> bool:
+            return (
                 is_solid_floor(cached_read((cx, cy - 1, cz)))
                 and is_passable(cached_read((cx, cy, cz)))
                 and is_passable(cached_read((cx, cy + 1, cz)))
                 and ore_cell_hazard_free((cx, cy, cz), cached_read)
-            ):
-                cand_spots.append([cx, cy, cz])
+            )
 
-        # 1. Live dropped item entity hint if exposed by mc-agent-api
+        def _live_cur_cell() -> List[int]:
+            snap = WorldNavigator.sync_live_pos(ctx)
+            return snap if snap is not None else [sx, sy, sz]
+
+        def _return_to_stance(from_spot: Sequence[int]) -> None:
+            fx, fy, fz = int(from_spot[0]), int(from_spot[1]), int(from_spot[2])
+            if [fx, fy, fz] == [sx, sy, sz]:
+                return
+            try:
+                stand_cell(ctx, stance_pos, tolerance=0.95)
+                return
+            except WorkflowStepError:
+                pass
+            # Case D pit escape: pillar_up underfoot inside a 1x1 well back up to sy
+            if fy < sy and (sy - fy) <= 4:
+                try:
+                    pillar_up(
+                        ctx,
+                        steps=min(4, sy - fy),
+                        blocks=SCAFFOLD_BLOCKS,
+                        allow_dig_headroom=True,
+                    )
+                    for py in range(fy, sy):
+                        world.invalidate((fx, py, fz), radius=1)
+                    try:
+                        stand_cell(ctx, stance_pos, tolerance=0.95)
+                        return
+                    except WorkflowStepError:
+                        pass
+                except WorkflowStepError:
+                    pass
+            cur_after = _live_cur_cell()
+            path_back = Pathfinder3D.find_path(
+                world,
+                cur_after,
+                stance_pos,
+                read_fn,
+                goal_tolerance=1,
+                allow_pillar=True,
+                max_pillar_height=4,
+                allow_dig=True,
+                max_dig_steps=2,
+                allow_bridge=False,
+                allow_drop=True,
+                max_nodes=400,
+            )
+            if path_back:
+                WorldNavigator.follow_path(ctx, world, cur_after, path_back, read_fn, allow_micro_dig=True)
+
+        # 1. Live dropped item entity hints + downward solid floor scan beneath ore_pos
+        entity_cells: List[Tuple[int, int, int]] = []
         ent_fn = getattr(ctx.guard.client, "get_entities", None)
         if callable(ent_fn):
             try:
@@ -294,70 +345,209 @@ class OreHarvester:
                         continue
                     if ("item" in etype or (drop_item and drop_item in ename)) and (
                         math.hypot(epos[0] - (ox + 0.5), epos[2] - (oz + 0.5)) <= 4.5
-                        and abs(epos[1] - oy) <= 3.5
+                        and abs(epos[1] - oy) <= 4.5
                     ):
-                        ex, ey, ez = math.floor(epos[0]), math.floor(epos[1]), math.floor(epos[2])
-                        for dy in (0, -1, 1):
-                            _add_if_standable(ex, ey + dy, ez)
+                        entity_cells.append((math.floor(epos[0]), math.floor(epos[1]), math.floor(epos[2])))
             except Exception:
                 pass
 
-        # 2. Scan physically downward beneath ore_pos for the resting solid floor
-        land_y: Optional[int] = None
-        for y_try in range(min(oy + 1, sy + 2), max(oy - 4, sy - 4) - 1, -1):
-            if (
-                is_solid_floor(cached_read((ox, y_try - 1, oz)))
-                and is_passable(cached_read((ox, y_try, oz)))
-                and is_passable(cached_read((ox, y_try + 1, oz)))
-            ):
-                land_y = y_try
-                _add_if_standable(ox, y_try, oz)
-                break
+        def _scan_land_y() -> Optional[int]:
+            for y_try in range(min(oy + 2, sy + 4), max(oy - 4, sy - 4) - 1, -1):
+                if (
+                    is_solid_floor(cached_read((ox, y_try - 1, oz)))
+                    and is_passable(cached_read((ox, y_try, oz)))
+                ):
+                    return y_try
+            return None
 
-        # 3. Adjacent lower/same-level floor cells ordered closest to landing point
+        land_y = _scan_land_y()
+        best_counts: Optional[Dict[str, int]] = None
+
+        # Case C: High cliff/ledge under-dig gravity drop — if floor below drop is reachable & safe to dig, drop item down
+        for lx, ly, lz in list(entity_cells) + ([(ox, land_y, oz)] if land_y is not None else []):
+            if ly < sy + 1 or ly > sy + 4:
+                continue
+            support = (lx, ly - 1, lz)
+            if support == (sx, sy - 1, sz):
+                continue
+            s_dist = math.sqrt(
+                (support[0] + 0.5 - (sx + 0.5)) ** 2
+                + (support[1] + 0.5 - (sy + 1.62)) ** 2
+                + (support[2] + 0.5 - (sz + 0.5)) ** 2
+            )
+            sname = str(cached_read(support).get("name") or "air")
+            if s_dist > 4.5 or sname not in dig_allowed or not ore_cell_hazard_free(support, cached_read):
+                continue
+            safe_drop_zone = any(
+                is_solid_floor(cached_read((lx, yd - 1, lz)))
+                and not is_lava_like(cached_read((lx, yd, lz)))
+                and not is_water_like(cached_read((lx, yd, lz)))
+                and ore_cell_hazard_free((lx, yd, lz), cached_read)
+                for yd in range(ly - 1, max(ly - 5, sy - 4) - 1, -1)
+            )
+            if not safe_drop_zone:
+                continue
+            try:
+                _, cur_items = cls.read_inventory(ctx)
+                pick_name = best_usable_pickaxe(cur_items)
+                if pick_name:
+                    ctx.guard.write(ctx.guard.client.equip, item=pick_name, slot="hand")
+                aim_at(ctx, support, relative=False)
+                dig_block(ctx, support, relative=False, allowed_blocks=dig_allowed, collect=False)
+                world.invalidate(support, radius=1)
+                time.sleep(0.25)
+                chk_c, _ = cls.read_inventory(ctx)
+                best_counts = _update_best(best_counts, chk_c)
+                if _has_gained(chk_c):
+                    return best_counts
+                land_y = _scan_land_y()
+                break
+            except WorkflowStepError:
+                pass
+
+        # Case B: 1-block-high wall pocket / gap — step close to lip first, otherwise open ceiling block & step in
+        opened_pocket_spots: List[List[int]] = []
+        pocket_targets: List[Tuple[int, int, int]] = []
+        for cell in entity_cells + ([(ox, land_y, oz)] if land_y is not None else []):
+            if cell not in pocket_targets:
+                pocket_targets.append(cell)
+        for lx, ly, lz in pocket_targets:
+            if (
+                is_solid_floor(cached_read((lx, ly - 1, lz)))
+                and is_passable(cached_read((lx, ly, lz)))
+                and not is_passable(cached_read((lx, ly + 1, lz)))
+                and abs(lx - sx) + abs(lz - sz) <= 6
+                and -4 <= ly - sy <= 4
+            ):
+                # First try tight step onto closest 2-high adjacent lip cell
+                lip_cells: List[Tuple[float, List[int]]] = []
+                for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)):
+                    for dy in (0, -1, 1):
+                        nx, ny, nz = lx + dx, ly + dy, lz + dz
+                        if _is_two_high_standable(nx, ny, nz):
+                            lip_cells.append((math.hypot(dx, dz) + 0.5 * abs(dy), [nx, ny, nz]))
+                lip_cells.sort(key=lambda it: it[0])
+                for _, lip in lip_cells[:1]:
+                    try:
+                        stand_at(ctx, [lip[0] + 0.5, float(lip[1]), lip[2] + 0.5], relative=False, tolerance=0.35, exact=True)
+                        time.sleep(0.15)
+                        chk_lip, _ = cls.read_inventory(ctx)
+                        best_counts = _update_best(best_counts, chk_lip)
+                        if _has_gained(chk_lip):
+                            _return_to_stance(lip)
+                            return best_counts
+                    except WorkflowStepError:
+                        pass
+
+                ceil_cell = (lx, ly + 1, lz)
+                cname = str(cached_read(ceil_cell).get("name") or "air")
+                above_ceil = cached_read((lx, ly + 2, lz))
+                above_name = str(above_ceil.get("name") or "air")
+                cur_eye = _live_cur_cell()
+                cdist = math.sqrt(
+                    (ceil_cell[0] + 0.5 - (cur_eye[0] + 0.5)) ** 2
+                    + (ceil_cell[1] + 0.5 - (cur_eye[1] + 1.62)) ** 2
+                    + (ceil_cell[2] + 0.5 - (cur_eye[2] + 0.5)) ** 2
+                )
+                if (
+                    cname in dig_allowed
+                    and cdist <= 4.8
+                    and ore_cell_hazard_free(ceil_cell, cached_read)
+                    and above_name not in FALLING_BLOCKS
+                    and not is_lava_like(above_ceil)
+                    and not is_water_like(above_ceil)
+                ):
+                    try:
+                        _, cur_items = cls.read_inventory(ctx)
+                        pick_name = best_usable_pickaxe(cur_items)
+                        if pick_name:
+                            ctx.guard.write(ctx.guard.client.equip, item=pick_name, slot="hand")
+                        aim_at(ctx, ceil_cell, relative=False)
+                        dig_block(ctx, ceil_cell, relative=False, allowed_blocks=dig_allowed, collect=False)
+                        world.invalidate(ceil_cell, radius=1)
+                        if _is_two_high_standable(lx, ly, lz):
+                            opened_pocket_spots.append([lx, ly, lz])
+                    except WorkflowStepError:
+                        pass
+
+        # Collect candidate standable pickup cells across corners (±1,±1), cliffs (±4 Y), and 1x1 pits (down to sy-4)
+        cand_spots: List[List[int]] = []
+        seen_spots: Set[Tuple[int, int, int]] = {(sx, sy, sz)}
+
+        def _add_if_standable(cx: int, cy: int, cz: int) -> None:
+            key = (cx, cy, cz)
+            if key in seen_spots or abs(cx - sx) + abs(cz - sz) > 6 or cy - sy > 4 or sy - cy > 4:
+                return
+            seen_spots.add(key)
+            if _is_two_high_standable(cx, cy, cz):
+                cand_spots.append([cx, cy, cz])
+
+        for spot_p in opened_pocket_spots:
+            _add_if_standable(spot_p[0], spot_p[1], spot_p[2])
+        for ex, ey, ez in entity_cells:
+            for dy in (0, -1, 1, -2):
+                _add_if_standable(ex, ey + dy, ez)
+        if land_y is not None:
+            _add_if_standable(ox, land_y, oz)
+
         ref_y = land_y if land_y is not None else min(oy, sy)
         nearby: List[Tuple[float, Tuple[int, int, int]]] = []
-        for dx, dz in ((0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)):
-            for y_try in (ref_y, sy, sy - 1, oy, oy - 1):
-                if abs(y_try - sy) <= 2:
-                    dist_drop = math.hypot(dx, dz) + 0.8 * abs(y_try - ref_y) + 0.25 * abs(y_try - sy)
-                    nearby.append((dist_drop, (ox + dx, y_try, oz + dz)))
+        for dx in (-1, 0, 1):
+            for dz in (-1, 0, 1):
+                for y_try in (ref_y, sy, sy - 1, oy, oy - 1, oy + 1, sy + 1, sy - 2):
+                    if -4 <= y_try - sy <= 4:
+                        dist_drop = math.hypot(dx, dz) + 0.8 * abs(y_try - ref_y) + 0.2 * abs(y_try - sy)
+                        nearby.append((dist_drop, (ox + dx, y_try, oz + dz)))
         nearby.sort(key=lambda it: it[0])
         for _, cell in nearby:
             _add_if_standable(cell[0], cell[1], cell[2])
 
-        best_counts: Optional[Dict[str, int]] = None
-        for spot in cand_spots[:2]:
+        for spot in cand_spots[:4]:
+            moved_ok = False
             try:
-                stand_cell(ctx, spot, tolerance=0.95)
+                stand_at(ctx, [spot[0] + 0.5, float(spot[1]), spot[2] + 0.5], relative=False, tolerance=0.38, exact=True)
+                moved_ok = True
             except WorkflowStepError:
                 cur_chk, _ = cls.read_inventory(ctx)
-                if best_counts is None or (drop_item and cur_chk.get(drop_item, 0) > best_counts.get(drop_item, 0)):
-                    best_counts = cur_chk
-                if drop_item and cur_chk.get(drop_item, 0) > before_counts.get(drop_item, 0):
-                    break
-                continue
-            time.sleep(0.15)
-            after_mid, _ = cls.read_inventory(ctx)
-            if best_counts is None or (drop_item and after_mid.get(drop_item, 0) > best_counts.get(drop_item, 0)):
-                best_counts = after_mid
-            try:
-                stand_cell(ctx, stance_pos, tolerance=0.95)
-            except WorkflowStepError:
-                path_back = Pathfinder3D.find_path(
+                best_counts = _update_best(best_counts, cur_chk)
+                if _has_gained(cur_chk):
+                    _return_to_stance(_live_cur_cell())
+                    return best_counts
+                # Case A / Case C fallback: route around corners or climb up cliff ledges via 3D A*
+                cur_here = _live_cur_cell()
+                path_to = Pathfinder3D.find_path(
                     world,
+                    cur_here,
                     spot,
-                    stance_pos,
                     read_fn,
-                    goal_tolerance=1,
+                    goal_tolerance=0,
                     allow_pillar=True,
-                    allow_dig=False,
+                    max_pillar_height=4,
+                    allow_dig=True,
+                    max_dig_steps=2,
                     allow_bridge=False,
                     allow_drop=True,
-                    max_nodes=400,
+                    max_nodes=320,
                 )
-                if path_back:
-                    WorldNavigator.follow_path(ctx, world, spot, path_back, read_fn, allow_micro_dig=False)
-            if drop_item and after_mid.get(drop_item, 0) > before_counts.get(drop_item, 0):
+                if path_to:
+                    all_done, _ = WorldNavigator.follow_path(
+                        ctx,
+                        world,
+                        cur_here,
+                        path_to,
+                        read_fn,
+                        allow_micro_dig=True,
+                        tolerance=0.45,
+                    )
+                    moved_ok = bool(all_done)
+
+            if not moved_ok:
+                continue
+            time.sleep(0.18)
+            after_mid, _ = cls.read_inventory(ctx)
+            best_counts = _update_best(best_counts, after_mid)
+            _return_to_stance(spot)
+            if _has_gained(after_mid):
                 break
+
         return best_counts

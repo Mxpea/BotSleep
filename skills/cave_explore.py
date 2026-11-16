@@ -530,15 +530,6 @@ class CaveExploreSkill(BaseSkill):
                         last_graph_at_visited = len(dive_visited)
                         has_scaffold = sum(cur_counts.get(s, 0) for s in SCAFFOLD_BLOCKS) >= 4
                         tool_tier = pickaxe_tier(best_usable_pickaxe(cur_items))
-                        if active_guard.max_reads >= 20000:
-                            active_world.ingest_around(
-                                cur_pos,
-                                cached_read,
-                                radius=3,
-                                targets=parsed_targets,
-                                harvested_counts=running_harvested,
-                                best_tool_tier=tool_tier,
-                            )
 
                         remaining_reads = max(0, int(active_guard.max_reads) - int(active_guard.read_calls) - 1000)
                         read_cap_nodes = max(120, remaining_reads // 12)
@@ -749,46 +740,120 @@ class CaveExploreSkill(BaseSkill):
                     active_world.record_stance(nxt)
                     continue
 
-                old_pos = list(cur_pos)
-                step_dir = (nxt[0] - old_pos[0], nxt[2] - old_pos[2])
-                cobweb_tool = next((w for w in SWORD_OR_SHEARS if cur_counts.get(w, 0) > 0), None)
-                try:
-                    new_pos, skipped_web = WorldNavigator.execute_step(
-                        ctx,
-                        active_world,
-                        cur_pos,
-                        planned_step,
-                        cached_read,
-                        cobweb_tool=cobweb_tool,
-                        allow_micro_dig=allow_micro_dig,
-                        allow_dig_headroom_on_pillar=allow_micro_dig,
-                        trail=trail,
-                        tolerance=0.85,
+                def _cell_has_cobweb(p_coord: Sequence[int]) -> bool:
+                    px, py, pz = int(p_coord[0]), int(p_coord[1]), int(p_coord[2])
+                    return any(
+                        str(cached_read((px, cy, pz)).get("name") or "air") == "cobweb"
+                        for cy in (py, py + 1)
                     )
-                    if skipped_web:
-                        dive_visited.add(tuple(nxt))
-                        active_world.scanned_cells.add(tuple(nxt))
-                        planned_queue.clear()
-                        continue
-                except WorkflowStepError as step_exc:
-                    if step_exc.code in STEP_RECOVERABLE_ERRORS:
-                        dive_visited.add(tuple(nxt))
-                        planned_queue.clear()
-                        consecutive_step_failures += 1
-                        snap = WorldNavigator.sync_live_pos(ctx)
-                        if snap is not None:
-                            cur_pos = snap
-                            dive_visited.add(tuple(cur_pos))
-                            active_world.record_stance(cur_pos)
-                        if consecutive_step_failures >= 6:
-                            break
-                        continue
-                    raise
 
+                coalesced_steps: List[Dict[str, Any]] = [planned_step]
+                if explore_radius >= 24 and mode == "walk" and planned_queue and not _cell_has_cobweb(nxt):
+                    while planned_queue and str(planned_queue[0].get("mode") or "walk") == "walk":
+                        if torch_interval > 0 and cur_counts.get("torch", 0) > 0 and (steps_since_torch + len(coalesced_steps)) >= torch_interval:
+                            break
+                        next_cand = planned_queue[0]
+                        next_to = (int(next_cand["to"][0]), int(next_cand["to"][1]), int(next_cand["to"][2]))
+                        if _cell_has_cobweb(next_to):
+                            break
+                        all_visited_stride = (
+                            all((int(s["to"][0]), int(s["to"][1]), int(s["to"][2])) in dive_visited for s in coalesced_steps)
+                            and next_to in dive_visited
+                        )
+                        max_stride = 5 if all_visited_stride else 4
+                        if len(coalesced_steps) + 1 > max_stride:
+                            break
+                        coalesced_steps.append(planned_queue.pop(0))
+
+                old_pos = list(cur_pos)
+                cobweb_tool = next((w for w in SWORD_OR_SHEARS if cur_counts.get(w, 0) > 0), None)
+                exec_step = coalesced_steps[-1]
+                used_stride = len(coalesced_steps) > 1
+                exec_nxt = list(exec_step["to"])
+                stride_succeeded = False
+
+                if used_stride:
+                    cur_key = norm_coord(cur_pos)
+                    dst_key = norm_coord(exec_nxt)
+                    prev_edge_fails = active_world.blocked_edges.get((cur_key, dst_key), 0)
+                    try:
+                        new_pos, skipped_web = WorldNavigator.execute_step(
+                            ctx,
+                            active_world,
+                            cur_pos,
+                            exec_step,
+                            cached_read,
+                            cobweb_tool=cobweb_tool,
+                            allow_micro_dig=allow_micro_dig,
+                            allow_dig_headroom_on_pillar=allow_micro_dig,
+                            trail=None,
+                            tolerance=0.85,
+                        )
+                        if skipped_web:
+                            dive_visited.add(tuple(exec_nxt))
+                            active_world.scanned_cells.add(tuple(exec_nxt))
+                            planned_queue.clear()
+                            continue
+                        for mid_step in coalesced_steps[:-1]:
+                            mid_p = [int(mid_step["to"][0]), int(mid_step["to"][1]), int(mid_step["to"][2])]
+                            dive_visited.add(tuple(mid_p))
+                            active_world.record_stance(mid_p)
+                            trail.push_step(mid_p)
+                        trail.push_step(new_pos)
+                        nxt = exec_nxt
+                        stride_succeeded = True
+                    except WorkflowStepError as stride_exc:
+                        if stride_exc.code not in STEP_RECOVERABLE_ERRORS:
+                            raise
+                        if prev_edge_fails <= 0:
+                            active_world.blocked_edges.pop((cur_key, dst_key), None)
+                        else:
+                            active_world.blocked_edges[(cur_key, dst_key)] = prev_edge_fails
+                        planned_queue[:0] = coalesced_steps[1:]
+                        snap_s = WorldNavigator.sync_live_pos(ctx)
+                        if snap_s is not None:
+                            cur_pos = snap_s
+                        coalesced_steps = [coalesced_steps[0]]
+
+                if not stride_succeeded:
+                    try:
+                        new_pos, skipped_web = WorldNavigator.execute_step(
+                            ctx,
+                            active_world,
+                            cur_pos,
+                            planned_step,
+                            cached_read,
+                            cobweb_tool=cobweb_tool,
+                            allow_micro_dig=allow_micro_dig,
+                            allow_dig_headroom_on_pillar=allow_micro_dig,
+                            trail=trail,
+                            tolerance=0.85,
+                        )
+                        if skipped_web:
+                            dive_visited.add(tuple(nxt))
+                            active_world.scanned_cells.add(tuple(nxt))
+                            planned_queue.clear()
+                            continue
+                    except WorkflowStepError as step_exc:
+                        if step_exc.code in STEP_RECOVERABLE_ERRORS:
+                            dive_visited.add(tuple(nxt))
+                            planned_queue.clear()
+                            consecutive_step_failures += 1
+                            snap = WorldNavigator.sync_live_pos(ctx)
+                            if snap is not None:
+                                cur_pos = snap
+                                dive_visited.add(tuple(cur_pos))
+                                active_world.record_stance(cur_pos)
+                            if consecutive_step_failures >= 6:
+                                break
+                            continue
+                        raise
+
+                step_dir = (nxt[0] - old_pos[0], nxt[2] - old_pos[2])
                 consecutive_step_failures = 0
                 dive_visited.add(tuple(new_pos))
                 cur_pos = list(new_pos)
-                steps_since_torch += 1
+                steps_since_torch += len(coalesced_steps)
                 if step_dir != (0, 0):
                     prev_dir = step_dir
 

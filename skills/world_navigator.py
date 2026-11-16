@@ -233,11 +233,75 @@ class WorldNavigator:
         trail: Optional[ReversibleTrail] = None,
         tolerance: float = 0.9,
     ) -> Tuple[bool, List[int]]:
-        """Execute a multi-step 3D path sequentially; returns `(all_done, last_pos)`."""
+        """Execute a multi-step 3D path sequentially with multi-block walk coalescing; returns `(all_done, last_pos)`."""
         cur = [int(start_pos[0]), int(start_pos[1]), int(start_pos[2])]
-        for step in path:
-            if [int(step["to"][0]), int(step["to"][1]), int(step["to"][2])] == cur and str(step.get("mode") or "walk") != "pillar":
+        idx = 0
+        total = len(path)
+        while idx < total:
+            step = path[idx]
+            mode = str(step.get("mode") or "walk")
+            to_cell = [int(step["to"][0]), int(step["to"][1]), int(step["to"][2])]
+            if to_cell == cur and mode != "pillar":
+                idx += 1
                 continue
+
+            # Coalesce up to 4 consecutive free 'walk' steps into one stride (never skip over cobwebs)
+            def _cell_has_cobweb(p_coord: Sequence[int]) -> bool:
+                px, py, pz = int(p_coord[0]), int(p_coord[1]), int(p_coord[2])
+                return any(
+                    str(world.read_block((px, cy, pz), read_fn).get("name") or "air") == "cobweb"
+                    for cy in (py, py + 1)
+                )
+
+            end_idx = idx + 1
+            if mode == "walk" and not _cell_has_cobweb(to_cell):
+                while (
+                    end_idx < total
+                    and (end_idx - idx) < 4
+                    and str(path[end_idx].get("mode") or "walk") == "walk"
+                    and not _cell_has_cobweb(path[end_idx]["to"])
+                ):
+                    end_idx += 1
+
+            if end_idx - idx > 1:
+                stride_target = path[end_idx - 1]
+                cur_key = norm_coord(cur)
+                dst_key = norm_coord(stride_target["to"])
+                prev_fails = world.blocked_edges.get((cur_key, dst_key), 0)
+                try:
+                    cur, skipped = cls.execute_step(
+                        ctx,
+                        world,
+                        cur,
+                        stride_target,
+                        read_fn,
+                        cobweb_tool=cobweb_tool,
+                        allow_micro_dig=allow_micro_dig,
+                        allow_dig_headroom_on_pillar=allow_dig_headroom_on_pillar,
+                        trail=None,
+                        tolerance=tolerance,
+                    )
+                    if skipped:
+                        return False, cur
+                    for s_mid in path[idx:end_idx]:
+                        mid_pos = [int(s_mid["to"][0]), int(s_mid["to"][1]), int(s_mid["to"][2])]
+                        world.record_stance(mid_pos)
+                        if trail is not None:
+                            trail.push_step(mid_pos)
+                    idx = end_idx
+                    continue
+                except WorkflowStepError as exc:
+                    if exc.code not in STEP_RECOVERABLE_ERRORS:
+                        raise
+                    # Do not poison the distant cell on a failed multi-block hop; fall back to 1-by-1
+                    if prev_fails <= 0:
+                        world.blocked_edges.pop((cur_key, dst_key), None)
+                    else:
+                        world.blocked_edges[(cur_key, dst_key)] = prev_fails
+                    snap = cls.sync_live_pos(ctx)
+                    if snap is not None:
+                        cur = snap
+
             try:
                 cur, skipped = cls.execute_step(
                     ctx,
@@ -253,6 +317,7 @@ class WorldNavigator:
                 )
                 if skipped:
                     return False, cur
+                idx += 1
             except WorkflowStepError as exc:
                 if exc.code in STEP_RECOVERABLE_ERRORS:
                     snap = cls.sync_live_pos(ctx)
