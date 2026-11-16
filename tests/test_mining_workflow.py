@@ -568,6 +568,54 @@ class MiningWorkflowTests(unittest.TestCase):
         self.assertGreaterEqual(res.data["harvested"].get("raw_iron", 0), 30)
         self.assertTrue(all(f is False for f in world.dig_collect_flags))
 
+    def test_deep_band_exits_band_complete_when_only_shallow_coal_unmet_and_returns_to_surface(self):
+        world = WorkflowMineWorld(bot_pos=(0.5, 10.0, -2.5), surface_y=10)
+        world.items.update({"iron_pickaxe": 1, "cobblestone": 64, "torch": 16})
+        for x in range(-18, 19):
+            for z in range(-10, 32):
+                for y in range(-8, 8):
+                    world.blocks[(x, y, z)] = {"name": "stone", "properties": {}}
+        res = MineShaftSkill(world).build_mine_shaft(
+            origin=[0, 10, 0],
+            orientation="south",
+            target_y=-2,
+            mining_mode="fishbone",
+            rib_length=6,
+            rib_spacing=4,
+            max_trunk_steps=16,
+            return_to_surface=True,
+            initial_quota_progress={"diamond": 1},
+            targets={
+                "diamond": {"count": 1, "min_tool": "iron_pickaxe"},
+                "coal": {"count": 4, "min_tool": "wooden_pickaxe"},
+            },
+        )
+        self.assertTrue(res.success, res)
+        self.assertEqual(res.data["stop_reason"], "band_complete")
+        self.assertAlmostEqual(world.status["pos"][1], 10.0, delta=1.0)
+
+    def test_deep_retreat_done_prevents_re_descent_on_branch_retry(self):
+        from skills.action_workflow import WorkflowContext, WorkflowGuard
+
+        world = WorkflowMineWorld(bot_pos=(0.5, 5.0, 8.5), surface_y=10)
+        guard = WorkflowGuard(world, timeout_seconds=30.0)
+        ctx = WorkflowContext(
+            guard=guard,
+            spec=MineShaftSkill._hub_only_spec(4, include_workstations=False),
+            origin=[0, 10, 0],
+            orientation="south",
+            extra={
+                "deep_retreat_done": True,
+                "stop_reason": "return_home",
+                "deep_pos": [0, -40, 20],
+                "deep_trail": [[0, 5, 8], [0, -40, 20]],
+            },
+        )
+        skill = MineShaftSkill(world)
+        out = skill._wf_deep_fishbone(ctx)
+        self.assertEqual(out["stop_reason"], "return_home")
+        self.assertAlmostEqual(world.status["pos"][1], 5.0, delta=0.5)
+
 
 if __name__ == "__main__":
     unittest.main()

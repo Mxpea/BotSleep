@@ -63,6 +63,19 @@ TARGET_DROP_ITEM: Dict[str, str] = {
     "quartz": "quartz",
 }
 
+# Overworld 1.18+ vertical ore spawn ranges: (min_y, optimal_y, max_y).
+# Notably coal does not spawn below Y=0, while diamond spawns only at Y<=15.
+ORE_SPAWN_Y_BANDS: Dict[str, Tuple[int, int, int]] = {
+    "coal": (0, 32, 192),
+    "copper": (-16, 48, 112),
+    "iron": (-64, 16, 256),
+    "gold": (-64, -16, 32),
+    "lapis": (-64, 0, 64),
+    "redstone": (-64, -54, 15),
+    "diamond": (-64, -54, 15),
+    "emerald": (-16, 80, 256),
+}
+
 DEFAULT_MINING_TARGETS: Dict[str, Dict[str, Any]] = {
     "iron": {"count": 24, "min_tool": "stone_pickaxe"},
     "coal": {"count": 16, "min_tool": "wooden_pickaxe"},
@@ -245,6 +258,80 @@ def evaluate_ore_block(
     if int(best_tool_tier) < required_tier:
         return ("skipped_tool", key, drop_item)
     return ("mine", key, drop_item)
+
+
+def target_spawns_at_y(target_key: str, y: int) -> bool:
+    """Return True if Overworld ore generation allows target_key around elevation y."""
+    band = ORE_SPAWN_Y_BANDS.get(str(target_key or "").strip().lower())
+    if band is None:
+        return True
+    min_y, _, max_y = band
+    return min_y <= int(y) <= max_y
+
+
+def _target_have_count(spec: Mapping[str, Any], harvested_counts: Mapping[str, int]) -> int:
+    drop = str(spec.get("drop_item") or "")
+    have = int(harvested_counts.get(drop, 0))
+    if drop == "raw_iron":
+        have += int(harvested_counts.get("iron_ingot", 0))
+    elif drop == "raw_gold":
+        have += int(harvested_counts.get("gold_ingot", 0))
+    return have
+
+
+def unmet_spawnable_targets_at_y(
+    targets: Mapping[str, Mapping[str, Any]],
+    harvested_counts: Mapping[str, int],
+    y: int,
+) -> List[str]:
+    """Return unmet canonical target keys that can actually generate around elevation y."""
+    out: List[str] = []
+    for key, spec in targets.items():
+        if _target_have_count(spec, harvested_counts) >= int(spec.get("count", 0)):
+            continue
+        if target_spawns_at_y(key, y):
+            out.append(key)
+    return out
+
+
+def recommended_mining_bands(
+    targets: Mapping[str, Mapping[str, Any]],
+    harvested_counts: Optional[Mapping[str, int]] = None,
+) -> List[Dict[str, Any]]:
+    """Plan elevation bands so shallow ores (coal) and deep ores (diamond) each mine at optimal Y."""
+    counts = dict(harvested_counts or {})
+    unmet: List[str] = [
+        key for key, spec in targets.items()
+        if _target_have_count(spec, counts) < int(spec.get("count", 0))
+    ]
+    if not unmet:
+        return []
+
+    bands: List[Dict[str, Any]] = []
+    remaining = set(unmet)
+
+    # 1. Shallow/mid coal+copper+iron band (Y=28 overlaps peak coal & upper iron cleanly)
+    if remaining & {"coal", "copper", "emerald"}:
+        y_shallow = 36 if "copper" in remaining and "iron" not in remaining else 28
+        covered = [k for k in unmet if k in remaining and target_spawns_at_y(k, y_shallow)]
+        bands.append({"target_y": y_shallow, "targets": covered, "reason": "shallow_coal_iron"})
+        remaining -= {k for k in covered if k in {"coal", "copper", "emerald"}}
+
+    # 2. Deep band (Y=-54 covers diamond/redstone/gold AND deepslate iron)
+    if remaining & {"diamond", "redstone", "gold"}:
+        y_deep = -54
+        covered = [k for k in unmet if k in remaining and target_spawns_at_y(k, y_deep)]
+        bands.append({"target_y": y_deep, "targets": covered, "reason": "deep_diamond_iron"})
+        remaining -= {k for k in covered if k in {"diamond", "redstone", "gold"}}
+
+    # 3. Dedicated iron/lapis mid band (Y=16) if only iron/lapis remain or deep band still lacked iron
+    if remaining:
+        y_mid = 16
+        covered = [k for k in unmet if k in remaining and target_spawns_at_y(k, y_mid)]
+        if covered:
+            bands.append({"target_y": y_mid, "targets": covered, "reason": "mid_iron"})
+
+    return bands
 
 
 def estimate_empty_main_slots(inventory_items: Sequence[Mapping[str, Any]], *, total_main_slots: int = 36) -> int:

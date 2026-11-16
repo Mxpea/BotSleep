@@ -171,14 +171,17 @@ execute(item="wooden_pickaxe", count=1, auto_prerequisites=True,
   - `lateral_air_clearance` 优先引导机器人在洞穴/通道中线行走，避开贴墙刮边。
   - `flood_safe_cave_graph`（[`core/cave_probe.py`](../core/cave_probe.py)）与 `Pathfinder3D` 均强制 `anchor_pos` / `anchor_radius` 硬边界过滤、`blocked_edges` 规避，以及**锚定跨涧搭桥约束**（`bridge` 桥长 `1..max_bridge_steps` 的落点前方/邻位必须存在自然实心地面或紧邻安全矿点，且前沿节点本身脚下必须为实心方块，杜绝朝悬崖虚空延伸凌空天桥）；在四邻列先完整评估所有自由步行高差（`dy in 0,+1,-1`），再评估 `micro_dig` / `drop` / 锚定 `bridge` / 受控 `pillar`。
   - [`explore_cave`](../skills/cave_explore.py) 通过 `VoxelWorld3D` 持久化累积全洞三维空间体素、未探前沿 `open_frontiers` 与 `ore_registry`：局部 `Pathfinder3D.plan_horizon`（≤560 节点）探尽当前支路后，自动查询 `VoxelWorld3D` 全局未收割矿脉与优先队列前沿并调用 `Pathfinder3D.find_path`（高达 2400 节点 3D A*）跨分支精确折返跳转，必要时再触发全局 horizon 扩图，直至局部前沿与记忆前沿穷尽、配额满或安全预算耗尽。
-  - `WorldNavigator` 在单步受阻时于循环内完成微掘清障或记录 `blocked_edges` 触发 A* 绕路，并通过 `retreat_to_entry` 四级恢复保证可回入口或安全回地面。**保持游戏会话在线**：`MinecraftAgentClient.attach_or_login` 与 `main.py --keep-connected` / `mc_api.keep_session_on_exit` / `competition` 模式退出时不调用 `auth/logout`。
-- **目标挖矿与实地踩捡边界**：所有 `dig` 调用均传 `collect=False`（步行踩捡）。主矿道每步复用缓存读取 8 个新暴露邻面；洞内与洪水图扫描覆盖 `oy in (-2..5)` 且同时校验眼距 `<= 4.5` 与高位矿脚底角距 `feet_corner_dist <= 3.95`（匹配 `mc-agent-api` 的 `goNear(3.5)` 零寻路阈值）；挖爆矿块后若未直接入包，`_collect_mined_drop` 会结合 `get_entities` 掉落物位置及矿点下方真实落脚层主动走进安全落点（校验升格防顶头，受阻后复核背包避免重复卡等）并同步返回后的实时坐标；按 `targets` 区分 `mined / skipped_quota / skipped_tool / skipped_hazard / unreachable / seen`；单条矿脉延伸 `<= 16` 格。
+  - `WorldNavigator` 在单步受阻时于循环内完成微掘清障或记录 `blocked_edges` 触发 A* 绕路，并通过 `follow_path` 将连续直线平滑步行步合并为疾跑长步（最多 8 格），减少走停顿挫；同时通过 `retreat_to_entry` 四级恢复与 `escape_to_surface(..., max_ascend=160)` 保证可回入口或安全回地面。**保持游戏会话在线**：`MinecraftAgentClient.attach_or_login` 与 `main.py --keep-connected` / `mc_api.keep_session_on_exit` / `competition` 模式退出时不调用 `auth/logout`。
+- **目标挖矿与实地踩捡边界**：所有 `dig` 调用均传 `collect=False`（步行踩捡）。主矿道每步复用缓存读取 8 个新暴露邻面；洞内与洪水图扫描覆盖 `oy in (-2..5)` 且同时校验眼距 `<= 4.5` 与高位矿脚底角距 `feet_corner_dist <= 3.95`（匹配 `mc-agent-api` 的 `goNear(3.5)` 零寻路阈值）；挖爆矿块后若未直接入包，`_collect_mined_drop` 会结合 `get_entities` 掉落物位置及矿点下方真实落脚层主动走进安全落点，并覆盖拐角绕行、1 格高矮缝拆顶防卡头、山崖高台攀登与 2 格竖井落底捡取后搭柱脱困（受阻后复核背包避免重复卡等）；按 `targets` 区分 `mined / skipped_quota / skipped_tool / skipped_hazard / unreachable / seen`；单条矿脉延伸 `<= 16` 格。
 - **原地柱搭高与洪水安全子图**：
-  - `skills/action_workflow.py` 提供 `pillar_up`、`pillar_down`、`scaffold_drop`（分段垫脚无伤下落）与 `escape_to_surface`（避液清顶原地搭柱逃回地表）。
+  - `skills/action_workflow.py` 提供 `pillar_up`（支持落沙/砂砾占格自清理与可选顶头允许列表）、`pillar_down`、`scaffold_drop`（分段垫脚无伤下落）与 `escape_to_surface`（`max_ascend=160`，覆盖深层板岩、`wall_torch`、原矿脉与防烟囱 `tolerance=0.35` 往返抖动，避液清顶原地搭柱逃回地表）。
   - `core/cave_probe.py` 提供 `flood_safe_cave_graph`、`reconstruct_flood_path` 与 `lateral_air_clearance`。
-  - `CaveExploreSkill.discover_and_explore_caves`（结合岩石顶板检索与陡坡/熔岩/落差全图导航）可由 `MineShaftSkill.run_with_journal(..., prefer_caves_first=True)` 联动调用。
+  - `CaveExploreSkill.discover_and_explore_caves`（结合岩石顶板检索与陡坡/熔岩/落差全图导航）可由 `MineShaftSkill.run_with_journal(..., prefer_caves_first=True)` 或 `mine_targets_from_surface` 联动调用。
+- **主世界分层矿脉分布与地表下矿防卡死**：
+  - `core/mining_targets.py` 新增 `ORE_SPAWN_Y_BANDS`、`target_spawns_at_y`、`unmet_spawnable_targets_at_y` 与 `recommended_mining_bands`（遵循 `coal` 仅 `Y=0..192` 下层不生成、`diamond` 在 `Y=-64..15`、`iron` 在 `Y=16` 峰值且全层可采等主世界分布）。
+  - `MineShaftSkill.build_mine_shaft` 与 `mine_targets_from_surface` 支持从地表出发先探浅洞再沿单条连续主阶梯下穿分层目标（`target_ys=[28, -54, 16]`；若浅层独占矿物如 `coal` 已提前达标且仍有深层目标则自动跳过 `Y>=20` 鱼骨支线；阶梯遇暗河/洞穴支持最多 10 格水平跨步绕行并避开已有 `trail` 防止 U 型折返自困；`_retreat_downsampled` 异常收敛与 `deep_retreat_done` 护栏防止撤回顶端后重试再次下钻；`_ensure_returned_to_surface` 优先复走 `retreat_trail` 干阶梯，其次 3D A* 与 `240s` `critical_health=1.0` `escape_to_surface` 确保回到地表）。
 - **回家/休整与检查点**：每推进 `4` 格分支及每次探索结束后评估 `home_thresholds`（空槽 `<= 3`、生命 `< 12`、饥饿 `< 10` 且无食物、火把 `< 4`、可放置方块 `< 16`、无可用镐或剩余耐久 `< 10%`；剩余时间 `< 30s` 安全收尾）。洞内优先自动进食回血（`DEFAULT_EDIBLE_FOODS`），仅在背包满、断镐或无食物且血量危急时早退。
-- **深层鱼骨挖矿与检查点续挖**：`MineShaftSkill.build_mine_shaft` / `run_with_journal` 支持 `target_y`、`mining_mode="single"|"fishbone"`、`rib_length=12`、`rib_spacing=4`、`max_trunk_steps=40`。
+- **深层鱼骨挖矿与检查点续挖**：`MineShaftSkill.build_mine_shaft` / `run_with_journal` 支持 `target_y`、`target_ys`、`mining_mode="single"|"fishbone"`、`rib_length=12`、`rib_spacing=4`、`max_trunk_steps=40`。
 - **伤害容忍与战斗限制**：`MineShaftSkill` 与 `CaveExploreSkill` 默认 `allow_damage=True`、`critical_health=6.0`，并在移动/放置动作上向 `mc-agent-api` 传递 `stop_on=["death"]`，不再因 `1~2` 点擦伤/摔伤立即中断动作或退洞；仍不主动迎战或清理怪物，近战攻击与防御留待后续单独模块补齐。
 
 ---

@@ -1,8 +1,19 @@
 # 配置、客户端、生存、赛事与监控验证
 
-最近独立复核：2026-11-16（Asia/Shanghai），分支 `develop-tianya/shelter-workflow`。首节为最新状态与验证记录；后续各节为历史证据，不代表当前进程在线。
+最近独立复核：2026-11-17（Asia/Shanghai），分支 `develop-tianya/shelter-workflow`。首节为最新状态与验证记录；后续各节为历史证据，不代表当前进程在线。
 
-## 通用 3D 空间世界记忆、A* 寻路、导航与采矿分层重构验证（2026-11-16）
+## 分层 Y 带地表下矿、防卡死回地表与掉落物/连续步态验证（2026-11-17）
+
+继 Git 检查点 `2744ccc` 后完成主世界分层矿脉规划与地表-深层闭环加固（相邻 `mc-agent-api` 未作任何修改；`starter 9 / daily 31 / competition 36` 模型目录与既有契约保持不变）：① [`core/mining_targets.py`](../core/mining_targets.py) 新增 `ORE_SPAWN_Y_BANDS`、`target_spawns_at_y`、`unmet_spawnable_targets_at_y` 与 `recommended_mining_bands`（遵循 `coal` 仅 `Y=0..192` 下层不生成、`diamond` 在 `Y=-64..15`、`iron` 在 `Y=16` 峰值与全层分布）；② [`skills/mining.py`](../skills/mining.py) 扩展 `build_mine_shaft(..., target_ys=...)` 与 `mine_targets_from_surface`：单条连续阶梯贯通 `Y=28 -> Y=-54 -> Y=16`（若浅层独占矿物如 `coal` 已达标则跳过冗余 `Y>=20` 鱼骨支线；阶梯遇暗河/洞腔支持最多 10 格水平跨步绕行并避开已有 `trail` 轨迹；`_wf_prepare_entry` 改为先清入口头部与脚部方块再严格站位），新增 `_ensure_returned_to_surface` 与 `deep_retreat_done` / `_retreat_downsampled` 异常收敛护栏；③ [`skills/action_workflow.py`](../skills/action_workflow.py) 将 `escape_to_surface` 与 `pillar_up` 加固至 `max_ascend=160`（覆盖深板岩/矿石/壁炉火把自清理、落沙砂砾占格自挖脱困及 `tolerance=0.35` 烟囱单次迁移防抖动）；④ 新增离线回归 `test_ore_spawn_bands_and_stratified_planning`（[`tests/test_mining_targets.py`](../tests/test_mining_targets.py)）、`test_deep_band_exits_band_complete_when_only_shallow_coal_unmet_and_returns_to_surface` 与 `test_deep_retreat_done_prevents_re_descent_on_branch_retry`（[`tests/test_mining_workflow.py`](../tests/test_mining_workflow.py)）、`test_escape_to_surface_handles_wall_torch_coal_ore_and_falling_gravel`（[`tests/test_action_workflow.py`](../tests/test_action_workflow.py)）。
+
+| 检查 / 实测轮次 | 结果与说明 |
+| --- | --- |
+| 专项离线回归（`test_action_workflow` 6 项、`test_mining_workflow` 11 项、`test_mining_targets` 4 项、`test_world_3d` 8 项） | **29 项全部通过**（含 2 轮实测前缀 `2744ccc` 的 4 种地形捡矿及疾跑合并步态回归）。 |
+| 全仓离线 `unittest`（最后一次 `.py` 代码修改后复跑，`$env:BOTSLEEP_RUN_LIVE_TESTS='0'`） | **963 项运行，OK（`skipped=10`，59.117s）**；跳过的 10 项为需本地 Ninjabrain JAR 的要塞用例、需连实服的 `test_speedrun_portal.py` 及 `test_cave_matrix.py`，不计作实服通过。 |
+| `main.py --config config.example.yaml --check-config` + `compileall` | 输出 `Configuration valid.`，字节码编译全部通过；`git -C ..\mc-agent-api status -s` 无任何改动。 |
+| **MCP 辅助真机排障与地表-深层闭环实测（`task-5561`，`[-159.5, 70, -859.5]` 出发）** | **通过（`success=True`，`stop=branch_done`，耗时 `848.6s`，`END POS=[-159.5, 70, -859.5]`，`on_surface=True`，`HP=20, Food=20`）**：先探浅洞并回到地表；随后开挖单条主斜井在 `Y=53` 提前采满 **`coal: 17/16`** 后于 `Y=28` 自动跳过冗余浅层支线直降至 **`Y=-54`**（沿途于 `[-56, -30, -860]` 挖获首颗钻石），在 `Y=-54` 完成左右鱼骨支线采矿并沿原阶梯直接疾跑步态走回地表起点，全程零漏捡与零死伤，净入包 **`diamond: 6, coal: 17, raw_copper: 16`**；此前对照轮次（`task-5427`）亦在 `[-130, 5, -893]` 一次性采齐 **`raw_iron: 17, coal: 17`**，并通过 `minecraft-debug` MCP 实测定位修复了 `Y=57` 暗河绕行、`coal_ore` / `wall_torch` / 落砂 `occupied` 阻断 `escape_to_surface` 等真机边界。 |
+
+## 历史：通用 3D 空间世界记忆、A* 寻路、导航与采矿分层重构验证（2026-11-16）
 
 继 Git 检查点 `615bba4` 后完成空间记忆与洞穴探索架构四层解耦重构（相邻 `mc-agent-api` 未作任何修改；`starter 9 / daily 31 / competition 36` 模型目录与既有公开契约保持不变）：① [`core/world_3d.py`](../core/world_3d.py) 提供可持久化的通用 `VoxelWorld3D`（chunk-zlib SQLite 存储、visited_stances、scanned_cells 前沿裁剪、open_frontiers、ore_registry 与 blocked_edges，严格遵循 Windows `contextlib.closing` AST 契约）；② [`core/pathfinder_3d.py`](../core/pathfinder_3d.py) 提供 `Pathfinder3D`（局部 horizon 扩展 + `find_path` 有向 3D A* 跨分支寻路 + `find_ore_vantage_path`）；③ [`skills/world_navigator.py`](../skills/world_navigator.py) 提供 `WorldNavigator`（统一移动/搭柱/搭桥/掉落执行、自主微掘清障、`blocked_edges` 记录与四级 `retreat_to_entry`）；④ [`skills/ore_harvester.py`](../skills/ore_harvester.py) 提供 `OreHarvester`（矿脉追踪、`collect=False` 实体提示踩捡及 cache invalidation 同步）；⑤ [`core/cave_probe.py`](../core/cave_probe.py) 与 `Pathfinder3D` 新增**锚定搭桥约束**（桥端必须落在真实实心方块前缘或安全矿点旁 2 格内，杜绝向悬崖虚空无限延伸天桥）与 `blocked_edges` 过滤，重构 [`skills/cave_explore.py`](../skills/cave_explore.py) 与 [`skills/mining.py`](../skills/mining.py)；⑥ 新增 [`tests/test_world_3d.py`](../tests/test_world_3d.py) 专项覆盖 SQLite 往返、A* 避障攀爬、锚定搭桥对比空洞零天桥，以及双分支矿洞穷尽采集与撤回。
 

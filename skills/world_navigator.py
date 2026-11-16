@@ -339,7 +339,7 @@ class WorldNavigator:
         allow_bridge: bool = True,
         allow_drop: bool = True,
         allow_surface_escape: bool = True,
-        max_ascend: int = 48,
+        max_ascend: int = 160,
     ) -> Tuple[bool, bool]:
         """Retreat safely back to entry_cell via direct move -> 3D A* -> reversible breadcrumbs -> surface escape."""
         breadcrumbs = trail.breadcrumbs

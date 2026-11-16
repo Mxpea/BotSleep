@@ -18,6 +18,7 @@ from core.domain import AIR, HAZARDS, parse_pos
 from core.structure_spec import (
     CAVE_DIGGABLE_BLOCKS,
     DEFAULT_REPLACEABLE,
+    MINE_DIGGABLE_BLOCKS,
     SCAFFOLD_BLOCKS,
     StructureSpec,
     inspect_structure,
@@ -684,6 +685,7 @@ def pillar_up(
     *,
     blocks: Iterable[str] = SCAFFOLD_BLOCKS,
     allow_dig_headroom: bool = True,
+    allowed_headroom_blocks: Optional[Iterable[str]] = None,
     max_attempts_per_step: int = 4,
 ) -> Dict[str, Any]:
     """Jump-pillar vertically in place using posture(jump=True) + verified place_block.
@@ -702,6 +704,15 @@ def pillar_up(
         )
 
     allowed_blocks = tuple(blocks)
+    head_allowed = (
+        set(allowed_headroom_blocks)
+        if allowed_headroom_blocks is not None
+        else (
+            set(CAVE_DIGGABLE_BLOCKS)
+            | set(MINE_DIGGABLE_BLOCKS)
+            | {"torch", "wall_torch", "soul_torch", "soul_wall_torch", "cobweb", "sculk_vein"}
+        )
+    )
     placed_cells: List[List[int]] = []
     dug_headroom = 0
 
@@ -741,7 +752,7 @@ def pillar_up(
                     blocker_type="safety_interrupted",
                     blocker_pos=[cx, cy + 3, cz],
                 )
-            dig_block(ctx, head2, relative=False, allowed_blocks=CAVE_DIGGABLE_BLOCKS, collect=False)
+            dig_block(ctx, head2, relative=False, allowed_blocks=head_allowed, collect=False)
             dug_headroom += 1
 
         chosen = ctx.select_item(allowed_blocks)
@@ -752,6 +763,31 @@ def pillar_up(
                 blocker_type="missing_item",
             )
 
+        def _clear_self_occupied() -> bool:
+            cleared = False
+            for sy in (cy + 1, cy):
+                bname = str(ctx.read_block((cx, sy, cz)).get("name") or "air")
+                if bname not in DEFAULT_REPLACEABLE and bname not in HAZARDS and bname in head_allowed:
+                    ctx.guard.set_jump(False)
+                    pk = ctx.select_item(PICKAXE_PRIORITY)
+                    if pk is not None:
+                        ctx.guard.write(ctx.guard.client.equip, item=pk, slot="hand")
+                    ctx.guard.write(ctx.guard.client.dig, cx, sy, cz, collect=False, stop_on=["death"])
+                    wait_until(
+                        ctx,
+                        lambda c: str(c.read_block((cx, sy, cz)).get("name") or "air") in DEFAULT_REPLACEABLE,
+                        timeout_seconds=1.5,
+                        poll_seconds=0.12,
+                        description=f"clear occupied {[cx, sy, cz]}",
+                    )
+                    cleared = True
+            if cleared:
+                ctx.guard.write(ctx.guard.client.equip, item=chosen, slot="hand")
+                ctx.guard.write(ctx.guard.client.look_at, cx + 0.5, cy - 0.5, cz + 0.5)
+                ctx.guard.set_jump(True)
+            return cleared
+
+        _clear_self_occupied()
         stand_cell(ctx, (cx, cy, cz), tolerance=0.45)
         ctx.guard.write(ctx.guard.client.equip, item=chosen, slot="hand")
         ctx.guard.write(ctx.guard.client.look_at, cx + 0.5, cy - 0.5, cz + 0.5)
@@ -770,7 +806,9 @@ def pillar_up(
                     last_exc = exc
                     if exc.code not in {"blocked_by_self", "place_failed", "occupied"}:
                         raise
-                    time.sleep(0.12)
+                    if exc.code == "occupied":
+                        _clear_self_occupied()
+                    time.sleep(0.15)
         finally:
             ctx.guard.set_jump(False)
 
@@ -894,14 +932,24 @@ def scaffold_drop(
 def escape_to_surface(
     ctx: WorkflowContext,
     *,
-    max_ascend: int = 48,
+    max_ascend: int = 160,
     blocks: Iterable[str] = SCAFFOLD_BLOCKS,
     invalidate: Optional[Callable[[Sequence[int]], None]] = None,
 ) -> Dict[str, Any]:
     """Emergency pillar-and-dig upward shaft out of a trapped underground cave to open surface sky."""
     ascended = 0
-    allowed_dig = set(CAVE_DIGGABLE_BLOCKS) | {"grass_block", "dirt", "coarse_dirt", "sand", "red_sand", "gravel", "oak_leaves", "birch_leaves", "spruce_leaves"}
+    allowed_dig = set(CAVE_DIGGABLE_BLOCKS) | set(MINE_DIGGABLE_BLOCKS) | {
+        "grass_block", "dirt", "coarse_dirt", "rooted_dirt", "mud", "clay",
+        "sand", "red_sand", "gravel", "moss_block", "dripstone_block",
+        "deepslate", "cobbled_deepslate", "tuff", "calcite",
+        "torch", "wall_torch", "soul_torch", "soul_wall_torch", "cobweb", "sculk_vein",
+        "oak_log", "birch_log", "spruce_log", "jungle_log", "acacia_log", "dark_oak_log", "mangrove_log", "cherry_log",
+        "oak_leaves", "birch_leaves", "spruce_leaves", "jungle_leaves", "acacia_leaves", "dark_oak_leaves",
+        "azalea_leaves", "flowering_azalea_leaves", "cherry_leaves", "mangrove_leaves",
+        "snow_block", "packed_ice",
+    }
     replaceable = set(AIR) | set(DEFAULT_REPLACEABLE)
+    visited_shifts: set[Tuple[int, int, int]] = set()
 
     def _col_open_sky(col_x: int, base_y: int, col_z: int) -> bool:
         for dy in range(1, 22):
@@ -929,12 +977,28 @@ def escape_to_surface(
         if _is_on_surface(cx, cy, cz):
             return {"escaped": True, "ascended": ascended, "pos": [cx, cy, cz]}
 
-        # If an adjacent walkable column already opens straight upward (natural chimney or previous shaft), step to it
+        # Clear falling gravel/sand inside current column if buried
+        for sy in (cy + 1, cy):
+            sb = str(ctx.read_block((cx, sy, cz)).get("name") or "air")
+            if sb not in replaceable and sb not in HAZARDS and sb in allowed_dig:
+                try:
+                    pk = ctx.select_item(PICKAXE_PRIORITY)
+                    if pk is not None:
+                        ctx.guard.write(ctx.guard.client.equip, item=pk, slot="hand")
+                    ctx.guard.write(ctx.guard.client.dig, cx, sy, cz, collect=False, stop_on=["death"])
+                    if invalidate is not None:
+                        invalidate((cx, sy, cz))
+                except WorkflowStepError:
+                    pass
+
+        # If an adjacent walkable column already opens straight upward (natural chimney or previous shaft), step to it once
         moved_chimney = False
         for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
             nx, nz = cx + dx, cz + dz
             for dy in (0, 1, -1):
                 ny = cy + dy
+                if (nx, ny, nz) in visited_shifts:
+                    continue
                 fl = str(ctx.read_block((nx, ny - 1, nz)).get("name") or "air")
                 f1 = str(ctx.read_block((nx, ny, nz)).get("name") or "air")
                 f2 = str(ctx.read_block((nx, ny + 1, nz)).get("name") or "air")
@@ -944,7 +1008,9 @@ def escape_to_surface(
                     # Prefer only if current column has solid ceiling at cy+2..cy+4
                     if any(str(ctx.read_block((cx, cy + ky, cz)).get("name") or "air") not in replaceable for ky in (2, 3, 4)):
                         try:
-                            stand_cell(ctx, (nx, ny, nz), tolerance=0.85)
+                            visited_shifts.add((cx, cy, cz))
+                            visited_shifts.add((nx, ny, nz))
+                            stand_cell(ctx, (nx, ny, nz), tolerance=0.35)
                             moved_chimney = True
                             break
                         except WorkflowStepError:
@@ -965,13 +1031,17 @@ def escape_to_surface(
                 nx, nz = cx + dx, cz + dz
                 for dy in (0, 1, -1):
                     ny = cy + dy
+                    if (nx, ny, nz) in visited_shifts:
+                        continue
                     fl = str(ctx.read_block((nx, ny - 1, nz)).get("name") or "air")
                     f1 = str(ctx.read_block((nx, ny, nz)).get("name") or "air")
                     f2 = str(ctx.read_block((nx, ny + 1, nz)).get("name") or "air")
                     top3 = str(ctx.read_block((nx, ny + 3, nz)).get("name") or "air")
                     if fl not in (replaceable | set(HAZARDS)) and f1 in replaceable and f2 in replaceable and top3 not in HAZARDS:
                         try:
-                            stand_cell(ctx, (nx, ny, nz), tolerance=0.85)
+                            visited_shifts.add((cx, cy, cz))
+                            visited_shifts.add((nx, ny, nz))
+                            stand_cell(ctx, (nx, ny, nz), tolerance=0.35)
                             shifted = True
                             break
                         except WorkflowStepError:
@@ -1012,7 +1082,43 @@ def escape_to_surface(
                 if mined_extra:
                     break
 
-        pres = pillar_up(ctx, steps=1, blocks=blocks, allow_dig_headroom=True)
+        pres = None
+        try:
+            pres = pillar_up(
+                ctx,
+                steps=1,
+                blocks=blocks,
+                allow_dig_headroom=True,
+                allowed_headroom_blocks=allowed_dig,
+            )
+        except WorkflowStepError as exc:
+            if exc.code not in {"occupied", "place_failed", "blocked_by_self", "dig_failed", "hazard_detected"}:
+                raise
+            shifted = False
+            for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                nx, nz = cx + dx, cz + dz
+                for dy in (0, 1, -1):
+                    ny = cy + dy
+                    if (nx, ny, nz) in visited_shifts:
+                        continue
+                    fl = str(ctx.read_block((nx, ny - 1, nz)).get("name") or "air")
+                    f1 = str(ctx.read_block((nx, ny, nz)).get("name") or "air")
+                    f2 = str(ctx.read_block((nx, ny + 1, nz)).get("name") or "air")
+                    top3 = str(ctx.read_block((nx, ny + 3, nz)).get("name") or "air")
+                    if fl not in (replaceable | set(HAZARDS)) and f1 in replaceable and f2 in replaceable and top3 not in HAZARDS:
+                        try:
+                            visited_shifts.add((cx, cy, cz))
+                            visited_shifts.add((nx, ny, nz))
+                            stand_cell(ctx, (nx, ny, nz), tolerance=0.35)
+                            shifted = True
+                            break
+                        except WorkflowStepError:
+                            pass
+                if shifted:
+                    break
+            if not shifted:
+                break
+            continue
         for pc in pres.get("placed_cells") or ():
             if invalidate is not None:
                 invalidate(pc)

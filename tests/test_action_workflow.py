@@ -1,5 +1,6 @@
 """Offline unit tests for skills.action_workflow."""
 
+import math
 import threading
 import unittest
 
@@ -13,6 +14,7 @@ from skills.action_workflow import (
     dig_block,
     place_block,
     stand_at,
+    escape_to_surface,
 )
 
 
@@ -71,6 +73,9 @@ class _DummyClient:
         self.items[item] -= 1
         self.blocks[(int(x), int(y), int(z))] = {"name": item}
         return {"ok": True, "result": {"placed": item}}
+
+    def look_at(self, x, y, z):
+        return {"ok": True, "result": {}}
 
     def equip(self, item, slot="hand"):
         return {"ok": True, "result": {"equipped": item}}
@@ -235,6 +240,57 @@ class ActionWorkflowTests(unittest.TestCase):
         self.assertEqual(res.error_code, "end_move_failed")
         self.assertTrue(res.data["structure_verified"])
         self.assertIsNotNone(res.data["end_move_error"])
+
+    def test_escape_to_surface_handles_wall_torch_coal_ore_and_falling_gravel(self):
+        client = _DummyClient()
+        # Bot at z=-847.09 falls inside (-135, 27, -848) column with wall_torch at y=30,
+        # adjacent chimney (-135, 27, -847) open through y=30, then coal_ore + falling gravel above.
+        client.pos = [-134.5, 27.0, -847.09]
+        client.items = {"cobblestone": 64, "iron_pickaxe": 1}
+        for x in range(-137, -133):
+            for z in range(-850, -845):
+                client.blocks[(x, 26, z)] = {"name": "stone"}
+                for y in range(31, 34):
+                    client.blocks[(x, y, z)] = {"name": "stone"}
+        client.blocks[(-135, 30, -848)] = {"name": "wall_torch"}
+        client.blocks[(-135, 31, -847)] = {"name": "coal_ore"}
+        client.blocks[(-135, 32, -847)] = {"name": "stone"}
+        client.blocks[(-135, 33, -847)] = {"name": "gravel"}
+        # Solid ground stops at y=33; y>=34 open sky!
+        orig_place = client.place_block
+        orig_dig = client.dig
+        gravel_dropped = {"done": False}
+
+        def custom_dig(x, y, z, collect=False, stop_on=None):
+            res = orig_dig(x, y, z, collect=collect, stop_on=stop_on)
+            # Simulate falling gravel into foot cell once (-135, 31, -847) -> step at y=29 digs y=31 stone/gravel
+            if (int(x), int(y), int(z)) == (-135, 32, -847) and not gravel_dropped["done"]:
+                gravel_dropped["done"] = True
+                client.blocks[(-135, 30, -847)] = {"name": "gravel"}
+                client.blocks[(-135, 33, -847)] = {"name": "air"}
+            return res
+
+        def custom_place(item=None, x=0, y=0, z=0):
+            cur = client.blocks.get((int(x), int(y), int(z)), {"name": "air"})["name"]
+            if cur not in {"air", "cave_air"}:
+                raise APIError("occupied", f"{cur} already at target")
+            r = orig_place(item=item, x=x, y=y, z=z)
+            px, py, pz = math.floor(client.pos[0] + 0.0001), math.floor(client.pos[1] + 0.0001), math.floor(client.pos[2] + 0.0001)
+            if (px, py, pz) == (int(x), int(y), int(z)):
+                client.pos[1] = float(int(y) + 1)
+            return r
+
+        client.dig = custom_dig
+        client.place_block = custom_place
+        ctx = WorkflowContext(
+            guard=WorkflowGuard(client, timeout_seconds=30, max_reads=2000),
+            spec=_mini_spec(),
+            origin=[-135, 27, -848],
+            orientation="south",
+        )
+        esc = escape_to_surface(ctx, max_ascend=20)
+        self.assertTrue(esc["escaped"], esc)
+        self.assertGreaterEqual(esc["pos"][1], 32)
 
 
 if __name__ == "__main__":

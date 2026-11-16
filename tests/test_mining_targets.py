@@ -9,6 +9,9 @@ from core.mining_targets import (
     parse_mining_targets,
     pickaxe_durability_ratio,
     pickaxe_tier,
+    recommended_mining_bands,
+    target_spawns_at_y,
+    unmet_spawnable_targets_at_y,
 )
 
 
@@ -91,6 +94,33 @@ class MiningTargetsTests(unittest.TestCase):
         self.assertEqual(
             evaluate_home_trigger(base_status, [{"name": "stone_pickaxe", "count": 1, "durability_used": 125, "slot": 0}, {"name": "cobblestone", "count": 32, "slot": 1}, {"name": "torch", "count": 8, "slot": 2}])["home_reason"],
             "no_pickaxe",
+        )
+
+    def test_ore_spawn_bands_and_stratified_planning(self):
+        self.assertFalse(target_spawns_at_y("coal", -54))
+        self.assertTrue(target_spawns_at_y("coal", 28))
+        self.assertTrue(target_spawns_at_y("diamond", -54))
+        self.assertFalse(target_spawns_at_y("diamond", 28))
+        self.assertTrue(target_spawns_at_y("iron", -54))
+        self.assertTrue(target_spawns_at_y("iron", 16))
+
+        targets = parse_mining_targets({"iron": 32, "coal": 64, "diamond": 6})
+        # Shallow coal+iron band (Y=28), deep diamond+iron band (Y=-54), fallback peak-iron (Y=16)
+        bands = recommended_mining_bands(targets, {})
+        self.assertEqual([b["target_y"] for b in bands], [28, -54, 16])
+        self.assertEqual(
+            [b["target_y"] for b in recommended_mining_bands(targets, {"coal": 64, "diamond": 6})],
+            [16],
+        )
+        # At Y=-54, if diamond & iron quotas are filled leaving only coal, unmet spawnable list is empty!
+        self.assertEqual(
+            unmet_spawnable_targets_at_y(targets, {"raw_iron": 32, "diamond": 6, "coal": 10}, -54),
+            [],
+        )
+        # Meanwhile at Y=28 coal is still spawnable
+        self.assertEqual(
+            unmet_spawnable_targets_at_y(targets, {"raw_iron": 32, "diamond": 6, "coal": 10}, 28),
+            ["coal"],
         )
 
 
