@@ -554,6 +554,7 @@ def flood_safe_cave_graph(
     protected_cells: Optional[Set[Tuple[int, int, int]]] = None,
     anchor_pos: Optional[Sequence[int]] = None,
     anchor_radius: Optional[int] = None,
+    blocked_edges: Optional[Set[Tuple[Tuple[int, int, int], Tuple[int, int, int]]]] = None,
     block_cache: Optional[Dict[Tuple[int, int, int], Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Flood-fill a safe cave/terrain graph supporting walk, micro-dig, pillar-up, lava/gap bridging, and safe drops.
@@ -568,6 +569,7 @@ def flood_safe_cave_graph(
         else (sx, sy, sz)
     )
     arad = int(anchor_radius) if anchor_radius is not None else int(max_radius)
+    blocked = blocked_edges or set()
     reader = _cached_reader(read_block, block_cache)
     cov_set = covered_cells if covered_cells is not None else visited_cells
     hints = [(int(h[0]), int(h[1]), int(h[2])) for h in (goal_hints or ()) if len(h) == 3]
@@ -675,6 +677,8 @@ def flood_safe_cave_graph(
                     up_clear = is_passable(reader((nx, ny + 2, nz)), allow_cobweb=allow_cobweb)
 
                 if f_pass and h_pass and up_clear:
+                    if (cur, nxt) in blocked:
+                        continue
                     clr = _lateral_clearance(nxt, reader)
                     base_delta = 1.0 if dy == 0 else 1.15
                     revisit_pen = 0.35 if (cov_set is not None and nxt in cov_set) else 0.0
@@ -753,7 +757,7 @@ def flood_safe_cave_graph(
                                 is_passable(reader((far_x, ny, far_z)), allow_cobweb=allow_cobweb)
                                 and is_passable(reader((far_x, ny + 1, far_z)), allow_cobweb=allow_cobweb)
                             )
-                        if not opens_to_air:
+                        if not opens_to_air or (cur, nxt) in blocked:
                             continue
                         step_cost = cur_cost + 3.5 + 1.5 * len(dig_cells)
                         if nxt not in expanded and step_cost < costs.get(nxt, float("inf")):
@@ -787,7 +791,7 @@ def flood_safe_cave_graph(
                             break
                         if is_solid_floor(floor_d):
                             nxt = (nx, ny, nz)
-                            if _cell_safe_border(nxt, reader) and _cell_safe_border((nx, ny + 1, nz), reader):
+                            if (cur, nxt) not in blocked and _cell_safe_border(nxt, reader) and _cell_safe_border((nx, ny + 1, nz), reader):
                                 if drop_d <= 3:
                                     step_cost = cur_cost + 1.35 + 0.25 * drop_d
                                     if nxt not in expanded and step_cost < costs.get(nxt, float("inf")):
@@ -819,28 +823,82 @@ def flood_safe_cave_graph(
                                         unseen_adj += 1
                             break
 
-            # Stone/cobblestone bridging across lava or open air chasms at same level
+            # Stone/cobblestone bridging ONLY when anchored to a reachable opposite solid landing (or ore within 2 blocks)
             if allow_bridge and not stepped_floor and bridge_streak < int(max_bridge_steps):
                 nxt = (nx, cy, nz)
                 cur_floor_blk = reader((cx, cy - 1, cz))
-                # Need solid anchor at current stance (or already bridged current floor)
-                if is_solid_floor(cur_floor_blk) or (edge_meta.get(cur, {}).get("mode") == "bridge"):
-                    f_blk = reader(nxt)
-                    h_blk = reader((nx, cy + 1, nz))
-                    fl_blk = reader((nx, cy - 1, nz))
-                    fl_name = _block_name(fl_blk)
-                    if (
-                        is_passable(f_blk, allow_cobweb=allow_cobweb)
-                        and is_passable(h_blk, allow_cobweb=allow_cobweb)
-                        and not is_lava_like(f_blk)
-                        and not is_water_like(f_blk)
-                        and not is_lava_like(h_blk)
-                        and not is_water_like(h_blk)
-                        and _cell_safe_border_ignore_floor(nxt, reader)
-                        and _cell_safe_border((nx, cy + 1, nz), reader)
-                        and fl_name not in {"not_loaded", "unknown", "spawner", "chest_minecart"}
-                        and (is_lava_like(fl_blk) or is_water_like(fl_blk) or is_passable(fl_blk))
-                    ):
+                prev_parent = parents.get(cur)
+                prev_mode = edge_meta.get(cur, {}).get("mode")
+                # Allow bridging from real ground, or continuing straight along an already-validated bridge direction
+                same_bridge_dir = (
+                    prev_mode == "bridge"
+                    and prev_parent is not None
+                    and (cx - prev_parent[0], cz - prev_parent[2]) == (dx, dz)
+                )
+                if (is_solid_floor(cur_floor_blk) or same_bridge_dir) and (cur, nxt) not in blocked:
+                    max_ahead = max(1, int(max_bridge_steps) - bridge_streak)
+                    anchored_ahead = False
+                    for span in range(1, max_ahead + 1):
+                        gx, gz = cx + span * dx, cz + span * dz
+                        if abs(gx - sx) > int(max_radius) or abs(gz - sz) > int(max_radius):
+                            break
+                        if abs(gx - ax) > arad or abs(gz - az) > arad:
+                            break
+                        gf = reader((gx, cy, gz))
+                        gh = reader((gx, cy + 1, gz))
+                        gfl = reader((gx, cy - 1, gz))
+                        gfl_name = _block_name(gfl)
+                        if not (
+                            is_passable(gf, allow_cobweb=allow_cobweb)
+                            and is_passable(gh, allow_cobweb=allow_cobweb)
+                            and not is_lava_like(gf)
+                            and not is_water_like(gf)
+                            and not is_lava_like(gh)
+                            and not is_water_like(gh)
+                            and _cell_safe_border_ignore_floor((gx, cy, gz), reader)
+                            and _cell_safe_border((gx, cy + 1, gz), reader)
+                            and gfl_name not in {"not_loaded", "unknown", "spawner", "chest_minecart"}
+                            and (is_lava_like(gfl) or is_water_like(gfl) or is_passable(gfl))
+                        ):
+                            break
+                        # Check real natural solid landing immediately past step `span`
+                        lx, lz = cx + (span + 1) * dx, cz + (span + 1) * dz
+                        if abs(lx - ax) <= arad and abs(lz - az) <= arad:
+                            for ly_off in (0, 1, -1):
+                                ly = cy + ly_off
+                                if (
+                                    is_solid_floor(reader((lx, ly - 1, lz)))
+                                    and is_passable(reader((lx, ly, lz)), allow_cobweb=allow_cobweb)
+                                    and is_passable(reader((lx, ly + 1, lz)), allow_cobweb=allow_cobweb)
+                                    and _cell_safe_border((lx, ly, lz), reader)
+                                    and _cell_safe_border((lx, ly + 1, lz), reader)
+                                    and (ly_off != 1 or is_passable(reader((gx, cy + 2, gz)), allow_cobweb=allow_cobweb))
+                                    and (ly_off != -1 or is_passable(reader((lx, cy + 1, lz)), allow_cobweb=allow_cobweb))
+                                ):
+                                    anchored_ahead = True
+                                    break
+                        if anchored_ahead:
+                            break
+                        # Also allow <=2 bridge steps if directly bringing an exposed target ore within reach
+                        if not anchored_ahead and targets is not None and span <= 2:
+                            for ox in (-2, -1, 0, 1, 2):
+                                for oz in (-2, -1, 0, 1, 2):
+                                    for oy in (-1, 0, 1, 2, 3):
+                                        ocell = (gx + ox, cy + oy, gz + oz)
+                                        oname = _block_name(reader(ocell))
+                                        if oname in ORE_DROP_MAP and has_exposed_air_face(ocell, reader, block_cache=block_cache):
+                                            oact, _, _ = evaluate_ore_block(oname, targets, harvested_counts=harvested_counts or {}, best_tool_tier=best_tool_tier)
+                                            if oact == "mine" and ore_cell_hazard_free(ocell, reader, block_cache=block_cache):
+                                                anchored_ahead = True
+                                                break
+                                    if anchored_ahead:
+                                        break
+                                if anchored_ahead:
+                                    break
+                        if anchored_ahead:
+                            break
+                    if anchored_ahead:
+                        fl_blk = reader((nx, cy - 1, nz))
                         is_lava_bridge = is_lava_like(fl_blk)
                         step_cost = cur_cost + (4.2 if is_lava_bridge else 3.2)
                         if nxt not in expanded and step_cost < costs.get(nxt, float("inf")):
@@ -903,7 +961,7 @@ def flood_safe_cave_graph(
                 )
             if need_pillar:
                 up_node = (cx, cy + 1, cz)
-                if _cell_safe_border(up_node, reader):
+                if (cur, up_node) not in blocked and _cell_safe_border(up_node, reader):
                     head2_cell = (cx, cy + 2, cz)
                     head2_blk = reader(head2_cell)
                     head2_pass = is_passable(head2_blk, allow_cobweb=allow_cobweb)
@@ -926,8 +984,15 @@ def flood_safe_cave_graph(
         unseen_edges = unseen_adj
         if cov_set is not None and cur not in cov_set and cur != start:
             unseen_adj += 1
-        # Only expose frontiers bordering real traversable unseen steps (never hover mid-air on a dead-end pillar)
-        if unseen_edges > 0 and cur != start and (cov_set is None or cur not in cov_set):
+        # Only expose frontiers on natural solid floors bordering real traversable unseen steps
+        # (never treat mid-air bridge nodes or dead-end pillars as open exploration frontiers).
+        if (
+            unseen_edges > 0
+            and cur != start
+            and (cov_set is None or cur not in cov_set)
+            and (pillar_h == 0 or unseen_edges >= 1)
+            and is_solid_floor(reader((cx, cy - 1, cz)))
+        ):
             center_bonus = 0.08 * _lateral_clearance(cur, reader)
             hint_penalty = 0.0
             if hints:

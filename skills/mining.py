@@ -66,6 +66,7 @@ from skills.action_workflow import (
     stand_cell,
 )
 from skills.cave_explore import CaveExploreSkill
+from core.world_3d import VoxelWorld3D
 from . import BaseSkill, SkillResult
 
 
@@ -584,6 +585,7 @@ class MineShaftSkill(BaseSkill):
                 "trunk_done": int(resumed.get("trunk_done", 0)) if resumed else 0,
                 "resume_progress": resumed,
                 "block_cache": {},
+                "world_3d": None,
                 "caves": list(resumed.get("caves", [])) if resumed else [],
                 "sealed_caves": list(resumed.get("sealed_caves", [])) if resumed else [],
                 "ore_records": {
@@ -1263,6 +1265,7 @@ class MineShaftSkill(BaseSkill):
                             existing_report=report,
                             existing_classification=cls,
                             block_cache=ctx.extra["block_cache"],
+                            world=ctx.extra.get("world_3d"),
                             blocked_backtracks=breadcrumbs,
                             guard=ctx.guard,
                         )
@@ -1570,6 +1573,7 @@ class MineShaftSkill(BaseSkill):
                     existing_report=report,
                     existing_classification=None if allow_subgraph and cls["decision"] != "enter" else cls,
                     block_cache=ctx.extra["block_cache"],
+                    world=ctx.extra.get("world_3d"),
                     blocked_backtracks=breadcrumbs[-3:],
                     guard=ctx.guard,
                     allow_damage=ctx.guard.allow_damage,

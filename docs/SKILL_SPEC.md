@@ -155,18 +155,23 @@ execute(item="wooden_pickaxe", count=1, auto_prerequisites=True,
 
 `PortalTelemetryRecorder.record_step(...)` 主动查询 API，可执行传入的 `action_func`；`dump_json()` 默认写 `logs/telemetry/`，未接入 EventMonitor。`LavaLakeGenerator.generate_random_lake(...)` 通过 RCON 生成地形，只用于专用靶场。三步实服测试默认跳过，随机矩阵是独立脚本；本轮未验证零伤害、零溢水或任何实服成功率。入口和门禁见 [DEBUG_GUIDE.md](DEBUG_GUIDE.md)。
 
-### 9. `MineShaftSkill` 与独立 `CaveExploreSkill`（Plan v2）
+### 9. `MineShaftSkill`、独立 `CaveExploreSkill` 与通用 3D 空间世界层
 
-- 模块拆分：`skills/mining.py`（`MineShaftSkill`，楼梯 + 4×3×2 侧边连通工作站平台 + 分支 + 封口换向 + 检查点恢复）与 `skills/cave_explore.py`（`CaveExploreSkill`，可单独调起调试的洞穴/废弃矿井有界探索技能），共用纯逻辑模块 `core/cave_probe.py`、`core/mining_targets.py` 与 `core/structure_spec.py` 常量。二者均未放入 `starter 9 / daily 31 / competition 36` 模型目录。
+- **分层模块拆分**：
+  - [`core/world_3d.py`](../core/world_3d.py)（`VoxelWorld3D`、`FrontierNode`、`OreNode`）：维护作用域隔离（可选 `runtime/world_3d/` chunk-zlib SQLite 持久化）的统一 3D 世界内存，记录体素映射、访问站位 `visited_stances`、清扫覆盖域 `scanned_cells`、未探前沿 `open_frontiers`、矿点注册表 `ore_registry`（`pending / mined / skipped_quota / skipped_tool / skipped_hazard / unreachable / seen`）、受阻有向边 `blocked_edges` 与脚手架坐标 `placed_scaffolds`。
+  - [`core/pathfinder_3d.py`](../core/pathfinder_3d.py)（`Pathfinder3D`）：纯 3D 空间规划器，封装局部洪水扩图与前沿/矿点注册（`plan_horizon`）、基于 `VoxelWorld3D` 的有向 3D A* 全局跨洞跳点寻路（`find_path`：先 `walk(dy=0,+1,-1)`，后 `micro_dig`、`drop`/`scaffold_drop`、**锚定对岸实心地面或矿点 `bridge`** 与 `pillar`），以及 `find_ore_vantage_path`；所有扩张自动避开 `world.blocked_edges`。
+  - [`skills/world_navigator.py`](../skills/world_navigator.py)（`WorldNavigator`、`ReversibleTrail`）：单步与路径执行器（统一经由 `stand_cell`/`dig_block`/`place_block`/`pillar_up`/`scaffold_drop` 执行），遇到未预料小阻碍/顶头方块可自主微掘清理并在失败时写入 `world.blocked_edges`；提供四级撤退恢复流水线 `retreat_to_entry`（直飞入口 → 缓存 3D A* 全图撤回 → `pillar_undo` 安全逆向面包屑 → `escape_to_surface` 回地面）。
+  - [`skills/ore_harvester.py`](../skills/ore_harvester.py)（`OreHarvester`）：矿脉连通追踪（`mine_vein`，`collect=False` 配合实体与地面扫描的踩捡收集 `collect_mined_drop`）、配额/镐级/岩浆邻居过滤，以及 `harvest_reachable_at`；完成挖矿后回写体素缓存失效与 `OreNode` 状态。
+  - [`skills/cave_explore.py`](../skills/cave_explore.py)（`CaveExploreSkill`，支持复用外部传入 `world: VoxelWorld3D` 或 `persistent_world=True`）与 [`skills/mining.py`](../skills/mining.py)（`MineShaftSkill`，通过 `ctx.extra["world_3d"]` 共享体素记忆并与 `CaveExploreSkill` 联动），共用纯逻辑探测/分类模块 `core/cave_probe.py`、`core/mining_targets.py` 与 `core/structure_spec.py` 常量。二者均未放入 `starter 9 / daily 31 / competition 36` 模型目录。
 - **洞穴分类决策与探索策略**：
   - `unsafe`（矿道主支路遇险时封口并返回平台、`cave_abandoned` 上限 3 次）：任意岩浆/刷怪笼、水类方块 `>= 3`、空腔高度 `>= 10`、落差 `>= 4`；`min_enter_torches` 默认为 `0`（无火把仍允许进入自然洞穴采煤铁；背包有煤/木炭与木棍或木板时先自动合成火把，仅当显式配置 `min_enter_torches >= 1` 时才返回 `missing_torch`）。
   - `small_bubble`：空气 `<= 4` 且无水/岩浆/刷怪笼，最多连续补 1 格地板后继续直挖。
   - `enter`：`mineshaft`（木板/栅栏/铁轨合计 `>= 3`）或低矮安全洞（`height < 10` 且 `drop < 4`），默认按水平 `<= 48` 格、最多访问 `600` 格、超时 `360s`、**每 `24` 格插一支火把**（空间去重 `>= 18` 格）探索；废弃矿井仅在持有剑或剪刀时清理 `cobweb`，不碰 `chest_minecart`。
-- **洞中防卡死、防兜圈、消除无意义搭高与两级 3D 穷尽扩图**：
+- **洞中防卡死、防兜圈、锚定搭桥与跨分支 3D 穷尽寻路**：
   - `lateral_air_clearance` 优先引导机器人在洞穴/通道中线行走，避开贴墙刮边。
-  - `flood_safe_cave_graph`（[`core/cave_probe.py`](../core/cave_probe.py)）支持基于锚点边界 `anchor_pos` / `anchor_radius` 过滤越界节点（返回前 `32` 个有效前沿），在四邻列先完整评估所有自由步行高差（`dy in 0,+1,-1`），再评估 `micro_dig` / `drop` / `bridge`，避免 1 格台阶被 `dy=0` 挖掘截断；`pillar_up` 仅在确实遇到 ≥2 格高台/裂缝或正上方悬空矿脉时触发（消除平地/单格台阶无意义搭高，并禁止在地下钻穿薄顶冲入露天高空）。图搜索允许穿过连通裂缝扩展 `frontiers`，对已覆盖邻域 `covered_cells` 施加轻度穿行惩罚并结合 `goal_hints`（`find_blocks`）高频刷新，跳过同格原地空站。
-  - [`explore_cave`](../skills/cave_explore.py) 在独立洞穴探索 / `discover_and_explore_caves` 模式下开启 `allow_bridge`（最多 4 格）、`allow_drop`、`allow_micro_dig`（最多 3 格）与 `allow_pillar`，并采用**按剩余读预算自适应的两级 3D 洪水扩图**：日常以 ≤700 节点推进并按 `remaining_reads // 12` 对共享小预算守护封顶；当局部前沿耗尽且非邻接可走、剩余读预算充足（`>= 12000`）时，自动在缓存内存中升级至 **最多 `4500` 节点**全连通图重扫，直接规划长达 `48` 步跨洞前往远处分支、高台或悬空矿脉直至全图穷尽；单独调用读预算提升至 `explore_cave=150000` / `discover_and_explore_caves=200000`。单个移动/挖掘步 `stalled` / `path_not_found` 时于循环内同步真实坐标、局部失效缓存并重新规划路径，不半途弃洞。
-  - 环路面包屑支持按 `pillar_undo` 最大柱索引安全剪枝；撤退 `_retreat_breadcrumbs` 无条件优先尝试直接 `stand_cell(entry_cell, tolerance=1.25)` 与 `_recover_step_with_graph` 跳跃撤回，拆柱返回时显式校验实际回到 `entry_cell`，最坏再触发 `escape_to_surface` 逐格清理安全顶板并 `pillar_up` 返回地面；`navigate_with_ops` 在扩展至 420 节点的本地洪水图仍无法接近目标时快速失败，不折返误入已探区域。**保持游戏会话在线**：`MinecraftAgentClient.attach_or_login` 与 `main.py --keep-connected` / `mc_api.keep_session_on_exit` / `competition` 模式退出时不调用 `auth/logout`，跨脚本直接复用玩家会话；外置只读/调试 MCP（`minecraft-debug`）可零干扰采样玩家 NBT、运动轨迹与体素状态。
+  - `flood_safe_cave_graph`（[`core/cave_probe.py`](../core/cave_probe.py)）与 `Pathfinder3D` 均强制 `anchor_pos` / `anchor_radius` 硬边界过滤、`blocked_edges` 规避，以及**锚定跨涧搭桥约束**（`bridge` 桥长 `1..max_bridge_steps` 的落点前方/邻位必须存在自然实心地面或紧邻安全矿点，且前沿节点本身脚下必须为实心方块，杜绝朝悬崖虚空延伸凌空天桥）；在四邻列先完整评估所有自由步行高差（`dy in 0,+1,-1`），再评估 `micro_dig` / `drop` / 锚定 `bridge` / 受控 `pillar`。
+  - [`explore_cave`](../skills/cave_explore.py) 通过 `VoxelWorld3D` 持久化累积全洞三维空间体素、未探前沿 `open_frontiers` 与 `ore_registry`：局部 `Pathfinder3D.plan_horizon`（≤560 节点）探尽当前支路后，自动查询 `VoxelWorld3D` 全局未收割矿脉与优先队列前沿并调用 `Pathfinder3D.find_path`（高达 2400 节点 3D A*）跨分支精确折返跳转，必要时再触发全局 horizon 扩图，直至局部前沿与记忆前沿穷尽、配额满或安全预算耗尽。
+  - `WorldNavigator` 在单步受阻时于循环内完成微掘清障或记录 `blocked_edges` 触发 A* 绕路，并通过 `retreat_to_entry` 四级恢复保证可回入口或安全回地面。**保持游戏会话在线**：`MinecraftAgentClient.attach_or_login` 与 `main.py --keep-connected` / `mc_api.keep_session_on_exit` / `competition` 模式退出时不调用 `auth/logout`。
 - **目标挖矿与实地踩捡边界**：所有 `dig` 调用均传 `collect=False`（步行踩捡）。主矿道每步复用缓存读取 8 个新暴露邻面；洞内与洪水图扫描覆盖 `oy in (-2..5)` 且同时校验眼距 `<= 4.5` 与高位矿脚底角距 `feet_corner_dist <= 3.95`（匹配 `mc-agent-api` 的 `goNear(3.5)` 零寻路阈值）；挖爆矿块后若未直接入包，`_collect_mined_drop` 会结合 `get_entities` 掉落物位置及矿点下方真实落脚层主动走进安全落点（校验升格防顶头，受阻后复核背包避免重复卡等）并同步返回后的实时坐标；按 `targets` 区分 `mined / skipped_quota / skipped_tool / skipped_hazard / unreachable / seen`；单条矿脉延伸 `<= 16` 格。
 - **原地柱搭高与洪水安全子图**：
   - `skills/action_workflow.py` 提供 `pillar_up`、`pillar_down`、`scaffold_drop`（分段垫脚无伤下落）与 `escape_to_surface`（避液清顶原地搭柱逃回地表）。
