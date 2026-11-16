@@ -26,6 +26,7 @@ class CompetitionRuntimeTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.settings = copy.deepcopy(DEFAULTS["survival"])
+        self.settings["local_execution"]["enabled"] = False  # Exercise native model protocol explicitly.
         self.settings.update(objective="competition", state_dir=self.directory.name)
         self.settings["competition"]["advancement_poll_seconds"] = .001
         self.obs = ready_world()
@@ -98,7 +99,14 @@ class CompetitionRuntimeTests(unittest.TestCase):
         feedback = [json.loads(row["content"]) for row in messages if row["role"] == "tool"]
         self.assertTrue(feedback and feedback[-1]["result"]["success"])
         ctx = json.loads([row["content"] for row in messages if row["role"] == "user"][-1])["context"]["competition"]
-        self.assertGreater(len(ctx["tasks"]), 100, "all goals must survive prompt list limits")
+        self.assertLessEqual(len(ctx["tasks"]), 7)
+        self.assertTrue(all(set(row) == {"id", "title", "points", "availability"} for row in ctx["tasks"]))
+        self.assertIsNone(ctx["active_goal"])
+        active_context = json.loads(brain.requests[1]["messages"][-1]["content"])["context"]["competition"]
+        self.assertEqual(active_context["tasks"], [])
+        self.assertEqual(active_context["active_goal"]["id"], GOAL)
+        self.assertIn("condition", active_context["active_goal"])
+        self.assertTrue(active_context["active_goal"]["next_steps"])
         self.assertIn("selectable_goal_ids", ctx)
         self.assertEqual(ctx["catalog_assessment"]["total"], 120)
         self.assertTrue(ctx["catalog_assessment"]["complete"])
@@ -109,11 +117,78 @@ class CompetitionRuntimeTests(unittest.TestCase):
         self.assertEqual(restored_brain.requests, [])
         self.skills.execute.assert_not_called()
 
+    def test_night_preparation_allows_local_task_selection_and_progress_tools(self):
+        self.obs["status"].update(is_day=False, time_of_day=14000)
+        self.obs["blocks"] = [row for row in self.obs["blocks"] if not row["name"].endswith("_bed")]
+        self.obs["daily_evidence"].pop("shelter", None)
+        runner, brain = self.harness(response("select_task", {"goal_id": GOAL}),
+            response("update_progress", {"summary": "夜间先做附近单步准备"}, call_id="night_card"))
+        self.assertTrue(self.step(runner).success)
+        self.assertTrue(self.step(runner).success)
+        self.assertEqual(runner.competition.snapshot()["active_goal_id"], GOAL)
+        current = json.loads(brain.requests[-1]["messages"][-1]["content"])
+        limits = current["context"]["survival_constraints"]
+        self.assertEqual(limits["scenario"], "night_preparation")
+        self.assertIn("update_progress", limits["allowed_actions"])
+        self.skills.execute.assert_not_called()
+
+    def test_canopy_bound_recovery_is_available_before_competition_selection(self):
+        self.obs["status"].update(is_day=False, time_of_day=14000)
+        self.obs["blocks"] = [{"name": "birch_leaves", "pos": [1, 64, 0],
+            "properties": {"waterlogged": False}, "can_see": True, "can_dig": True}]
+        self.obs["daily_evidence"] = {}
+        runner, brain = self.harness(response("force_clear_foliage", {}, "bound_clear"))
+        runner.context["retreat_recovery"] = {"dimension": "overworld", "evacuating": True,
+            "canopy_blocked": True, "evacuation_origin": [.5, 64, .5], "threat_pos": [-3, 64, .5],
+            "excluded_until": {}, "retry_after": time.time() + 30,
+            "blocked_cells": [{"name": "birch_leaves", "pos": [1, 64, 0]}],
+            "search_basis": {"pos": [.5, 64, .5], "threat_pos": [-3, 64, .5]}}
+        result = self.step(runner)
+        self.assertTrue(result.success, result)
+        self.assertTrue(result.data["forced_attempt"])
+        self.assertIsNone(runner.competition.snapshot()["active_goal_id"])
+        self.assertEqual(runner.competition.snapshot()["score"]["raw"], 0)
+        self.skills.execute.assert_called_once()
+        self.assertEqual(self.skills.execute.call_args.args[:2],
+                         ("clear_foliage", {"pos": [1, 64, 0], "expected_name": "birch_leaves"}))
+        self.assertEqual({row["function"]["name"] for row in brain.requests[0]["tools"]},
+                         {"force_clear_foliage", "report_blocked", "wait"})
+
     def test_production_requires_goal_but_existing_safety_is_not_bypassed(self):
         runner, _ = self.harness(response("craft_item", {"item": "stick"}))
         result = self.step(runner)
         self.assertFalse(result.success)
-        self.assertEqual(result.error_code, "task_selection_required")
+        self.assertEqual(result.error_code, "llm_unavailable_tool")
+        direct = runner._competition_tool(Decision("craft_item", {"item": "stick"}, "Cannot bypass selection", "tools"), self.obs)
+        self.assertEqual(direct.error_code, "task_selection_required")
+        self.skills.execute.assert_not_called()
+
+    def test_repeated_blockage_reports_exit_task_without_awarding_points(self):
+        runner, brain = self.harness(response("select_task", {"goal_id": GOAL}),
+            *(response("report_blocked", {"reason": f"No route, attempt {index}", "resolution": "replan"},
+                       call_id=f"blocked_{index}") for index in range(3)))
+        self.assertTrue(self.step(runner).success)
+        for _ in range(3):
+            result = self.step(runner)
+            self.assertTrue(result.success, result)
+        self.assertTrue(result.data["task_exited"])
+        self.assertEqual(runner.competition.snapshot()["phase"], "selection")
+        self.assertEqual(runner.competition.snapshot()["score"]["raw"], 0)
+        self.assertEqual(runner.context["last_blockage"]["attempts"], 3)
+        self.assertEqual(runner.competition.select(GOAL)["error_code"], "goal_deferred")
+        self.skills.execute.assert_not_called()
+
+    def test_explicit_blockage_exit_returns_selection_and_preserves_failure_history(self):
+        runner, _ = self.harness(response("select_task", {"goal_id": GOAL}),
+            response("report_blocked", {"reason": "No useful nearby action", "resolution": "exit_task"}, call_id="exit"))
+        self.assertTrue(self.step(runner).success)
+        runner.context["failures"]["known-target"] = 2
+        result = self.step(runner)
+        self.assertTrue(result.success, result)
+        self.assertTrue(result.data["task_exited"])
+        self.assertEqual(runner.context["failures"]["known-target"], 2)
+        self.assertFalse(runner.finished)
+        self.assertIsNone(runner.journal.state["pending"])
         self.skills.execute.assert_not_called()
 
     def test_force_exit_defers_goal_and_does_not_call_game_tools(self):
@@ -183,28 +258,51 @@ class CompetitionRuntimeTests(unittest.TestCase):
         self.assertFalse(runner.completed)
         self.assertEqual(runner.pause_reason, "budget_exhausted")
 
-    def test_full_catalogue_prompt_fits_competition_request_budget(self):
-        from core.competition_rules import scoring_catalog
-        from core.competition_tasks import CompetitionTasks
-        planner = LLMSurvivalPlanner({"enabled": True}, self.settings, brain=Brain(response("wait")))
-        manager = CompetitionTasks({"max_seconds": 28800})
-        snapshot = manager.snapshot()
-        context = {"competition": {"phase": snapshot["phase"], "active_goal_id": None,
-            "progress_card": snapshot["progress_card"], "score": snapshot["score"],
-            "remaining_seconds": snapshot["remaining_seconds"],
-            "advancements": snapshot["advancements"],
-            "selectable_goal_ids": [row["id"] for row in snapshot["tasks"] if row["selectable"]],
-            "catalog_assessment": {key: snapshot["catalog_assessment"][key]
-                                   for key in ("checked", "total", "known_count", "complete")},
-            "task_columns": ["id", "title", "difficulty", "points", "eligibility", "availability", "completion"],
-            "tasks": [[row.get(key) for key in ("id", "title", "difficulty", "points", "eligibility", "availability", "completion")]
-                      for row in snapshot["tasks"]]}}
-        compact = planner._compact_value(context)
-        self.assertEqual(len(compact["competition"]["tasks"]), 125)
-        message = {"role": "user", "content": json.dumps({"observation": self.obs,
-            "progress": planner.progress(self.obs), "context": compact}, ensure_ascii=False)}
-        self.assertLessEqual(planner._request_bytes([{"role": "system", "content": planner.system_prompt}, message]),
-                             planner.MAX_REQUEST_BYTES)
+    def test_dense_observation_and_feedback_fit_budget_with_staged_task_details(self):
+        # Exercise the actual collector -> harness -> planner input boundary, not
+        # a hand-built empty catalogue. This shape exceeded 48KB with all 125 rows.
+        names = ["oak_log", "stone", "crafting_table", "wheat", "oak_leaves", "water"]
+        self.obs["blocks"] = [{"name": name, "pos": [index, 64, group], "dist": float(index + group),
+            "can_dig": True, "can_see": True, "properties": {"age": "7"},
+            "visibility": {"visible": True, "reason": "clear", "queries": 8}}
+            for group, name in enumerate(names) for index in range(8)]
+        self.obs["terrain"] = [{"name": "grass_block", "pos": [index, 63, 0]} for index in range(16)]
+        self.obs["entities"] = [{"id": index, "name": "sheep", "type": "passive", "pos": [index, 64, 10]}
+                                for index in range(12)]
+        self.obs["safe_stand_candidates"] = [{"pos": [index, 64, 0], "support": "stone"} for index in range(8)]
+        self.obs["placement_candidates"] = [{"pos": [index, 64, 1], "support": "stone"} for index in range(8)]
+        runner, brain = self.harness(response("select_task", {"goal_id": GOAL}),
+            response("update_progress", {"summary": "准备石镐，按新鲜服务器状态核验"}, call_id="card"),
+            *(response("report_blocked", {"reason": "No useful nearby action; reconsider the plan"}, call_id=f"wait_{index}")
+              if index == 3 else response("wait", call_id=f"wait_{index}") for index in range(6)))
+        # Include recalled Chinese evidence so the regression covers wire ASCII
+        # escaping as well as the empty-memory opening used by earlier tests.
+        recalled = {"places": [{"name": "crafting_table", "pos": [index, 64, 0],
+            "source": "api_verified", "summary": "工作台位置需要重新观察后才能使用。" * 5}
+            for index in range(4)]}
+        self.assertLess(len(json.dumps(recalled, ensure_ascii=False).encode("utf-8")), 2500)
+        runner.memory.recall = Mock(return_value=recalled)
+        for _ in range(8):
+            result = self.step(runner)
+            self.assertTrue(result.success, result)
+        self.assertEqual(len(runner.competition.snapshot()["tasks"]), 125)
+        for index, request in enumerate(brain.requests):
+            self.assertLessEqual(runner.planner._request_bytes(request["messages"], request["tools"]), 48000)
+            current = json.loads([message for message in request["messages"] if message["role"] == "user"][-1]["content"])
+            view = current["context"]["competition"]
+            self.assertLessEqual(len(view["tasks"]), 7)
+            self.assertNotIn("task_columns", view)
+            if index:
+                self.assertEqual(view["tasks"], [])
+                self.assertEqual(view["active_goal"]["id"], GOAL)
+                self.assertIn("completion_criteria", view["active_goal"])
+                # The immediately previous tool result must survive history trimming.
+                paired = [m for m in request["messages"] if m["role"] == "tool"]
+                self.assertTrue(paired)
+                self.assertEqual(paired[-1]["tool_call_id"], "call_1" if index == 1 else "card" if index == 2 else f"wait_{index-3}")
+            else:
+                self.assertIsNone(view["active_goal"])
+            self.assertNotIn("minecraft:end/elytra", json.dumps(view))
 
     def test_task_tools_do_not_enter_starter_daily_catalogs(self):
         for objective in ("starter", "daily"):

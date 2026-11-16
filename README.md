@@ -1,6 +1,6 @@
 # BotSleep
 
-基于 mc-agent-api 的 Minecraft 机器人控制项目，采用模型决策与本地技能分层设计。默认运行自动睡眠；生存入口支持初期石器目标（starter）、日常维护（daily）和赛事得分任务（competition）。默认不调用模型，正常运行无需 RCON。
+基于 mc-agent-api 的 Minecraft 机器人控制项目，采用 harness 本地执行优先、模型接管与技能分层设计。默认运行自动睡眠；生存入口支持初期石器目标（starter）、日常维护（daily）和赛事得分任务（competition）。默认不调用模型，正常运行无需 RCON。
 
 当前生存主链路已接通观察、规划、技能执行、结果验证与反馈。独立合成、伐木、雷达和地狱门开发技能的存在，不代表它们已进入生存模型的工具目录或通过完整实服验收。验证基线、环境、通过与跳过情况统一见 [测试记录](docs/TESTING.md)，历史测试数字不作为最新合并版本的结果。
 
@@ -50,7 +50,7 @@ Copy-Item config.example.yaml config.yaml
 | sleep（默认） | 找床、接近、交互、等待醒来 | 检查维度、床占用与附近敌人；须观察到入睡到醒来，或服务端 slept 证据与昼夜/雷暴转换。下界、末地拒绝用床。 |
 | survival / starter | 木材、工作台、木镐、圆石及初期工具制作 | 目标为石镐、石斧、石剑和熔炉；以当前背包与设施验证，不以模型自报完成。 |
 | survival / daily | 13 项日常任务：食物、工具、熔炼、装备、床、住所、储物、死亡掉落恢复与维护 | 按新鲜状态重算任务；小批采集、施工最多 8 步且逐步复核。5×5 住所检查只验证结构，不保证照明或完全防怪。 |
-| survival / competition | 模型选择得分目标，沿日常动作目录执行，以服务器 advancement 计分 | 125 项规则目录中只有 7 个早期计分目标有明确行动计划，尚非完整赛事执行器。 |
+| survival / competition | 本地优先选择并推进已支持得分目标，耗尽后模型接管，以服务器 advancement 计分 | 125 项规则目录中只有 7 个早期计分目标有明确行动计划，尚非完整赛事执行器。 |
 
 starter、daily 支持规则规划或开启模型规划；competition 要求模型。生存 harness 串行执行技能，模型返回后重新观察并通过本地安全门禁，再按背包、方块或位置变化验证结果。工具调用返回、移动达到容差和实际取得物品是不同证据；离线协议覆盖不等于真实技能成功，更不等于完整生存或比赛完成。
 
@@ -58,7 +58,7 @@ starter、daily 支持规则规划或开启模型规划；competition 要求模�
 
 ### 模型实际可调用的工具
 
-工具目录由 `agent/tools.py` 的 `tools_for_objective()` 选择，执行由 `core/survival_harness.py` 及对应技能分派：starter 为 9 项，daily 为 31 项，competition 为 36 项（31 个日常工具 + 5 个赛事生命周期工具）。模型只能选择当前已注册且可分派的技能。
+工具目录由 `agent/tools.py` 的 `tools_for_objective()` 选择，执行由 `core/survival_harness.py` 及对应技能分派：starter 为 9 项，daily 为 33 项，competition 为 38 项（31 个日常工具 + 2 个恢复工具 + 5 个赛事生命周期工具）。模型只能选择当前已注册且可分派的技能。
 
 合并新增的独立技能与主链路关系如下：
 
@@ -76,9 +76,23 @@ starter、daily 支持规则规划或开启模型规划；competition 要求模�
 
 规则快照 `data/competition/rules_v2.json` 共 125 项（120 个 advancement 目标、5 个根节点），其中 45 项明确计分、54 项条件待确认、26 项不计分。条件项默认不计分，须通过 `survival.competition.eligibility_overrides` 显式确认；只采纳服务器证据，未知不计分，归一化得分暂为 `null`。
 
-Harness 每次只维护一个活动目标。当前仅 7 个明确计分目标有行动计划，其余可计分项虽能评估和展示，但标为 unsupported、不可选择。`finish_task` 需 fresh advancement 检测，正常 `end_competition` 需 fresh 全目录检测；未知可记为 unknown，但不能加分。终态持久化后，重启不再调用模型。离线覆盖不能称为完整比赛验收，详见 [赛事接口与限制](docs/HARNESS_INTERFACES.md)。
+Harness 每次只维护一个活动目标；选择时只给按当前资源/环境解锁的简化候选，选中后再给该任务完整条件、缺口、步骤和结束判据。完整 125 项只留在本地核验与监控，不再每轮注入模型。当前仅 7 个明确计分目标有行动计划，其余可计分项虽能评估和展示，但标为 unsupported、不可选择。`finish_task` 需 fresh advancement 检测，正常 `end_competition` 需 fresh 全目录检测；未知可记为 unknown，但不能加分。终态持久化后，重启不再调用模型。离线覆盖不能称为完整比赛验收，详见 [赛事接口与限制](docs/HARNESS_INTERFACES.md)。
+
+daily/competition 在无床、无已验证返家路线的黄昏/夜间，可依据完整观察进入受限准备：满血、食物充足、无近敌时，模型只做3格内单步采木/制作/放置等，禁止批量、狩猎和远程探索；受伤或危险变化仍会打断。它修复了“缺庇护所却不允许准备”的死等，不能保证夜间安全或任何地形都可脱困，见 [日常安全策略](docs/DAILY_SURVIVAL.md)。
+
+daily/competition 另有两个恢复工具：`report_blocked` 报告卡点并重新规划/退出任务；`force_attempt` 可有理由地尝试一个受时间策略限制的动作，例如夜间采集或相邻清叶。近敌、关键低血、液体/火、目标几何/材料、未知结果和动作互斥不能绕过。模型请求使用 `tool_choice=required`，实际只发当前可用工具；连续无进展wait会要求报告卡点，详见 [恢复工具接口](docs/HARNESS_INTERFACES.md)。
+
+树冠恢复时进一步提供临时 `force_clear_foliage`：工具已经绑定当前一格安全可见树叶，模型只需调用 `{}`，无需重写坐标；仍会在执行前核验，不能修改目标或绕过危险。恢复工具按真实现场临时生成，不改变永久9/33/38项注册目录。
 
 ## 模型、恢复与监控
+
+启用模型的生存链先处理本地安全，再尝试本地任务和树冠脱困；明确失败或无进展后本地替代方案耗尽、无支持计划或预算耗尽时，才交给模型。`survival.local_execution` 默认 `enabled: true`、`max_steps: 64`、`max_seconds: 180`（秒），上限分别为128步/600秒；每步重新观察，沿用原安全检查、pending 和串行真实技能，不保存可重放动作队列。失败位置记入内部 `failed_targets`，先换其他已观察且安全的资源目标；模型接管时得到最近最多6条结果摘要，返回提案仍需重观测和安全复核。
+
+已登记且新鲜核验仍在加工的熔炉任务由本地等待与重观测推进；等待仍消耗本地步骤/时间预算，槽位未知、输出不匹配或预算耗尽才交模型。
+
+树冠恢复除身体高度清叶外，另有 harness 专用分段下降：先核验侧下方支撑，可最多清一格侧叶再下降1～2格，或朝已核验下降口推进一格；不挖当前支撑，不做四格直落。只有精确落地实心地面才清除恢复意图。该内部动作不加入模型工具，仍需加载新代码后实服验收，详见 [技能契约](docs/SKILL_SPEC.md)。
+
+本地执行不是模型服务报错后的 fallback。动作结果未知保留 pending，禁止重放；模型门禁未知或请求在途时不开展本地生产。关闭 `survival.local_execution.enabled` 可恢复直接由模型规划的路径；未启用模型时仍走原规则路径。比赛明确行动计划仍为7个，模型工具目录仍为9/33/38。完整 starter 链路离线验证通过，零模型请求。本轮最终结果以 [TESTING.md](docs/TESTING.md) 首节为准；未做实服验收。
 
 模型规划需同时设置 `agent.mode: survival` 与 `llm.enabled: true`，配置支持原生工具调用的 OpenAI 兼容服务。下面是 `config.yaml` 对应字段的节选，请修改已有节点：
 
@@ -108,7 +122,11 @@ debug:
 
 步骤、时间、探索和死亡预算依然有效，不承诺无限无人值守。starter 完成退出 0，步骤/时间预算耗尽退出 2；生存 `--once` 只执行一次观察决策，退出 0 也可能只是等待成功，不代表整体目标完成。自动睡眠失败会按配置冷却；单次睡眠无床、白天、中断或超时等返回非零。
 
-启用监控后访问 [本机只读面板](http://127.0.0.1:18930)，可查看 heartbeat、Agent 阶段、任务板、模型请求槽、原始返回、pending 与赛事快照。API 端点延迟、检查点健康度和可靠性告警仍待补。历史按请求字节预算裁剪，不等于语义 compact；阶段 skill 加载、handoff、水面优先导航和自动搭路仍待实现。详见 [监控说明](docs/MONITORING.md)。
+启用监控后访问 [本机只读面板](http://127.0.0.1:18930)，可查看 heartbeat、Agent 阶段、任务板、模型请求槽、原始返回、pending 与赛事快照。本地执行可查 `snapshot.local_execution` 与 `LOCAL_EXECUTION_STEP` / `LOCAL_EXECUTION_RESULT` / `MODEL_TAKEOVER` 事件；只读面板已有本地执行卡片，显示阶段、步数、原因和近期动作，当前决策另显示来源。API 端点延迟、检查点健康度和可靠性告警仍待补。历史按请求字节预算裁剪，不等于语义 compact；阶段 skill 加载、handoff、水面优先导航和自动搭路仍待实现。详见 [监控说明](docs/MONITORING.md)。
+
+监控网页打不开时，先确认 `debug.monitor.enabled: true` 和启动输出的监听地址；只改配置不会热加载。运行中不想重启可用 `python -B -m debug.monitor_tail --log-dir logs --port 18931`，然后打开本机 `http://127.0.0.1:18931`；这是只读日志补看，不代表实时游戏探测，见 [监控说明](docs/MONITORING.md)。
+
+生存主循环按 `next_poll_seconds` 调度：busy 或本地 ready 且无退避时最多等50ms，成功的本地中间步骤不再等待普通 poll 间隔；失败退避和暂停保持原策略。聊天轮询另按原配置间隔节流，快 tick 不会提高聊天 API 轮询频率。
 
 ## 聊天调试与独立开发入口
 
@@ -162,6 +180,7 @@ RCON 仅供开发靶场，另需安装可选依赖；安装不会授权实服测
 | `main.py`、`core/config.py` | 配置装配、启动与退出清理。 |
 | `core/client.py` | 统一 mc-agent-api HTTP 交互。 |
 | `core/survival_harness.py`、`core/survival_state.py` | 串行任务调度、状态观察、pending 与检查点恢复。 |
+| `core/local_execution.py`、`core/local_tasks.py`、`core/local_recovery.py` | 有界本地执行、任务单步规划与共享树冠清障候选。 |
 | `agent/`、`core/model_gate.py` | 规则/模型决策、工具目录、任务图与模型请求门禁。 |
 | `skills/` | 睡眠、生存动作与独立开发技能，遵循 `BaseSkill` / `SkillResult`。 |
 | `core/competition_rules.py`、`core/competition_tasks.py` | 赛事规则快照、服务器证据计分与生命周期。 |

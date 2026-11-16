@@ -13,6 +13,7 @@ from typing import Any, Dict, List
 
 from core.block_geometry import trace_block_visibility
 from core.client import APIError
+from core.action_permissions import FORCEABLE_ACTIONS
 
 from . import SkillResult
 
@@ -99,6 +100,12 @@ class SurvivalSkills:
 
     @staticmethod
     def _read_options(context):
+        if "retreat_landing_deadline" in context:
+            remaining = context["retreat_landing_deadline"] - time.monotonic()
+            if remaining <= 0:
+                raise _Failure("retreat_unverified", "Retreat landing observation budget expired",
+                               {"landing_termination": "timeout"})
+            return {"timeout_seconds": remaining}
         if "recovery_deadline" not in context:
             return {}
         remaining = context["recovery_deadline"] - time.monotonic()
@@ -109,6 +116,9 @@ class SurvivalSkills:
     def _status(self, context):
         self._check(context)
         status = self._result(self.client.get_status(**self._read_options(context)))
+        observe = context.get("retreat_status_observer")
+        if observe is not None:
+            observe(status)
         self._check(context)
         if status.get("alive") is False:
             raise _Failure("dead", "Bot is dead")
@@ -131,6 +141,23 @@ class SurvivalSkills:
         if context.get("dimension") is not None and dimension != context["dimension"]:
             raise _Failure("dimension_changed", "The bot changed dimension during the action")
         status["pos"] = position
+        if context.get("force_advisory"):
+            self._overworld(status)
+            food = self._number(status.get("food"), "food", 0, 20)
+            initial = context.setdefault("force_health", health)
+            marker = (status.get("dimension"), status.get("last_death"))
+            first_marker = context.setdefault("force_life", marker)
+            if marker != first_marker or health < initial:
+                raise _Failure("unsafe_state", "Life or health changed during the forced attempt")
+            if (health <= 8 or food <= 6 or status.get("gamemode") != "survival"
+                    or status.get("on_ground") is not True or status.get("thundering") is not False
+                    or any(status.get(key) for key in ("in_water", "in_lava", "on_fire", "submerged"))):
+                raise _Failure("unsafe_state", "Explicit danger cannot be overridden")
+            nearest = status.get("nearest_hostile")
+            if isinstance(nearest, dict):
+                distance = self._number(nearest.get("dist"), "hostile distance", 0, 1000000)
+                if distance <= context["force_threat_radius"]:
+                    raise _Failure("unsafe", "A known hostile is inside the forced-attempt safety buffer")
         return status
 
     def _inventory(self, context):
@@ -750,16 +777,103 @@ class SurvivalSkills:
             outcome["executed"] = context["acted"]
             outcome["candidate_failed"] = getattr(error, "code", "") in {"path_not_found", "stalled", "out_of_reach"}
             raise
-        after = self._status(context)
-        horizontal_after = math.hypot(after["pos"][0] - threat[0], after["pos"][2] - threat[2])
-        if (feet(after["pos"]) != feet(target) or after.get("on_ground") is not True
-                or horizontal_after < norm - 0.5 or not safe_height_band(after["pos"])):
-            raise _Failure("retreat_unverified", "Observed movement did not reach the checked retreat step", evidence(pos=after["pos"], candidate_failed=True))
-        cache.clear()
-        blocked.clear()
-        support = safe_cell(feet(after["pos"]), temporary_leaves=True)
-        if not support:
-            raise _Failure("retreat_unverified", "Retreat destination no longer has safe footing", evidence(pos=after["pos"], target=target))
+        # A completed path request may precede physical landing. Observe only
+        # this checked step; never resend movement or walk the remaining route.
+        landing_started = time.monotonic()
+        context["retreat_landing_deadline"] = landing_started + 1.25
+        evidence(landing_reads=0, landing_reason="not_grounded", landing_termination=None)
+        closest_target = None
+        nearest = before.get("nearest_hostile")
+        closest_hostile = nearest.get("dist") if isinstance(nearest, dict) else None
+
+        def observed(status):
+            try:
+                position = self._pos(status.get("pos"))
+            except _Failure:
+                return
+            evidence(pos=position, moved=round(math.dist(origin, position), 3),
+                     on_ground=status.get("on_ground"))
+
+        def unverified(reason, message, termination="safety"):
+            evidence(landing_reason=reason, landing_termination=termination, candidate_failed=True)
+            raise _Failure("retreat_unverified", message)
+
+        context["retreat_status_observer"] = observed
+        try:
+            for attempt in range(6):
+                self._check(context)
+                outcome["landing_reads"] = attempt + 1
+                after = self._status(context)
+                if after.get("last_death") != before.get("last_death"):
+                    evidence(landing_reason="life_changed", landing_termination="interrupted", action_state="unknown")
+                    raise _Failure("action_unconfirmed", "Life marker changed while confirming retreat landing")
+                if after["health"] < before["health"]:
+                    unverified("health_changed", "Damage occurred while confirming retreat landing")
+                if any(after.get(flag) for flag in ("in_water", "in_lava", "on_fire")):
+                    unverified("hazard", "Retreat landing entered water, lava or fire")
+                hostile = after.get("nearest_hostile")
+                if isinstance(hostile, dict):
+                    distance = hostile.get("dist")
+                    if (isinstance(distance, bool) or not isinstance(distance, (int, float))
+                            or not math.isfinite(distance) or distance < 0):
+                        unverified("invalid_hostile", "Retreat threat distance is unknown")
+                    if (not isinstance(nearest, dict)
+                            or (nearest.get("id") is not None and hostile.get("id") != nearest["id"])):
+                        unverified("new_hostile", "A new hostile appeared during retreat landing")
+                    if (isinstance(closest_hostile, bool) or not isinstance(closest_hostile, (int, float))
+                            or not math.isfinite(closest_hostile)):
+                        unverified("invalid_hostile", "Initial retreat threat distance is unknown")
+                    if distance < closest_hostile - 0.1:
+                        unverified("hostile_closer", "A hostile approached during retreat landing")
+                    closest_hostile = min(closest_hostile, distance)
+                horizontal_after = math.hypot(after["pos"][0] - threat[0], after["pos"][2] - threat[2])
+                target_distance = math.hypot(after["pos"][0] - target[0], after["pos"][2] - target[2])
+                evidence(horizontal_after=horizontal_after, target_horizontal_distance=target_distance)
+                if (horizontal_after < norm - 0.5
+                        or (closest_target is not None and target_distance > closest_target + 0.1)):
+                    unverified("distance_regression", "Retreat landing regressed towards danger or away from its target")
+                if (not safe_height_band(after["pos"])
+                        or not min(origin[1], target[1]) - 1e-4 <= after["pos"][1] <= max(origin[1], target[1]) + 0.5):
+                    unverified("height_band", "Retreat landing left the checked step height band")
+                if target_distance > 0.75:
+                    unverified("wrong_cell", "Retreat movement is not close enough to the checked step")
+                closest_target = target_distance if closest_target is None else min(closest_target, target_distance)
+                # A late HTTP response must not turn an expired wait into success.
+                if time.monotonic() >= context["retreat_landing_deadline"]:
+                    unverified(outcome["landing_reason"], "Retreat landing observation budget expired", "timeout")
+                if after.get("on_ground") is True:
+                    if feet(after["pos"]) != feet(target):
+                        unverified("wrong_cell", "Retreat landed outside the exact checked target cell")
+                    cache.clear()
+                    blocked.clear()
+                    support = safe_cell(feet(after["pos"]), temporary_leaves=True)
+                    if not support:
+                        unverified("unsafe_support", "Retreat destination no longer has safe footing")
+                    self._check(context)
+                    if time.monotonic() >= context["retreat_landing_deadline"]:
+                        unverified(outcome["landing_reason"], "Retreat support verification exceeded its budget", "timeout")
+                    evidence(landing_reason="confirmed", landing_termination="confirmed")
+                    break
+                evidence(landing_reason="not_grounded")
+                if attempt == 5:
+                    unverified("not_grounded", "Retreat did not land within six status observations", "read_limit")
+                delay = min(0.2, context["retreat_landing_deadline"] - time.monotonic())
+                if delay <= 0:
+                    unverified("not_grounded", "Retreat landing observation budget expired", "timeout")
+                if context["cancel"] is None:
+                    time.sleep(delay)
+                else:
+                    context["cancel"].wait(delay)
+                self._check(context)
+        except Exception as error:
+            code = getattr(error, "code", "internal_error")
+            if code != "retreat_unverified":
+                evidence(landing_reason=code, landing_termination="interrupted")
+            raise
+        finally:
+            evidence(landing_elapsed=round(time.monotonic() - landing_started, 3))
+            context.pop("retreat_landing_deadline", None)
+            context.pop("retreat_status_observer", None)
         complete = support in self.SUPPORT and farther(after["pos"])
         return evidence(pos=after["pos"], target=target, moved=round(math.dist(origin, after["pos"]), 3),
                         retreat_complete=complete, evacuation_stage="ground" if complete else "relay",
@@ -769,11 +883,18 @@ class SurvivalSkills:
                         planned_path=planned_path, path_following_verified=False,
                         path_caveat="Candidate terrain was checked; the backend may choose a different route.")
 
-    def execute(self, name: str, args: Dict[str, Any], cancel_event=None, *, recovery_context=None) -> SkillResult:
+    def execute(self, name: str, args: Dict[str, Any], cancel_event=None, *, recovery_context=None,
+                force_advisory=False, force_threat_radius=12) -> SkillResult:
         """Execute one registered action; partial and unverified results fail explicitly."""
         context = {"cancel": cancel_event, "acted": False}
         data = {"skill": name}
         try:
+            if type(force_advisory) is not bool or force_advisory and name not in FORCEABLE_ACTIONS:
+                raise _Failure("bad_args", "Unsupported forced attempt")
+            if force_advisory:
+                context.update(force_advisory=True,
+                    force_threat_radius=self._number(force_threat_radius, "force_threat_radius", 8, 32))
+                data["forced_attempt"] = True
             if not isinstance(name, str) or name not in self.ARGUMENTS:
                 raise _Failure("unknown_skill", "Unknown survival skill")
             allowed, required = self.ARGUMENTS[name]
@@ -818,6 +939,10 @@ class SurvivalSkills:
             if isinstance(details, dict) and details:
                 data["api_details"] = details
             data.update(getattr(error, "data", {}))
+            if (context.get("force_advisory") and context["acted"] and not context.get("daily_verified")
+                    and code in {"cancelled", "unsafe", "unsafe_state", "dead", "dimension_changed", "not_ready"}):
+                data.update(executed=True, action_state="unknown", interruption_code=code)
+                code = "action_unconfirmed"
             if context["acted"] and code != "busy" and not context.get("cleanup_attempted"):
                 try:
                     self.client.stop()

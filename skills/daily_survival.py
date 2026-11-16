@@ -58,8 +58,10 @@ class DailySurvivalSkills(SurvivalSkills):
                     "place_bed": ("pos", "item"), "place_door": ("pos", "item"),
                 }.items()}}
 
-    def execute(self, name, args, cancel_event=None, *, recovery_context=None):
-        result = super().execute(name, args, cancel_event, recovery_context=recovery_context)
+    def execute(self, name, args, cancel_event=None, *, recovery_context=None,
+                force_advisory=False, force_threat_radius=12):
+        options = {"force_advisory": True, "force_threat_radius": force_threat_radius} if force_advisory else {}
+        result = super().execute(name, args, cancel_event, recovery_context=recovery_context, **options)
         if name not in SurvivalSkills.ARGUMENTS:
             result.data.setdefault("executed", False)
             if (not result.success and result.data["executed"] and result.data.get("action_state") != "verified"
@@ -289,7 +291,7 @@ class DailySurvivalSkills(SurvivalSkills):
             feet = [math.floor(value + 1e-4) for value in status["pos"]]
             if feet != initial_feet or abs(status["pos"][1] - initial["pos"][1]) >= .5:
                 raise _Failure("position_changed", "The stance changed before clearing foliage")
-            if (status.get("is_day") is not True
+            if not context.get("force_advisory") and (status.get("is_day") is not True
                     or type(status.get("time_of_day")) not in (int, float)
                     or not 0 <= status["time_of_day"] < 11000
                     or status.get("thundering")):

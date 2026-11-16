@@ -2,6 +2,7 @@
 
 import copy
 import math
+import time
 
 from core.block_geometry import trace_block_visibility
 from core.client import APIError
@@ -34,10 +35,10 @@ class DailyObservationCollector(ObservationCollector):
             raise APIError("invalid_response", "Daily block coordinates must be integers")
         return [int(v) for v in pos]
 
-    def _read(self, pos, cancel_event):
+    def _read(self, pos, cancel_event, *, timeout_seconds=2):
         pos = self._block_pos(pos)
         self._check_cancel(cancel_event)
-        value = self._result(self.client.get_block(pos, timeout_seconds=2))
+        value = self._result(self.client.get_block(pos, timeout_seconds=timeout_seconds))
         self._check_cancel(cancel_event)
         if (not isinstance(value.get("name"), str) or not value["name"]
                 or value.get("properties") is not None and not isinstance(value["properties"], dict)
@@ -190,6 +191,40 @@ class DailyObservationCollector(ObservationCollector):
                 current["can_see"] = sight["visible"]
                 current["visibility"] = sight
             self._replace_block(observation, pos, current)
+
+    def _canopy_step(self, observation, cancel_event):
+        """Read a bounded descent, including lower adjacent leaf layers."""
+        recovery = self.context.get("retreat_recovery") or {}
+        if recovery.get("canopy_blocked") is not True:
+            return
+        from core.canopy_geometry import plan_canopy_step
+        from core.daily_policy import DailySafetyPolicy
+        if DailySafetyPolicy()._force_environment_error(observation) is not None:
+            return
+        started = time.monotonic()
+        reads = 0
+
+        def read(pos):
+            nonlocal reads
+            self._check_cancel(cancel_event)
+            if reads >= 96 or time.monotonic() - started >= 3:
+                return None
+            reads += 1
+            try:
+                return self._read(list(pos), cancel_event,
+                    timeout_seconds=min(2, max(.001, 3 - (time.monotonic() - started))))
+            except APIError as error:
+                if error.code == "not_loaded":
+                    return None
+                raise
+        excluded = (self.context.get("local_execution") or {}).get("failed_targets", [])
+        plan = plan_canopy_step(observation["status"], read, excluded=excluded)
+        observation["canopy_search"] = {"block_reads": reads,
+            "termination": "step_found" if plan else "no_verified_step",
+            "elapsed_ms": round((time.monotonic() - started) * 1000)}
+        if plan:
+            observation["canopy_step"] = {**plan, "fresh": True, "verified": True,
+                                          "dimension": observation["status"]["dimension"]}
 
     def _local_foliage(self, observation, cancel_event):
         """Observe neighbouring body cells; this does not authorize removing them."""
@@ -424,6 +459,7 @@ class DailyObservationCollector(ObservationCollector):
         self._seed_plants(observation, cancel_event)
         self._food_neighborhoods(observation, cancel_event)
         self._local_foliage(observation, cancel_event)
+        self._canopy_step(observation, cancel_event)
         self._home(observation, cancel_event)
         observation["status"] = self._status(status, cancel_event)
         return observation

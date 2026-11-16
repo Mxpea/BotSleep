@@ -146,8 +146,10 @@ def main(argv=None) -> int:
             else:
                 controller.request_sleep()
         next_heartbeat = 0
+        next_debug_poll = 0
         while True:
-            if debugger:
+            if debugger and time.monotonic() >= next_debug_poll:
+                next_debug_poll = time.monotonic() + config["survival" if survival else "sleep"]["poll_interval_seconds"]
                 try:
                     debugger.poll_and_dispatch()
                 except APIError as exc:
@@ -174,7 +176,7 @@ def main(argv=None) -> int:
                 exit_code = 0 if controller.completed else 2
                 print(controller.summary())
                 break
-            time.sleep(config["survival" if survival else "sleep"]["poll_interval_seconds"])
+            time.sleep(controller.next_poll_seconds if survival else config["sleep"]["poll_interval_seconds"])
     except KeyboardInterrupt:
         print("Stopping BotSleep...")
     except Exception as exc:

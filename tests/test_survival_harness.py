@@ -153,6 +153,7 @@ class HarnessTests(unittest.TestCase):
     def test_unconfirmed_dig_feedback_is_paired_before_pause_and_replanning(self):
         from agent.llm_planner import LLMSurvivalPlanner
 
+        self.settings["local_execution"]["enabled"] = False  # Exercise model feedback pairing.
         brain = Mock()
         def response(name, args, call_id):
             return {"choices": [{"finish_reason": "tool_calls", "message": {

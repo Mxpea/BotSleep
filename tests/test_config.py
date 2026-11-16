@@ -59,6 +59,21 @@ class ConfigTests(unittest.TestCase):
         with self.assertRaises(ConfigError):
             load_config(self.write({"agent": {"mode": "invalid"}}), environ={})
 
+    def test_local_execution_defaults_and_explicit_opt_out(self):
+        config = load_config(self.write({}), environ={})
+        self.assertEqual(config["survival"]["local_execution"],
+                         {"enabled": True, "max_steps": 64, "max_seconds": 180})
+        config = load_config(self.write({"survival": {"local_execution": {"enabled": False}}}), environ={})
+        self.assertFalse(config["survival"]["local_execution"]["enabled"])
+        self.assertEqual(config["survival"]["local_execution"]["max_steps"], 64)
+
+    def test_local_execution_rejects_unbounded_or_mistyped_budgets(self):
+        for limits in ({"enabled": 1}, {"max_steps": True}, {"max_steps": 0}, {"max_steps": 129},
+                       {"max_seconds": 0}, {"max_seconds": float("inf")},
+                       {"max_seconds": 601}, {"unknown": "private-value"}):
+            with self.subTest(limits=limits), self.assertRaises(ConfigError):
+                load_config(self.write({"survival": {"local_execution": limits}}), environ={})
+
     def test_daily_objective_preserves_defaults_and_bounds_reserves(self):
         config = load_config(self.write({"survival": {"objective": "daily", "daily": {"food_reserve": 12}}}), environ={})
         self.assertEqual(config["survival"]["objective"], "daily")

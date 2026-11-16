@@ -22,6 +22,7 @@
 <div class="card"><div class="stats"><div class="stat"><h3>生命</h3><div id="health" class="value">— / 20</div><div class="track"><div id="health-bar" class="fill"></div></div></div><div class="stat"><h3>饥饿值</h3><div id="food" class="value">— / 20</div><div class="track"><div id="food-bar" class="fill food"></div></div></div></div><div id="steps" class="sub">已执行 0 步</div></div>
 </section>
 <section class="summary system-summary" aria-label="系统状态">
+<div class="card"><h3>数据来源</h3><div id="data-source" class="value">运行事件</div><div id="data-source-note" class="sub">等待来源状态；日志时间不等于实时心跳</div></div>
 <div class="card"><h3>模型请求槽</h3><div id="model-slot" class="value">未确认</div><div id="model-slot-note" class="sub">等待已发布状态</div></div>
 <div class="card"><h3>游戏动作</h3><div id="game-state" class="value">未确认</div><div id="game-state-note" class="sub">busy / pending / paused 独立显示</div></div>
 <div class="card"><h3>Heartbeat 新鲜度</h3><div id="heartbeat-state" class="value">未确认</div><div class="sub">15 秒为显示阈值；时间由浏览器计算，不代表游戏成功</div></div>
@@ -39,7 +40,7 @@
 <section id="daily-panel" class="panel hidden" aria-label="日常生存任务"><div class="panel-head"><h2>日常生存任务与记忆</h2><span id="daily-phase" class="pill">待观察</span></div><div class="panel-body"><div id="memory-summary" class="sub"></div><div id="daily-tasks"></div><details><summary>任务证据与前置条件</summary><pre id="daily-json">{}</pre></details></div></section>
 <section class="workspace">
 <article class="panel"><div class="panel-head"><h2>模型请求与返回</h2><span id="llm-state" class="pill">等待模型事件</span></div><nav class="tabs" aria-label="模型内容"><button class="active" data-tab="content">回复内容</button><button data-tab="tools">工具调用</button><button data-tab="reasoning">附带推理信息</button><button data-tab="response">完整返回 JSON</button><button data-tab="request">完整请求 JSON</button></nav><div class="model-body"><div id="model-empty" class="empty"><strong>尚未收到模型返回</strong><span>确定性规划模式下也会展示 Agent 状态和操作。</span></div><pre id="model-content" class="hidden"></pre></div><div class="metrics"><span>耗时 <b id="latency">—</b></span><span>输入 token <b id="input-tokens">—</b></span><span>输出 token <b id="output-tokens">—</b></span><span>总 token <b id="total-tokens">—</b></span></div></article>
-<aside class="stack"><article class="panel"><div class="panel-head"><h2>当前决策</h2><span id="skill-state" class="pill">尚未执行</span></div><div class="panel-body"><div id="decision-name" class="decision">等待下一步决策</div><p id="decision-reason" class="reason">模型或规划器选定动作后将在这里显示。</p><div class="kv"><span>目标</span><span id="goal">—</span><span>执行状态</span><span id="execution">—</span></div><details><summary>查看动作参数</summary><pre id="decision-args">{}</pre></details></div></article><article class="panel"><div class="panel-head"><h2>最近执行结果</h2><span id="result-state" class="pill">暂无结果</span></div><div class="panel-body"><div id="result-message" class="result muted">操作完成或失败后将在这里显示。</div><details><summary>查看完整结果</summary><pre id="result-json">{}</pre></details></div></article></aside>
+<aside class="stack"><article class="card" aria-label="本地优先执行"><h3>本地优先执行</h3><div id="local-phase" class="value">未确认</div><div id="local-steps" class="sub">本地步数：未确认</div><div id="local-reason" class="reason">接管 / 受阻原因：未确认</div><h3>近期动作（最多 6 条）</h3><div id="local-recent" class="result">未确认</div></article><article class="panel"><div class="panel-head"><h2>当前决策</h2><span id="skill-state" class="pill">尚未执行</span></div><div class="panel-body"><div id="decision-name" class="decision">等待下一步决策</div><p id="decision-reason" class="reason">模型或规划器选定动作后将在这里显示。</p><div class="kv"><span>决策来源</span><span id="decision-source">未确认</span><span>目标</span><span id="goal">—</span><span>执行状态</span><span id="execution">—</span></div><details><summary>查看动作参数</summary><pre id="decision-args">{}</pre></details></div></article><article class="panel"><div class="panel-head"><h2>最近执行结果</h2><span id="result-state" class="pill">暂无结果</span></div><div class="panel-body"><div id="result-message" class="result muted">操作完成或失败后将在这里显示。</div><details><summary>查看完整结果</summary><pre id="result-json">{}</pre></details></div></article></aside>
 </section>
 <section class="panel"><div class="panel-head"><h2>运行时间线 <span id="event-count" class="sub">0 条</span></h2><div class="toolbar"><select id="filter" aria-label="事件分类"><option value="all">全部事件</option><option value="model">模型请求 / 返回</option><option value="action">Agent 操作</option><option value="error">警告与异常</option><option value="system">运行状态</option></select><input id="search" type="search" placeholder="筛选事件或内容" aria-label="搜索事件"><button id="scroll-toggle" aria-pressed="true">自动滚动：开</button></div></div><div id="retention" class="notice hidden"></div><div id="timeline" class="timeline"><div class="timeline-empty">等待 Agent 发布运行事件…</div></div></section>
 <footer class="footer"><span>本机只读监控 · 每 0.5 秒更新 · 最多保留最近 500 条事件</span><span>控制命令仍通过游戏聊天发送：#stop / #resume</span></footer>
@@ -99,6 +100,9 @@ function ageText(timestamp) {
 }
 function renderFreshness() {
   const state=currentState || {}, stamp=state.heartbeat_at;
+  const source=object(state.source);
+  txt('data-source',source.mode==='log_tail' ? '只读日志补读' : '运行事件');
+  txt('data-source-note',source.mode==='log_tail' ? '日志：'+display(source.file || source.path || source.log_file)+' · 最后日志事件：'+ageText(source.last_event_at || source.last_event_timestamp)+'；不代表机器人在线，不补造心跳' : '由运行进程发布；心跳与事件时间分别展示');
   const parsed=typeof stamp==='string' ? Date.parse(stamp) : NaN;
   const stale=Number.isFinite(parsed) && Date.now()-parsed>15000;
   txt('heartbeat-state',!Number.isFinite(parsed) ? '未确认 · 尚无有效心跳时间' : (stale ? 'stale · ' : '新鲜 · ')+ageText(stamp));
@@ -143,9 +147,35 @@ function renderCompetition(state) {
   $('competition-tasks').replaceChildren(rows);
   txt('competition-json',pretty(board));
 }
+const decisionSources = {local:'本地',model:'模型',manual:'手动',safety:'安全',rules:'规则'};
+function decisionSource(source) {
+  return Object.prototype.hasOwnProperty.call(decisionSources,source) ? decisionSources[source]+' · '+source : '未确认';
+}
+function renderLocal(state) {
+  const local=object(state.local_execution);
+  const phases={running:'本地执行中 · running',model_takeover:'交由模型决策 · model_takeover',blocked_unknown:'动作结果不明 · blocked_unknown'};
+  txt('local-phase',Object.prototype.hasOwnProperty.call(phases,local.phase) ? phases[local.phase] : display(local.phase));
+  txt('local-steps','本地步数：'+(Number.isInteger(local.steps) && local.steps>=0 ? local.steps : '未确认'));
+  txt('local-reason','接管 / 受阻原因：'+display(local.reason));
+  const rows=document.createDocumentFragment();
+  if (Array.isArray(local.recent)) {
+    for (const item of local.recent.slice(-6)) {
+      const action=object(item), row=document.createElement('div');
+      const success=action.success===true ? '成功' : action.success===false ? '失败' : '结果未确认';
+      const progress=action.progress===true ? '有进展' : action.progress===false ? '无进展' : '进展未确认';
+      row.textContent=display(action.action)+' · '+success+' · '+progress+(action.error_code ? ' · '+display(action.error_code) : '');
+      rows.append(row);
+    }
+  }
+  $('local-recent').replaceChildren(rows);
+  if (!Array.isArray(local.recent)) txt('local-recent','未确认');
+  else if (!local.recent.length) txt('local-recent','尚无已发布动作');
+  txt('decision-source',decisionSource(state.decision_source));
+}
 function renderState(state) {
   currentState=state;
   renderSystem(state);
+  renderLocal(state);
   renderCompetition(state);
   renderFreshness();
   const run=state.run || {}, status=state.status || {}, llm=state.llm || {};
@@ -199,7 +229,7 @@ function renderState(state) {
   renderModel();
 }
 function isModel(event) { return /^(LLM_|MODEL_)/.test(String(event.event)); }
-function isAction(event) { return /DECISION|STEP_RESULT|SLEEP_|ACTION|SKILL/.test(String(event.event)); }
+function isAction(event) { return /DECISION|STEP_RESULT|SLEEP_|ACTION|SKILL|LOCAL_EXECUTION_/.test(String(event.event)); }
 function matches(event) {
   const kind=$('filter').value;
   if (kind==='model' && !isModel(event)) return false;
@@ -211,7 +241,8 @@ function matches(event) {
 }
 function describe(event) {
   const d=event.data || {};
-  if (event.event==='DECISION') return ((d.decision || {}).name || '决策')+' · '+((d.decision || {}).reason || '');
+  if (event.event==='DECISION') return decisionSource(d.source)+' · '+((d.decision || {}).name || '决策')+' · '+((d.decision || {}).reason || '');
+  if (/^(LOCAL_EXECUTION_(STEP|RESULT|YIELDED)|MODEL_TAKEOVER)$/.test(event.event)) { const summary=object(d.summary); return '本地优先 · '+display(summary.phase)+' · 步数 '+display(summary.steps)+' · '+display(summary.reason); }
   if (event.event==='STEP_RESULT') return ((d.result || {}).success ? '成功 · ' : '失败 · ')+((d.result || {}).message || '');
   if (event.event==='HEARTBEAT') return '状态更新 · '+(d.paused ? '已暂停' : d.busy ? '执行中' : '等待下一步')+' · 步数 '+(d.steps || 0);
   if (event.event==='COMPETITION_TASKS') return '赛事任务快照 · '+display(object(d.board).phase);

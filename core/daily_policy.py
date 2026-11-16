@@ -1,6 +1,6 @@
 """Pure daily safety policy: inspect supplied evidence, never perform I/O.
 
-Food emergencies can release a narrowly restricted model turn. This is not a
+Food emergencies and unprepared nights can release narrowly restricted model turns. This is not a
 fallback resource planner. Shelter routes are current terrain evidence, not a
 promise that the backend will follow that path or that a shelter is monster-proof.
 """
@@ -9,6 +9,7 @@ import math
 from collections.abc import Mapping
 
 from agent.survival_planner import Decision, SurvivalPlanner
+from core.action_permissions import FORCEABLE_ACTIONS, CONTROL_ACTIONS
 from skills.daily_survival import DailySurvivalSkills
 
 
@@ -23,19 +24,25 @@ FOOD_POINTS = {
 CROP_OUTPUT = {"wheat": (7, "wheat"), "carrots": (7, "carrot"), "potatoes": (7, "potato"), "beetroots": (3, "beetroot")}
 FOOD_ACTIONS = frozenset({"harvest_crop", "take_items", "inspect_container", "craft_item", "smelt_collect", "eat_food", "wait"})
 HAZARDS = DailySurvivalSkills.HAZARDS
+NIGHT_PREPARATION_ACTIONS = frozenset({"wait", "gather_block", "craft_item",
+    "place_item", "place_bed", "place_door", "plan_shelter", "inspect_shelter",
+    "build_shelter_step", "position_for_task"})
+_TASK_ACTIONS = frozenset({"select_task", "update_progress", "finish_task", "force_exit_task", "end_competition"})
 
 
 class DailySafetyPolicy:
     """Choose local emergency actions and validate restricted food/model turns."""
 
-    def __init__(self, settings=None):
+    def __init__(self, settings=None, *, allow_controls=False):
         settings = settings or {}
         if isinstance(settings, Mapping) and isinstance(settings.get("survival"), Mapping):
             settings = settings["survival"]
         self.rules = SurvivalPlanner(settings)
+        self.allow_controls = allow_controls is True
         self.low_health = self.rules.low_health
         self.threat_radius = self.rules.threat_radius
         self.food_threshold = self.rules.food_threshold
+        self.task_tools = _TASK_ACTIONS if settings.get("objective") == "competition" else frozenset()
 
     @staticmethod
     def _rows(value):
@@ -306,6 +313,140 @@ class DailySafetyPolicy:
         return any(row["name"].endswith("_bed") and self._near_safe(row["pos"], observation, 16)
                    and (row.get("properties") or {}).get("occupied") not in (True, "true") for row in self._blocks(observation))
 
+    def _force_environment_error(self, observation):
+        """Hard facts remain vetoes even when the caller requests an advisory override."""
+        scenario, forced = self._basics(observation)
+        if forced is not None:
+            return scenario
+        if (observation.get("observation_scope") == "safety"
+                or observation.get("inventory_fresh") is False or observation.get("terrain_fresh") is False):
+            return "full_observation_required"
+        status = observation["status"]
+        if status["health"] <= self.low_health or status["food"] <= 6:
+            return "critical_life_or_food"
+        if status["thundering"]:
+            return "storm_risk"
+        buffer = max(12, self.threat_radius)
+        if any(distance <= buffer for distance, _ in self.rules._hostiles(observation, status["pos"])):
+            return "known_hostile"
+        nearest = status.get("nearest_hostile") or {}
+        if isinstance(nearest, dict) and self.rules._number(nearest.get("dist")) and nearest["dist"] <= buffer:
+            return "known_hostile"
+        if not self._near_safe(status["pos"], observation, 0):
+            return "known_environment_hazard"
+        return None
+
+    def validate_force(self, decision, observation):
+        """Bypass advisory time/preparation rules only, for one registered local action."""
+        if not self.allow_controls or not isinstance(decision, Decision) or decision.name not in FORCEABLE_ACTIONS:
+            return "unsupported_force_action"
+        error = self._force_environment_error(observation)
+        if error:
+            return error
+        name, args = decision.name, decision.args
+        if name == "craft_item":
+            count = args.get("count", 1)
+            return None if type(count) is int and 1 <= count <= 16 else "force_count_limit"
+        pos = self._point(args.get("pos"))
+        radius = 3 if name in {"clear_foliage", "position_for_task"} else 4
+        if pos is None or not self._near_safe(pos, observation, radius):
+            return "force_target_unsafe_or_far"
+        if name in {"gather_block", "gather_resource", "harvest_crop", "gather_seeds", "clear_foliage"}:
+            if not any(row["name"] == args.get("expected_name") and row["pos"] == pos
+                       and row.get("can_see") is True and row.get("can_dig") is not False
+                       for row in self._blocks(observation)):
+                return "force_target_not_verified"
+        if name == "clear_foliage" and (observation["status"]["health"] < 12 or observation["status"]["food"] < 8):
+            return "force_foliage_life_limit"
+        if name == "position_for_task":
+            origin = observation["status"]["pos"]
+            if (self._cell(origin)[1] != self._cell(pos)[1] or math.dist(origin, pos) <= .75
+                    or not any(self._point(row.get("pos")) == pos for row in self._rows(observation.get("safe_stand_candidates")))):
+                return "force_stance_not_verified"
+        if name in {"place_item", "place_bed", "place_door"} and self.rules._counts(observation).get(args.get("item"), 0) <= 0:
+            return "missing_item"
+        return None
+
+    def _night_preparation_ready(self, observation):
+        """Permit bounded preparation from present evidence, never infer a safe night."""
+        if (observation.get("observation_scope") == "safety"
+                or observation.get("inventory_fresh") is False or observation.get("terrain_fresh") is False):
+            return False
+        status = observation["status"]
+        if status["health"] < 20 or status["food"] < 12 or status["thundering"]:
+            return False
+        buffer = max(12, self.threat_radius)
+        if any(distance <= buffer for distance, _ in self.rules._hostiles(observation, status["pos"])):
+            return False
+        nearest = status.get("nearest_hostile") or {}
+        if isinstance(nearest, dict) and self.rules._number(nearest.get("dist")) and nearest["dist"] <= buffer:
+            return False
+        if not self._near_safe(status["pos"], observation, 0):
+            return False
+        # Meta task tools are local only. Others need a real preparation candidate.
+        if self.task_tools:
+            return True
+        counts = self.rules._counts(observation)
+        materials = DailySurvivalSkills.LOGS | DailySurvivalSkills.PLANKS | {
+            "cobblestone", "dirt", "crafting_table", "furnace", "torch", "stick", "coal", "charcoal"}
+        if any(n > 0 and (name in materials or name.endswith(("_bed", "_wool", "_door")))
+               for name, n in counts.items()):
+            return True
+        if any(row["name"] in DailySurvivalSkills.LOGS and row.get("can_see") is True
+               and self._near_safe(row["pos"], observation, 3) for row in self._blocks(observation)):
+            return True
+        return any(self._night_preparation_valid(
+            Decision("position_for_task", {"pos": row.get("pos")}, "Current nearby stance", "safety"), observation)
+            for row in self._rows(observation.get("safe_stand_candidates")))
+
+    def _night_preparation_valid(self, decision, observation):
+        name, args = decision.name, decision.args
+        if name in self.task_tools or name == "wait":
+            return True
+        if name not in NIGHT_PREPARATION_ACTIONS:
+            return False
+        counts = self.rules._counts(observation)
+        if name == "craft_item":
+            item, count = args.get("item"), args.get("count", 1)
+            basic = DailySurvivalSkills.PLANKS | DailySurvivalSkills.BEDS | DailySurvivalSkills.DOORS | {
+                "stick", "crafting_table", "wooden_pickaxe", "wooden_axe", "stone_pickaxe", "torch", "furnace"}
+            return item in basic and type(count) is int and 1 <= count <= 16
+        pos = self._point(args.get("pos"))
+        if pos is None or not self._near_safe(pos, observation, 3):
+            return False
+        if name == "position_for_task":
+            origin = observation["status"]["pos"]
+            return (self._cell(origin)[1] == self._cell(pos)[1] and math.dist(origin, pos) > .75
+                    and any(self._point(row.get("pos")) == pos
+                            for row in self._rows(observation.get("safe_stand_candidates"))))
+        if name == "gather_block":
+            expected = args.get("expected_name")
+            return expected in DailySurvivalSkills.LOGS and any(row["name"] == expected and row["pos"] == pos
+                and row.get("can_see") is True and row.get("can_dig") is not False
+                for row in self._blocks(observation))
+        if name in {"plan_shelter", "inspect_shelter", "build_shelter_step"}:
+            return True  # The real single-step skill re-reads the complete geometry.
+        item = args.get("item")
+        if name in {"place_bed", "place_door"}:
+            allowed = DailySurvivalSkills.BEDS if name == "place_bed" else DailySurvivalSkills.DOORS
+        else:
+            allowed = DailySurvivalSkills.LOGS | DailySurvivalSkills.PLANKS | {
+                "cobblestone", "dirt", "crafting_table", "furnace", "torch"}
+        return item in allowed and counts.get(item, 0) > 0
+
+    def _night_priority(self, observation):
+        """Share identical sleep/home priority between choose and execution validation."""
+        status = observation["status"]
+        home = self._return_home(observation)
+        if home:
+            return home
+        if (not status["is_day"] or status["thundering"]) and self._bed(observation):
+            return Decision("auto_sleep", {}, "Use a currently observed free bed through the verified sleep skill", "sleep")
+        shelter = self._shelter(observation)
+        if shelter and shelter.get("inside") is True:
+            return self._wait("Remain in the freshly verified shelter geometry; spawn protection is not proven", "sleep")
+        return None
+
     def constraints(self, observation):
         scenario, forced = self._basics(observation)
         allowed, radius, model = None, 32, forced is None
@@ -322,11 +463,21 @@ class DailySafetyPolicy:
                 scenario, allowed, radius, model = "low_health", sorted(FOOD_ACTIONS - {"inspect_container"}), 2, can_feed
                 reason = "Eat or regenerate; only directly verified nearby food can justify a restricted model turn"
             elif self._night(status):
-                scenario, allowed, radius, model = "shelter_time", ["wait", "auto_sleep", "move_to", "set_door"], 4, False
-                reason = "Dusk/night permits verified sleep or separately verified door and short shelter-route steps"
+                if self._night_priority(observation) is None and self._night_preparation_ready(observation):
+                    scenario, allowed, radius, model = "night_preparation", sorted(NIGHT_PREPARATION_ACTIONS | self.task_tools), 3, True
+                    reason = "No verified bed/shelter: prepare nearby one step at a time. Use gather_block for a visible log, not gather_materials. No batches, hunting or exploration."
+                elif (self.allow_controls and self._night_priority(observation) is None
+                      and self._force_environment_error(observation) is None):
+                    scenario, allowed, radius, model = "advisory_blocked", sorted({"wait", "report_blocked", "force_attempt"} | self.task_tools), 4, True
+                    reason = "Ordinary night preparation is unavailable. Report the exact blockage, or force one verified nearby action past time policy only. Explicit danger and unknown state remain vetoes."
+                else:
+                    scenario, allowed, radius, model = "shelter_time", ["wait", "auto_sleep", "move_to", "set_door"], 4, False
+                    reason = "Verified sleep/home takes priority; unsafe or unsupported night preparation must wait"
             elif status["food"] <= 6:
                 scenario, allowed, radius, model = "critical_hunger", sorted(FOOD_ACTIONS), 4, True
                 reason = "Only nearby observed food acquisition is allowed; no hunting, mining, building or exploration"
+        if self.allow_controls and model and allowed is not None:
+            allowed = sorted(set(allowed) | {"report_blocked"} | ({"force_attempt"} if self._force_environment_error(observation) is None else set()))
         return {"scenario": scenario, "model_allowed": model, "allowed_actions": allowed,
                 "max_action_distance": radius, "reason": reason,
                 "route_evidence_is_actual_trajectory": False, "shelter_spawn_safety": "unknown"}
@@ -352,14 +503,13 @@ class DailySafetyPolicy:
                 return None
             return self._wait("Health is low; eat available food or wait for regeneration without hunting", "recover")
         if self._night(status):
-            home = self._return_home(observation)
-            if home:
-                return home
-            if (not status["is_day"] or status["thundering"]) and self._bed(observation):
-                return Decision("auto_sleep", {}, "Use a currently observed free bed through the verified sleep skill", "sleep")
-            shelter = self._shelter(observation)
-            return self._wait("Remain in the freshly verified shelter geometry; spawn protection is not proven" if shelter and shelter.get("inside") is True
-                              else "Dusk/night has no fresh verified short shelter route or usable bed", "sleep")
+            priority = self._night_priority(observation)
+            if priority is not None:
+                return priority
+            if (self._night_preparation_ready(observation)
+                    or self.allow_controls and self._force_environment_error(observation) is None):
+                return None  # Expose recovery controls instead of silently looping on wait.
+            return self._wait("Night preparation lacks fresh local options, full health/food or a safe threat buffer", "sleep")
         # Critical hunger intentionally releases only the constrained food turn.
         # A baseline resource action is never executed here as model fallback.
         return None
@@ -377,6 +527,8 @@ class DailySafetyPolicy:
                 return None
             return scenario
         status = observation["status"]
+        if decision.name == "report_blocked" and self.allow_controls:
+            return None
         if decision.name == "eat_food":
             return None if self._food_valid(decision, observation) else "food_not_available_or_unsafe"
         if self._meal(observation):
@@ -386,11 +538,11 @@ class DailySafetyPolicy:
                 return None
             return "low_health_food_only"
         if self._night(status):
-            home = self._return_home(observation)
-            if home is not None:
-                return None if decision.name == home.name and decision.args == home.args else "night_requires_verified_sleep_or_shelter_route"
-            if decision.name == "auto_sleep" and (not status["is_day"] or status["thundering"]) and self._bed(observation):
-                return None
+            priority = self._night_priority(observation)
+            if priority is not None:
+                return None if decision.name == priority.name and decision.args == priority.args else "night_requires_verified_sleep_or_shelter_route"
+            if self._night_preparation_ready(observation):
+                return None if self._night_preparation_valid(decision, observation) else "night_preparation_single_step_only"
             return "night_requires_verified_sleep_or_shelter_route"
         if status["food"] <= 6 and not self._food_valid(decision, observation):
             return "critical_hunger_nearby_food_only"

@@ -1,6 +1,7 @@
 """Native function tools for implemented, locally verified survival actions."""
 
 from skills.survival import SurvivalSkills
+from core.action_permissions import FORCEABLE_ACTIONS
 import copy
 
 
@@ -222,7 +223,18 @@ def tools_for_objective(objective="starter"):
     add("build_shelter_batch", "Build at most 8 shelter blocks, rechecking each child action. Stops for safe repositioning, shortage, danger or unknown writes; never automatically walks or removes obstacles. Inspect current house completion separately.",
         {**pos, "material": materials,
          "max_blocks": {"type": "integer", "minimum": 1, "maximum": 8, "default": 8}}, ("pos", "material"))
-    return tools
+    controls = control_tools()
+    force = next(row for row in controls if row["function"]["name"] == "force_attempt")
+    variants = []
+    for row in tools:
+        function = row["function"]
+        name = function["name"]
+        if name not in FORCEABLE_ACTIONS:
+            continue
+        required = list(function["parameters"].get("required", []))
+        variants.append({"properties": {"action": {"enum": [name]}}, "required": required})
+    force["function"]["parameters"]["anyOf"] = variants
+    return tools + controls
 
 
 # Standalone calculator metadata; no survival harness dispatcher is bound yet.
@@ -266,11 +278,25 @@ STRONGHOLD_TOOL_DEFINITION = {'type': 'function',
                              'required': ['throws']}}}
 
 
+def control_tools():
+    """Recovery controls with a separately validated, bounded physical action."""
+    return [
+        _tool("report_blocked", "Report a concrete blockage. Replan or exit the active task; never clears unknown action/model locks or grants completion.",
+              {"resolution": {"type": "string", "enum": ["replan", "exit_task"], "default": "replan"}}, ("reason",)),
+        _tool("force_attempt", "Try ONE action past time policy. Coordinates MUST be in pos, never only in reason. clear_foliage/gather need pos AND expected_name. No danger/unknown overrides.",
+              {"action": {"type": "string", "enum": sorted(FORCEABLE_ACTIONS)}, "pos": {**_position(), "description": "REQUIRED for gather/clear/place/position/shelter: observed [x,y,z], not prose."},
+               "item": {**_ITEM, "description": "REQUIRED for craft_item and place_*; exact inventory item name."},
+               "expected_name": {**_ITEM, "description": "REQUIRED for gather_block/gather_resource/harvest_crop/gather_seeds/clear_foliage: exact observed block name."},
+               "material": {**_ITEM, "description": "Required for shelter planning/building when declared by the actual action schema."},
+               "count": {"type": "integer", "minimum": 1, "maximum": 16}}, ("action", "reason")),
+    ]
+
+
 def competition_tools():
     """Task lifecycle tools; executed locally by the competition runtime."""
     reason = {"type": "string", "minLength": 1, "maxLength": 300}
     return [
-        _tool("select_task", "Select ONE scored goal ID from the competition board. This does not grant items or complete it. Pending/excluded scoring goals cannot be selected.",
+        _tool("select_task", "Select ONE goal ID from the current staged tasks. Hidden or locked goals cannot be selected. Details appear only after selection.",
               {"goal_id": {"type": "string", "minLength": 1, "maxLength": 160}}, ("goal_id",)),
         _tool("update_progress", "Save a short progress card: verified progress and next intent. Do not invent completion or paste logs.",
               {"summary": {"type": "string", "minLength": 1, "maxLength": 500}}, ("summary",)),

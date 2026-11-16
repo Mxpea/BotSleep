@@ -29,6 +29,7 @@ class DailyFoodMonitorTests(unittest.TestCase):
         self.endpoint.release.clear()
         self.addCleanup(self.endpoint.close)
         settings = {**copy.deepcopy(DEFAULTS["survival"]), "objective": "daily",
+            "local_execution": {"enabled": False},
             "state_dir": str(Path(self.temp.name) / "state"), "poll_interval_seconds": .001,
             "retry_seconds": .001, "max_runtime_seconds": 20}
         gate = ModelRequestGate(self.endpoint.base_url, "offline-key", directory=Path(self.temp.name) / "gate")

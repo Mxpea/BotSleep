@@ -22,6 +22,7 @@ from core.daily_observation import DailyObservationCollector
 from core.model_gate import ModelRequestGate
 from core.survival_harness import SurvivalHarness
 from skills.daily_survival import DailySurvivalSkills
+from skills import SkillResult
 from test_daily_skills import DailyWorld, envelope
 from test_llm_runtime import FakeChatEndpoint, tool_response
 
@@ -116,6 +117,7 @@ class DailyRuntimeTests(unittest.TestCase):
     def make_harness(self, replies=None, *, state_dir=None, timeout=1):
         self.index += 1
         settings = {**copy.deepcopy(DEFAULTS["survival"]), "objective": "daily",
+            "local_execution": {"enabled": False},  # Explicit model-protocol/skill acceptance seam.
             "state_dir": state_dir or str(Path(self.temp.name) / str(self.index)),
             "poll_interval_seconds": .001, "retry_seconds": .001, "max_steps": 30, "max_runtime_seconds": 30}
         endpoint, planner = None, None
@@ -146,6 +148,245 @@ class DailyRuntimeTests(unittest.TestCase):
     def prompt(request):
         message = next(message for message in reversed(request["body"]["messages"]) if message["role"] == "user")
         return json.loads(message["content"])
+
+    def night_log_fixture(self):
+        self.world.block([2, 64, 0], "oak_log", can_see=True, can_dig=True)
+        def collect_log():
+            self.world.block([2, 64, 0], "air")
+            self.world.counts["oak_log"] = self.world.counts.get("oak_log", 0) + 1
+            return envelope({"gained": {"oak_log": 1}})
+        self.world.effects["dig"] = collect_log
+
+    def test_forced_night_log_crosses_only_time_policy_and_keeps_native_feedback(self):
+        self.world.status.update(is_day=False, time_of_day=14000, health=19)
+        self.night_log_fixture()
+        harness, endpoint = self.make_harness([
+            tool_response("force_attempt", {"action": "gather_block", "pos": [2, 64, 0],
+                "expected_name": "oak_log", "reason": "Visible nearby log; override the night policy only"}, "forced_log"),
+            tool_response("report_blocked", {"reason": "Need a new plan after obtaining wood"}, "blocked")])
+        result = self.step(harness)
+        self.assertTrue(result.success, result)
+        self.assertTrue(result.data["forced_attempt"])
+        self.assertEqual(self.world.counts["oak_log"], 1)
+        self.assertEqual(self.world.blocks[(2, 64, 0)]["name"], "air")
+        self.assertIsNone(harness.journal.state["pending"])
+        self.assertTrue(self.step(harness).success)
+        message = next(m for m in endpoint.requests[1]["body"]["messages"]
+                       if m.get("role") == "tool" and m.get("tool_call_id") == "forced_log")
+        self.assertTrue(json.loads(message["content"])["result"]["success"])
+        self.assertEqual(endpoint.requests[0]["body"]["tool_choice"], "required")
+
+    def test_forced_night_foliage_clears_exactly_one_adjacent_leaf(self):
+        self.world.status.update(is_day=False, time_of_day=14000)
+        target = [1, 64, 0]
+        self.world.block(target, "birch_leaves", properties={"waterlogged": False})
+        def clear_leaf():
+            self.world.block(target, "air")
+            return envelope({"block_removed": True})
+        self.world.effects["dig"] = clear_leaf
+        harness, endpoint = self.make_harness([tool_response("force_attempt", {
+            "action": "clear_foliage", "pos": target, "expected_name": "birch_leaves",
+            "reason": "One visible adjacent leaf blocks the exit; only night policy is overridden"})])
+        result = self.step(harness)
+        self.assertTrue(result.success, result)
+        self.assertEqual(self.world.blocks[tuple(target)]["name"], "air")
+        self.assertTrue(result.data["forced_attempt"])
+        self.assertFalse(result.data["collected"])
+        self.assertEqual(len([call for call in self.world.calls if call[0] == "dig"]), 1)
+        self.assertEqual(len(endpoint.requests), 1)
+
+    def test_blocked_canopy_allows_one_forced_clear_then_resumes_verified_retreat(self):
+        self.world.status.update(is_day=False, time_of_day=14000)
+        self.world.block([0, 63, 0], "birch_leaves", properties={"waterlogged": False})
+        target = [1, 64, 0]
+        self.world.block(target, "birch_leaves", properties={"waterlogged": False})
+        def clear_leaf():
+            self.world.block(target, "air")
+            return envelope({"block_removed": True})
+        self.world.effects["dig"] = clear_leaf
+        harness, endpoint = self.make_harness([tool_response("force_clear_foliage", {}, "bound_clear")])
+        observed = harness.collector.collect()
+        retreat = Decision("retreat_from", {"pos": [-3, 64, .5], "distance": 8}, "Canopy escape", "safety")
+        harness._retreat_state(observed, retreat.args["pos"])
+        harness._retreat_result(retreat, SkillResult(False, "Route is blocked", {
+            "origin_support": {"center_name": "birch_leaves"}, "blocked_cells": [{"name": "birch_leaves", "pos": target}]}, "unsafe"), observed)
+        self.assertTrue(harness.context["retreat_recovery"]["canopy_blocked"])
+        # The cooldown may expire while the model responds; it must not cancel
+        # an already validated explicit clearance to redo the failed search.
+        endpoint.before_response = lambda: harness.context["retreat_recovery"].update(retry_after=0)
+        self.assertTrue(self.step(harness).success)
+        self.assertNotIn("retry_after", harness.context["retreat_recovery"])
+        self.assertEqual(self.prompt(endpoint.requests[0])["context"]["recovery"]["kind"], "canopy")
+        self.assertTrue(self.step(harness).success)
+        self.assertTrue(self.step(harness).success)
+        self.assertNotIn("retreat_recovery", harness.context)
+        self.assertEqual(len(endpoint.requests), 1)
+        self.assertEqual(len([call for call in self.world.calls if call[0] == "dig"]), 1)
+        self.assertEqual(len([call for call in self.world.calls if call[0] == "move"]), 2)
+        self.assertIsNone(harness.journal.state["pending"])
+
+    def test_bound_clearance_rejects_changed_target_before_any_write(self):
+        self.world.status.update(is_day=False, time_of_day=14000)
+        self.world.block([0, 63, 0], "birch_leaves", properties={"waterlogged": False})
+        target = [1, 64, 0]
+        self.world.block(target, "birch_leaves", properties={"waterlogged": False})
+        harness, endpoint = self.make_harness([tool_response("force_clear_foliage", {})])
+        observed = harness.collector.collect()
+        retreat = Decision("retreat_from", {"pos": [-3, 64, .5], "distance": 8}, "Blocked", "safety")
+        harness._retreat_state(observed, retreat.args["pos"])
+        harness._retreat_result(retreat, SkillResult(False, "blocked", {
+            "origin_support": {"center_name": "birch_leaves"}, "blocked_cells": [{"name": "birch_leaves", "pos": target}]}, "unsafe"), observed)
+        endpoint.before_response = lambda: self.world.block(target, "stone")
+        result = self.step(harness)
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "safety_changed")
+        self.assertFalse([call for call in self.world.calls if call[0] in {"dig", "place", "move"}])
+        self.assertIsNone(harness.journal.state["pending"])
+
+    def test_forced_attempt_cannot_override_enemy_appearing_during_model_request(self):
+        self.world.status.update(is_day=False, time_of_day=14000)
+        self.night_log_fixture()
+        harness, endpoint = self.make_harness([tool_response("force_attempt", {
+            "action": "gather_block", "pos": [2, 64, 0], "expected_name": "oak_log",
+            "reason": "Try a nearby log"})])
+        endpoint.before_response = lambda: self.world.status.update(nearest_hostile={"name": "zombie", "dist": 10})
+        result = self.step(harness)
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "safety_changed")
+        self.assertFalse([call for call in self.world.calls if call[0] == "dig"])
+        self.assertEqual(len(endpoint.requests), 1)
+
+    def test_unknown_forced_dig_keeps_pending_and_never_replays(self):
+        self.world.status.update(is_day=False, time_of_day=14000)
+        self.night_log_fixture()
+        def unknown_dig():
+            raise APIError("request_timeout", "Unknown forced write")
+        self.world.effects["dig"] = unknown_dig
+        harness, endpoint = self.make_harness([tool_response("force_attempt", {
+            "action": "gather_block", "pos": [2, 64, 0], "expected_name": "oak_log",
+            "reason": "One verified nearby log"})])
+        result = self.step(harness)
+        self.assertFalse(result.success)
+        self.assertTrue(harness.paused)
+        self.assertIsNotNone(harness.journal.state["pending"])
+        self.assertEqual(harness.journal.state["pending"]["decision"]["name"], "force_attempt")
+        for _ in range(3):
+            harness.tick(automatic=True)
+        self.assertEqual(len([call for call in self.world.calls if call[0] == "dig"]), 1)
+        self.assertEqual(len(endpoint.requests), 1)
+
+    def test_damage_after_forced_write_remains_unconfirmed_without_replay(self):
+        self.world.status.update(is_day=False, time_of_day=14000)
+        self.night_log_fixture()
+        original = self.world.effects["dig"]
+        def dig_and_hurt():
+            response = original()
+            self.world.status["health"] = 18
+            return response
+        self.world.effects["dig"] = dig_and_hurt
+        harness, endpoint = self.make_harness([tool_response("force_attempt", {
+            "action": "gather_block", "pos": [2, 64, 0], "expected_name": "oak_log",
+            "reason": "Try one local harvest"})])
+        result = self.step(harness)
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "action_unconfirmed")
+        self.assertIsNotNone(harness.journal.state["pending"])
+        self.assertTrue(harness.paused)
+        self.assertEqual(len(endpoint.requests), 1)
+
+    def test_unprepared_night_reaches_model_and_verifies_one_actual_log(self):
+        self.world.status.update(is_day=False, time_of_day=14000)
+        self.night_log_fixture()
+        harness, endpoint = self.make_harness([tool_response("gather_block", {
+            "pos": [2, 64, 0], "expected_name": "oak_log"})])
+        result = self.step(harness)
+        self.assertTrue(result.success, result)
+        self.assertEqual(self.world.counts["oak_log"], 1)
+        self.assertEqual(self.world.blocks[(2, 64, 0)]["name"], "air")
+        constraints = self.prompt(endpoint.requests[0])["context"]["survival_constraints"]
+        self.assertEqual(constraints["scenario"], "night_preparation")
+        self.assertNotIn("gather_materials", constraints["allowed_actions"])
+        self.assertEqual(len([call for call in self.world.calls if call[0] == "dig"]), 1)
+        self.assertIsNone(harness.journal.state["pending"])
+
+    def test_single_visible_log_proposal_survives_day_to_dusk_recheck(self):
+        self.world.status["time_of_day"] = 10900
+        self.night_log_fixture()
+        harness, endpoint = self.make_harness([tool_response("gather_block", {
+            "pos": [2, 64, 0], "expected_name": "oak_log"})])
+        endpoint.before_response = lambda: self.world.status.update(time_of_day=11200)
+        result = self.step(harness)
+        self.assertTrue(result.success, result)
+        self.assertEqual(self.world.counts["oak_log"], 1)
+        self.assertEqual(harness.context["survival_constraints"]["scenario"], "night_preparation")
+
+    def test_day_batch_crossing_dusk_is_rejected_then_model_chooses_single_step(self):
+        self.world.status["time_of_day"] = 10900
+        self.night_log_fixture()
+        harness, endpoint = self.make_harness([
+            tool_response("gather_materials", {"resource": "logs", "count": 5}, "batch"),
+            tool_response("gather_block", {"pos": [2, 64, 0], "expected_name": "oak_log"}, "single")])
+        endpoint.before_response = lambda: self.world.status.update(time_of_day=11200)
+        first = self.step(harness)
+        self.assertEqual(first.error_code, "safety_changed")
+        self.assertEqual(first.message, "night_preparation_single_step_only")
+        self.assertFalse([call for call in self.world.calls if call[0] == "dig"])
+        self.assertTrue(self.step(harness).success)
+        self.assertEqual(self.world.counts["oak_log"], 1)
+        feedback = next(m for m in endpoint.requests[1]["body"]["messages"] if m.get("tool_call_id") == "batch" and m["role"] == "tool")
+        self.assertFalse(json.loads(feedback["content"])["result"]["success"])
+        self.assertEqual(len(endpoint.requests), 2)
+
+    def test_rules_mode_cannot_bypass_night_single_step_restrictions(self):
+        self.world.status.update(is_day=False, time_of_day=14000)
+        self.night_log_fixture()
+        harness, endpoint = self.make_harness()
+        with patch.object(harness.daily_goals, "choose", return_value=Decision(
+                "gather_materials", {"resource": "logs", "count": 5}, "Rule batch", "materials")):
+            result = self.step(harness)
+        self.assertTrue(result.success, result)
+        self.assertTrue(result.data["waiting"])
+        self.assertEqual(result.message, "night_preparation_single_step_only")
+        self.assertFalse([call for call in self.world.calls if call[0] == "dig"])
+        self.assertIsNone(endpoint)
+
+    def test_unprepared_night_can_place_an_owned_workbench(self):
+        self.world.status.update(is_day=False, time_of_day=14000)
+        self.world.counts = {"crafting_table": 1}
+        harness, endpoint = self.make_harness([tool_response("place_item", {
+            "item": "crafting_table", "pos": [2, 64, 0]})])
+        result = self.step(harness)
+        self.assertTrue(result.success, result)
+        self.assertEqual(self.world.blocks[(2, 64, 0)]["name"], "crafting_table")
+        self.assertEqual(self.world.counts["crafting_table"], 0)
+        self.assertEqual(len(endpoint.requests), 1)
+
+    def test_night_preparation_damage_enemy_or_storm_cancels_pending_proposal(self):
+        for change in ({"health": 19}, {"nearest_hostile": {"name": "skeleton", "dist": 11}}, {"thundering": True}):
+            with self.subTest(change=change):
+                self.world = RuntimeDailyWorld()
+                self.world.status.update(is_day=False, time_of_day=14000)
+                self.night_log_fixture()
+                harness, endpoint = self.make_harness([tool_response("gather_block", {
+                    "pos": [2, 64, 0], "expected_name": "oak_log"})])
+                endpoint.release.clear()
+                self.addCleanup(endpoint.release.set)
+                self.assertTrue(harness._start())
+                self.assertTrue(endpoint.entered.wait(2))
+                self.assertEqual(harness.context["survival_constraints"]["scenario"], "night_preparation")
+                self.world.status.update(change)
+                harness._next_monitor = 0
+                harness.tick(automatic=False)
+                self.assertTrue(harness._model_worker.cancelled)
+                deadline = time.monotonic() + 3
+                while harness.busy and time.monotonic() < deadline:
+                    harness.tick(automatic=False)
+                    time.sleep(.001)
+                self.assertFalse([call for call in self.world.calls if call[0] in {"dig", "place", "move"}])
+                self.assertEqual(len(endpoint.requests), 1)
+                endpoint.release.set()
+                harness._model_worker.close(harness.last_observation)
+                self.assertIsNone(harness.planner._pending)
 
     def test_native_daily_tools_smelt_job_fresh_slots_feedback_and_real_output_gain(self):
         self.world.furnace()

@@ -96,7 +96,7 @@ class CompetitionTasksTests(unittest.TestCase):
             CompetitionTasks(saved=malformed, catalog=CATALOG, clock=lambda: NOW[0])
 
     def test_selection_requires_scored_selectable_row(self):
-        snap = self.update()
+        snap = self.update(obs({}, [{"name": "white_bed", "pos": [1, 64, 1]}]))
         sleep = "minecraft:adventure/sleep_in_bed"
         pending = next(row["id"] for row in CATALOG if row["eligibility"] == "pending")
         excluded = next(row["id"] for row in CATALOG if row["eligibility"] == "excluded")

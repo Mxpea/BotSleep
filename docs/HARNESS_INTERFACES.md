@@ -1,12 +1,12 @@
 # Harness 接口契约与架构决策
 
-更新：2026-11-15；源码核对基线为合并后的 `3801be9`。状态：**第 2 节与第 5 节赛事任务子集为现有运行接口；其余未实现入口仍是设计提案**。路径均相对本仓库；部署地址、账号与凭据由配置提供。
+更新：2026-11-16；源码核对基线为 `38db5d5` 加本轮阶段候选与本地执行优先等工作树改动；最终离线结果见 [TESTING.md](TESTING.md) 首节，尚未实服验收。状态：**第 2 节与第 5 节赛事任务子集为现有运行接口；其余未实现入口仍是设计提案**。路径均相对本仓库；部署地址、账号与凭据由配置提供。
 
 合并说明：本页保留 dev-aure 的赛事接口设计访谈，不是当前全部运行能力清单。合并后的配置入口、原生模型反馈、日常技能、单模型请求门禁及本地安全运行时见 [README.md](../README.md)、[DAILY_SURVIVAL.md](DAILY_SURVIVAL.md) 和 [TESTING.md](TESTING.md)。这些实现不代表完整阶段 skill 加载、compact/handoff、浮水/搭桥执行器等未来提案已经落地。
 
 ## 1. 目标与术语
 
-目标：封装 mc-agent-api，为程序和小模型提供一致能力。harness 根据比赛清单与实际进度分阶段给目标；模型自主制定具体计划，程序管理执行约束、互斥、中断、恢复和导航。模型避免高频采样、数学运算与安全监控。
+目标：封装 mc-agent-api，为程序和小模型提供一致能力。harness 根据比赛清单与实际进度分阶段给目标；当前已支持计划由 harness 优先逐步推进，本地执行/脱困耗尽后模型接管；程序管理执行约束、互斥、中断与恢复。完整导航执行器仍属后文提案。模型避免高频采样、数学运算与安全监控。
 
 首要质量目标：长阶段任务可靠运行，模型对话或进程重启后能够核验并恢复进度。
 
@@ -27,13 +27,15 @@
 | 观察列表 | `get_blocks(...)`、`get_entities(...)`、`find_blocks(...)` | 返回校验后的列表；无类型方块查询是最近每类摘要，不是完整地图 |
 | 移动 | `client.move_to(x,y,z,timeout_ms=8000,range=2)` | Python 参数仍叫 timeout_ms，已转换为 HTTP `timeout:8000`；单位毫秒，不再是旧 bug |
 | 旧兼容方法 | `look_at(x,y,z)`、`get_inventory()` | 前者走 `/look`，后者与 inventory 一样返回 envelope；不可按旧裸 result 使用 |
-| 生存调度 | `SurvivalHarness.tick(automatic=True)`、`snapshot(status=None)` | 已实现单动作线程、模型 worker、安全检查；快照含阶段/暂停/任务板等 |
+| 生存调度 | `SurvivalHarness.tick(automatic=True)`、`snapshot(status=None)`、`next_poll_seconds` | 已实现单动作线程、模型 worker、安全检查；快照含阶段/暂停/任务板等 |
 | 调试控制 | `pause(reason)`、`resume()`、`request_step()`、`request_sleep()`、`close()` | 生存内部/白名单调试入口，不是新增赛事模型工具；resume 不重放 pending |
+| 本地执行优先 | `LocalExecutor.choose(observation,context,competition=...,daily_board=...)`、`record(...)`、`summary(context)`；`LocalTaskPlanner.choose(...)`；`canopy_clearances(...)` | 只返回单步 Decision 或 None，不做游戏 I/O；harness 沿用原安全、pending、串行技能和后验验证。None 表示交回调用者，不表示任务完成。 |
+| 树冠内部下降 | `plan_canopy_step(status, read, *, target=None, excluded=())`；`CanopyRecoverySkill.execute("descend_canopy", args)` | 只读规划返回已核验单步或 None；harness 本地绑定 `pos/clear_pos/expected_name`，串行 pending 后执行，不注册模型工具。 |
 | 模型选择 | `LLMSurvivalPlanner.choose(observation,context,cancel_event)` | 返回一个 Decision；`observe_result(decision,result,observation)` 回传配对原生工具结果 |
 | 模型门禁 | `ModelRequestGate.request(cancel_event)`、`snapshot()` | 本机线程/进程串行化；传输未知持久化锁定；不自动清锁 |
 | 进度/记忆 | `SurvivalJournal.update/record`、`SurvivalMemory.recall/record_result` | 按 API/账号/world_id 隔离的检查点及有界 SQLite；competition 子状态可恢复终态，pending 不重放 |
-| 模型工具目录 | `tools_for_objective("starter"/"daily"/"competition")` | 9/31/36 个已注册工具；competition 的 5 个任务工具由本地任务管理器执行，游戏工具仍受后验门禁 |
-| 赛事任务 | `CompetitionTasks`、`tools_for_objective("competition")`、`MinecraftAgentClient.advancements()` | 规则目录、目标选择、progress/finish/force-exit/end、服务器 advancement 计分和终态检查点已实现；模型自报不算证据 |
+| 模型工具目录 | `tools_for_objective("starter"/"daily"/"competition")` | 9/33/38 个已注册工具；competition 的 5 个任务工具由本地任务管理器执行，游戏工具仍受后验门禁 |
+| 赛事任务 | `CompetitionTasks.model_view()` / `snapshot()`、`tools_for_objective("competition")`、`MinecraftAgentClient.advancements()` | model_view 只给当前状态解锁的简化候选或选中任务详情；snapshot 保留全目录供核验/监控。服务器 advancement 计分、退出和终态恢复已实现。 |
 | 要塞 | `EyeObservationCollector.capture()`、`CalculateStrongholdSkill.execute(...)` | 独立 Python/CLI；STRONGHOLD_TOOL_DEFINITION 未加入 starter/daily/competition 工具目录 |
 | Markdown skill | `skills/stronghold_localization/SKILL.md` | 策略文档，无运行时按需加载器 |
 | 扩展客户端 | `get_block([x,y,z])` / `get_block(x,y,z)`、`dig([x,y,z], collect=True)` / `dig(x,y,z,...)`、`get_inventory_counts()` | 坐标兼容与背包计数；主入口仍使用配置凭据。`move_to` 可省略 y，z 通过显式参数传入。 |
@@ -46,6 +48,16 @@
 目标与能力差异：daily 的 13 项证据任务板不等于赛事 advancement 清单；competition 现在提供 advancement 任务板和结束 gate，但尚未实现完整阶段清单、动态 skill 加载或导航执行器；starter 的 `goal_complete` 与 competition 的 `end_competition` 是两套退出语义。
 
 模型与动作两个恢复入口必须分清：`--resume` 只处理游戏 pending；`--acknowledge-model-idle` 只在已确认 provider 空闲后解除模型不确定锁。不能用重启/清文件绕过门禁；当前脚本退出会登出游戏，不是 handoff 保持在线功能。
+
+### 本地执行与接管契约
+
+仅在启用模型的生存路径优先本地执行。`survival.local_execution` 默认 `{"enabled":true,"max_steps":64,"max_seconds":180}`，时间单位秒，上限128步/600秒；关闭后恢复直接模型规划。每步新观察，不缓存可重放队列；明确失败或无进展的签名跳过，失败位置写内部 `context.local_execution.failed_targets` 并合入下一轮受阻目标，优先换其他已观察资源目标；无剩余方案、无支持计划或预算耗尽才请求模型。competition 可本地选择当前解锁任务并按已有计划推进，完成仍需 fresh 服务端 advancement 证据；明确行动计划仍7个，工具目录仍9/33/38。
+
+`context.local_execution` / `snapshot.local_execution` 提供 phase、reason、steps、recent，recent 最多6条，记录 action/success/error_code/progress。phase 包括 running、model_takeover、blocked_unknown；未知写动作保留原 pending、禁止重放；模型门禁未知或请求在途时不本地生产。接管不是 provider 出错 fallback，不解除原模型串行与未知锁。
+
+`next_poll_seconds` 是主循环等待秒数：busy 或无退避的本地ready取配置间隔与0.05秒的较小值，本地成功中间步骤不再加普通poll等待；失败退避、暂停和终态保持原策略。`main.py` 的聊天轮询另按原配置间隔节流，快tick不增加聊天API请求频率，不代表实时反射执行器。
+
+审计事件：`LOCAL_EXECUTION_STEP`、`LOCAL_EXECUTION_RESULT`、`MODEL_TAKEOVER`；执行前被安全策略拒绝可记录 `LOCAL_EXECUTION_YIELDED`。`EventMonitor.local_execution` 已投影发布摘要，HTML 卡片显示阶段、步数、原因和最多6条近期动作；当前决策的 `decision_source` 只来自 `DECISION.data.source`，支持 local/model/manual/safety/rules，缺失显示未确认。此摘要不是语义 compact 或跨模型对话 handoff；水面导航、自动搭路和完整赛事执行仍未实现。完整 starter 链路离线验证通过，零模型请求。本轮最终结果以 [TESTING.md](TESTING.md) 首节为准；未做实服验收。
 
 ## 3. 底层 API 摘要
 
@@ -89,13 +101,13 @@
 
 | 工具 | 参数 | 语义 |
 |---|---|---|
-| `select_task(goal_id)` | 规则 ID | 仅选择 scored、未确认且当前 availability 为 ready/needs_prerequisites 的目标；进入单活动任务阶段。 |
+| `select_task(goal_id)` | 当前候选的规则 ID | 仅选择 scored、未确认、已解锁且 ready/needs_prerequisites 的目标；猜出隐藏目标 ID 也不能绕过阶段门禁。 |
 | `update_progress(summary)` | 简短进度文本 | 只改进度卡，不是完成证据。 |
 | `finish_task(reason)` | 原因 | 要求 fresh 的活动目标检查；只有服务端 advancement 显示 completed 且规则 eligibility 为 scored 才加分，然后回到选择。 |
 | `force_exit_task(reason)` | 原因 | 结束当前目标并 cooldown，回到选择；不清游戏 pending 或模型 uncertain。 |
 | `end_competition(reason)` | 原因 | 只在 selection 且 fresh 全目录检测后进入 terminal；未知目标留 unknown、不计分。 |
 
-工具定义见 `agent/tools.py`，状态由 `core/competition_tasks.py` 保存至 scoped journal。`competition` 目录共 36 个工具（31 个日常生存动作 + 5 个生命周期工具）；规则目录 125 项，只有 7 个 scored 目标有当前行动计划。
+工具定义见 `agent/tools.py`，状态由 `core/competition_tasks.py` 保存至 scoped journal。`competition` 目录共 38 个工具（31 个日常生存动作 + 2 个恢复工具 + 5 个生命周期工具）；规则目录 125 项，只有 7 个 scored 目标有当前行动计划。
 
 ## 5. 程序入口草案
 
@@ -106,7 +118,7 @@
 | `observe()` | 范围/新鲜度要求 | 时间、会话、维度、状态和缺失字段 |
 | `select_task(goal_id)` | 当前阶段可做目标 ID | 已实现；实际语义见上表 |
 | `update_progress_card(task_id, summary)` | 目标、已确认进度、下一意图 | 未实现；当前仅有 `update_progress(summary)` |
-| `get_task(task_id)` | 标识 | 未实现；模型通过上下文接收完整目录和当前进度卡 |
+| `get_task(task_id)` | 标识 | 未实现；模型自动收到当前阶段候选摘要，选中后才收到当前任务详情及进度卡 |
 | `finish_task(task_id, reason, evidence)` | 标识、原因及检测证据 | 草案接口未实现；当前 `finish_task(reason)` 用最新服务器证据结束单任务 |
 | `force_exit_task(task_id, reason)` | 标识及原因 | 草案接口未实现；当前 `force_exit_task(reason)` 结束活动目标并 cooldown |
 | `execute_action(spec)` | 内部动作和截止时间 | action_id、已确认或不确定的执行结果 |
@@ -119,7 +131,7 @@
 
 ## 6. 模型决策与导航职责（赛事设计，尚未完整实现）
 
-模型自主制定目标内策略；harness 提供当前全部可做目标及需要前置的目标，不只提供程序预排的 top-N。每轮给模型简短进度卡：当前目标、已核验进度、下一意图、规则/安全硬约束。遇到阻塞或重复输出时停止当前计划，把真实状态交模型重新决定；不得静默重试。模型的路径是任务/策略方向，不需逐个预批 HTTP 动作。
+模型自主制定目标内策略；harness 按当前新鲜物资和附近环境解锁阶段候选，仅提供简化的 ID/标题/分值/可用性，不预排 top-N，不注入后期不可做目录。选中后才提供该任务完整规则条件、资源缺口、最多五步建议、技能需求及完成/失败/中止条件。每轮给模型简短进度卡：当前目标、已核验进度、下一意图、规则/安全硬约束。遇到阻塞或重复输出时停止当前计划，把真实状态交模型重新决定；不得静默重试。模型的路径是任务/策略方向，不需逐个预批 HTTP 动作。
 
 导航由 harness 全权负责，模型只给目的地，不选择路线。安全可行时优先水面通行，水面且未潜没不计氧气消耗；继续监控潜没、氧气、血量与进展。游泳、绕行优先选择不耗材料的方案；虚空、岩浆等危险区允许按材料预算搭路。普通 `move_to` 不保证保持浮水，未来水面执行器不能仅依赖它；当前生存安全逻辑仍可能拒绝/中断水中生产，未采用本段优先策略。
 
@@ -127,13 +139,75 @@
 
 预设目标检测器逐项给证据与状态。`CompetitionTasks` 已用 `/advancements` 的 fresh 响应完成该 gate：缺失目标仍记录 unknown，未知不计分；所有非根目标被检查后，`end_competition` 才能进入 terminal。模型也可 force-exit 当前目标并回任务选择。
 
+### 当前阶段候选投影（2026-11-16）
+
+`CompetitionTasks.model_view()` 是模型输入，`snapshot()` 仍保留 125 项供评分、审计与只读面板。`phase=selection` 时 `tasks` 是当前全部已解锁候选摘要，`active_goal=null`；`phase=active` 时 `tasks=[]`，`active_goal` 展开唯一任务详情。模型不负责下载/解析规则目录，不手动加载其他任务详情。
+
+| 当前状态 | 可解锁方向（仍须规则资格与技能可用） |
+| --- | --- |
+| 新鲜空背包 | 石器开局目标，任务内包含木材/木镐准备 |
+| 木镐或更高镐、圆石 | 石工具目标 |
+| 石镐或更高合适镐、铁原料/铁锭 | 获取铁锭目标 |
+| 铁锭，或铁原料并有可用熔炉 | 铁镐、铁甲目标 |
+| 床、同色羊毛或附近羊 | 睡眠目标，仍要准备床并等待合适时段 |
+| 种子、附近草或作物 | 种植目标，仍要耕地等前置 |
+
+候选会随物品损失、完成证据、附近环境和 cooldown 重算；`stage=bootstrap/stone/iron/unobserved` 仅是资源阶段摘要，不能替代每项目标门禁。pending/excluded/unsupported、已确认、冷却或前置不足目标不注入。末地/下界等后期目标当前仍无已绑定计划，不因 stage 提升而虚构执行能力。任务完成/强退后回到选择，恢复的活动目标仍保留详情并重新观察；预算、未知动作/模型锁和全目录结束检测保持原契约。这是确定性投影，不是语义 compact。
+
+### 必须调用、受阻报告与强制尝试（2026-11-16）
+
+这是三层独立权限。OpenAI兼容请求只在有tools时发送 `tool_choice="required"`，仍严格解析一轮一个native tool call；不回退auto、不增加网络重试。注册目录 starter9/daily33/competition38；实际请求按任务phase与本地allowed_actions过滤。安全条件允许调用report_blocked时，同任务状态连续3次模型wait后下一轮仅给该工具；任务/位置/库存等真实变化会解除该限制。元数据或等待不授予得分。
+
+| 工具 | 参数示例 | 返回与限制 |
+| --- | --- | --- |
+| `report_blocked` | `{"reason":"树叶挡住出口，附近无安全站位","resolution":"replan"}` | reason必填；resolution默认replan，或exit_task。保留失败/未知锁；赛事活动任务同一状态报告3次自动强退并cooldown，显式exit_task可立即返回选择。 |
+| `force_attempt` | `{"action":"gather_block","pos":[2,64,0],"expected_name":"oak_log","reason":"目标当前可见，仅覆盖夜间采集限制"}` | 扁平参数；action须在支持集合并再次按真实技能schema验证。成功/失败通过原始force_attempt tool_call_id反馈，pending保存外层请求。 |
+
+force_attempt参数不能只写action和reason。工具schema按真实动作声明必填字段：clear_foliage/gather_block必须pos与expected_name，craft_item必须item，place_item必须pos与item。坐标写在reason文字里不提供pos，程序不会猜测补齐。缺字段反馈明确列出missing_keys和JSON形状；连续两次格式/不可用工具错误后，下轮只提供report_blocked，避免重复相同无效调用。
+
+可强制的是单次采集/清叶、制作（最多16个增量）、单次放置、短距精确站位、住所检查/单步施工。禁止任意HTTP/代码/自递归、批量、狩猎和远程move_to。采集目标须在完整新鲜观察中匹配可见且未明确不可挖，距离最多4格；清叶和精确站位最多3格。清叶仍禁止自己整列/支撑、仅相邻身体高度，要求明确非含水叶块；只取消白天要求，不追掉落、不自动连挖。
+
+不能覆盖：低于关键生命/食物阈值（health<=配置low_health_threshold或food<=6）、已观察敌人在max(12,threat_radius)格内、火/水/岩浆/潜没、雷暴、不稳定落脚、目标危险或不可核验、无材料/错误维度、pending/模型unknown/并发占用。强制动作执行中的生命/世界变化仍中止，已写但未确认则保留action_unconfirmed，不重放。重复相同失败的forced attempt不会因改理由或wait就再执行；对普通动作旧时间拒绝允许一次改走显式force路径。
+
+已知树冠撤退搜索受树叶阻挡时持久化canopy_blocked/evacuating意图；无近敌且无显式危险时升级为完整观察，本地优先核验内部单步下降，身体高度清叶仍按共享候选和 force 安全门禁执行；无可用候选或预算耗尽后让模型报告或显式尝试。每步重读地形，不一次盲走整个旧路线；近敌保持旧 retreat 逻辑。撤退成功HTTP后最多1.25秒/6次观察等精确目标格落地，仍须on_ground和安全支撑；记录真实位移与失败原因，不把浮空或回血当作未移动。
+
+### harness 本地专用树冠下降（2026-11-16）
+
+用户新运行仍 `posY=92`、本地 `no_verified_local_recovery`、0 steps；身体高度叶片已清、附近地面脚部 Y 为88。旧恢复只有身体高度清叶及受历史 threat 方向/实心终点限制的完整 retreat，漏掉部分可安全下降的中继落脚点。
+
+| 内部入口 | 输入与单位 | 输出/执行边界 |
+|---|---|---|
+| `core/canopy_geometry.py` 的 `plan_canopy_step` | 当前状态和只读方块回调；坐标/距离为格 | 当前干叶支撑、居中落地；四正方向最多3格内找降低1～2格的落脚点；可先水平1格朝已核验下降口走，不盲目 wander。返回单步计划或 None。 |
+| daily collector 树冠采样 | `canopy_blocked` 且无显式危险 | 最多96次方块读/3秒规划预算；未知方块不当空气。 |
+| `skills/canopy.py` 的 `CanopyRecoverySkill` | 内部 Python 动作 `descend_canopy(pos, clear_pos, expected_name)`；无须清叶时后两项为 `None` | harness 本地专用，最多清一格侧下方干叶，绝不挖自身支撑；不注册模型工具，不能通过 generic force 扩权。 |
+
+串行 pending 写入后，每次写前重读12格实体门禁、支撑与身体净空；最多一次 `dig(collect=False)` 加一次 `move_to(range=0)`，随后确认精确目标落地。dig 未知禁止 move 和重放，保留 pending；结果证据 `action_state`、`retreat_complete`、`evacuation_stage` 区分未知、实心 ground 与叶片 relay。落到实心地面才清恢复，叶片则重观测。
+
+仅安静、无近敌树冠使用新路径，忽略历史威胁方向；旧近敌 retreat 保留。四格直落仍拒绝，不承诺任意树冠成功。侧下方清叶权限只属于此内部动作，`clear_foliage`、`force_attempt` 清叶和下述临时 `force_clear_foliage` 仍限相邻身体高度；模型工具仍9/33/38。
+
+离线覆盖包括模拟 `92→91→90→88` 到 ground、零模型请求、competition selection 先恢复、未知 pending、内部动作非模型工具、规划预算与失败目标排除。最终离线结果见 [TESTING.md](TESTING.md) 首节，尚未实服验收。侧叶用例不是实服验收，不承诺任意树冠成功。本轮未重启或操控在线机器人，现场仅读日志和监控；当前进程需重启加载修改。
+
+### 树冠恢复的当前目标绑定工具（2026-11-16）
+
+现场小模型在复杂force_attempt schema下仍返回 `{}` / 多个工具调用。树冠恢复现在临时提供 `force_clear_foliage`：函数描述明确一个当前可见、可挖、相邻身体高度且非支撑的叶片坐标/名称，参数只含可选reason，`{}` 就表示显式选择该具体动作。这是请求级别别名，不增加永久目录工具数，不是省略参数时猜坐标。
+
+- 每轮从完整新鲜观察重新绑定一个目标，优先已记录blocked_cells，再按距离；显式非含水叶块、3格内、health>=12/food>=8、稳定主世界/无危险等继续核验。冷却目标、原状态已失败force目标跳过，可选另一合法叶片，无合法目标则只给report_blocked/wait。
+- 恢复阶段实际只提供该绑定工具、report_blocked、wait，不再给通用force_attempt或无关计分/生产工具。selection阶段也可先脱困，不必先选计分任务。无安全目标不能提供虚构工具。
+- 模型选择后内部转换为canonical force_attempt；原assistant别名和call_id保留，真实执行前重新观察，目标变石头/危险靠近时拒绝。禁止传pos/action等额外字段来改绑，reason中的其他坐标不起作用。
+- 无新危险的已验证恢复动作不会因旧撤退搜索冷却在模型等待期间到期而被抢占；清障成功后仍重读下降路线逐步撤退，不自动连续挖叶或跳下。实际危险依然优先。
+- HTTP请求新增 `parallel_tool_calls=false`，但仍本地拒绝多个call，不因provider忽略设置就执行多动作。
+
+### 无床黄昏/夜间的执行约束
+
+阶段候选不授予安全豁免。daily/competition 的 `survival_constraints.scenario=night_preparation` 允许在满血、食物至少12、无雷暴/近敌、完整观察和稳定落地时，选择附近单步采木/制作/放置/站位/住所准备；不因 `time_of_day >=11000` 独自锁死整个模型。动作参数仍需即时核验，敌人缓冲至少12格。已有床、已验证返家路线/住所和紧急避险继续优先，夜间批量提案必须拒绝并重新规划。完整阈值和允许集合见 [DAILY_SURVIVAL.md](DAILY_SURVIVAL.md)。
+
 ## 7. 已确认方向与设计树
 
 ### 用户已确认
 
 | ID | 决策 |
 |---|---|
-| D1 | 按比赛目标/预制清单行动；harness 给阶段目标与当前可做项目，模型按资源和环境自主排序、规划。无需细致逐 API 计划，只需持续掌握目标、进度和下一意图。 |
+| D1 | 按比赛目标/预制清单行动；2026-11-16 明确改为基于当前状态的阶段简化候选，选中后展开单任务详情，替代旧全目录每轮注入。模型自主排序、规划，不要求逐 API 计划。 |
 | D2 | 超出预期行为/计划不可行时停止并重新规划；目标条件满足后模型可决定结束。 |
 | D3 | 预设目标全部完成检测后才开放正常退出；模型可结束或继续。可强制退出当前任务并回任务选择。检测完不等于全部成就已完成。 |
 | D4 | 模型重复输出触发循环兜底；compact 并允许一次重规划，仍重复则 force-exit 当前任务回任务选择。 |

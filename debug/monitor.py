@@ -68,7 +68,8 @@ class EventMonitor:
             "run": {"state": "waiting", "username": None, "planner": None, "model": None,
                     "steps": 0, "busy": False, "paused": False, "goal": None,
                     "phase": "idle", "pause_reason": None},
-            "status": {}, "decision": None, "last_result": None,
+            "status": {}, "decision": None, "decision_source": None, "last_result": None,
+            "local_execution": None,
             "daily": {"board": None, "memory_counts": {}},
             "competition": {"board": None},
             "llm": {"state": "idle", "request": None, "response": None, "error": None,
@@ -157,6 +158,8 @@ class EventMonitor:
         state.update(has_data=True, last_seq=record["seq"], updated_at=record["timestamp"])
         data = record["data"] if isinstance(record["data"], dict) else {}
         event = str(record["event"]).upper()
+        if event == "LOG_SOURCE":
+            state["source"] = copy.deepcopy(data)
         run = state["run"]
         if isinstance(data.get("status"), dict):
             state["status"] = data["status"]
@@ -189,6 +192,22 @@ class EventMonitor:
                 state["daily"]["board"] = data["daily_tasks"]
             if isinstance(data.get("memory_summary"), dict):
                 state["daily"]["memory_counts"] = data["memory_summary"]
+        if event in {"HEARTBEAT", "AGENT_STATE"} or event in {
+                "LOCAL_EXECUTION_STEP", "LOCAL_EXECUTION_RESULT", "LOCAL_EXECUTION_YIELDED", "MODEL_TAKEOVER"}:
+            if not data.get("_monitor_truncated"):
+                summary = data.get("local_execution") if event in {"HEARTBEAT", "AGENT_STATE"} else data.get("summary")
+                if isinstance(summary, dict):
+                    # Store only the published, already redacted summary; never infer a model request.
+                    state["local_execution"] = {key: copy.deepcopy(summary.get(key))
+                                                for key in ("phase", "reason", "steps", "recent")}
+                    recent = summary.get("recent")
+                    state["local_execution"]["recent"] = copy.deepcopy(recent[-6:]) if isinstance(recent, list) else None
+                else:
+                    state["local_execution"] = None
+        if event == "DECISION":
+            source = data.get("source")
+            state["decision_source"] = source if isinstance(source, str) and source in {
+                "local", "model", "manual", "safety", "rules"} else None
         if event == "DAILY_TASKS":
             state["daily"] = {"board": data.get("board"), "memory_counts": data.get("memory_counts", {})}
         if event == "AGENT_PHASE":

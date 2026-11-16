@@ -12,6 +12,10 @@ agent:
 
 survival:
   objective: "starter"                     # starter, daily, competition (requires llm.enabled; no chat debug).
+  local_execution:
+    enabled: true                          # Local verified work first; model takes over only when blocked/budget exhausted.
+    max_steps: 64                          # Per current task/recovery episode; no stored action replay.
+    max_seconds: 180
   competition:
     # Conditions in the draft are NOT enabled automatically. Set final-table IDs explicitly.
     eligibility_overrides: {}              # e.g. minecraft:story/follow_ender_eye: true (only if final rules score it).

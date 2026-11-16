@@ -2,7 +2,7 @@
 
 Pass fresh collector observations and the unmodified /advancements envelope to
 update. Missing visible-tree IDs remain unknown. state() is a small checkpoint;
-snapshot() is a detached model board. Nonterminal restores need fresh assessment.
+snapshot() is the full audit board; model_view() is the staged model input. Nonterminal restores need fresh assessment.
 No networking, skill execution, compact, handoff or lock recovery occurs here.
 Injected catalog rows must already resolve overrides in competition_rules.
 clock is a callable returning epoch seconds (time.time by default).
@@ -654,6 +654,77 @@ class CompetitionTasks:
                 and all(check["checked"] for check in self._assessment.values())
                 and catalog["complete"])
 
+    def _stage_access(self, goal_id: str) -> bool:
+        """Use current physical prerequisites, never historical scores, to unlock a goal."""
+        known, counts, blocks = self._resources(self._observation)
+        if not known:
+            return False
+        has = lambda item: counts.get(item, 0) > 0
+        pick = any(has(f"{tier}_pickaxe") for tier in
+                   ("wooden", "stone", "iron", "golden", "diamond", "netherite"))
+        stone_pick = any(has(f"{tier}_pickaxe") for tier in ("stone", "iron", "diamond", "netherite"))
+        raw = any(has(item) for item in ("raw_iron", "iron_ore", "deepslate_iron_ore"))
+        furnace = has("furnace") or "furnace" in blocks
+        path = goal_id.split("/")[-1]
+        if path == "mine_stone":
+            return True  # The bootstrap task includes acquiring wood and a wooden pickaxe.
+        if path == "upgrade_tools":
+            return pick or has("cobblestone")
+        if path == "smelt_iron":
+            return stone_pick or raw or has("iron_ingot")
+        if path in ("iron_tools", "obtain_armor"):
+            return has("iron_ingot") or raw and furnace
+        if path == "sleep_in_bed":
+            entities = (self._observation or {}).get("entities", [])
+            sheep = isinstance(entities, list) and any(
+                isinstance(row, dict) and row.get("name", "").removeprefix("minecraft:") == "sheep"
+                for row in entities)
+            return (any(name.endswith("_bed") for name in blocks)
+                    or any(n > 0 and name.endswith("_bed") or n >= 3 and name.endswith("_wool")
+                           for name, n in counts.items()) or sheep)
+        if path == "plant_seed":
+            return (any(has(item) for item in ("wheat_seeds", "beetroot_seeds", "carrot", "potato"))
+                    or bool(blocks & {"short_grass", "tall_grass", "wheat", "carrots", "potatoes", "beetroots"}))
+        return False  # New goals need an explicit prerequisite policy before exposure.
+
+    @_synchronized
+    def model_view(self) -> dict:
+        """Return all currently unlocked choices, or full details for the active task.
+
+        This is a projection, not a checkpoint. The complete scoring catalogue stays
+        in snapshot() for local assessment and the read-only dashboard.
+        """
+        board = self.snapshot()
+        known, counts, _ = self._resources(self._observation)
+        stage = "unobserved"
+        if known:
+            stage = ("iron" if any(counts.get(item, 0) > 0 for item in (
+                "stone_pickaxe", "iron_pickaxe", "diamond_pickaxe", "netherite_pickaxe",
+                "raw_iron", "iron_ingot", "iron_ore", "deepslate_iron_ore")) else
+                "stone" if any(counts.get(item, 0) > 0 for item in ("wooden_pickaxe", "golden_pickaxe", "cobblestone"))
+                else "bootstrap")
+        candidates = [{key: row[key] for key in ("id", "title", "points", "availability")}
+                      for row in board["tasks"] if row["selectable"]]
+        active = next((row for row in board["tasks"] if row["id"] == board["active_goal_id"]), None)
+        details = None
+        if active is not None:
+            details = {key: copy.deepcopy(active[key]) for key in (
+                "id", "title", "difficulty", "points", "eligibility", "availability", "completion",
+                "stage", "missing", "next_steps", "reason", "required_skills")}
+            # Unlike the dashboard's brief fields, selected-task rules stay complete.
+            details["condition"] = self._by_id[active["id"]]["condition"]
+            details["completion_criteria"] = "Only a fresh server advancement completed status confirms this goal; inventory is preparation."
+            details["failure_criteria"] = "A failed or unknown skill result does not complete the goal; reobserve and replan."
+            details["abort_criteria"] = "Use force_exit_task when blocked; unknown game actions and model requests must remain locked."
+        result = {key: copy.deepcopy(board[key]) for key in (
+            "rules_version", "phase", "active_goal_id", "progress_card", "score", "stale",
+            "remaining_seconds", "last_exit", "advancements", "assessment_complete", "end_reason")}
+        result.update(stage=stage, tasks=candidates, active_goal=details,
+                      selectable_goal_ids=[row["id"] for row in candidates],
+                      catalog_assessment={key: board["catalog_assessment"][key]
+                          for key in ("checked", "total", "known_count", "complete")})
+        return result
+
     @_synchronized
     def snapshot(self) -> dict:
         """Return a serializable, consistent all-catalog board without mutations."""
@@ -676,6 +747,7 @@ class CompetitionTasks:
             row["selectable"] = (self._state["phase"] == "selection" and self._remaining(now) > 0
                 and row["eligibility"] == "scored" and ident not in confirmed
                 and row["availability"] in ("ready", "needs_prerequisites")
+                and self._stage_access(ident)
                 and (row["deferred_until"] is None or row["deferred_until"] <= now))
             tasks.append(row)
             if ident in confirmed:

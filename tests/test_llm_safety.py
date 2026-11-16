@@ -51,7 +51,8 @@ class LLMSafetyTests(unittest.TestCase):
 
     def harness(self, name, args, before_response=None, content=None, **settings):
         self.counter += 1
-        survival = {**copy.deepcopy(DEFAULTS["survival"]), "state_dir": str(Path(self.temp.name) / str(self.counter)),
+        survival = {**copy.deepcopy(DEFAULTS["survival"]), "local_execution": {"enabled": False},
+                    "state_dir": str(Path(self.temp.name) / str(self.counter)),
                     "poll_interval_seconds": 0.001, "max_runtime_seconds": 10, **settings}
         planner = LLMSurvivalPlanner({"enabled": True, "model": "fake", "api_key": "private-key-sentinel"}, survival,
                                     brain=Model(name, args, before_response, content))

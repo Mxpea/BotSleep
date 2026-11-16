@@ -24,6 +24,7 @@ DEFAULTS: Dict[str, Any] = {
     "agent": {"name": "SleepBot", "password": "", "mode": "sleep"},
     "survival": {
         "objective": "starter",
+        "local_execution": {"enabled": True, "max_steps": 64, "max_seconds": 180},
         "competition": {"eligibility_overrides": {}, "defer_seconds": 300,
                         "advancement_poll_seconds": 5, "max_seconds": 28800, "max_steps": 100000},
         "daily": {"food_reserve": 8, "wood_reserve": 8, "fuel_reserve": 8, "maintenance_interval_seconds": 30},
@@ -172,6 +173,15 @@ def _validate(config: Dict[str, Any], config_dir: Path) -> None:
         raise ConfigError("survival contains unsupported options")
     if survival["objective"] not in {"starter", "daily", "competition"}:
         raise ConfigError("survival.objective must be starter, daily or competition")
+    local = _mapping(survival["local_execution"], "survival.local_execution")
+    if set(local) - set(DEFAULTS["survival"]["local_execution"]):
+        raise ConfigError("survival.local_execution contains unsupported options")
+    _boolean(local["enabled"], "survival.local_execution.enabled")
+    if type(local["max_steps"]) is not int or not 1 <= local["max_steps"] <= 128:
+        raise ConfigError("survival.local_execution.max_steps must be an integer between 1 and 128")
+    _positive(local["max_seconds"], "survival.local_execution.max_seconds")
+    if local["max_seconds"] > 600:
+        raise ConfigError("survival.local_execution.max_seconds must not exceed 600")
     competition = _mapping(survival["competition"], "survival.competition")
     if set(competition) - set(DEFAULTS["survival"]["competition"]):
         raise ConfigError("survival.competition contains unsupported options")

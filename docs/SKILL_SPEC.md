@@ -1,6 +1,6 @@
 # BotSleep 技能规范文档 (SKILL SPECIFICATION)
 
-源码核对：2026-11-15，`3801be9`。本文区分模型已绑定技能、独立开发技能和未接入提案；实现存在不等于实服验收。验证结果见 [TESTING.md](TESTING.md)。
+源码核对：2026-11-16，`38db5d5` 加本地执行优先等工作树改动。本文区分模型已绑定技能、独立开发技能和未接入提案；实现存在不等于实服验收。验证结果见 [TESTING.md](TESTING.md)。
 
 ---
 
@@ -12,11 +12,30 @@
 - `execute(**kwargs) -> SkillResult`：核心动作逻辑。
 - `rollback(reason: str) -> None`：异常中断时的恢复钩子，基类默认不执行动作；具体恢复以各技能实现为准。
 
-`SkillResult` 包含 `success`、`message`、`data`、`error_code`。生存基础动作通过 `SurvivalSkills.execute(name, args, cancel_event=None, *, recovery_context=None)` 分派；`recovery_context` 由 harness 内部提供，不是模型参数。当前运行时为 `main.py` 启动的 `core/survival_harness.py`，不使用 `agent/loop.py` 旧骨架。starter/daily/competition 分别公开9/31/36项模型工具，仅接受已注册动作；实际契约见 [SURVIVAL.md](SURVIVAL.md) 与 [DAILY_SURVIVAL.md](DAILY_SURVIVAL.md)。
+`SkillResult` 包含 `success`、`message`、`data`、`error_code`。生存基础动作通过 `SurvivalSkills.execute(name, args, cancel_event=None, *, recovery_context=None)` 分派；`recovery_context` 由 harness 内部提供，不是模型参数。当前运行时为 `main.py` 启动的 `core/survival_harness.py`，不使用 `agent/loop.py` 旧骨架。starter/daily/competition 分别公开9/33/38项模型工具，仅接受已注册动作；实际契约见 [SURVIVAL.md](SURVIVAL.md) 与 [DAILY_SURVIVAL.md](DAILY_SURVIVAL.md)。
 
 ---
 
 日常生产技能及验证边界见 [DAILY_SURVIVAL.md](DAILY_SURVIVAL.md)。下面的 `pillar_up`、`mlg_water` 及其 `telemetry.ReflexDaemon` 触发机制是未接入的设计规范，不属于可执行模型工具。
+
+### 本地优先分派
+
+启用模型时，`LocalExecutor` 默认先从新鲜观察生成一个动作：普通任务使用真实注册技能，树冠内部下降使用下述专用契约，均沿用安全门禁与pending；普通任务、相邻树冠准备、本地专用分段下降和有界加工等待由harness推进，无可用方案或预算耗尽再请求模型。模型接管收到最多6条本地结果摘要；本地结果不伪造模型call_id。默认64步/180秒，可设置 `survival.local_execution.enabled: false` 恢复直接模型规划。永久工具目录未增加，未知写入和模型门禁保持原锁定要求。
+
+### 模型恢复工具
+
+`report_blocked` 和 `force_attempt` 由harness处理，不是允许任意技能反射调用的接口。force_attempt必须说明原因，action和扁平参数再次按真实已注册工具schema验证；执行时传入内部force_advisory标记，仅覆盖明确支持的时间判断。禁止把该内部标记暴露成可由普通动作任意设置的参数。未知写入、支撑/净空、危险、材料和执行后证据不得跳过。调用示例和完整限制见 [HARNESS_INTERFACES.md](HARNESS_INTERFACES.md)。
+
+### harness 内部树冠下降（非模型工具）
+
+`skills/canopy.py` 的 `CanopyRecoverySkill` 由 harness 本地分派内部 Python 动作 `descend_canopy(pos, clear_pos, expected_name)`。通过 `execute("descend_canopy", {"pos": [...], "clear_pos": None, "expected_name": None})` 执行；坐标单位为格，`pos` 是脚部精确目标，需要清叶时后两项由当前观察绑定侧下方叶片坐标和真实名称。它不在模型 registry，starter/daily/competition 工具数仍9/33/38，不能经 `force_attempt` 扩大调用范围。
+
+- 规划：`core/canopy_geometry.py` 的 `plan_canopy_step` 要求居中站在脚下干叶上；在四正方向最多3格内寻找降低1～2格的落脚点。可先水平1格朝已核验下降口推进，不盲目 wander；最多清一格侧下方干叶，绝不挖自身支撑。daily collector 仅在 `canopy_blocked` 且无显式危险时采样，最多96次方块读/3秒规划预算。
+- 执行：仅无近敌的安静树冠走此路径，忽略历史 threat 方向；近敌仍走旧 retreat。沿用串行 pending，每次写前重查12格实体门禁、支撑和身体净空；最多一次 `dig(collect=False)` 加一次 `move_to(range=0)`。dig 未确认返回 `dig_unconfirmed` 并保留 pending，禁止继续 move 或重放；移动结果未知同样锁定。
+- 完成：精确目标、稳定落地和支撑均需复核。结果证据含 `action_state`、`retreat_complete`、`evacuation_stage`；实心地面才清除恢复，叶片为 relay、下轮重新观察。四格直落仍拒绝，不承诺任意树冠成功。
+- 权限：`clear_foliage` 及其 generic force/临时 `force_clear_foliage` 仍只清相邻身体高度的叶片，不能据本内部动作放宽到侧下方；自身支撑始终禁止。
+
+离线覆盖包括模拟 `92→91→90→88` 到 ground、零模型请求、competition selection 先恢复、未知 pending、内部动作非模型工具、规划预算与失败目标排除。最终离线结果见 [TESTING.md](TESTING.md) 首节，尚未实服验收。侧叶用例不是实服验收，不承诺任意树冠成功。本轮现场仅读日志和监控，未重启或操控在线机器人；当前进程需重启加载修改。
 
 ## 二、核心技能规范
 

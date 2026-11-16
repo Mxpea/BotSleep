@@ -10,6 +10,8 @@ from dataclasses import asdict
 
 from agent.survival_planner import Decision, SurvivalPlanner
 from core.client import APIError
+from core.local_execution import LocalExecutor
+from core.local_recovery import canopy_descent
 from core.sleep_controller import SleepController
 from core.survival_state import ObservationCollector, SurvivalJournal
 from skills import SkillResult
@@ -49,6 +51,10 @@ class SurvivalHarness:
         self.uses_llm = getattr(self.planner, "uses_llm", False) is True
         self._safety_rules = SurvivalPlanner(settings)
         self._model_feedback = False
+        self.local_executor = LocalExecutor(settings)
+        from skills.canopy import CanopyRecoverySkill
+        self.canopy_skills = CanopyRecoverySkill(client)
+        self._local_step = False
         self.competition_mode = settings.get("objective", "starter") == "competition"
         self.competition = None
         self._competition_board_signature = None
@@ -88,7 +94,7 @@ class SurvivalHarness:
             from skills.doors import DoorSkills
             from skills.positioning import PositioningSkills
             self.daily_goals = DailySurvivalGoals(settings)
-            self.daily_policy = DailySafetyPolicy(settings)
+            self.daily_policy = DailySafetyPolicy(settings, allow_controls=self.uses_llm)
             self.skills = skills or DailySurvivalSkills(client)
             self.collector = collector or DailyObservationCollector(client, settings["scan_radius"],
                 low_health_threshold=settings["low_health_threshold"])
@@ -145,6 +151,20 @@ class SurvivalHarness:
     def paused(self):
         return self._paused
 
+    @property
+    def next_poll_seconds(self) -> float:
+        """Wake quickly for running/ready local work; retain deliberate backoff."""
+        interval = self.settings["poll_interval_seconds"]
+        if self.busy:
+            return min(interval, .05)
+        if self.paused or self.finished:
+            return interval
+        delay = max(0, self._next_attempt - time.monotonic())
+        local = self.context.get("local_execution") or {}
+        if self.local_executor.enabled and local.get("phase") == "running":
+            return min(interval, max(.05, delay))
+        return interval
+
     def _record(self, level, event, data):
         if self.recorder and callable(getattr(self.recorder, "redact", None)):
             data = self.recorder.redact(data)
@@ -176,6 +196,7 @@ class SurvivalHarness:
                 "model_blocked": self._model_blocked,
                 "model_pending": bool(self._model_worker and self._model_worker.pending),
                 "pending": copy.deepcopy(self.journal.state.get("pending")),
+                "local_execution": self.local_executor.summary(self.context),
                 "daily_tasks": self.daily_board,
                 "memory_summary": {key: len(value) for key, value in self.context.get("memory", {}).items() if isinstance(value, list)},
                 "retry_in_seconds": max(0, round(self._next_attempt - time.monotonic(), 1)),
@@ -188,12 +209,20 @@ class SurvivalHarness:
 
     def _mandatory_safety(self, observation):
         """Only safety decisions may override the model, never its resource plan."""
+        if (self.local_executor.enabled and not self.journal.state.get("pending")
+                and not self._model_blocked and canopy_descent(observation, self.context, self.settings) is not None):
+            return None  # Fresh quiet-canopy recovery is independent of an old threat coordinate.
         decision = self._safety_rules.choose(observation, self.context)
         decision = self._retreat_decision(observation, decision)
         if self.daily_policy:
             decision = self.daily_policy.choose(observation, decision, self.daily_board)
             if decision is None:
                 return None
+            recovery = self.context.get("retreat_recovery") or {}
+            if (self.uses_llm and decision.name == "wait" and recovery.get("canopy_blocked") is True
+                    and not self.journal.state.get("pending") and not self._model_blocked
+                    and self.daily_policy._force_environment_error(observation) is None):
+                return None  # Let the model report the blockage or explicitly clear one checked leaf.
         if decision.goal in {"safety", "recover", "observe", "food", "sleep"}:
             return decision
         return None
@@ -273,6 +302,16 @@ class SurvivalHarness:
 
     def _retreat_result(self, decision, result, observation):
         """Return whether a known route failure uses recovery rather than global failure limits."""
+        if decision.name == "descend_canopy" and observation is not None:
+            recovery = self.context.get("retreat_recovery") or {}
+            if result.success:
+                if result.data.get("retreat_complete") is True:
+                    self.context.pop("retreat_recovery", None)
+                    self._record("INFO", "CANOPY_LANDED", {"pos": observation["status"]["pos"]})
+                else:
+                    recovery.update(evacuating=True, canopy_blocked=True)
+                    recovery.pop("retry_after", None)
+            return False
         if decision.name != "retreat_from" or observation is None:
             return False
         recovery = self.context.get("retreat_recovery")
@@ -291,6 +330,9 @@ class SurvivalHarness:
             return False
         if result.error_code not in RETREAT_REPLAN and result.data.get("candidate_failed") is not True:
             return False
+        support = result.data.get("origin_support") or {}
+        if isinstance(support, dict) and support.get("center_name") in SurvivalSkills.RETREAT_LEAVES:
+            recovery.update(evacuating=True, canopy_blocked=True)
         target = self._safety_rules._pos(result.data.get("target"))
         if target is not None:
             key = ",".join(str(math.floor(value)) for value in target)
@@ -313,7 +355,7 @@ class SurvivalHarness:
         return json.dumps({key: status.get(key) for key in ("last_death", "dimension", "alive")}, sort_keys=True)
 
     def _unsafe_destination(self, decision, observation):
-        target_actions = {"move_to", "gather_block", "place_item"}
+        target_actions = {"move_to", "gather_block", "place_item", "descend_canopy"}
         if self.daily:
             target_actions |= {"gather_resource", "harvest_crop", "gather_seeds", "clear_foliage", "plant_crop", "till_soil", "place_bed", "place_door",
                                "smelt_start", "smelt_collect", "inspect_container", "store_items", "take_items",
@@ -468,13 +510,58 @@ class SurvivalHarness:
             self._record("INFO", "COMPETITION_TASKS", {"board": board})
             self._competition_board_signature = signature
 
+    @staticmethod
+    def _execution_decision(decision):
+        if decision.name != "force_attempt":
+            return decision
+        return Decision(decision.args["action"], {key: value for key, value in decision.args.items() if key != "action"},
+                        decision.reason, decision.goal)
+
+    def _report_blocked(self, decision, observation):
+        if decision.name != "report_blocked":
+            return None
+        if self.journal.state.get("pending") or self._model_blocked or self._cancel.is_set():
+            return SkillResult(False, "Recovery reporting cannot clear an unsettled action or model slot",
+                               {"executed": False}, "action_unconfirmed")
+        board = self.competition.snapshot() if self.competition else {}
+        status = observation.get("status", {})
+        basis = {"goal_id": board.get("active_goal_id"), "pos": status.get("pos"),
+                 "dimension": status.get("dimension"), "last_death": status.get("last_death"),
+                 "counts": observation.get("counts", {}),
+                 "blocks": [{key: row.get(key) for key in ("name", "pos", "can_see")}
+                            for row in observation.get("blocks", [])[:16] if isinstance(row, dict)]}
+        previous = self.context.get("last_blockage") or {}
+        attempts = previous.get("attempts", 0) + 1 if previous.get("basis") == basis else 1
+        self.context["last_blockage"] = {"basis": copy.deepcopy(basis), "attempts": attempts,
+            "reason": decision.reason[:240], "resolution": decision.args.get("resolution", "replan")}
+        exit_task = decision.args.get("resolution") == "exit_task" or attempts >= 3
+        data = {"executed": False, "replan_required": True, "attempts": attempts,
+                "task_exited": False, "active_goal_id": board.get("active_goal_id")}
+        if self.competition and board.get("active_goal_id"):
+            if exit_task:
+                result = self.competition.force_exit("blocked: " + decision.reason[:140])
+                data.update(result.get("data", {}), task_exited=result["success"])
+            else:
+                self.competition.record_action("replan", {}, {"success": True, "data": {"replan_attempted": True}})
+        data["phase"] = self.competition.snapshot()["phase"] if self.competition else "daily_reassessment"
+        self._checkpoint(context=self.context)
+        if self.competition:
+            self._record("INFO", "COMPETITION_TASKS", {"board": self.competition.snapshot()})
+        self._record("WARN", "BLOCKAGE_REPORTED", {"reason": decision.reason[:240], **data})
+        return SkillResult(True, "Blockage recorded; choose a different plan or a supported forced attempt. Unknown locks and failure history are unchanged", data)
+
     def _competition_tool(self, decision, observation):
         """Handle metadata-only task tools at an idle, fresh execution boundary."""
         if not self.competition:
             return None
         names = {"select_task", "update_progress", "finish_task", "force_exit_task", "end_competition"}
         if decision.name not in names:
-            if self.competition.snapshot().get("active_goal_id") is None and decision.name not in {
+            canopy_clear = (decision.name == "clear_foliage"
+                and self._active_decision is not None and self._active_decision.name == "force_attempt"
+                and (self.context.get("retreat_recovery") or {}).get("canopy_blocked") is True)
+            canopy_clear = canopy_clear or (decision.name == "descend_canopy" and self._local_step
+                and (self.context.get("retreat_recovery") or {}).get("canopy_blocked") is True)
+            if not canopy_clear and self.competition.snapshot().get("active_goal_id") is None and decision.name not in {
                 "wait", "retreat_from", "eat_food", "auto_sleep"}:
                 return SkillResult(False, "Select a scored goal before production actions", {"executed": False}, "task_selection_required")
             return None
@@ -523,11 +610,55 @@ class SurvivalHarness:
                     and status.get("gamemode") == "survival" and status["food"] < 20
                     and (status["health"] <= self._safety_rules.low_health
                          or status["food"] <= self._safety_rules.food_threshold))
-                # Without a nearby enemy, existing food/low-health priorities
-                # still need a real inventory rather than a partial empty list.
-                if safety_only or close or not needs_inventory or not status.get("ready") or not status.get("alive") or status.get("busy"):
+                # A blocked canopy needs a full inventory/terrain turn before
+                # the model may report or clear a single obstacle. Safety-only
+                # snapshots must never authorize physical preparation.
+                needs_canopy = (self.uses_llm and recovery.get("canopy_blocked") is True
+                    and self._safety_rules._number(status.get("health"))
+                    and status["health"] > self.settings["low_health_threshold"]
+                    and self._safety_rules._number(status.get("food")) and status["food"] > 6
+                    and status.get("on_ground") is True and not status.get("thundering")
+                    and not any(status.get(key) for key in ("in_water", "in_lava", "on_fire", "submerged", "in_vehicle"))
+                    and not any(distance <= max(12, self.settings["threat_radius"]) for distance, _ in hostiles)
+                    and not (isinstance(nearby, dict) and self._safety_rules._number(nearby.get("dist"))
+                             and nearby["dist"] <= max(12, self.settings["threat_radius"])))
+                if safety_only or close or not (needs_inventory or needs_canopy) or not status.get("ready") or not status.get("alive") or status.get("busy"):
                     return short
         return self.collector.collect(self._cancel)
+
+    def _local_decision(self, observation):
+        """Prefer a fresh deterministic step before asking the model; never on unknown state."""
+        if (not self.local_executor.enabled or self.journal.state.get("pending")
+                or self._model_blocked or self._model_worker and self._model_worker.pending):
+            return None
+        if (self.context.get("local_execution") or {}).get("phase") == "blocked_unknown":
+            return None
+        gate = getattr(getattr(self.planner, "brain", None), "request_gate", None)
+        if gate is not None and callable(getattr(gate, "snapshot", None)):
+            slot = gate.snapshot()
+            if isinstance(slot, dict) and slot.get("state") != "idle":
+                return None
+        if observation.get("fresh") is not True or observation.get("observation_scope") == "safety":
+            return None
+        board = self.competition.model_view() if self.competition else None
+        decision = self.local_executor.choose(observation, self.context, competition=board, daily_board=self.daily_board)
+        if decision is None:
+            return None
+        execution = self._execution_decision(decision)
+        blocked = self._unsafe_destination(execution, observation)
+        if self.daily_policy:
+            if decision.name == "descend_canopy":
+                blocked = blocked or self.daily_policy._force_environment_error(observation)
+            else:
+                validation = self.daily_policy.validate_force if decision.name == "force_attempt" else self.daily_policy.validate
+                blocked = blocked or validation(execution, observation)
+        if blocked:
+            self.local_executor.reject(self.context, blocked)
+            self._record("WARN", "LOCAL_EXECUTION_YIELDED", {"reason": blocked, "summary": self.local_executor.summary(self.context)})
+            return None
+        self._local_step = True
+        self._record("INFO", "LOCAL_EXECUTION_STEP", {"decision": asdict(decision), "summary": self.local_executor.summary(self.context)})
+        return decision
 
     def _model_decision(self, observation):
         worker = self._model_worker
@@ -545,19 +676,22 @@ class SurvivalHarness:
             # entire daily-production catalogue or its unrelated top-3 hints.
             model_context.pop("daily_tasks", None)
             model_context.pop("action_hints", None)
-            board = self.competition.snapshot()
-            model_context["competition"] = {key: board.get(key) for key in (
-                "phase", "active_goal_id", "progress_card", "score", "stale", "remaining_seconds", "last_exit", "advancements", "assessment_complete")}
-            active = next((row for row in board.get("tasks", []) if row.get("id") == board.get("active_goal_id")), None)
-            model_context["competition"]["active_goal"] = ({key: active.get(key) for key in (
-                "id", "title", "points", "stage", "missing", "next_steps", "reason", "required_skills")} if active else None)
-            model_context["competition"]["selectable_goal_ids"] = [row["id"] for row in board["tasks"] if row["selectable"]]
-            model_context["competition"]["catalog_assessment"] = {
-                key: board["catalog_assessment"][key] for key in ("checked", "total", "known_count", "complete")}
-            model_context["competition"]["task_columns"] = ["id", "title", "difficulty", "points", "eligibility", "availability", "completion"]
-            model_context["competition"]["tasks"] = [[row.get(key) for key in (
-                "id", "title", "difficulty", "points", "eligibility", "availability", "completion")]
-                for row in board.get("tasks", [])]
+            model_context["competition"] = self.competition.model_view()
+        recovery = self.context.get("retreat_recovery") or {}
+        if recovery.get("canopy_blocked") is True:
+            if model_context is self.context:
+                model_context = copy.deepcopy(self.context)
+            model_context["recovery"] = {"kind": "canopy", "goal": "Reach freshly verified solid ground before resource work",
+                "blocked_cells": copy.deepcopy(recovery.get("blocked_cells", [])[:4]),
+                "instruction": "Report the blockage, or force_attempt one verified adjacent leaf clearance when no explicit danger exists. Do not mine support or jump blindly; the harness rechecks descent."}
+        if self.local_executor.enabled:
+            if model_context is self.context:
+                model_context = copy.deepcopy(self.context)
+            model_context["local_execution"] = self.local_executor.summary(self.context)
+            model_context["blocked_targets"] = list(dict.fromkeys(
+                list(model_context.get("blocked_targets") or [])
+                + (self.context.get("local_execution") or {}).get("failed_targets", [])))
+            self._record("WARN", "MODEL_TAKEOVER", {"summary": model_context["local_execution"]})
         worker.start(observation, model_context)
         while not worker.done:
             if self._cancel.wait(.05):
@@ -632,13 +766,18 @@ class SurvivalHarness:
     def _cycle(self, manual):
         decision = Decision("observe", {}, "Read current state", "observe")
         observation = None
+        self._local_step = False
         try:
             self._phase("observing")
             observation = self._observe()
             self.latest_status = observation["status"]
             self._prepare_context(observation)
-            self.context.update(remaining_steps=max(0, self.settings["max_steps"] - self.steps),
-                                remaining_seconds=max(0, self.settings["max_runtime_seconds"] - (time.monotonic() - self._started)))
+            step_limit = (self.settings.get("competition", {}).get("max_steps", 100000)
+                          if self.competition_mode else self.settings["max_steps"])
+            remaining = (self.competition.snapshot().get("remaining_seconds", 0) if self.competition else
+                         self.settings["max_runtime_seconds"] - (time.monotonic() - self._started))
+            self.context.update(remaining_steps=max(0, step_limit - self.steps),
+                                remaining_seconds=max(0, remaining))
             if self._cancel.is_set():
                 return decision, SkillResult(False, "Cancelled before action", error_code="cancelled"), observation
             if self.context["death_count"] >= self.settings["max_deaths"]:
@@ -665,59 +804,79 @@ class SurvivalHarness:
                     decision = safety
                     self._record("WARN", "SAFETY_OVERRIDE", {"decision": asdict(safety), "status": observation["status"]})
                 else:
-                    if self._model_blocked:
-                        decision = Decision("wait", {"seconds": 5}, "Model request outcome is uncertain; local safety remains active", "observe")
-                        return decision, SkillResult(True, decision.reason, {"waiting": True, "model_blocked": self._model_blocked}), observation
-                    self._phase("thinking")
-                    before_life = self._life_marker(observation)
-                    decision = self._model_decision(observation)
-                    if decision is None:
-                        decision = Decision("wait", {"seconds": 1}, "Previous model request is draining; local safety remains active", "observe")
+                    local = self._local_decision(observation)
+                    if local is not None:
+                        decision = local
+                    else:
+                        if self._model_blocked:
+                            decision = Decision("wait", {"seconds": 5}, "Model request outcome is uncertain; local safety remains active", "observe")
+                            return decision, SkillResult(True, decision.reason, {"waiting": True, "model_blocked": self._model_blocked}), observation
+                        self._phase("thinking")
+                        before_life = self._life_marker(observation)
+                        decision = self._model_decision(observation)
+                        if decision is None:
+                            decision = Decision("wait", {"seconds": 1}, "Previous model request is draining; local safety remains active", "observe")
+                            if self._cancel.is_set():
+                                return decision, SkillResult(False, "Planning cancelled; no action sent", {"executed": False}, "cancelled"), observation
+                            return decision, SkillResult(True, decision.reason, {"waiting": True, "model_pending": True}), observation
+                        self._model_feedback = True
                         if self._cancel.is_set():
-                            return decision, SkillResult(False, "Planning cancelled; no action sent", {"executed": False}, "cancelled"), observation
-                        return decision, SkillResult(True, decision.reason, {"waiting": True, "model_pending": True}), observation
-                    self._model_feedback = True
-                    if self._cancel.is_set():
-                        return decision, SkillResult(False, "Paused while the model was planning; no action sent", error_code="cancelled"), observation
-                    # A slow model must not act on pre-death inventory or an old
-                    # daytime/danger snapshot. Skills then recheck target details.
-                    self._phase("rechecking")
-                    observation = self._observe()
-                    self.latest_status = observation["status"]
-                    self._prepare_context(observation)
-                    if self._cancel.is_set():
-                        return decision, SkillResult(False, "Cancelled before model action", error_code="cancelled"), observation
-                    if self.context["death_count"] >= self.settings["max_deaths"]:
-                        return decision, SkillResult(False, "Death limit reached while the model was planning",
-                                                     {"executed": False}, "death_limit"), observation
-                    if self._life_marker(observation) != before_life:
-                        return decision, SkillResult(False, "Life or dimension changed during model planning; replan",
-                                                     {"executed": False}, "safety_changed"), observation
-                    unsafe_target = self._unsafe_destination(decision, observation)
-                    if self.daily_policy:
-                        unsafe_target = unsafe_target or self.daily_policy.validate(decision, observation)
-                    if unsafe_target:
-                        self._record("WARN", "SAFETY_OVERRIDE", {"model_decision": asdict(decision), "reason": unsafe_target})
-                        return decision, SkillResult(False, unsafe_target, {"executed": False}, "safety_changed"), observation
-                    safety = self._mandatory_safety(observation)
-                    if safety is not None and (safety.name != decision.name or safety.args != decision.args):
-                        self._record("WARN", "SAFETY_OVERRIDE", {"model_decision": asdict(decision), "decision": asdict(safety)})
-                        return decision, SkillResult(False, "Fresh local safety check rejected the model action; replan",
-                                                     {"executed": False, "safety_decision": asdict(safety)}, "safety_changed"), observation
+                            return decision, SkillResult(False, "Paused while the model was planning; no action sent", error_code="cancelled"), observation
+                        # A slow model must not act on pre-death inventory or an old
+                        # daytime/danger snapshot. Skills then recheck target details.
+                        self._phase("rechecking")
+                        observation = self._observe()
+                        self.latest_status = observation["status"]
+                        self._prepare_context(observation)
+                        if self._cancel.is_set():
+                            return decision, SkillResult(False, "Cancelled before model action", error_code="cancelled"), observation
+                        if self.context["death_count"] >= self.settings["max_deaths"]:
+                            return decision, SkillResult(False, "Death limit reached while the model was planning",
+                                                         {"executed": False}, "death_limit"), observation
+                        if self._life_marker(observation) != before_life:
+                            return decision, SkillResult(False, "Life or dimension changed during model planning; replan",
+                                                         {"executed": False}, "safety_changed"), observation
+                        execution = self._execution_decision(decision)
+                        unsafe_target = self._unsafe_destination(execution, observation)
+                        if self.daily_policy:
+                            validation = self.daily_policy.validate_force if decision.name == "force_attempt" else self.daily_policy.validate
+                            unsafe_target = unsafe_target or validation(execution, observation)
+                        if decision.name == "force_attempt" and self.journal.state.get("pending"):
+                            unsafe_target = "action_unconfirmed"
+                        if unsafe_target:
+                            self._record("WARN", "SAFETY_OVERRIDE", {"model_decision": asdict(decision), "reason": unsafe_target})
+                            return decision, SkillResult(False, unsafe_target, {"executed": False}, "safety_changed"), observation
+                        canopy_control = (decision.name in {"force_attempt", "report_blocked"}
+                            and (self.context.get("retreat_recovery") or {}).get("canopy_blocked") is True
+                            and self.daily_policy is not None
+                            and self.daily_policy._force_environment_error(observation) is None)
+                        safety = None if canopy_control else self._mandatory_safety(observation)
+                        if safety is not None and (safety.name != decision.name or safety.args != decision.args):
+                            self._record("WARN", "SAFETY_OVERRIDE", {"model_decision": asdict(decision), "decision": asdict(safety)})
+                            return decision, SkillResult(False, "Fresh local safety check rejected the model action; replan",
+                                                         {"executed": False, "safety_decision": asdict(safety)}, "safety_changed"), observation
             else:
                 decision = self.planner.choose(observation, self.context)
                 decision = self._retreat_decision(observation, decision)
                 if self.daily:
                     safety = self.daily_policy.choose(observation, decision, self.daily_board)
                     decision = safety or self.daily_goals.choose(observation, self.context.get("memory"), self.context)
+                    if decision is not None and not safety and self.context.get("survival_constraints", {}).get("scenario") == "night_preparation":
+                        blocked = self.daily_policy.validate(decision, observation)
+                        if blocked:
+                            decision = Decision("wait", {"seconds": 5}, blocked, "safety")
                     if decision is None:
                         decision = Decision("wait", {"seconds": 5}, "No verified daily action is currently available", "observe")
             self._active_decision = decision
             self._safety_baseline = copy.deepcopy(observation["status"])
             self._record("INFO", "DECISION", {"decision": asdict(decision), "status": observation["status"],
                                                "counts": observation["counts"], "milestones": self.context["milestones"],
-                                               "source": "model" if self._model_feedback else "manual" if manual else "safety" if self.uses_llm else "rules"})
-            task_result = self._competition_tool(decision, observation)
+                                               "source": "local" if self._local_step else "model" if self._model_feedback else "manual" if manual else "safety" if self.uses_llm else "rules"})
+            execution = self._execution_decision(decision)
+            reported = self._report_blocked(decision, observation)
+            if reported is not None:
+                return decision, reported, observation
+            task_result = self._competition_tool(execution, observation)
             if task_result is not None:
                 return decision, task_result, observation
             if decision.name == "wait":
@@ -732,22 +891,35 @@ class SurvivalHarness:
             self._checkpoint(context=self.context, pending={"decision": asdict(decision), "before_counts": observation["counts"],
                 "before_counts_fresh": observation.get("inventory_fresh", True)})
             self._phase("acting")
-            if decision.name == "auto_sleep":
+            if execution.name == "auto_sleep":
                 options = {key: value for key, value in self.sleep_settings.items() if key in SleepController.SKILL_OPTIONS}
                 result = AutoSleepSkill(self.client).execute(**options, cancel_event=self._cancel)
             else:
-                options = {"recovery_context": self._retreat_options(observation, decision)} if decision.name == "retreat_from" else {}
-                runner = self.shelter_skills if self.daily and decision.name in {"plan_shelter", "inspect_shelter", "build_shelter_step"} else self.skills
-                if self.daily and decision.name in {"gather_materials", "build_shelter_batch"}:
+                options = {"recovery_context": self._retreat_options(observation, execution)} if execution.name == "retreat_from" else {}
+                runner = self.shelter_skills if self.daily and execution.name in {"plan_shelter", "inspect_shelter", "build_shelter_step"} else self.skills
+                if execution.name == "descend_canopy":
+                    runner = self.canopy_skills
+                elif self.daily and execution.name in {"gather_materials", "build_shelter_batch"}:
                     runner = self.batch_skills
-                elif self.daily and decision.name == "set_door":
+                elif self.daily and execution.name == "set_door":
                     runner = self.door_skills
-                elif self.daily and decision.name == "position_for_task":
+                elif self.daily and execution.name == "position_for_task":
                     runner = self.positioning_skills
-                result = runner.execute(decision.name, decision.args, cancel_event=self._cancel, **options)
+                if decision.name == "force_attempt":
+                    options.update(force_advisory=True, force_threat_radius=max(12, self.settings["threat_radius"]))
+                result = runner.execute(execution.name, execution.args, cancel_event=self._cancel, **options)
+                if decision.name == "force_attempt" and isinstance(result, SkillResult):
+                    result.data.update(forced_attempt=True, requested_action=execution.name)
+                    if result.success and execution.name == "clear_foliage" and result.data.get("block_removed") is True:
+                        recovery = self.context.get("retreat_recovery") or {}
+                        if recovery.get("canopy_blocked") is True:
+                            recovery.pop("retry_after", None)
+                            self._record("INFO", "CANOPY_PREPARATION", {"cleared": execution.args.get("pos"), "reobserve_before_descent": True})
+                    self._record("INFO" if result.success else "WARN", "FORCED_ATTEMPT_RESULT",
+                                 {"action": execution.name, "reason": decision.reason[:240], "result": asdict(result)})
             if not isinstance(result, SkillResult):
                 raise TypeError("Skill returned an invalid result")
-            if (self._model_feedback or self.daily) and not self._cancel.is_set() and not _uncertain_result(result):
+            if (self._local_step or self._model_feedback or self.daily) and not self._cancel.is_set() and not _uncertain_result(result):
                 try:
                     observation = self._observe(safety_only=decision.name == "retreat_from")
                     self.latest_status = observation["status"]
@@ -809,7 +981,19 @@ class SurvivalHarness:
                 and status.get("pos") == baseline.get("pos")
                 and status.get("on_ground") is True and status.get("is_day") is True
                 and not status.get("thundering") and status.get("time_of_day", 24000) < 11000)
-        danger = (not status.get("alive") or status.get("in_lava") or status.get("on_fire")
+        night_preparation_danger = False
+        if self.daily and (constraints.get("scenario") in {"night_preparation", "advisory_blocked"}
+                           or decision is not None and decision.name == "force_attempt"):
+            health = status.get("health")
+            food = status.get("food")
+            night_preparation_danger = (
+                not self._safety_rules._number(health) or health < baseline.get("health", 20)
+                or not self._safety_rules._number(food)
+                or food < (7 if constraints.get("scenario") == "advisory_blocked" or decision is not None and decision.name == "force_attempt" else 12)
+                or status.get("thundering")
+                or (self._safety_rules._number(hostile.get("dist"))
+                    and hostile["dist"] <= max(12, self.settings["threat_radius"])))
+        danger = (night_preparation_danger or not status.get("alive") or status.get("in_lava") or status.get("on_fire")
                   or status.get("submerged") or status.get("in_water")
                   or status.get("health", 20) <= self.settings["low_health_threshold"] and not food_turn
                   or (isinstance(hostile.get("dist"), (int, float)) and hostile["dist"] <= self.settings["threat_radius"]))
@@ -889,7 +1073,12 @@ class SurvivalHarness:
             self.steps += 1
             self.last_result, self.last_observation = result, observation
             self.context["last_result"] = asdict(result)
-            self._daily_result(decision, result, observation)
+            self._daily_result(self._execution_decision(decision), result, observation)
+            if self._local_step:
+                board = self.competition.model_view() if self.competition else None
+                self.local_executor.record(decision, result, observation, self.context, competition=board)
+                self._record("INFO", "LOCAL_EXECUTION_RESULT", {"decision": asdict(decision), "result": asdict(result),
+                             "summary": self.local_executor.summary(self.context)})
             if self.competition and decision.name not in {"select_task", "update_progress", "finish_task", "force_exit_task", "end_competition"}:
                 self.competition.record_action(decision.name, decision.args, asdict(result), observation)
                 self.context["competition"] = self.competition.state()
@@ -962,6 +1151,8 @@ class SurvivalHarness:
             if self._budget_exhausted:
                 self.finished = True
                 self.pause_reason = "budget_exhausted"
+            if self._local_step and decision.name != "wait" and result.success and not self.paused and not self.finished:
+                delay = 0  # Continue local verified steps without a model-round or retry delay.
             self._next_attempt = time.monotonic() + delay
             self.phase = "paused" if self.paused else "complete" if self.completed else "waiting"
             # Keep uncertain intentions for explicit recovery after a restart.

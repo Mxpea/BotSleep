@@ -226,6 +226,7 @@ base.heartbeat_at='invalid';render(base);assert(text('heartbeat-state').includes
 base.heartbeat_at=new Date(Date.now()-60000).toISOString();intervals.forEach(fn=>fn());assert(text('heartbeat-state').includes('stale'));
 const daily={has_data:true,status:{busy:false},run:{objective:'daily',phase:'acting',busy:true,paused:false},competition:base.competition,llm:{state:'idle'},daily:{board:{tasks:[{id:'food_reserve',status:'ready'}]},memory_counts:{places:2}}};
 render(daily);assert(get('competition-panel').classes.has('hidden'));assert(!get('daily-panel').classes.has('hidden'));assert(text('daily-tasks').includes('食物储备'));assert(text('daily-tasks').includes('可推进'));assert(text('memory-summary').includes('地点 2'));assert(text('game-state').includes('busy 是'));
+base.source={mode:'log_tail',file:'flight_fixture.jsonl',last_event_at:new Date(Date.now()-60000).toISOString()};render(base);assert(text('data-source').includes('只读日志'));assert(text('data-source-note').includes('flight_fixture.jsonl'));assert(text('data-source-note').includes('不代表机器人在线'));
 console.log('Dashboard rendering checks passed');
 """
         result = subprocess.run([shutil.which("node"), "-e", runner],

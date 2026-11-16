@@ -193,7 +193,8 @@ class LLMRuntimeTests(unittest.TestCase):
 
     def survival_settings(self, **changes):
         self.scope += 1
-        return {**copy.deepcopy(DEFAULTS["survival"]), "state_dir": str(Path(self.temp.name) / f"state_{self.scope}"),
+        return {**copy.deepcopy(DEFAULTS["survival"]), "local_execution": {"enabled": False},
+                "state_dir": str(Path(self.temp.name) / f"state_{self.scope}"),
                 "poll_interval_seconds": 0.002, "retry_seconds": 0.002,
                 "max_steps": 2, "max_runtime_seconds": 10, **changes}
 
@@ -249,7 +250,7 @@ class LLMRuntimeTests(unittest.TestCase):
         self.assertEqual(endpoint.requests[0]["authorization"], "Bearer fake-model-key-sentinel")
         feedback = self.tool_results(endpoint.requests[1])
         self.assertEqual(feedback[-1]["tool_call_id"], "gather_1")
-        self.assertIn('"success": true', feedback[-1]["content"].lower())
+        self.assertIs(json.loads(feedback[-1]["content"])["result"]["success"], True)
         self.assertIn("oak_log", feedback[-1]["content"])
         newest = json.loads(endpoint.requests[1]["body"]["messages"][-1]["content"])
         self.assertEqual(newest["observation"]["counts"], {"oak_log": 1})
@@ -269,7 +270,7 @@ class LLMRuntimeTests(unittest.TestCase):
         feedback = self.tool_results(endpoint.requests[1])[-1]
         self.assertEqual(feedback["tool_call_id"], "blocked_1")
         self.assertIn("no_path", feedback["content"])
-        self.assertIn('"success": false', feedback["content"].lower())
+        self.assertIs(json.loads(feedback["content"])["result"]["success"], False)
         self.assertEqual(len(self.game.writes()), 1)
 
     def test_pause_while_model_is_in_flight_discards_its_late_action(self):

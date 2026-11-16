@@ -1,8 +1,119 @@
 # 配置、客户端、生存、赛事与监控验证
 
-最近独立复核：2026-11-15（Asia/Shanghai），源码基线 `HEAD 3801be9`，另含本轮文档同步、实服测试门禁与 3 项隔离回归。首节为本轮结果；后续各节均是历史证据，不代表当前进程在线。
+最近独立复核：2026-11-16（Asia/Shanghai），`HEAD 38db5d5` 加阶段候选、恢复工具、日志监控与本地执行优先与安静树冠分段下降工作树改动。首节为本轮结果；历史结果与实服现场不代表当前版本通过。
 
-## 最新拉取后复核（3801be9）
+## 树冠身体高度已清空后仍无法下降（2026-11-16）
+
+只读现场日志与原生监控确认：新架构已加载，机器人脚部 Y=92，附近已观察地面脚部约 Y=88，本地为 `no_verified_local_recovery`、0 steps。身体高度无合法清叶候选，旧 retreat 的完整实心终点与历史威胁方向约束仍会拒绝部分已核验的下降步骤，模型最终反复 wait/report。首次失败用例验证了：存在已核验侧下落脚点时，旧 `LocalExecutor` 仍返回 None。
+
+新增 `core/canopy_geometry.py`、`skills/canopy.py`，collector 对安静树冠补充最多96读/3秒的有界采样，harness 专用 `descend_canopy` 可最多清一格侧下方干叶，单步下降1～2格；也可朝3格内已核验下降口水平推进1格。当前脚下支撑不挖，四格直落不放行。实际近敌仍使用旧 retreat；新路径独立复核源点和目标12格缓冲、生命周期、身体净空与支撑，不让历史威胁坐标阻断无近敌下降。模型工具仍9/33/38。
+
+| 检查 | 本轮复核结果 |
+| --- | --- |
+| `BOTSLEEP_RUN_LIVE_TESTS=0` 下 `python -X utf8 -B -m unittest discover -s tests -q` | **1081项，44.095秒：1077通过、3项门户实服跳过、1项旧SQLite清理ERROR**；无其他失败，不能报告全绿。 |
+| 新增树冠回归 | **44项全部通过**：15项几何/collector/harness整链，29项真实内部技能与可变内存世界回归。 |
+| 整链 | 身体高度已清空、地面低四格的合成世界中，最多清两格侧叶，3步 `92→91→90→88` 到实心地面，零模型请求；原支撑叶保留。competition selection 阶段同样可先恢复，不选目标、不授分。此地形保留现场失败结构，不是原世界完整体素重建。 |
+| 规划与活性 | 侧叶有下层支撑才可清理；最多3格直线内先证明有下降口才可水平中继；无出口不盲走，未知/含水/岩浆拒绝、失败目标排除、读预算有界。叶支撑本身足以标记树冠恢复，不依赖首4条拒绝证据中恰好出现叶片。 |
+| 写入与落地 | 每次写前重查支撑、源点与实体；未知 dig 保留 pending、禁止 move/重挖；写后受伤/取消/重生均不续行。一次 move 后最多1.25秒/6次状态观察核验落地，浮空或危险不成功。目标脚格、Y误差与X/Z各轴安全足迹按API舍入复核，不要求无误差的数学中心。 |
+| 兼容性 | 原本地优先81项、daily224项、retreat16项定向回归通过，亦包含于最终全量。示例配置、Python AST、文档相对链接及 `git diff --check` 通过；未增加模型调用入口或放宽通用 clear/force 权限。 |
+
+唯一ERROR仍为既有 `test_corrupt_and_future_schema_databases_are_preserved` 的Windows SQLite临时文件清理WinError32/267；本轮未修改该模块或抑制异常。仅离线/mock/本机假HTTP，现场核查只读取日志与监控；未登录新游戏会话、重启或操控在线机器人、修改运行检查点、请求真实模型或使用RCON，亦未修改相邻mc-agent-api。原native监控确认过的在线进程尚未加载本轮修复；需要重启加载后另做实服验收，不能据合成下降成功宣称原位置已经脱困。
+
+## 历史：Harness 本地执行优先与模型接管（2026-11-16）
+
+默认启用 `survival.local_execution`，预算为64步/180秒。harness 先执行有证据的任务步骤、换可观察资源目标、清障/撤退和已登记熔炉等待；无支持计划、替代方案耗尽或预算耗尽才请求模型。成功本地步骤不等普通poll，主线程busy/本地ready最多50ms唤醒，聊天独立节流。每步仍经过新观察、安全门禁、原pending、串行真实技能和后验核验；未知动作/模型槽不因本地优先解锁。模型请求前提供最近最多6条结果摘要与失败目标。
+
+| 检查 | 本轮复核结果 |
+| --- | --- |
+| `BOTSLEEP_RUN_LIVE_TESTS=0` 下 `python -X utf8 -B -m unittest discover -s tests -q` | **1037项，54.159秒：1033通过、3项门户实服跳过、1项旧SQLite清理ERROR**；无其他失败，不报告全绿。 |
+| 新增本地优先回归 | **83项**：32项任务单步规划、27项执行器预算/状态/未知锁/进展、9项实际starter与树冠运行链、5项competition/daily生命周期、8项监控、2项配置。原模型协议夹具显式关闭本地优先，继续验证原生工具反馈。 |
+| starter完整链 | 空背包开始，采集真实减少目标、制作扣材料、放置工作台、木镐后采石，取得三件石工具与熔炉并核验goal_complete；**32步、31次技能写动作、0次模型请求**。仅在受控内存世界验证，资源在交互范围内，不代表实服寻路性能。 |
+| 局部恢复与接管 | 树冠单叶清障后重观测并完成两步撤退，零模型请求；一个资源不可达先换另一个已观察目标。无候选/无进展/预算耗尽交模型，现实不变不重启同一失败；已知熔炉加工由本地有界等待推进。 |
+| 赛事证据 | 本地选择→扣材料制作→新鲜服务端advancement→finish，零模型请求；库存齐全不替代服务端完成。模型等待后收到新完成证据可回本地收尾；API证据不可用不finish、不授分。仍只有7个明确行动计划。 |
+| 未知与监控 | 未知结果跨作用域变化仍保持本地blocked_unknown/pending，不重放；模型门禁uncertain不本地生产。只读面板显示本地阶段、原因、步数、近期结果和决策来源；摘要/接管事件不伪造模型在途。 |
+| 配置与静态 | 示例Configuration valid；118个Python文件AST、文档相对链接与 `git diff --check` 通过。默认预算与示例一致，显式 `enabled: false` 可恢复逐步模型规划。 |
+
+唯一ERROR为既有 `test_survival_memory.SurvivalMemoryTests.test_corrupt_and_future_schema_databases_are_preserved` 的Windows临时SQLite文件清理WinError32/267，本轮未改该模块或抑制异常。3项跳过不是实服通过。只使用mock、内存游戏和本机临时假HTTP；没有真实模型/API/RCON请求，没有重启在线机器人或写其运行检查点，没有修改相邻mc-agent-api。当前运行进程需重新加载代码后另做实服验收；本轮不能证明完整比赛执行或长时无人值守完成。
+
+## 历史：小模型空参/多call：观察绑定恢复（2026-11-16）
+
+最新实测已加载anyOf参数修复，但模型持续返回force_attempt `{}`或两个call；report后又退回同一模式。另有旧撤退搜索冷却在模型思考期间到期，执行前强制搜索覆盖已经核验的清障。该层修复仅增强schema不足，需要降低模型所需参数量。
+
+实现临时请求工具 `force_clear_foliage`：选择一格当前可见、相邻身体高度、明确非含水、非支撑且不在冷却/相同失败状态的叶片，描述中绑定名称和坐标，模型 `{}` 或仅reason即可表示显式选择；不从reason补参，不注册全局通用动作、不改变永久9/33/38目录。canopy只提供该工具/report/wait，selection亦可先脱困；无合法目标/明确危险不提供绑定动作。模型原alias/call_id仍配对canonical force结果，执行前再次复核。HTTP明确parallel_tool_calls=false，本地仍拒绝多个call。
+
+| 检查 | 本轮结果 |
+| --- | --- |
+| `BOTSLEEP_RUN_LIVE_TESTS=0` 下 `python -X utf8 -B -m unittest discover -s tests -q` | **954项，37.415秒：950通过、3项门户实服跳过、1项旧SQLite清理ERROR**；无其他失败，不能报全绿。 |
+| 新增回归 | **11项**：9项pure planner绑定规则/目标冷却/别名配对/额外字段拒绝/危险与完整观察/无registry污染；2项实际collector/harness/skill链中目标变更拒绝与未选赛事任务先恢复。原完整树冠执行链已改为alias `{}`并模拟旧冷却到期，不增加该用例计数。 |
+| 完整离线执行链 | alias `{}`清一格叶片后重观测并续接两步撤退到实地；冷却在模型等待时到期不抢占；目标在回应前变stone则无dig/place/move且无pending；selection阶段可执行恢复而不授分。 |
+| 真实输入离线重放 | 从已有本地请求中重放树冠观察/约束/失败冷却，使用假Brain返回alias `{}`，选择另一合法树叶、跳过冷却目标。只重放输入，未探测模型或向游戏派发动作。 |
+| 配置/监控/静态 | 示例Configuration valid；110个Python文件AST、84个相对文档链接、git diff --check通过；本机18930原生监控与18931只读日志查看器都响应，来源/心跳分别展示。 |
+
+唯一ERROR仍为Windows SQLite临时文件清理WinError32/267，未修复或抑制；3项实服跳过不是脱困成功证据。仅离线模拟/本机假HTTP和读取已有监控页面，没有新游戏/API/RCON/真实模型请求、没有重启机器人或清锁。线上旧进程仍会按旧工具schema运行，加载此修改后是否实际脱困需另行验收。
+
+## 历史：force必填参数反馈与只读日志监控（2026-11-16）
+
+现场日志重复返回 `force_attempt {action:clear_foliage,reason:包含坐标的文字}`，遗漏JSON pos/expected_name；旧schema仅把action/reason标必填、内部再校验却反馈笼统，模型未修正。本轮增加按真实action required声明的anyOf分支与字段说明；本地仍按真实schema校验，明确missing_keys/unsupported_keys和JSON字段形状，不从reason猜坐标。连续两次格式/不可用工具错误后下轮提供report_blocked，防止继续重复畸形请求。
+
+监控打不开的已核对原因是私有配置 `debug.monitor.enabled=false`。本轮仅把该开关改为true供下次正常启动，未重启机器人。新增 `debug.monitor_tail` 在独立18931端口补读现有flight日志，重用只读HTTP、脱敏和缓存限制；启动后实际 `/` HTTP200、`/api/state` source.mode=log_tail 且已有日志数据，原日志无HEARTBEAT时仍为null。查看器存活不证明机器人在线。
+
+| 检查 | 本轮结果 |
+| --- | --- |
+| `BOTSLEEP_RUN_LIVE_TESTS=0` 下 `python -X utf8 -B -m unittest discover -s tests -q` | **943项，49.342秒：939通过、3项门户实服跳过、1项旧SQLite清理ERROR**；无其他失败，不能报告全绿。 |
+| 新增回归 | **26项**：23项日志尾读（有界起始窗口/坏行/超长行/UTF8拆分/追加/截断/轮转/跨会话隔离/不伪造心跳等），3项force必填schema/原样错误重放修正/连续畸形转report。 |
+| 当前只读页面 | 本机18931启动并独立HTTP复核成功，不读私有配置、不登录游戏、不发模型请求；主程序未来仍用18930，避免端口冲突。HTML来源标识已在原面板脚本测试覆盖。 |
+| 静态检查 | 109个Python文件AST、82个相对文档链接、git diff --check通过；本机配置加载确认monitor.enabled=true。 |
+
+唯一ERROR仍是Windows SQLite临时清理WinError32/267。仅读取本地事件诊断和mock/本机假HTTP测试，未操作游戏/API/RCON/模型、未写用户运行检查点或清锁。只读日志查看器作为后台辅助进程保持运行；后续加载机器人新代码时要正常停止旧进程再启动，不并行第二个同名客户端。已有进程不会热加载参数反馈修复。
+
+## 历史：required工具、受阻报告、强制尝试与树冠恢复（2026-11-16）
+
+用户明确同意分开实现required工具输出、report_blocked和force_attempt；强制仅覆盖没有明确危险的保守策略，如夜间单次采集/相邻清叶，不解除未知动作、模型门禁或实际目标/材料/几何限制。注册工具starter9/daily33/competition38，按本轮安全约束和任务phase动态过滤；预算计算采用实际发出的tools，原registry不变。
+
+| 检查 | 本轮结果 |
+| --- | --- |
+| `BOTSLEEP_RUN_LIVE_TESTS=0` 下 `python -X utf8 -B -m unittest discover -s tests -q` | **917项，33.865秒：913通过、3项门户实服跳过、1项旧SQLite清理ERROR**；无其他失败，不能报告全绿。 |
+| 新增恢复工具/传输/落地回归 | **43项**：required HTTP5项、pure policy/planner14项、落地确认16项、daily真实离线链6项、competition受阻退出2项。 |
+| required与动态目录 | 有tools请求required，无tools无tool_choice；无auto降级/自动网络重试。实际provider工具按allowed_actions与任务phase过滤；隐藏工具被有界repair拒绝且反馈配对。连续3次同任务同状态wait仅提供report_blocked，真实库存/任务变化解除。 |
+| force与blocked真实离线链 | 夜间19血单次采木库存+1/目标air；夜间强制清一格相邻叶片且collect=false；近敌出现拒绝写入；超时/写后受伤保留pending且不重放。活动任务连续3次同状态blocked自动强退cooldown，显式exit_task立即回选择，不授分、不清失败。 |
+| 树冠与撤退 | 已记录blocked canopy升级完整观察，模型force清一格后重读地形并续接两次检查后的撤退、到达实地清恢复意图；不是回放旧route。move_to只发一次，最多1.25秒/6次读等精确目标格落地；浮空/错格/危险/重生不算成功，记录实际位移和原因。 |
+| 配置与静态检查 | 示例Configuration valid；107个Python文件AST、79个文档相对链接、git diff --check通过。 |
+
+唯一ERROR仍为 `test_corrupt_and_future_schema_databases_are_preserved` 的Windows SQLite临时文件清理WinError32/267，未修复或抑制。3项跳过不是实服通过。只使用mock/内存游戏/本机临时假HTTP，未发真实模型/API/RCON请求、未重启在线机器人、未写其运行检查点，也未修改相邻API。required只约束provider输出，不能保证模型提案正确；force_attempt也可因新证据失败，不能据离线通过宣称任意树冠可脱困或长时无人值守已验收。
+
+## 历史：无床黄昏/夜间开局修复（2026-11-16）
+
+实测日志显示模型已选石器任务并提出采5根木头，但复查时跨过11000tick，旧本地策略返回 `night_requires_verified_sleep_or_shelter_route`；随后多轮本地wait，不是模型无响应或上下文超限。本轮用完整合成观察重现：满血/满食物且附近可见原木时，黄昏和夜间均 model_allowed=false、choose=wait。
+
+新增 `night_preparation` 在无现成床/已验证返家路径、状态与附近证据满足保守阈值时开放3格内单步准备；夜间仍禁止批量、探索、狩猎和清叶，不修改底层技能安全契约。模型返回后的同一门禁重新核验；在途受伤、雷暴、食物不足或敌人进入缓冲会取消/停止，迟到提案不执行。详见 [DAILY_SURVIVAL.md](DAILY_SURVIVAL.md)。
+
+| 检查 | 本轮结果 |
+| --- | --- |
+| `BOTSLEEP_RUN_LIVE_TESTS=0` 下 `python -X utf8 -B -m unittest discover -s tests -q` | **874 项，43.333 秒：870 通过、3 项门户实服跳过、1 项旧 SQLite 清理 ERROR**；无其他失败，不能报告全绿。 |
+| 新增夜间回归 | **19 项通过**：12项纯策略、6项真实collector/harness/skill + 本机假HTTP、1项赛事生命周期夜间元数据。 |
+| 真实离线执行链 | 无床夜间单次采木后原木库存+1且目标变air；已有工作台放置后库存-1且目标匹配；单步提案跨黄昏可执行；批量提案跨黄昏拒绝、配对失败反馈后模型改单步成功。 |
+| 危险/恢复边界 | 等待模型时生命下降、11格敌人或雷暴触发取消；无dig/place/move写入、没有第二个模型请求、迟到提案排空；规则模式不能绕过单步白名单。原床/返家/室内、低血、饥饿、未知状态等回归仍通过。 |
+| 配置与静态检查 | 示例Configuration valid；103个Python文件AST、75个文档相对链接、git diff --check通过。 |
+
+唯一 ERROR 仍是 `test_corrupt_and_future_schema_databases_are_preserved` 清理临时 SQLite 的 Windows WinError32/267，未修该模块或忽略异常。3项实服跳过不可计作游戏验收。没有连接真实模型/API/RCON、改时间、给物或重启当前机器人；仅离线模拟时序与读取此前日志。运行中的旧进程需重启加载代码后独立验收，本轮不声称实服已恢复行动。
+
+## 历史：状态驱动阶段候选与上下文超限回归（2026-11-16）
+
+用户实测发生 `llm_context_limit`；本地日志确认首轮当前输入约51–53KB，预算48KB，未发送模型请求。离线合成密集观察+旧全目录的复现为57,801字节，历史为空且模型假客户端未被调用，排除了“仅历史太长”。根因是每轮125项目录+36工具定义+真实观察/恢复状态叠加；原预算用例只有稀疏观察，覆盖不足。
+
+实现改为 `CompetitionTasks.model_view()`：选择时仅发送当前资源/附近环境解锁的候选摘要，选中后才发送完整单任务规则、缺口、最多5步建议、技能需求与完成/失败/中止判据；同一门禁控制 select，不能猜ID绕过。snapshot 保留125项用于本地计分和只读监控。阶段不会注册尚未实现的末地/下界技能。当前/历史消息与反馈移除JSON空白，仍以实际ASCII转义字节预算校验，不抬高上限；不是语义compact。
+
+| 检查 | 本轮结果 |
+| --- | --- |
+| `BOTSLEEP_RUN_LIVE_TESTS=0` 下 `python -X utf8 -B -m unittest discover -s tests -q` | **855 项，30.678 秒：851 通过、3 实服跳过、1 旧 SQLite 清理 ERROR**。无其他失败，不能报全绿。 |
+| `test_competition_task_view.py` | 新增10项通过：资源阶段变化、可选摘要/详情分离、全部合格候选不截top-N、隐藏目标选择拒绝、完整condition、冷却、unknown和terminal。 |
+| 实际 harness → worker → planner 多轮预算回归 | 密集48方块/16地形/12实体/站位候选与中文召回，8轮请求42,540–47,359字节，均小于48,000；选择后只发活动任务详情，完整审计目录仍为125项，最近工具反馈ID保持配对。 |
+| `python -B -m unittest discover -s tests -p test_llm_planner.py -q` | 48项通过；超大输入仍在本地拒绝，不绕过模型门禁。 |
+| 示例配置与静态检查 | Configuration valid；102个Python文件AST、69个文档相对链接和git diff --check通过。 |
+
+唯一 ERROR 仍为 `test_corrupt_and_future_schema_databases_are_preserved` 在 Windows 清理 SQLite 临时文件的 WinError32/267，本轮未改记忆模块。3项跳过是门户实服测试，不是本轮真实技能通过。仅重放读取已有本地脱敏事件/检查点并用合成夹具验证，没有新游戏/API/RCON/模型请求，没有清锁、重启机器人或写运行检查点；线上是否恢复需加载新代码后独立验收。运行中的进程不会自动热加载此修改。
+
+## 历史：拉取后复核（2026-11-15，3801be9）
 
 环境：Windows、Python 3.11.3、requests 2.34.2、PyYAML 6.0.3、Temurin OpenJDK/javac 25.0.2。已有虚拟环境，本轮未安装依赖。只使用离线测试和本机临时假 HTTP 服务，没有连接 Minecraft、实际 mc-agent-api、RCON 或模型，也未修改相邻 API 仓库。
 

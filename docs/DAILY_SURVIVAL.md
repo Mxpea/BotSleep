@@ -1,6 +1,6 @@
 # 日常生存：任务、反馈与长期记忆
 
-本页描述 2026-11-14 的 BotSleep 日常生存实现。`survival.objective: daily` 在初期工具链之上持续检查食物、材料、设施与安全，不以取得石器后的 `goal_complete` 结束。已完成源码接线并有历史离线回归记录；最新复测有1项错误，见本页验证记录。普通地图的完整日常闭环仍须真实验收。历史采木、制作或专用平坦场石器成功不能替代这项验收，具体记录见 [TESTING.md](TESTING.md)。
+本页描述 BotSleep 日常生存实现，2026-11-16 增补黄昏/夜间准备、本地执行优先与安静树冠分段下降。`survival.objective: daily` 在初期工具链之上持续检查食物、材料、设施与安全，不以取得石器后的 `goal_complete` 结束。已完成源码接线；本轮最终结果以 [TESTING.md](TESTING.md) 首节为准，历史数字不代表本轮结果；未做实服验收。普通地图的完整日常闭环仍须真实验收。历史采木、制作或专用平坦场石器成功不能替代这项验收，具体记录见 [TESTING.md](TESTING.md)。
 
 ## 入口与执行链
 
@@ -27,25 +27,77 @@ python main.py --config config.yaml --mode survival --objective daily
 | [skills/doors.py](../skills/doors.py)、[skills/positioning.py](../skills/positioning.py) | 门的显式开闭与双半状态确认；同层 3 格内的精确工作站位和完整身体净空检查。 |
 | [core/survival_memory.py](../core/survival_memory.py) | 按服务器、账号、世界隔离的 SQLite 事实记忆；不访问模型或游戏。 |
 | [core/model_gate.py](../core/model_gate.py) | 同一模型服务及凭据下的本机跨线程、跨进程互斥与未知请求台账。 |
-| [core/survival_harness.py](../core/survival_harness.py) | 串行观察、模型请求、安全复查、意图落盘、技能执行、结果反馈与检查点。 |
+| `core/local_execution.py`、`core/local_tasks.py`、`core/local_recovery.py` | 有界单步任务规划、失败/预算证据、共享清叶候选及本地树冠下降绑定，耗尽后交模型。 |
+| `core/canopy_geometry.py`、`skills/canopy.py` | 只读分段下降规划与 harness 专用 `CanopyRecoverySkill`；不是新增模型工具。 |
+| [core/survival_harness.py](../core/survival_harness.py) | 串行观察、本地执行优先、模型接管、安全复查、意图落盘、技能执行、结果反馈与检查点。 |
 
-每轮先观察，再更新记忆与任务板。模型得到压缩后的当前证据、缺口和记忆候选，一次只选择一个注册工具；返回后再次观察并检查安全条件。实际技能结果进入配对的 `tool_call_id` 反馈，下一轮据此调整。日志的模型名采用服务返回的 `response.model`，请求路由 `default` 本身不证明实际型号。
+每轮先观察，再更新记忆与任务板；优先本地安全，其次本地任务/脱困。需模型接管时，模型得到压缩后的当前证据、缺口和记忆候选，一次只选择一个注册工具；返回后再次观察并检查安全条件。本地结果直接记录；模型提案的实际技能结果进入配对的 `tool_call_id` 反馈，下一轮据此调整。日志的模型名采用服务返回的 `response.model`，请求路由 `default` 本身不证明实际型号。
 
 ```mermaid
 flowchart LR
     O[新鲜游戏观察] --> T[任务板与有界记忆召回]
-    T --> G[唯一模型请求槽]
+    T --> L[本地安全与有界单步规划]
+    L --> R
+    L -->|耗尽或无支持计划| G[唯一模型请求槽]
     G --> M[一个原生工具提案]
     M --> R[重新观察与本地门禁]
     R --> S[一个技能或有界小批工作]
     S --> V[方块 库存 槽位 位置后验]
-    V --> F[配对工具反馈与结构化记忆]
+    V --> F[结构化结果与记忆]
     F --> O
     W[本地安全监测] --> C[取消旧提案的执行]
     C --> R
 ```
 
 图中的取消不释放仍在远端执行的请求槽。近敌、死亡、掉血或环境危险可抢占慢模型；旧提案返回后被排空，不能继续执行。低血且无现成食物时，只在白天、2 格内存在已观察可直接取食的目标及完整邻域证据时放行受限模型回合。collector 最多补读两个目标及各自六邻格；未知仍是未知。初始低血不会反复取消这个救食回合，新增掉血、位置/生命变化或近敌仍会取消。
+
+## 本地执行优先与模型接管
+
+`survival.local_execution` 默认 enabled=true、max_steps=64、max_seconds=180（秒），上限128步/600秒，用于启用模型的 starter/daily/competition 路径；未启用模型仍走原规则路径。每步重新观察，普通任务按真实注册 schema 生成一个动作，树冠内部下降按专用契约本地绑定；均继续走原 pending、安全复核、串行技能与后验核验。夜间准备、库存/支撑/目标证据等限制不因本地规划放宽。
+
+明确失败或无进展的动作签名跳过，失败位置写内部 `context.local_execution.failed_targets`，下一轮规划合入受阻目标，先换其他已观察且安全的资源目标；无剩余可用方案、无支持计划或预算耗尽后，模型收到 `context.local_execution` 的 phase/reason/steps 及最近最多6条结果摘要，再决定新动作。无近敌且无显式危险的树冠恢复优先核验本地分段下降；身体高度单叶清障仍可使用共享候选，每步重观测；本地方案耗尽才交模型，不承诺一定脱困。competition 仍只有7个明确行动计划，模型工具仍为9/33/38。
+
+未知动作保留 pending、禁止重放；模型门禁未知或请求在途时不开展本地生产，仍保留原本地安全处理。此链路不作模型服务出错 fallback。可用 `snapshot.local_execution` 和 `LOCAL_EXECUTION_STEP` / `LOCAL_EXECUTION_RESULT` / `MODEL_TAKEOVER` 审计；只读面板已有本地执行卡片，显示阶段、步数、原因和近期动作，当前决策按已发布 source 显示来源，缺失为未确认。完整 starter 链路离线验证通过，包含采集扣材料、工作台放置、三件石工具与熔炉、goal_complete，零模型请求；本轮最终结果以 [TESTING.md](TESTING.md) 首节为准，未做实服验收。
+
+主循环通过 `next_poll_seconds` 缩短本地接续等待：busy/无退避的本地ready最多50ms tick，成功的本地中间步骤不等普通poll；失败退避、暂停和终态保持原策略。聊天轮询按原配置间隔独立节流，不因快tick增加聊天API请求。失败后换已观察资源目标的离线回归通过，零模型请求；这不扩大目标证据或安全权限。
+
+## 黄昏和夜间的受限准备（2026-11-16）
+
+旧策略在 `time_of_day >= 11000`（即使 `is_day=true`）就禁止全部生产；无床、无已验证返家路线时只能原地等天亮。现在 daily/competition 按真实危险和当前资源选择安全状态，模型不能因此开展夜间批量生产：
+
+1. 近敌、低血、缺观察、死亡、动作忙、水/火/岩浆等仍先走本地安全处理；有现成安全食物则优先进食。
+2. 已验证返家路线、可用床和已在完整庇护所内仍优先返家、睡眠或留在室内。
+3. 无上述条件时，`health >= 20`、`food >= 12`、稳定落地、无雷暴/潜没/危险，且没有已观察到的敌人在 `max(12, threat_radius)` 格内，才可进入 `night_preparation`。完整新鲜库存/地形不能被 safety-only 部分观察替代。
+4. 仅允许本地或模型选3格内的单步准备：采一个可见匹配原木；制作少量木板/木棍/工作台/基础镐/床门/火把等；放已有工作台、建材或床门；检查/逐块修建住所；向新鲜站位候选做同层短距离精确移动。目标、材料、碰撞与路径仍由实际技能重读和后验核验。当前位置不算移动机会。
+5. 允许列表写入 `context.survival_constraints`，本地优先选具体一步，耗尽后模型接管。夜间不开放 gather_materials、build_shelter_batch、远程 move_to、狩猎、矿石/后期生产或仍要求白天的 clear_foliage。规则模式也用相同门禁。competition 的任务选择/进度/退出等本地元数据工具可用，不会解除未知动作/模型锁。
+
+白天提案跨过黄昏后，若是符合新门禁的单步动作可继续；批量提案以 `night_preparation_single_step_only` 拒绝并回传模型，下一轮重新选择单步，绝不偷偷把批量转换成规则采集。每步后重新观察；模型或动作在途时，生命下降、食物低于12、雷暴或敌人进入夜间缓冲会取消旧提案或请求停止。取消不代表远端请求/游戏动作已结束，原 pending/门禁契约继续适用。
+
+没有可用准备机会或安全条件不足时仍可等待，这不是保证任何夜间都能脱困。`night_preparation` 是运行时约束，不是新工具、无敌模式或整夜安全证明；starter 保留原初期安全策略。离线回归见 [TESTING.md](TESTING.md)。
+
+## 显式覆盖保守策略与脱困
+
+普通夜间白名单仍限制批量/清叶等；模型可用 `force_attempt(action, ..., reason)` 对已注册单步动作显式覆盖时间/偏好策略，例如夜间采集或清一格相邻叶片。它不是危险豁免：完整观察、近距目标、材料、支撑/净空、关键生命、无近敌/液体/火及动作所有权仍必须核验；技能层每次状态读取继续检查，写后状态未知保留pending。
+
+`report_blocked(reason, resolution="replan")` 记录卡点并要求新计划；`exit_task` 返回赛事任务选择。同一状态连续报告3次也会结束当前赛事任务并进入冷却，不清失败记录、不计分。连续3次无进展模型wait会临时只提供report_blocked，避免required工具调用仍被无限等待满足。详细调用表见 [HARNESS_INTERFACES.md](HARNESS_INTERFACES.md)。
+
+树冠已阻塞时，恢复只保存意图，不保存可重放动作。无近敌且状态可核验后允许完整观察，优先尝试下述本地分段下降；身体高度清叶与近敌 retreat 保留各自门禁。仍未找到安全路时如实报告，不保证任何树冠都能脱困。撤退到点后短暂观察是否稳定落地，最多1.25秒/6次读，不重发move_to；落错格、受伤/危险或重生不能算成功。
+
+### 减少小模型恢复参数负担
+
+树冠blocked恢复阶段临时给 `force_clear_foliage`，工具描述绑定当前一格已核验树叶，模型可调用 `{}` 或只写reason。模型不再生成坐标或action，程序也不从理由猜参数。实际工具仅绑定清障/report/wait；冷却或原状态失败目标跳过，未选计分任务也可先恢复。选择后仍重新观察目标与危险，并把结果配对到原生alias call_id。旧撤退搜索冷却到期不取消无新危险的恢复提案；清障后仍重新核验下一撤退步。细节见 [HARNESS_INTERFACES.md](HARNESS_INTERFACES.md)。
+
+### 安静树冠的本地分段下降（2026-11-16）
+
+用户新运行仍停在 `posY=92`，本地 `no_verified_local_recovery`、0 steps；身体高度叶片已清，附近地面脚部 Y 为88。旧恢复仅清身体高度叶片，后续完整 retreat 又受历史 threat 方向和实心终点约束，漏掉部分可安全分段下降的落脚点。
+
+1. daily collector 仅在 `canopy_blocked` 且无显式危险时调用 `core/canopy_geometry.py` 的 `plan_canopy_step`，最多96次方块读/3秒规划预算；缺失证据不能当空气。要求居中站在脚下干叶上，四正方向最多3格内寻找降低1～2格的落脚点。
+2. 若已核验的下降口在稍远位置，本次只水平1格朝该口推进，下轮重新观察，不盲目 wander；每次最多清一格侧下方叶片，绝不挖自身支撑，四格直落仍拒绝。
+3. harness 本地通过 `skills/canopy.py` 的 `CanopyRecoverySkill` 执行 `descend_canopy(pos, clear_pos, expected_name)`。坐标单位为格，来自新鲜规划；无清叶需要时后两项为 `None`。它是内部 Python 动作，不进模型工具目录，也不能借 generic clear/force 调用。
+4. 沿用串行 pending，写前复查12格实体门禁、支撑与身体净空；最多一次 `dig(collect=False)` 和一次 `move_to(range=0)`，核验精确目标落地。dig 未知时保留 pending，禁止继续 move 或重放。
+5. 新路径只用于无近敌的安静树冠，忽略历史威胁方向；近敌仍用原 retreat 逻辑。落到实心地面才清除恢复意图，落在叶片则继续重观测。`clear_foliage`、`force_attempt` 清叶与临时 `force_clear_foliage` 仍限相邻身体高度，侧下方权限只属于此内部动作。
+
+离线覆盖包括模拟 `92→91→90→88` 到 ground、零模型请求、competition selection 先恢复、未知 pending、内部动作非模型工具、规划预算与失败目标排除。最终离线结果见 [TESTING.md](TESTING.md) 首节，尚未实服验收。侧叶用例不是实服验收，不承诺任意树冠成功。模型工具仍9/33/38。本轮未重启或操控在线机器人，现场仅读日志和监控；当前进程需重启加载修改，在线恢复结果待核验。
 
 ## 借鉴 with-you 的部分
 
@@ -111,7 +163,7 @@ BotSleep 的实现适配 Minecraft 的外部副作用：使用原生工具调用
 
 历史记录：较早一轮 **740 项通过（15.126 秒）**，后续曾有 **772 项全部通过（17.137 秒）**；两者均不是最新复测结果。
 
-最新复测（2026-11-14，源码基线 `ed685f7`）：补齐 `requirements.txt` 中的 PyYAML 依赖后，运行 `python -X utf8 -B -m unittest discover -s tests -q`，共 **772 项，17.131 秒，0 skipped，1 error**，其余771项无错误。错误来自 `test_survival_memory.SurvivalMemoryTests.test_corrupt_and_future_schema_databases_are_preserved`，发生在 Windows 临时目录清理 SQLite 文件时（`WinError 32/267`）；不能记为全套通过。
+历史复测（2026-11-14，源码基线 `ed685f7`）：补齐 `requirements.txt` 中的 PyYAML 依赖后，运行 `python -X utf8 -B -m unittest discover -s tests -q`，共 **772 项，17.131 秒，0 skipped，1 error**，其余771项无错误。错误来自 `test_survival_memory.SurvivalMemoryTests.test_corrupt_and_future_schema_databases_are_preserved`，发生在 Windows 临时目录清理 SQLite 文件时（`WinError 32/267`）；不能记为全套通过。
 
 离线用例检查有界读取、未知不作空、状态变化、门与路线证据、逐块库存验证、记忆隔离与容量、崩溃后请求不重发等；不连接真实 Minecraft 或模型服务，也不证明完整生存目标完成。
 
