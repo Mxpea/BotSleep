@@ -613,6 +613,13 @@ class MinecraftAgentClient:
             payload["stop_on"] = stop_on
         return self._request("POST", "use_item", payload=payload, timeout_seconds=self._action_timeout(self.PATHFINDING_SECONDS))
 
+    def drop(self, item: str, count: Optional[int] = None) -> Dict[str, Any]:
+        """Toss unneeded items from inventory so mining/storage slots stay open."""
+        payload: Dict[str, Any] = {"item": item}
+        if count is not None:
+            payload["count"] = int(count)
+        return self._request("POST", "drop", payload=payload, timeout_seconds=self._action_timeout(15))
+
     def find_nearest_block(self, name_contains: str = "_bed", radius: int = 16) -> Optional[Dict[str, Any]]:
         """Compatibility helper over the nearest-per-type block summary."""
         matching = [block for block in self.get_blocks(radius=radius) if name_contains in block["name"]]

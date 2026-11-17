@@ -744,6 +744,27 @@ class MineShaftSkill(BaseSkill):
                 spec_to_check = self._hub_only_spec(branch_len, include_workstations=include_ws)
             else:
                 spec_to_check = mine_shaft_spec(branch_length=branch_len, include_workstations=include_ws)
+            corridor_only = (
+                not include_ws
+                and (
+                    c.extra.get("target_y") is not None
+                    or c.extra.get("target_ys")
+                    or str(c.extra.get("mining_mode") or "").lower() == "fishbone"
+                )
+            )
+            if corridor_only:
+                kept = tuple(
+                    cell for cell in spec_to_check.cells
+                    if cell.stage not in {"platform_clear", "platform_floor"} or int(cell.rel_pos[0]) == 0
+                )
+                spec_to_check = StructureSpec(
+                    spec_id=spec_to_check.spec_id,
+                    stages=spec_to_check.stages,
+                    cells=kept,
+                    anchors=spec_to_check.anchors,
+                    clearance_rel=spec_to_check.clearance_rel,
+                    site_spec=None,
+                )
             return inspect_structure(spec_to_check, c.origin, c.read_block, orientation=c.orientation)
 
         result = ActionWorkflowRunner().run(
@@ -1067,6 +1088,30 @@ class MineShaftSkill(BaseSkill):
                 for dz in (-1, 0, 1):
                     cache.pop((px + dx, py + dy, pz + dz), None)
 
+    SOFT_ROCK_TOOL_PRIORITY: Tuple[str, ...] = (
+        "stone_pickaxe",
+        "iron_pickaxe",
+        "diamond_pickaxe",
+        "netherite_pickaxe",
+        "golden_pickaxe",
+        "wooden_pickaxe",
+    )
+    SOFT_TERRAIN_BLOCKS: Set[str] = {
+        "stone",
+        "cobblestone",
+        "andesite",
+        "diorite",
+        "granite",
+        "dirt",
+        "grass_block",
+        "coarse_dirt",
+        "gravel",
+        "sand",
+        "sandstone",
+        "tuff",
+        "netherrack",
+    }
+
     def _dig_cell_safely(
         self,
         ctx: WorkflowContext,
@@ -1086,7 +1131,9 @@ class MineShaftSkill(BaseSkill):
                 break
             above_name = str(self._cached_read(ctx, [world[0], world[1] + 1, world[2]]).get("name") or "air")
             aim_at(ctx, world, relative=False)
-            res = dig_block(ctx, world, relative=False, allowed_blocks=allowed, collect=False)
+            # Preserve iron/diamond pickaxe durability on soft upper stone when a stone pickaxe is available.
+            tool_prio = self.SOFT_ROCK_TOOL_PRIORITY if bname in self.SOFT_TERRAIN_BLOCKS else None
+            res = dig_block(ctx, world, relative=False, allowed_blocks=allowed, collect=False, tool_priority=tool_prio)
             self._invalidate_cache(ctx, world)
             if not res.get("skipped"):
                 dug += 1
@@ -1135,19 +1182,37 @@ class MineShaftSkill(BaseSkill):
             blocker_block=name,
         )
 
-    def _step_to(self, ctx: WorkflowContext, rel_pos: Tuple[float, float, float], *, tolerance: float = 0.75) -> None:
+    def _step_to(
+        self,
+        ctx: WorkflowContext,
+        rel_pos: Tuple[float, float, float],
+        *,
+        tolerance: float = 0.75,
+        exact: bool = False,
+    ) -> None:
         """Move cleanly within the already-excavated corridor/platform."""
-        stand_at(ctx, rel_pos, relative=True, tolerance=tolerance)
+        stand_at(ctx, rel_pos, relative=True, tolerance=tolerance, exact=exact)
 
     def _wf_prepare_entry(self, ctx: WorkflowContext) -> Dict[str, Any]:
         dug = 0
+        # Ensure we are standing behind/level with surface_entry before clearing (0, 1, -1) / (0, 0, -1),
+        # so an elevated bot on a slope cannot stand on (0, 0, -1) as its own floor cell.
+        st_pos = parse_pos((ctx.guard.check_status(require_safe=False) or {}).get("pos"))
+        bot_floor = (
+            [int(math.floor(st_pos[0])), int(math.floor(st_pos[1])) - 1, int(math.floor(st_pos[2]))]
+            if st_pos is not None
+            else None
+        )
         for rel in ((0, 1, -1), (0, 0, -1)):
             wpos = ctx.world_pos(rel, integer=True)
             bname = str(self._cached_read(ctx, wpos).get("name") or "air")
             if bname not in AIR:
+                if bot_floor is not None and wpos == bot_floor:
+                    self._step_to(ctx, (0.5, 0.0, -1.5), tolerance=0.75, exact=True)
+                    bot_floor = None
                 dug += self._dig_cell_safely(ctx, rel, collect=False)
         patched = self._ensure_floor_cell(ctx, (0, -1, -1))
-        self._step_to(ctx, (0.5, 0.0, -0.5), tolerance=0.9)
+        self._step_to(ctx, (0.5, 0.0, -0.5), tolerance=0.75, exact=True)
         return {"dug": dug, "patched": patched}
 
     def _wf_excavate_stairs(self, ctx: WorkflowContext) -> Dict[str, Any]:
@@ -1157,7 +1222,7 @@ class MineShaftSkill(BaseSkill):
             dz = step - 1
             foot_y = -step
             prev_rel = (0.5, 0.0, -0.5) if step == 1 else (0.5, float(-(step - 1)), float(dz - 1) + 0.5)
-            self._step_to(ctx, prev_rel, tolerance=0.75)
+            self._step_to(ctx, prev_rel, tolerance=0.75, exact=True)
 
             # Dig top-down so headroom and view stay clear and no block falls onto bot head.
             for off in (2, 1):
@@ -1178,9 +1243,18 @@ class MineShaftSkill(BaseSkill):
         dug = 0
         patched = 0
         self._step_to(ctx, (0.5, -5.0, 4.5), tolerance=0.75)
+        corridor_only = (
+            not ctx.extra.get("deploy_workstation")
+            and (
+                ctx.extra.get("target_y") is not None
+                or ctx.extra.get("target_ys")
+                or str(ctx.extra.get("mining_mode") or "").lower() == "fishbone"
+            )
+        )
+        dx_limit = 1 if corridor_only else 4
 
         for dz in range(5, 9):
-            for dx in range(0, 4):
+            for dx in range(0, dx_limit):
                 stand_x = 0.5 if dx <= 2 else 1.5
                 stand_z = float(dz) + 0.5 if dz == 5 and dx >= 1 else float(dz - 1) + 0.5
                 self._step_to(ctx, (stand_x, -5.0, stand_z), tolerance=0.8)
@@ -1595,27 +1669,37 @@ class MineShaftSkill(BaseSkill):
             indices.append(len(seq) - 1)
         goal = [int(seq[-1][0]), int(seq[-1][1]), int(seq[-1][2])]
         prev_idx = -1
+        consec_stalls = 0
         for idx in indices:
             if ctx.guard.remaining_timeout(999.0) < 1.5:
                 break
             try:
                 stand_cell(ctx, seq[idx], tolerance=1.15)
+                consec_stalls = 0
             except WorkflowStepError as exc:
                 if exc.code not in {"path_not_found", "stalled", "timeout", "unreachable_stance"}:
                     raise
+                step_ok = False
                 for sub_idx in range(prev_idx + 1, idx + 1):
                     if ctx.guard.remaining_timeout(999.0) < 1.5:
                         break
                     try:
                         stand_cell(ctx, seq[sub_idx], tolerance=1.35)
+                        step_ok = True
+                        consec_stalls = 0
                     except WorkflowStepError as sub_exc:
                         if sub_exc.code not in {"path_not_found", "stalled", "timeout", "unreachable_stance"}:
                             raise
                         if sub_idx == len(seq) - 1:
                             try:
                                 stand_cell(ctx, goal, tolerance=1.8)
+                                step_ok = True
                             except WorkflowStepError:
                                 pass
+                        break
+                if not step_ok:
+                    consec_stalls += 1
+                    if consec_stalls >= 2:
                         break
             prev_idx = idx
 
@@ -1902,7 +1986,7 @@ class MineShaftSkill(BaseSkill):
             # Phase 1: Safe descending staircase down to band_y along continuous trail
             stair_timed_out = False
             if band_y is not None and cur_foot[1] > int(band_y):
-                turns_left = 8
+                turns_left = 24
                 step_counter = 0
                 visited_turns: Set[Tuple[Tuple[int, int, int], Tuple[int, int, int]]] = set()
                 while cur_foot[1] > int(band_y) and turns_left > 0:
@@ -1961,54 +2045,75 @@ class MineShaftSkill(BaseSkill):
                         turns_left -= 1
                         recent_cells = {(int(p[0]), int(p[2])) for p in trail[-10:-1]}
                         turn_cands = [
-                            tuple(fwd),
                             (-fwd[2], 0, fwd[0]),
                             (fwd[2], 0, -fwd[0]),
+                            tuple(fwd),
                             (-fwd[0], 0, -fwd[2]),
                         ]
-                        chosen_fwd = None
-                        for cand in turn_cands:
-                            if (tuple(cur_foot), cand) in visited_turns:
-                                continue
-                            if (cur_foot[0] + cand[0], cur_foot[2] + cand[2]) in recent_cells:
-                                continue
-                            chosen_fwd = cand
-                            break
-                        if chosen_fwd is None:
-                            for cand in turn_cands[1:]:
-                                if (cur_foot[0] + cand[0], cur_foot[2] + cand[2]) not in recent_cells:
-                                    chosen_fwd = cand
+                        ordered = [
+                            c for c in turn_cands
+                            if (tuple(cur_foot), c) not in visited_turns
+                            and (cur_foot[0] + c[0], cur_foot[2] + c[2]) not in recent_cells
+                        ]
+                        if not ordered:
+                            ordered = [
+                                c for c in turn_cands
+                                if (cur_foot[0] + c[0], cur_foot[2] + c[2]) not in recent_cells
+                            ] or [turn_cands[0]]
+
+                        def _rock_heading_score(cand_dir: Tuple[int, int, int]) -> int:
+                            cx = cur_foot[0] + cand_dir[0]
+                            cy = cur_foot[1]
+                            cz = cur_foot[2] + cand_dir[2]
+                            s = 0
+                            for dy in (0, -1, 1):
+                                bname = str(self._cached_read(ctx, (cx, cy + dy, cz)).get("name") or "unknown")
+                                if bname in MINE_HAZARD_BLOCKS:
+                                    s -= 10
+                                elif bname not in DEFAULT_REPLACEABLE and bname != "unknown":
+                                    s += 2 if dy <= 0 else 1
+                            return s
+
+                        ordered.sort(key=lambda c: -_rock_heading_score(c))
+                        moved_any = False
+                        for cand in ordered:
+                            visited_turns.add((tuple(cur_foot), cand))
+                            moved_pad = 0
+                            # Jog flat (dy=0) across underwater rivers / cave seams until floor+subfloor ahead is hazard-free
+                            for _pad in range(8):
+                                p_foot = [cur_foot[0] + cand[0], cur_foot[1], cur_foot[2] + cand[2]]
+                                p_head2 = [p_foot[0], p_foot[1] + 2, p_foot[2]]
+                                p_head = [p_foot[0], p_foot[1] + 1, p_foot[2]]
+                                p_floor = [p_foot[0], p_foot[1] - 1, p_foot[2]]
+                                try:
+                                    if _pad == 0:
+                                        dug += self._dig_cell_safely(ctx, tuple(p_head2), collect=False, relative=False)
+                                    dug += self._dig_cell_safely(ctx, tuple(p_head), collect=False, relative=False)
+                                    p_patch = self._ensure_floor_cell(ctx, p_floor, relative=False)
+                                    patched += p_patch
+                                    dug += self._dig_cell_safely(ctx, tuple(p_foot), collect=False, relative=False)
+                                    if _pad % 2 == 1 or p_patch > 0 or _pad == 7:
+                                        stand_cell(ctx, p_foot, tolerance=0.95)
+                                    cur_foot = list(p_foot)
+                                    trail.append(list(cur_foot))
+                                    moved_pad += 1
+                                    if _pad >= 1:
+                                        df_x, df_y, df_z = cur_foot[0] + cand[0], cur_foot[1] - 1, cur_foot[2] + cand[2]
+                                        df_name = str(self._cached_read(ctx, (df_x, df_y - 1, df_z)).get("name") or "unknown")
+                                        sub_name = str(self._cached_read(ctx, (df_x, df_y - 2, df_z)).get("name") or "unknown")
+                                        if (
+                                            df_name not in (DEFAULT_REPLACEABLE | MINE_HAZARD_BLOCKS)
+                                            and sub_name not in MINE_HAZARD_BLOCKS
+                                        ):
+                                            break
+                                except WorkflowStepError:
                                     break
-                        fwd = chosen_fwd or (-fwd[2], 0, fwd[0])
-                        visited_turns.add((tuple(cur_foot), tuple(fwd)))
-                        # Jog flat (dy=0) across underwater rivers / cave seams until floor+subfloor ahead is hazard-free
-                        for _pad in range(10):
-                            p_foot = [cur_foot[0] + fwd[0], cur_foot[1], cur_foot[2] + fwd[2]]
-                            p_head2 = [p_foot[0], p_foot[1] + 2, p_foot[2]]
-                            p_head = [p_foot[0], p_foot[1] + 1, p_foot[2]]
-                            p_floor = [p_foot[0], p_foot[1] - 1, p_foot[2]]
-                            try:
-                                if _pad == 0:
-                                    dug += self._dig_cell_safely(ctx, tuple(p_head2), collect=False, relative=False)
-                                dug += self._dig_cell_safely(ctx, tuple(p_head), collect=False, relative=False)
-                                p_patch = self._ensure_floor_cell(ctx, p_floor, relative=False)
-                                patched += p_patch
-                                dug += self._dig_cell_safely(ctx, tuple(p_foot), collect=False, relative=False)
-                                if _pad % 2 == 1 or p_patch > 0 or _pad == 9:
-                                    stand_cell(ctx, p_foot, tolerance=0.95)
-                                cur_foot = list(p_foot)
-                                trail.append(list(cur_foot))
-                                if _pad >= 1:
-                                    df_x, df_y, df_z = cur_foot[0] + fwd[0], cur_foot[1] - 1, cur_foot[2] + fwd[2]
-                                    df_name = str(self._cached_read(ctx, (df_x, df_y - 1, df_z)).get("name") or "unknown")
-                                    sub_name = str(self._cached_read(ctx, (df_x, df_y - 2, df_z)).get("name") or "unknown")
-                                    if (
-                                        df_name not in (DEFAULT_REPLACEABLE | MINE_HAZARD_BLOCKS)
-                                        and sub_name not in MINE_HAZARD_BLOCKS
-                                    ):
-                                        break
-                            except WorkflowStepError:
+                            if moved_pad > 0:
+                                fwd = cand
+                                moved_any = True
                                 break
+                        if not moved_any:
+                            fwd = ordered[0]
                         stand_cell(ctx, cur_foot, tolerance=0.95)
                         continue
 
@@ -2020,13 +2125,43 @@ class MineShaftSkill(BaseSkill):
 
                     if step_counter % 8 == 0:
                         cur_status = ctx.guard.check_status(require_safe=True)
-                        _, cur_items = cave_skill._read_inventory(ctx)
+                        cur_counts, cur_items = cave_skill._read_inventory(ctx)
                         home_eval = evaluate_home_trigger(
                             cur_status,
                             cur_items,
                             remaining_seconds=ctx.guard.remaining_timeout(999.0),
                             thresholds=ctx.extra.get("home_thresholds"),
                         )
+                        if home_eval["home_reason"] == "inventory_full" and callable(getattr(ctx.guard.client, "drop", None)):
+                            try:
+                                ctx.guard.write(
+                                    ctx.guard.client.look_at,
+                                    float(cur_foot[0]) + 0.5 - float(fwd[0]) * 2.0,
+                                    float(cur_foot[1]) + 1.5,
+                                    float(cur_foot[2]) + 0.5 - float(fwd[2]) * 2.0,
+                                )
+                            except Exception:
+                                pass
+                            clutter_keep = (
+                                ("granite", 0), ("diorite", 0), ("andesite", 0), ("cobbled_deepslate", 0),
+                                ("tuff", 0), ("gravel", 0), ("flint", 0), ("dirt", 0), ("cobblestone", 64),
+                            )
+                            for cname, keep in clutter_keep:
+                                if cname == "dirt" and cur_counts.get("cobblestone", 0) < 32:
+                                    continue
+                                excess = int(cur_counts.get(cname, 0)) - int(keep)
+                                if excess > 0:
+                                    try:
+                                        ctx.guard.write(ctx.guard.client.drop, cname, excess)
+                                    except Exception:
+                                        break
+                            _, cur_items = cave_skill._read_inventory(ctx)
+                            home_eval = evaluate_home_trigger(
+                                cur_status,
+                                cur_items,
+                                remaining_seconds=ctx.guard.remaining_timeout(999.0),
+                                thresholds=ctx.extra.get("home_thresholds"),
+                            )
                         if home_eval["trigger"]:
                             ctx.extra["deep_pos"] = list(cur_foot)
                             ctx.extra["deep_fwd"] = list(fwd)

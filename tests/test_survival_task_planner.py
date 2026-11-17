@@ -264,7 +264,7 @@ class SurvivalTaskPlannerTests(unittest.TestCase):
             {"task": "craft", "item": "stick", "resource": "logs"},
             {"task": "smelt", "item": "iron_ingot", "resource": "raw_iron"},
             {"task": "food", "item": "bread"}, {"task": "maintenance", "resource": "coal"},
-            {"task": "gather", "resource": "diamond"}, {"task": "craft", "item": "../secret"},
+            {"task": "gather", "resource": "obsidian"}, {"task": "craft", "item": "../secret"},
             {"task": "farm", "pos": [1, 64, 1]}, {"task": "bed", "actions": [{"name": "teleport"}]},
             {"task": "food", "count": True}, {"task": "food", "count": 0}, {"task": "food", "count": 65},
             {"task": "food", "radius": 3}, {"task": "food", "radius": 65}, {"task": "food", "radius": 4.5}]

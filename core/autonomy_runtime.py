@@ -5,10 +5,12 @@ of game writes. Each child uses the ordinary harness journal and skill checks.
 """
 
 import copy
+import math
 from dataclasses import asdict
+from pathlib import Path
 
 from agent.brain import LLMError
-from agent.survival_planner import Decision
+from agent.survival_planner import Decision, LOG_NAMES
 from skills import SkillResult
 
 
@@ -72,10 +74,182 @@ class AutonomyRuntime:
             "accepted": True, "completed": False, "executed": False,
             "task_id": self._task_snapshot().get("task_id")})
 
+    def _remote_log_waypoint(self, observation):
+        blocks = observation.get("blocks") or []
+        if any(row.get("name") in LOG_NAMES for row in blocks if isinstance(row, dict)):
+            return None
+        status = observation.get("status") if isinstance(observation, dict) else {}
+        origin = status.get("pos") if isinstance(status, dict) else None
+        if not isinstance(origin, (list, tuple)) or len(origin) != 3:
+            return None
+        try:
+            rows = self.client.get_blocks(radius=128, types=sorted(LOG_NAMES), limit=8)
+        except Exception:
+            return None
+        if not isinstance(rows, list) or not rows:
+            return None
+        best = min(
+            (r.get("pos") for r in rows if isinstance(r, dict) and isinstance(r.get("pos"), list) and len(r["pos"]) == 3),
+            key=lambda p: math.dist(origin, p),
+            default=None,
+        )
+        if best is None:
+            return None
+        dist = math.dist(origin, best)
+        if dist <= 24.0:
+            return None
+        if dist <= 26.0:
+            return [float(best[0]), float(origin[1]), float(best[2])]
+        scale = 24.0 / dist
+        return [
+            round(float(origin[0]) + (float(best[0]) - float(origin[0])) * scale, 1),
+            float(origin[1]),
+            round(float(origin[2]) + (float(best[2]) - float(origin[2])) * scale, 1),
+        ]
+
+    _MINING_CLUTTER_KEEP = (
+        ("granite", 0), ("diorite", 0), ("andesite", 0), ("cobbled_deepslate", 0),
+        ("tuff", 0), ("gravel", 0), ("flint", 0), ("leaf_litter", 0),
+        ("red_mushroom", 0), ("brown_mushroom", 0), ("rotten_flesh", 0),
+        ("raw_copper", 0), ("sand", 0), ("dirt", 0), ("cobblestone", 64),
+    )
+
+    def _discard_mining_clutter(self, status_pos=None):
+        drop_fn = getattr(self.client, "drop", None)
+        if not callable(drop_fn):
+            return
+        try:
+            inv_raw = self.client.inventory()
+            items = (inv_raw.get("result") if isinstance(inv_raw, dict) and isinstance(inv_raw.get("result"), dict) else inv_raw).get("items", [])
+        except Exception:
+            return
+        counts = {}
+        for row in items:
+            if isinstance(row, dict) and isinstance(row.get("name"), str) and isinstance(row.get("count"), int):
+                counts[row["name"]] = counts.get(row["name"], 0) + int(row["count"])
+        from core.mining_targets import estimate_empty_main_slots
+        if len(items) < 22 and estimate_empty_main_slots(items) > 12:
+            return
+        # Turn slightly away from digging face if look_at is available so tossed clutter lands clear.
+        look_fn = getattr(self.client, "look_at", None)
+        if callable(look_fn) and isinstance(status_pos, (list, tuple)) and len(status_pos) >= 3:
+            try:
+                look_fn(float(status_pos[0]) - 3.0, float(status_pos[1]) + 1.5, float(status_pos[2]) - 3.0)
+            except Exception:
+                pass
+        for name, keep in self._MINING_CLUTTER_KEEP:
+            if name == "dirt" and counts.get("cobblestone", 0) < 32:
+                continue
+            excess = int(counts.get(name, 0)) - int(keep)
+            if excess > 0:
+                try:
+                    drop_fn(name, excess)
+                except Exception:
+                    break
+
+    def _run_task_deep_mine(self, decision, observation):
+        from core.memory import MemoryEngine
+        from skills.mining import MineShaftSkill
+
+        spec = (self.task_controller.state().get("pending_deep_mine") if self.task_controller else None) or {}
+        resource = str(spec.get("resource") or "raw_iron")
+        count = max(1, min(32, int(spec.get("count", 4))))
+        if resource == "diamond":
+            targets = {"diamond": {"count": count, "min_tool": "iron_pickaxe"}}
+        elif resource == "coal":
+            targets = {"coal": {"count": count, "min_tool": "wooden_pickaxe"}}
+        else:
+            targets = {
+                "iron": {"count": max(count, 7), "min_tool": "stone_pickaxe"},
+            }
+        # Never abort a resource expedition solely because the player lacks torches or scaffold blocks yet.
+        deep_home_thresholds = {
+            "min_torches": 0,
+            "min_blocks": 0,
+            "min_empty_slots": 0,
+        }
+        status_pos = (observation.get("status") or {}).get("pos") if isinstance(observation, dict) else None
+        self._discard_mining_clutter(status_pos=status_pos)
+
+        remaining = 900.0 if resource == "diamond" else 480.0
+        if hasattr(self, "_remaining_budget"):
+            try:
+                remaining = max(60.0, float(self._remaining_budget().get("remaining_seconds", remaining)) - 30.0)
+            except Exception:
+                pass
+        total_t = min(840.0 if resource == "diamond" else 540.0, max(90.0, remaining))
+        band_t = min(760.0 if resource == "diamond" else 460.0, max(75.0, total_t * 0.9))
+
+        state_root = Path(str(self.settings.get("state_dir") or "runtime/survival"))
+        memory = MemoryEngine(str(state_root / "deep_mine_memory"))
+        miner = MineShaftSkill(self.client, memory=memory)
+        if resource == "cobblestone":
+            pos = ((observation.get("status") or {}).get("pos") if isinstance(observation, dict) else None) or [0, 64, 0]
+            start_surface = [int(math.floor(float(pos[0]))), int(math.floor(float(pos[1]))), int(math.floor(float(pos[2])))]
+            # Stay shallow (~7 blocks below surface) so a wooden pickaxe never breaks mid-shaft and return stays fast.
+            target_y = max(36, start_surface[1] - 7)
+            before_c = dict(self.client.get_inventory_counts() or {})
+            res = miner.build_mine_shaft(
+                origin=start_surface,
+                radius=18,
+                branch_length=3,
+                place_workstation=False,
+                return_to_surface=True,
+                target_y=target_y,
+                mining_mode="single",
+                rib_length=3,
+                max_trunk_steps=3,
+                home_thresholds=deep_home_thresholds,
+                cancel_event=getattr(self, "_cancel", None),
+                timeout_seconds=210.0,
+                allow_damage=True,
+            )
+            data = dict(res.data or {}) if isinstance(res.data, dict) else {}
+            data.setdefault("executed", True)
+            if data.get("action_state") == "unknown" or res.error_code == "action_unconfirmed":
+                return SkillResult(False, str(res.message), data, res.error_code)
+            retreat_trail = ((data.get("mining_progress") or {}).get("deep_trail")) or []
+            surface_chk = miner._ensure_returned_to_surface(
+                start_surface,
+                retreat_trail=retreat_trail,
+                cancel_event=getattr(self, "_cancel", None),
+            )
+            data["surface_return"] = surface_chk
+            after_c = dict(self.client.get_inventory_counts() or {})
+            gained_cobble = max(0, int(after_c.get("cobblestone", 0)) - int(before_c.get("cobblestone", 0)))
+            if gained_cobble > 0:
+                data.setdefault("gained", {})["cobblestone"] = gained_cobble
+            return SkillResult(bool((res.success or gained_cobble > 0) and surface_chk.get("on_surface", True)), str(res.message), data, res.error_code)
+
+        res = miner.mine_targets_from_surface(
+            targets=targets,
+            cave_policy={"explore_timeout_seconds": 65.0},
+            home_thresholds=deep_home_thresholds,
+            prefer_caves_first=(resource in {"raw_iron", "coal"}),
+            cave_search_radius=24,
+            max_caves=2,
+            place_workstation=False,
+            rib_length=8 if resource == "diamond" else 6,
+            rib_spacing=4,
+            max_trunk_steps=20 if resource == "diamond" else 16 if resource == "raw_iron" else 10,
+            band_timeout_seconds=band_t,
+            total_timeout_seconds=total_t,
+            cancel_event=getattr(self, "_cancel", None),
+            allow_damage=True,
+        )
+        data = dict(res.data or {}) if isinstance(res.data, dict) else {}
+        data.setdefault("executed", True)
+        return SkillResult(bool(res.success), str(res.message), data, res.error_code)
+
     def _task_next(self, observation):
         if not self._task_active():
             return None
-        decision = self.task_controller.next_action(observation, self.context)
+        task_ctx = dict(self.context)
+        task_ctx["deep_mining_enabled"] = not bool(self.settings.get("disable_deep_mining", False))
+        remote_log = self._remote_log_waypoint(observation)
+        if remote_log is not None:
+            task_ctx["remote_log_target"] = remote_log
+        decision = self.task_controller.next_action(observation, task_ctx)
         if decision is None:
             status = self._task_snapshot().get("status")
             event = {"completed": "TASK_COMPLETED", "needs_ai": "TASK_NEEDS_AI",

@@ -502,6 +502,15 @@ class DailySurvivalSkills(SurvivalSkills):
     def _inspect_container(self, args, context):
         pos = self._pos(args["pos"], block=True)
         self._prepare(context)
+        status = self._status(context)
+        if not context.get("cautious") and math.dist(status["pos"], pos) > 3.0:
+            # ObservationCollector only auto-opens windows within 3.0 blocks; close the gap horizontally
+            # when elevated stations (e.g. dy=2) otherwise pass openTarget(range=3) without entering <=3.0.
+            target_pos = [pos[0], math.floor(status["pos"][1]), pos[2]] if abs(pos[1] - status["pos"][1]) > 1 else pos
+            try:
+                self._action(context, self.client.move_to, *target_pos, range=1, timeout_ms=15000)
+            except _Failure:
+                pass
         window = self._window(pos, context, self.CONTAINERS | self.FURNACES)
         self._prepare(context)
         return self._verified(context, pos=pos, window=window, inventory_mutated=False)

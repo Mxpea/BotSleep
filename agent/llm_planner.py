@@ -127,7 +127,17 @@ prerequisites. Waiting/no-op does not erase a failure. Respect active target coo
 All models share one serialized request slot. Provider uncertainty blocks new calls.
 There is no final goal_complete in daily mode: maintain reserves and facilities,
 inspect changes, eat and sleep when appropriate, and wait briefly when nothing safe
-needs doing. Partial results never mean an entire task is complete.
+needs doing. For progression toward iron/diamond gear, use run_survival_task cleanly
+(starter_tools -> iron_tools or craft(iron_pickaxe) -> gather(resource="diamond")
+-> craft(diamond_pickaxe/diamond_sword)); when coal, raw_iron or diamond is absent
+on the surface and the required pickaxe is ready, run_survival_task dispatches a
+bounded surface-to-deep mining expedition with guaranteed surface return.
+Do not call craft(furnace) when a furnace is already in inventory; iron_tools,
+smelt(iron_ingot) and craft(iron_pickaxe) deploy held furnaces automatically.
+When iron_ingot >= 3 and iron_pickaxe < 2 (needed before diamond mining), call
+craft(item="iron_pickaxe") rather than smelting more iron_ingot; once an iron_pickaxe
+is ready, prioritize gather(resource="diamond") over optional fuel_reserve/logs/base_site hints.
+Partial results never mean an entire task is complete.
 Return one native tool call, not simulated calls inside text.
 """
 

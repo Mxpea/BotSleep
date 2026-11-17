@@ -623,6 +623,54 @@ class MiningWorkflowTests(unittest.TestCase):
         self.assertEqual(out["stop_reason"], "return_home")
         self.assertAlmostEqual(world.status["pos"][1], 5.0, delta=0.5)
 
+    def test_prepare_entry_moves_bot_off_origin_edge_before_step_1_floor_dig(self):
+        # Bot starts inside cell (0, 64, 0) but within 0.7 blocks of (0.5, 64.0, -0.5)
+        world = WorkflowMineWorld(bot_pos=(0.5, 64.0, 0.15))
+        res = MineShaftSkill(world, memory=Mock()).build_mine_shaft(
+            origin=[0, 64, 0],
+            orientation="south",
+            branch_length=4,
+            place_workstation=False,
+        )
+        self.assertTrue(res.success, res)
+
+    def test_prepare_entry_moves_elevated_bot_off_surface_entry_cell(self):
+        # Bot starts 1 block higher on top of (0, 64, -1) with solid stone at (0, 64, -1)
+        world = WorkflowMineWorld(bot_pos=(0.5, 65.0, -0.5))
+        world.blocks[(0, 64, -1)] = {"name": "stone", "properties": {}}
+        res = MineShaftSkill(world, memory=Mock()).build_mine_shaft(
+            origin=[0, 64, 0],
+            orientation="south",
+            branch_length=4,
+            place_workstation=False,
+        )
+        self.assertTrue(res.success, res)
+
+    def test_retreat_downsampled_breaks_early_after_consecutive_stalls(self):
+        from skills.action_workflow import WorkflowContext, WorkflowGuard
+
+        world = WorkflowMineWorld(bot_pos=(0.5, 10.0, 0.5), surface_y=64)
+        stalled_targets = []
+
+        def fake_move(x, y, z, **kwargs):
+            stalled_targets.append((x, y, z))
+            return {"ok": False, "error": {"code": "stalled", "message": "stuck"}}
+
+        world.move_to = fake_move
+        guard = WorkflowGuard(world, timeout_seconds=30.0)
+        ctx = WorkflowContext(
+            guard=guard,
+            spec=MineShaftSkill._hub_only_spec(4, include_workstations=False),
+            origin=[0, 64, 0],
+            orientation="south",
+            extra={"world_3d": None},
+        )
+        trail = [[0, y, 0] for y in range(64, 9, -1)]
+        with patch("skills.mining.Pathfinder3D.find_path", return_value=[]):
+            MineShaftSkill(world, memory=Mock())._retreat_downsampled(ctx, trail)
+        # Should abort after 2 consecutive stalled segments instead of iterating all ~28 segments.
+        self.assertLessEqual(len(stalled_targets), 12)
+
 
 if __name__ == "__main__":
     unittest.main()

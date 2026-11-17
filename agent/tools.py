@@ -22,7 +22,7 @@ def _tool(name, description, properties, required=()):
 _ITEM = {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$", "maxLength": 64}
 SURVIVAL_TASK_NAMES = ("gather", "craft", "smelt", "food", "starter_tools", "iron_tools",
                        "shelter", "bed", "storage", "farm", "recover_drops", "maintenance")
-SURVIVAL_TASK_RESOURCES = ("logs", "cobblestone", "coal", "raw_iron")
+SURVIVAL_TASK_RESOURCES = ("logs", "cobblestone", "coal", "raw_iron", "diamond")
 
 TOOL_DEFINITIONS = [
     _tool("gather_block", "Gather ONE observed natural log, stone/cobblestone or coal ore. "
@@ -184,7 +184,7 @@ def tools_for_objective(objective="starter"):
     entity_id = {"type": "integer", "minimum": 0}
     def add(name, description, properties, required=None):
         tools.append(_tool(name, description, properties, tuple(properties) if required is None else required))
-    add("run_survival_task", "Prefer ONE bounded survival goal over repeated atomic calls. The local executor finds prerequisites, reobserves and verifies child steps without model calls. Stop on safety, unknown writes or budget; only the final summary is tool feedback. gather requires resource; craft/smelt require target item; others accept neither. No coordinates or action queues.",
+    add("run_survival_task", "Prefer ONE bounded survival goal over repeated atomic calls. The local executor finds prerequisites, reobserves, runs bounded underground ore mining + surface return for coal/raw_iron/diamond when surface ore is absent, and verifies child steps without model calls. Stop on safety, unknown writes or budget; only the final summary is tool feedback. gather requires resource; craft/smelt require target item; others accept neither. No coordinates or action queues.",
         {"task": {"type": "string", "enum": list(SURVIVAL_TASK_NAMES)},
          "resource": {"type": "string", "enum": list(SURVIVAL_TASK_RESOURCES)},
          "item": {**_ITEM, "description": "Desired crafted/smelted OUTPUT item, not an ingredient; executor checks supported recipes."},

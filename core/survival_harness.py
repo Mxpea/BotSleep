@@ -771,8 +771,11 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                     options["recovery_context"] = self._canopy_options(observation)
                 if self._task_child and self.context.get("cautious_bootstrap") is True:
                     options["cautious"] = True
-                runner = resolve_skill_runner(self, decision.name)
-                result = runner.execute(decision.name, decision.args, cancel_event=self._cancel, **options)
+                if self._task_child and decision.goal == "deep_mine":
+                    result = self._run_task_deep_mine(decision, observation)
+                else:
+                    runner = resolve_skill_runner(self, decision.name)
+                    result = runner.execute(decision.name, decision.args, cancel_event=self._cancel, **options)
             if not isinstance(result, SkillResult):
                 raise TypeError("Skill returned an invalid result")
             if (self._model_feedback or self.daily) and not self._cancel.is_set() and not _uncertain_result(result):
@@ -887,8 +890,9 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
             status.get("dimension") != baseline.get("dimension")
             or status.get("last_death") != baseline.get("last_death")
             or status.get("health", 0) < baseline.get("health", 20))
+        deep_mine_active = decision is not None and decision.goal == "deep_mine"
         danger = (not status.get("alive") or status.get("in_lava") or status.get("on_fire")
-                  or status.get("submerged") or status.get("in_water")
+                  or status.get("submerged") or (status.get("in_water") and not deep_mine_active)
                   or status.get("health", 20) <= self.settings["low_health_threshold"] and not (food_turn or local_recovery_turn)
                   or combat_changed
                   or (not combat_action and isinstance(hostile.get("dist"), (int, float))

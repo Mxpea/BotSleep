@@ -1,6 +1,31 @@
 # 配置、客户端、生存、赛事与监控验证
 
-最近合并复核：2026-11-17（Asia/Shanghai），`main 02343f9` + `develop-tianya/shelter-workflow 39afec8`，在独立 main 工作区合并。下方两侧分支的历史日志与实服记录保留，不替代本次合并验证。
+最近复核：2026-11-17（Asia/Shanghai），`develop-tianya/ai-iron-diamond-loop`（基于 `origin/main 9018f76`）。
+
+## AI 自主铁套/钻石闭环与矿井优化回归（2026-11-17）
+
+本轮围绕“出生开局 → 铁镐/铁套 → 钻石闭环”与效率/防卡死优化完成了离线实现与分阶段实服调测：
+- **策略与规划**：`agent/tools.py`、`agent/llm_planner.py` 与 `core/autonomous_tasks.py` 新增 `diamond` 采集及 `diamond_pickaxe`/`diamond_sword`/`diamond_axe`/`diamond_hoe` 合成目标，保留 starter 9 / daily 35 / competition 40 目录上限。
+- **开局与采矿速度优化**：`logs` 采集优先可达主干（`dy <= 2.1`）并过滤树冠高处原木；`raw_iron`/`coal` 采集开启近处矿洞优先探查（半径 24、最多 2 处，单洞超时 65s）后再切换阶梯矿井；`raw_iron` 直下 `Y=16` 峰值矿层。
+- **背包与熔炼修复**：`core/client.py` 封装 `/drop`，`core/autonomy_runtime.py` 在深矿前或背包满时主动丢弃花岗岩、闪长岩、安山岩、深板岩圆石、凝灰岩、沙砾、粗铜、多余圆石等杂物（仅附近已有箱子时入箱）；`skills/daily_survival.py` 修复高 2 格熔炉观察距离与 `inspected_furnace` 单步交接，避免反复 `inspect_container`。
+- **矿井安全与溶洞防卡死**：`skills/mining.py` 对矿井入口 `_wf_prepare_entry` 与阶梯前移增加精确站位与脚下实心核验、`corridor_only` 跳过冗余工作站开挖、`_wf_deep_fishbone` 增加溶洞多向岩石优先级转向与 24 次转向预算，以及 `_retreat_downsampled` 连续 2 次卡滞即提前交由 3D 寻路返程。
+
+### 离线回归与静态检查
+
+全部 Python 改动完成后的最终完整回归结果为：**1440 项 / 67.756 秒：1430 通过、10 项跳过（2 项 `test_cave_matrix` 与 3 项 `test_speedrun_portal` 实服专用跳过，5 项 `test_stronghold.EngineTests` 因未安装 ninjabrain JAR 跳过），`OK (skipped=10)`**，命令为 `$env:BOTSLEEP_RUN_LIVE_TESTS='0'; .\.venv\Scripts\python.exe -B -m unittest discover -s tests -v`。`compileall -q main.py agent core skills debug integrations`、`main.py --config config.example.yaml --check-config` 及 `git diff --check` 均通过；相邻 `mc-agent-api` 工作区零改动。
+
+### 实服阶段验证与未闭环阻塞说明
+
+使用本地 Minecraft 服务端（`127.0.0.1:25565`）、官方 `mc-agent-api` 与远端 LLM 对新存档进行多轮实测，确认到以下阶段表现：
+- **Run 4**：空手开局依次完成 `wooden_pickaxe`（约 1.9m）→ `stone_pickaxe`（约 6.6m）→ `furnace`（约 7.8m）→ `6 raw_iron + 4 coal`（约 14.5m）→ `iron_pickaxe`（约 17.2m）。
+- **Run 7**：空手开局完成 `wooden_pickaxe`（约 2.5m）→ `28 cobblestone`（67.84s）→ `stone_pickaxe`（约 4.3m）→ `furnace`（约 8.0m）→ `4 raw_iron`（约 17.4m，含约 3m 雷雨等待）→ `iron_pickaxe`（总耗时约 25m / 有效约 21–22m），随后到达 `Y=16` 再采 `7 raw_iron + 5 coal` 并冶炼出 `8 iron_ingot`。
+- **Run 10 / Run 12**：完成 `smelt` 铁锭、`iron_tools`（`iron_axe`/`iron_sword`/`shield`/`bucket`）、放置箱子存物后携带铁镐沿矿井下探至深板岩层（Run 10 下至 `Y=-5` 并安全返回地表 `[-125.7, 63, 412.5]`；Run 12 下至 `Y=2.0`）。
+
+**阻塞与未完成项**：在后续实测与最终“新存档完整铁套 + `Y=-54` 采钻闭环”基准测试前，本地 Minecraft 服务端与 RCON（`127.0.0.1:25565` / `25575`）离线停止响应，导致最终改版后的新档全程实服基准与实服采钻验收未能运行。因此当前版本**未宣称已实服跑通整套铁甲/钻石提取全闭环**，需在重启 MC 服务端后于独立测试存档复测。
+
+---
+
+历史合并复核：2026-11-17（Asia/Shanghai），`main 02343f9` + `develop-tianya/shelter-workflow 39afec8`，在独立 main 工作区合并。下方两侧分支的历史日志与实服记录保留，不替代上述验证。
 
 ## shelter-workflow 合并取舍与回归
 

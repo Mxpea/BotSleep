@@ -15,6 +15,7 @@ from core.client import APIError
 from core.config import DEFAULTS
 from core.block_geometry import trace_block_visibility
 from core.survival_harness import SurvivalHarness
+from skills import SkillResult
 from test_daily_runtime import RuntimeDailyWorld
 from test_daily_skills import envelope
 from test_llm_planner import Brain, response
@@ -697,6 +698,70 @@ class TaskHarnessTests(unittest.TestCase):
         self.assertEqual(len(brain.requests), 1)
         self.assertEqual(len([call for call in self.world.calls if call[0] == "dig"]), 1)
         self.assertFalse([call for call in self.world.calls if call[0] == "stop"])
+
+    def test_deep_mine_dispatches_mineshaft_skill_and_completes_diamond_goal(self):
+        self.world.counts["iron_pickaxe"] = 2
+        seen_targets = []
+
+        def fake_mine(miner_self, *, targets=None, **kwargs):
+            seen_targets.append(copy.deepcopy(targets))
+            self.world.counts["diamond"] = self.world.counts.get("diamond", 0) + 2
+            return SkillResult(True, "Mined 2 diamond", {
+                "executed": True, "gained": {"diamond": 2}, "surface_returned": True})
+
+        harness, brain = self.harness(response("run_survival_task", {
+            "task": "gather", "resource": "diamond", "count": 2}, "diamond_goal"))
+        with patch("skills.mining.MineShaftSkill.mine_targets_from_surface", new=fake_mine):
+            self.cycle(harness)
+            self.until(harness, lambda: harness.snapshot()["task_execution"]["status"] == "completed")
+        self.assertEqual(len(seen_targets), 1)
+        self.assertIn("diamond", seen_targets[0])
+        feedback = self.feedback(harness.planner)
+        self.assertEqual(len(feedback), 1)
+        self.assertTrue(json.loads(feedback[0]["content"])["result"]["success"])
+        self.assertEqual(len(brain.requests), 1)
+
+    def test_deep_mine_unknown_action_state_stops_harness_without_retry(self):
+        self.world.counts["iron_pickaxe"] = 2
+        calls = []
+
+        def fake_unknown(miner_self, *, targets=None, **kwargs):
+            calls.append(copy.deepcopy(targets))
+            return SkillResult(False, "Connection dropped mid-dig", {
+                "executed": True, "action_state": "unknown"}, "action_unconfirmed")
+
+        harness, _ = self.harness(response("run_survival_task", {
+            "task": "gather", "resource": "diamond", "count": 1}, "diamond_unknown"))
+        with patch("skills.mining.MineShaftSkill.mine_targets_from_surface", new=fake_unknown):
+            self.cycle(harness)
+            self.until(harness, lambda: harness.snapshot()["task_execution"]["status"] == "unknown")
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(harness.paused)
+        self.assertIsNotNone(harness.journal.state.get("pending"))
+
+    def test_remote_log_waypoint_steers_toward_distant_tree(self):
+        harness, _ = self.harness(response("wait", {"seconds": 1}))
+        obs = {"status": {"pos": [0.5, 64.0, 0.5]}, "blocks": []}
+        with patch.object(harness.client, "get_blocks", return_value=[{"name": "oak_log", "pos": [50, 64, 0]}]):
+            wp = harness._remote_log_waypoint(obs)
+        self.assertIsNotNone(wp)
+        self.assertGreater(wp[0], 20.0)
+
+    def test_discard_mining_clutter_drops_excess_junk_when_crowded(self):
+        harness, _ = self.harness(response("wait", {"seconds": 1}))
+        dropped = []
+        harness.client.drop = lambda item, count=None: dropped.append((item, count))
+        harness.client.counts = {"cobblestone": 640, "granite": 324}
+        harness.client.inventory = lambda timeout_seconds=None: {
+            "ok": True,
+            "result": {
+                "items": [{"name": "cobblestone", "count": 64, "slot": i} for i in range(10)]
+                + [{"name": "granite", "count": 18, "slot": 10 + i} for i in range(18)]
+            },
+        }
+        harness._discard_mining_clutter(status_pos=[0.5, 64.0, 0.5])
+        self.assertIn(("granite", 324), dropped)
+        self.assertIn(("cobblestone", 576), dropped)
 
 
 if __name__=="__main__":
