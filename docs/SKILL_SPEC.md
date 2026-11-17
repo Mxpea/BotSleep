@@ -24,6 +24,8 @@
 
 `AutonomousTaskController` 从 fresh 观察规划一个原子动作，`AutonomyRuntime` 使用普通 harness 的 pending/技能/后验检查执行；它不是任意命令宏，也不调用独立 `CraftItemSkill` 的全部配方。默认限制为 128 步/600 秒、4 次连续本地失败、8 次无进展和 8 次探索。程序子步不产生额外模型 tool call，完成/升级/未知或显式暂停边界只对原目标反馈一次；unknown 保留意图，不能自动补发。完整任务表、计数语义和恢复接口见 [AUTONOMOUS_TASKS.md](AUTONOMOUS_TASKS.md)。
 
+住所目标另有两个内部动作 `plan_shelter_preparation({pos, orientation?})` 和 `prepare_shelter_step({pos, orientation?})`，由 `ShelterPreparationSkills` 执行，不进入 9/35/40 模型目录。前者仅只读计划，后者在完整新观察通过后至多一次 `dig(collect=False)`；只允许完整天然地板上至多 8 格泥土/草方块凸起，不补地或拆建筑。`prepared` 不代表基地已验证，必须重新执行普通 `plan_shelter`。缺证据、未知写入、预算和临近危险均保留原有中止契约。参数 `pos` 是候选蓝图中心，不能指定任意待挖方块。
+
 ### 当前已绑定的战斗与桶类扩展
 
 以下三项只加入 daily/competition，starter 仍为 9 项。模型参数须通过严格 schema；harness 分派到对应类后，技能还会重新读取并核验现场。

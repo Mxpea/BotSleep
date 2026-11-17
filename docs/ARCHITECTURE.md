@@ -61,11 +61,12 @@ flowchart TD
 | `core/structure_spec.py` | 标准结构蓝图（庇护所/矿井坐标变换、安全选址与结构验收）与挖掘/危险/可替代方块常量 |
 | `skills/exploration.py` | 可开关后台雷达，约每秒读取状态，默认位移 6 格后扫描；不是寻路或导航执行器 |
 | `skills/daily_survival.py` | 日常生存技能库（作物、狩猎、铁矿、装备、熔炼、储物、床门、5x5 庇护所） |
+| `skills/positioning.py`、`skills/shelter_preparation.py` | 内部短距站位与住所相邻台阶；独立只读天然场地准备计划、每次至多一格土块清理，随后重新勘测基地；不调用独立整套建筑工作流 |
 | `skills/combat.py` | `fight_hostile` 短步近战/远程/撤退；按交战预算复查伤害与击杀，安全解除本技能持有的盾姿态 |
 | `skills/buckets.py` | `collect_liquid` 与受限 `hunt_with_lava`；核验源方块、桶转移、源回收和实际库存收益 |
 | `core/survival_playbook.py` | 按 `survival.intent` 生成 survival/speedrun 阶段建议、前置、已绑定动作及未实现缺口 |
 | `core/domain.py` | 共享领域常量（木种、床色、食物点、危险方块）、纯坐标/体素键解析、背包计数提取与 `TypedDict` 契约 |
-| `core/skill_registry.py` | starter / daily / competition 技能注册表（目标作用域、终点安全复核标记、执行器槽位分发），包含自主任务、战斗与桶类入口 |
+| `core/skill_registry.py` | starter / daily / competition 技能注册表（目标作用域、终点安全复核标记、执行器槽位分发），包含自主任务、战斗与桶类入口；内部住所准备目录不暴露给模型 |
 | `core/retreat_controller.py` | 树冠/近敌分段撤退恢复状态机、失败落点冷却与中继恢复判定 |
 | `core/survival_harness.py` | 串行任务推进、单游戏动作线程、独立模型 worker、安全复查、取消、失败退避和检查点 |
 | `agent/llm_planner.py`、`agent/tools.py` | 完整注册 starter 9 / daily 35 / competition 40 工具；autonomy 正常规划仅暴露目标及安全/赛事元工具，needs_ai 开放原子修复；严格解析并保留配对工具反馈 |

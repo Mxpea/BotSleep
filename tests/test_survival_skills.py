@@ -411,8 +411,9 @@ class TerrainRetreatTests(unittest.TestCase):
         result = SurvivalSkills(world).execute("retreat_from", {"pos": [-3, 66, 0.5]},
                                               recovery_context={"evacuating": True, "evacuation_origin": origin})
         self.assertTrue(result.success, result)
-        self.assertTrue(result.data["retreat_complete"])
-        self.assertEqual(result.data["evacuation_stage"], "ground")
+        self.assertTrue(result.data["ground_reached"])
+        self.assertFalse(result.data["retreat_complete"])  # Ground is still within the hostile radius.
+        self.assertEqual(result.data["evacuation_stage"], "relay")
         self.assertEqual(world.blocks[(2, 63, 0)]["name"], "dirt")
         self.assertNotIn("birch_leaves", SurvivalSkills.SUPPORT)
         self.assertNotIn("oak_leaves", SurvivalSkills.SUPPORT)
@@ -771,8 +772,9 @@ class ObservedCanopyRetreatTests(unittest.TestCase):
                                  abs(math.floor(target[2]) - math.floor(previous[2])), 1)
                 self.assertTrue(-2 <= target[1] - previous[1] <= 1)
                 self.assertLessEqual(result.data["terrain_search"]["block_reads"], 256)
-                self.assertEqual(result.data["retreat_complete"], index == 3)
-                self.assertEqual(result.data["evacuation_stage"], "ground" if index == 3 else "relay")
+                self.assertEqual(result.data["ground_reached"], index == 3)
+                self.assertFalse(result.data["retreat_complete"])
+                self.assertEqual(result.data["evacuation_stage"], "relay")
                 previous = target
         support = ",".join(str(value) for value in (9, 109, -6))
         self.assertEqual(self.fixture["blocks"][support]["name"], "grass_block")

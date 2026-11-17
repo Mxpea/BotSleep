@@ -35,6 +35,7 @@ from core.domain import (
 )
 from core.survival_state import SurvivalInstanceError, SurvivalJournal
 from core.skill_registry import (
+    INTERNAL_SKILLS,
     SKILL_REGISTRY,
     destination_checked_skills,
     resolve_skill_runner,
@@ -100,10 +101,11 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertEqual(set(daily_tools), set(DAILY_SKILLS))
         self.assertEqual(set(daily_tools), set(skills_for_objective("daily")))
         self.assertEqual(set(competition_tools), set(skills_for_objective("competition")))
-        self.assertEqual(set(SKILL_REGISTRY), set(starter_tools) | set(competition_tools))
+        self.assertEqual(set(SKILL_REGISTRY), set(starter_tools) | set(competition_tools) | INTERNAL_SKILLS)
+        self.assertFalse(INTERNAL_SKILLS & (set(starter_tools) | set(competition_tools)))
         self.assertTrue(_KNOWN_SKILLS.issubset(set(daily_tools)))
         self.assertEqual(destination_checked_skills(daily=False), {"move_to", "gather_block", "place_item"})
-        self.assertEqual(len(destination_checked_skills(daily=True)), 24)
+        self.assertEqual(len(destination_checked_skills(daily=True)), 25)
         self.assertNotIn("fight_hostile", destination_checked_skills(daily=True))
         self.assertEqual([len(starter_tools), len(daily_tools), len(competition_tools)], [9, 35, 40])
 

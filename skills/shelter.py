@@ -56,7 +56,11 @@ class ShelterSkills(SurvivalSkills):
     MATERIALS = SHELTER_BUILDING_BLOCKS
     NATURAL_GROUND = SHELTER_GROUND_BLOCKS
     DOORS = WOODEN_DOOR_BLOCKS
-    INTERIOR_PASSABLE = SurvivalSkills.AIR | {"torch", "wall_torch"}
+    # Both have empty collision in 1.21.11 and are replaceable by API.place.
+    # Do not reuse the broader workflow set: snow can have partial collision.
+    REPLACEABLE_PLANTS = frozenset({"leaf_litter", "short_grass"})
+    REPLACEABLE_SPACE = SurvivalSkills.AIR | REPLACEABLE_PLANTS
+    INTERIOR_PASSABLE = REPLACEABLE_SPACE | {"torch", "wall_torch"}
     MAX_READS = 150
     # Checked between calls and used as each read's remaining HTTP timeout.
     # An already dispatched place keeps the client's bounded action timeout;
@@ -185,7 +189,7 @@ class ShelterSkills(SurvivalSkills):
             "facing": lp.get("facing"),
             "reason": "door_missing",
         }
-        if lower["name"] in self.AIR and upper["name"] in self.AIR:
+        if lower["name"] in self.REPLACEABLE_SPACE and upper["name"] in self.REPLACEABLE_SPACE:
             return result
         if (
             lower["name"] not in self.DOORS
@@ -287,8 +291,8 @@ class ShelterSkills(SurvivalSkills):
         floor_ok = all(cache[p]["name"] in floor_blocks and self._safe_block(cache[p]) for p in floor)
         hazards = [list(pos) for pos, block in cache.items() if not self._safe_block(block)]
         filled = lambda pos: cache[pos]["name"] in self.MATERIALS and self._safe_block(cache[pos])
-        missing = [(p, "wall" if p in wall_set else "roof") for p in walls + roof if cache[p]["name"] in self.AIR]
-        occupied = [list(p) for p in walls + roof if cache[p]["name"] not in self.AIR and not filled(p)]
+        missing = [(p, "wall" if p in wall_set else "roof") for p in walls + roof if cache[p]["name"] in self.REPLACEABLE_SPACE]
+        occupied = [list(p) for p in walls + roof if cache[p]["name"] not in self.REPLACEABLE_SPACE and not filled(p)]
         door = self._door(anchor, cache, orientation=norm_orient)
 
         corridor = [
@@ -302,7 +306,7 @@ class ShelterSkills(SurvivalSkills):
             exit_floor["name"] in floor_blocks
             and self._safe_block(exit_floor)
             and all(cache[p]["name"] in self.INTERIOR_PASSABLE and self._safe_block(cache[p]) for p in corridor)
-            and (door["frame_verified"] or all(cache[p]["name"] in self.AIR for p in (doorway, door_upper_pos)))
+            and (door["frame_verified"] or all(cache[p]["name"] in self.REPLACEABLE_SPACE for p in (doorway, door_upper_pos)))
         )
 
         candidates = []
@@ -353,6 +357,15 @@ class ShelterSkills(SurvivalSkills):
             ]
             candidates.sort(key=lambda p: (math.dist(p, target), math.dist(status["pos"], p)))
 
+        current_visibility = (trace_block_visibility(
+            status["pos"], next_gap["pos"], lambda _: None, cache=cache,
+            max_queries=0, max_distance=4.5) if next_gap else None)
+        needs_position = bool(next_gap and (
+            abs(status["pos"][1] - y) > .15
+            or math.dist(status["pos"], next_gap["pos"]) > 3.5
+            or self._body_intersects(next_gap["pos"], status["pos"])
+            or current_visibility["visible"] is not True))
+
         geometry = {
             "floor_verified": floor_ok,
             "walls_complete": all(filled(p) for p in walls),
@@ -400,6 +413,8 @@ class ShelterSkills(SurvivalSkills):
             "door": door,
             "missing_blocks": len(missing),
             "occupied_blueprint_cells": occupied[:8],
+            "replaceable_vegetation": [{"pos": list(p), "name": b["name"]}
+                                       for p, b in cache.items() if b["name"] in self.REPLACEABLE_PLANTS][:8],
             "hazards": hazards[:8],
             "next_gap": next_gap,
             "needs_door": None
@@ -408,9 +423,11 @@ class ShelterSkills(SurvivalSkills):
                 "pos": list(doorway),
                 "allowed_facing": list(self._axis_facings(norm_orient)),
                 "stand_pos": door_stand,
+                "approach_pos": inside_door_stand if inside_door_stand in candidates else None,
                 "reason": door["reason"],
             },
-            "needs_position": False,
+            "needs_position": needs_position,
+            "visibility": current_visibility,
             "stand_candidates": candidates[:8],
             "executed": False,
         }
@@ -433,8 +450,8 @@ class ShelterSkills(SurvivalSkills):
         _, y, _ = anchor
         if not evidence["geometry"]["floor_verified"] or not evidence["geometry"]["exit_verified"] or evidence["hazards"]:
             raise _Failure("unsafe_site", "Shelter needs a flat natural-type solid floor and a clear supported exit")
-        if any(block["name"] not in self.AIR for pos, block in cache.items() if pos[1] >= y):
-            raise _Failure("site_occupied", "Planning requires three clear layers; existing blocks will not be removed")
+        if any(block["name"] not in self.REPLACEABLE_SPACE for pos, block in cache.items() if pos[1] >= y):
+            raise _Failure("site_occupied", "Planning requires clear layers or known replaceable ground cover; obstacles will not be removed")
         evidence["blueprint"] = {
             "size": [5, 3, 5],
             "wall_blocks": 30,
@@ -497,8 +514,8 @@ class ShelterSkills(SurvivalSkills):
                 if self._body_intersects(target, entity["pos"]):
                     raise _Failure("body_occupied", "The next block intersects an observed entity")
             current_target = self._block(target, context)
-            if current_target["name"] not in self.AIR or not self._safe_block(current_target):
-                raise _Failure("site_changed", "The intended blueprint cell is no longer empty")
+            if current_target["name"] not in self.REPLACEABLE_SPACE or not self._safe_block(current_target):
+                raise _Failure("site_changed", "The intended blueprint cell is no longer clear or replaceable")
             adjacent = [
                 [target[0] + dx, target[1] + dy, target[2] + dz]
                 for dx, dy, dz in ((0, -1, 0), (1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1), (0, 1, 0))

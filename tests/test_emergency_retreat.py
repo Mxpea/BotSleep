@@ -259,10 +259,56 @@ class EmergencyRetreatTests(unittest.TestCase):
         self.assertTrue(harness.paused)
         self.assertFalse(harness.journal.state["pending"]["before_counts_fresh"])
         self.assertEqual(self.collector.full_calls, 0)
+        self.client.status.update(health=10, nearest_hostile={"id": 2, "name": "skeleton", "dist": 2})
+        self.client.entities.append({"id": 2, "name": "skeleton", "type": "hostile", "pos": [2.5, 64, .5]})
         for _ in range(3):
             harness.tick()
         self.assertEqual(self.skills.execute.call_count, 1)
         self.assertIsNotNone(harness.journal.state["pending"])
+
+    def test_shooter_failure_and_cooldown_use_one_second_fresh_observations(self):
+        self.client.status["nearest_hostile"]["name"] = "pillager"
+        self.client.entities[0]["name"] = "pillager"
+        harness = self.harness()
+        harness.request_step()
+        self.assertFalse(self.finish(harness).success)
+        self.assertGreater(harness._next_attempt - time.monotonic(), .8)
+        self.assertLessEqual(harness._next_attempt - time.monotonic(), 1)
+        self.assertTrue(harness._start())
+        self.assertTrue(self.finish(harness).data["waiting"])
+        self.assertEqual(self.skills.execute.call_count, 1)
+        self.assertGreater(harness._next_attempt - time.monotonic(), .8)
+        self.assertLessEqual(harness._next_attempt - time.monotonic(), 1)
+        self.client.status["health"] = 16
+        self.assertTrue(harness._start())
+        self.assertFalse(self.finish(harness).success)
+        self.assertEqual(self.skills.execute.call_count, 2)
+        self.assertTrue(harness._start())
+        self.assertTrue(self.finish(harness).data["waiting"])
+        self.assertEqual(self.skills.execute.call_count, 2)
+        self.assertEqual(self.collector.full_calls, 0)
+
+    def test_known_hurt_termination_clears_pending_then_reobserves_without_replay(self):
+        self.skills.execute.return_value = SkillResult(False, "Verified stopped after hurt", {
+            "executed": True, "action_state": "terminated", "backend_terminated": True,
+            "candidate_failed": True, "target": [-.5, 64, .5], "pos": [.5, 64, .5],
+            "planned_path": [[99, 80, 99]], "retreat_complete": False}, "retreat_interrupted")
+        harness = self.harness()
+        harness.request_step()
+        self.assertEqual(self.finish(harness).error_code, "retreat_interrupted")
+        self.assertFalse(harness.paused)
+        self.assertIsNone(harness.journal.state["pending"])
+        self.assertFalse(any(row[0] == "stop" for row in self.client.calls))
+        reads = len(self.client.calls)
+        self.skills.execute.return_value = SkillResult(False, "No verified new route", {"executed": False}, "unsafe")
+        self.assertTrue(harness._start())
+        self.assertEqual(self.finish(harness).error_code, "unsafe")
+        self.assertGreater(len(self.client.calls), reads)
+        self.assertEqual(self.skills.execute.call_count, 2)
+        options = self.skills.execute.call_args.kwargs["recovery_context"]
+        self.assertNotIn("planned_path", options)
+        self.assertEqual(options["excluded_targets"], [[-1, 64, 0]])
+        self.assertFalse(any(row[0] == "stop" for row in self.client.calls))
 
     def test_changed_position_life_or_busy_during_short_scan_refuses_action(self):
         for change in ({"pos": [1.1, 64, .5]}, {"pos": [.5, 64.5, .5]}, {"last_death": {"t": 9}},

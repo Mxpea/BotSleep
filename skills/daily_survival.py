@@ -735,7 +735,13 @@ class DailySurvivalSkills(SurvivalSkills):
         def site(status):
             feet = [math.floor(v) for v in status["pos"]]
             for cell in [pos] + extras:
-                if cell in (feet, [feet[0], feet[1] + 1, feet[2]]) or self._block(cell, context)["name"] not in self.AIR:
+                at = self._block(cell, context)
+                # API.place can replace these empty-collision plants directly.
+                # A real paired, closed door and one consumed item are still
+                # required below; other decoration never becomes empty space.
+                if (cell in (feet, [feet[0], feet[1] + 1, feet[2]])
+                        or at["name"] not in self.AIR | {"leaf_litter", "short_grass"}
+                        or not self._safe_block(at)):
                     raise _Failure("unsafe", "Both structure cells must have clear space outside the bot body")
                 if bed or cell == pos:
                     ground = self._block([cell[0], cell[1] - 1, cell[2]], context)

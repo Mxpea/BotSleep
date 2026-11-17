@@ -77,6 +77,12 @@ positions or action queues. Targets need not already be visible. context.task_ex
 is actual task progress, not a claim of completion; only its terminal summary closes
 the native tool call. Unknown writes require explicit recovery. Change strategy after
 needs_ai/failure; a model error never authorizes inventing a replacement task.
+The shelter goal handles its own site validation, wood/plank supply, workstation,
+walls, roof and closed door. Stone tools and a furnace are NOT prerequisites for
+this wooden house. When the owner prioritizes shelter, choose that goal before
+optional stone upgrades. Repeated zero-yield resource goals need a different
+strategy; moving between standing positions alone does not make buried stone
+reachable or justify postponing the owner's achievable goal indefinitely.
 context.playbook is bounded stage advice, not proof of completion or an action queue.
 Follow its selected survival/speedrun intent only through registered tools; unsupported
 later stages are gaps, never permission to invent portal, trading or dragon actions.

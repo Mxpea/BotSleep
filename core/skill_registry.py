@@ -77,7 +77,15 @@ SKILL_SPECS = (
     SkillSpec("end_competition", _COMP_ONLY, "competition", checks_destination=False),
 )
 
-SKILL_REGISTRY: Dict[str, SkillSpec] = {spec.name: spec for spec in SKILL_SPECS}
+# Local procedural children are executable capabilities, not model tools.
+# Keep them out of SKILL_SPECS and all public objective/tool catalogues.
+INTERNAL_SKILL_SPECS = (
+    SkillSpec("plan_shelter_preparation", _DAILY_COMP, "shelter_preparation_skills", checks_destination=False),
+    SkillSpec("prepare_shelter_step", _DAILY_COMP, "shelter_preparation_skills", checks_destination=True),
+)
+INTERNAL_SKILLS = frozenset(spec.name for spec in INTERNAL_SKILL_SPECS)
+
+SKILL_REGISTRY: Dict[str, SkillSpec] = {spec.name: spec for spec in SKILL_SPECS + INTERNAL_SKILL_SPECS}
 
 _OBJECTIVE_SKILLS: Dict[str, FrozenSet[str]] = {
     objective: frozenset(spec.name for spec in SKILL_SPECS if objective in spec.objectives)
@@ -88,7 +96,8 @@ _STARTER_DESTINATION_SKILLS: FrozenSet[str] = frozenset(
     spec.name for spec in SKILL_SPECS if "starter" in spec.objectives and spec.checks_destination
 )
 _DAILY_DESTINATION_SKILLS: FrozenSet[str] = frozenset(
-    spec.name for spec in SKILL_SPECS if ("starter" in spec.objectives or "daily" in spec.objectives) and spec.checks_destination
+    spec.name for spec in SKILL_SPECS + INTERNAL_SKILL_SPECS
+    if ("starter" in spec.objectives or "daily" in spec.objectives) and spec.checks_destination
 )
 
 
@@ -104,13 +113,20 @@ def destination_checked_skills(*, daily: bool = False) -> FrozenSet[str]:
     return _DAILY_DESTINATION_SKILLS if daily else _STARTER_DESTINATION_SKILLS
 
 
+def internal_skills_for_objective(objective: str) -> FrozenSet[str]:
+    """Procedural-only children; callers still need their own task authorization."""
+    if objective not in _OBJECTIVE_SKILLS:
+        raise ValueError(f"Unsupported survival objective: {objective}")
+    return frozenset(spec.name for spec in INTERNAL_SKILL_SPECS if objective in spec.objectives)
+
+
 def resolve_skill_runner(harness: Any, skill_name: str) -> Any:
     """Resolve the skill runner instance on SurvivalHarness for a given skill name."""
     spec = SKILL_REGISTRY.get(skill_name)
     if spec is None or not getattr(harness, "daily", False):
         return harness.skills
     slot = spec.runner_slot
-    if slot in {"shelter_skills", "batch_skills", "door_skills", "positioning_skills",
+    if slot in {"shelter_skills", "shelter_preparation_skills", "batch_skills", "door_skills", "positioning_skills",
                 "combat_skills", "bucket_skills"}:
         runner = getattr(harness, slot, None)
         if runner is not None:

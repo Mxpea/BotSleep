@@ -134,6 +134,193 @@ class LocalRecoveryRuntimeTests(unittest.TestCase):
         self.assertEqual(restarted.context["canopy_recovery"]["steps"], 2)
         self.assertEqual(brain.requests + next_brain.requests, [])
 
+    def test_live_old_two_cell_loop_refreshes_recent_landings_across_restart(self):
+        # Session 7036988f2542 steps 23-67 alternated the eighth/ninth cells
+        # below. Both had fallen out of visited[-8:] despite every new arrival.
+        history = [[0, 125, 6], [1, 123, 6], [2, 122, 6], [2, 122, 7],
+                   [3, 123, 7], [3, 122, 8], [4, 122, 8], [5, 122, 8],
+                   [6, 121, 8], [6, 122, 7], [6, 122, 6], [6, 122, 5],
+                   [5, 121, 5], [5, 122, 6], [4, 121, 6], [5, 121, 6], [5, 122, 7]]
+        self.world.status.update(pos=[5.5, 122, 8.3], health=20, food=20)
+        self.world.block([5, 121, 8], "oak_leaves", properties={"waterlogged": False})
+        self.world.block([6, 120, 8], "oak_leaves", properties={"waterlogged": False})
+        self.world.move_mode = "offset"
+        harness, brain = self.make_harness()
+        state = harness._recovery_state("canopy_recovery", {"status": self.world.status})
+        state.update(origin=[-.7, 125, 6.5], visited=history, steps=19, evacuating=True)
+        first = self.cycle(harness)
+        self.assertTrue(first.success, first)
+        self.assertEqual([math.floor(v) for v in first.data["pos"]], [6, 121, 8])
+        self.assertEqual(state["visited"][-1], [6, 121, 8])
+        self.assertEqual(state["visited"].count([6, 121, 8]), 1)
+        saved = json.loads(harness.journal.path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["context"]["canopy_recovery"]["visited"][-1], [6, 121, 8])
+        harness.close()
+
+        restarted, next_brain = self.make_harness()
+        second = self.cycle(restarted)
+        self.assertTrue(second.success, second)
+        self.assertEqual([math.floor(v) for v in second.data["pos"]], [5, 122, 8])
+        state = restarted.context["canopy_recovery"]
+        self.assertEqual(state["visited"][-2:], [[6, 121, 8], [5, 122, 8]])
+        self.assertEqual(len(state["visited"]), 17)
+        third = self.cycle(restarted)
+        self.assertEqual(third.error_code, "unsafe", third)
+        self.assertEqual(len([call for call in self.world.calls if call[0] == "move"]), 2)
+        self.assertTrue(self.cycle(restarted).success)
+        self.assertEqual(self.last_decision(restarted)["name"], "wait")
+        self.assertEqual(len([call for call in self.world.calls if call[0] == "move"]), 2)
+        self.assertFalse(restarted.paused)
+        self.assertIsNone(restarted.journal.state["pending"])
+        self.assertEqual(brain.requests + next_brain.requests, [])
+
+    def exhausted_canopy(self):
+        self.canopy()
+        self.world.status.update(health=20, food=20)
+        harness, brain = self.make_harness()
+        observation = harness.collector.collect()
+        state = harness._recovery_state("canopy_recovery", observation)
+        state.update(steps=64, exhausted=True, reason="canopy_step_budget_exhausted",
+                     visited=[[0, 70, 0], [9, 70, 9]],
+                     excluded_until={"8,70,8": time.time() + 300}, evacuating=True)
+        harness._paused = True
+        harness.pause_reason = "canopy_recovery_exhausted"
+        return harness, brain, state, observation
+
+    def test_explicit_resume_reopens_one_fresh_window_preserving_history_and_global_budget(self):
+        harness, brain, state, observation = self.exhausted_canopy()
+        harness.steps = 12
+        started = harness._started
+        excluded = copy.deepcopy(state["excluded_until"])
+        origin = list(state["origin"])
+        self.assertTrue(harness.resume())
+        self.assertEqual(state["steps"], 64)  # A resume command is not fresh evidence.
+        harness._prepare_context(observation)
+        self.assertEqual((state["steps"], state["total_steps"], state["completed_windows"]), (0, 64, 1))
+        self.assertFalse(state["exhausted"])
+        self.assertEqual(state["visited"], [[9, 70, 9], [0, 70, 0]])
+        self.assertEqual(state["excluded_until"], excluded)
+        self.assertEqual(state["origin"], origin)
+        self.assertEqual(state["window_history"][-1]["steps"], 64)
+        self.assertEqual(state["window_history"][-1]["reason"], "canopy_step_budget_exhausted")
+        self.assertEqual(harness.steps, 12)
+        self.assertEqual(harness._started, started)
+        self.assertIsNone(harness._canopy_resume_request)
+        result = self.cycle(harness)
+        self.assertTrue(result.success, result)
+        self.assertEqual((state["steps"], state["total_steps"], harness.steps), (1, 65, 13))
+        saved = json.loads(harness.journal.path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["context"]["canopy_recovery"], state)
+        self.assertEqual(len([row for row in self.events(harness)
+                              if row["event"] == "CANOPY_RECOVERY_WINDOW_REOPENED"]), 1)
+        state.update(steps=64, exhausted=True, reason="canopy_step_budget_exhausted")
+        harness._prepare_context(harness.last_observation)
+        self.assertEqual(state["steps"], 64)  # The consumed resume cannot open another window.
+        self.assertEqual(state["completed_windows"], 1)
+        self.assertEqual(brain.requests, [])
+
+    def test_automatic_tick_and_restart_do_not_renew_an_exhausted_window(self):
+        harness, brain, state, observation = self.exhausted_canopy()
+        harness._prepare_context(observation)
+        self.assertIsNone(harness.tick())
+        self.assertEqual(state["steps"], 64)
+        harness._checkpoint(context=harness.context)
+        harness.close()
+        restarted, next_brain = self.make_harness()
+        restarted.tick(automatic=True)
+        restarted._future.result(timeout=5)
+        result = restarted.tick(automatic=False)
+        self.assertTrue(result.success, result)
+        self.assertEqual(self.last_decision(restarted)["name"], "wait")
+        self.assertTrue(restarted.paused)
+        self.assertEqual(restarted.context["canopy_recovery"]["steps"], 64)
+        self.assertFalse(any(row["event"] == "CANOPY_RECOVERY_WINDOW_REOPENED" for row in self.events(restarted)))
+        self.assertFalse(any(row[0] == "move" for row in self.world.calls))
+        self.assertEqual(brain.requests + next_brain.requests, [])
+
+    def test_resume_request_is_not_persisted_without_fresh_authorization(self):
+        harness, brain, state, observation = self.exhausted_canopy()
+        self.assertTrue(harness.resume())
+        harness._checkpoint(context=harness.context)
+        harness.close()
+        restarted, next_brain = self.make_harness()
+        restarted._prepare_context(observation)
+        self.assertEqual(restarted.context["canopy_recovery"]["steps"], 64)
+        self.assertEqual(brain.requests + next_brain.requests, [])
+
+    def test_resume_waits_for_complete_stable_fresh_observation(self):
+        harness, brain, state, observation = self.exhausted_canopy()
+        self.assertTrue(harness.resume())
+        changes = ({"fresh": False}, {"stale": True}, {"partial": True},
+                   {"observation_scope": "safety"}, {"inventory_fresh": False}, {"terrain_fresh": False},
+                   {"footing": None})
+        status_changes = ({"on_ground": False}, {"jumping": True}, {"busy": "move_to"},
+                          {"held_controls": {"forward": True}}, {"in_lava": True}, {"gamemode": "creative"})
+        for root, updates in ((True, changes), (False, status_changes)):
+            for update in updates:
+                with self.subTest(update=update):
+                    altered = copy.deepcopy(observation)
+                    (altered if root else altered["status"]).update(update)
+                    harness._prepare_local_recovery(altered)
+                    self.assertEqual(state["steps"], 64)
+        harness._prepare_local_recovery(observation)
+        self.assertEqual(state["steps"], 0)
+        self.assertEqual(brain.requests, [])
+
+    def test_pending_or_unknown_cannot_request_or_consume_a_new_window(self):
+        harness, brain, state, observation = self.exhausted_canopy()
+        baseline = copy.deepcopy(state)
+        for kind in ("pending", "canopy", "task", "result"):
+            with self.subTest(kind=kind):
+                state.clear(); state.update(copy.deepcopy(baseline))
+                harness.context.pop("task_execution", None)
+                harness.context.pop("last_result", None)
+                harness.journal.update(pending=None)
+                if kind == "pending": harness.journal.update(pending={"action_state": "unknown"})
+                elif kind == "canopy": state["unknown"] = True
+                elif kind == "task": harness.context["task_execution"] = {"status": "unknown"}
+                else: harness.context["last_result"] = {"data": {"action_state": "unknown"}}
+                pending = copy.deepcopy(harness.journal.state.get("pending"))
+                harness._paused = False  # Loaded evidence must also block a fresh runner.
+                self.assertFalse(harness.resume())
+                self.assertTrue(harness.paused)
+                self.assertIsNone(harness.tick())
+                harness._prepare_local_recovery(observation)
+                self.assertEqual(state["steps"], 64)
+                self.assertIsNone(harness._canopy_resume_request)
+                self.assertEqual(harness.journal.state.get("pending"), pending)
+        harness.context.pop("last_result", None)
+        harness.journal.update(pending=None)
+        state.clear(); state.update(copy.deepcopy(baseline))
+        self.assertTrue(harness.resume())
+        harness.journal.update(pending={"action_state": "unknown"})
+        harness._prepare_local_recovery(observation)
+        self.assertEqual(state["steps"], 64)
+        self.assertIsNone(harness._canopy_resume_request)
+        harness.journal.update(pending=None)
+        harness._prepare_local_recovery(observation)
+        self.assertEqual(state["steps"], 64)
+        self.assertEqual(brain.requests, [])
+
+    def test_changed_life_dimension_or_global_exhaustion_cannot_renew_canopy(self):
+        harness, brain, state, observation = self.exhausted_canopy()
+        for change in ({"last_death": {"t": 5}}, {"dimension": "the_nether"}):
+            with self.subTest(change=change):
+                self.assertTrue(harness.resume())
+                altered = copy.deepcopy(observation)
+                altered["status"].update(change)
+                harness._prepare_local_recovery(altered)
+                self.assertEqual(state["steps"], 64)
+                self.assertIsNone(harness._canopy_resume_request)
+                harness._prepare_local_recovery(observation)
+                self.assertEqual(state["steps"], 64)
+        harness.steps = self.settings["max_steps"]
+        self.assertTrue(harness.resume())
+        harness._prepare_local_recovery(observation)
+        self.assertEqual(state["steps"], 64)
+        self.assertEqual(harness.steps, self.settings["max_steps"])
+        self.assertEqual(brain.requests, [])
+
     def test_failed_canopy_search_cools_down_without_repeated_actions_or_model(self):
         self.canopy(route=False)
         harness, brain = self.make_harness()
@@ -164,6 +351,7 @@ class LocalRecoveryRuntimeTests(unittest.TestCase):
         pending = copy.deepcopy(harness.journal.state["pending"])
         self.assertIsNotNone(pending)
         self.assertTrue(harness.context["canopy_recovery"]["unknown"])
+        self.assertEqual(harness.context["canopy_recovery"]["visited"], [])
         for _ in range(3):
             self.assertIsNone(harness.tick())
         self.assertEqual(harness.journal.state["pending"], pending)

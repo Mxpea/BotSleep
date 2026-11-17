@@ -69,6 +69,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
         self.daily_policy = None
         self.memory = None
         self.shelter_skills = None
+        self.shelter_preparation_skills = None
         self.batch_skills = None
         self.door_skills = None
         self.positioning_skills = None
@@ -93,6 +94,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
             from core.daily_policy import DailySafetyPolicy
             from skills.daily_survival import DailySurvivalSkills
             from skills.shelter import ShelterSkills
+            from skills.shelter_preparation import ShelterPreparationSkills
             from skills.batch import BatchSkills
             from skills.doors import DoorSkills
             from skills.positioning import PositioningSkills
@@ -104,6 +106,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
             self.collector = collector or DailyObservationCollector(client, settings["scan_radius"],
                 low_health_threshold=settings["low_health_threshold"])
             self.shelter_skills = ShelterSkills(client)
+            self.shelter_preparation_skills = ShelterPreparationSkills(client)
             self.batch_skills = BatchSkills(client, gather_skills=self.skills, shelter_skills=self.shelter_skills)
             self.door_skills = DoorSkills(client)
             self.positioning_skills = PositioningSkills(client)
@@ -294,6 +297,10 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
 
     def resume(self):
         if self._closed or self.busy or self.finished:
+            return False
+        if not self._request_canopy_resume():
+            self._paused = True
+            self.pause_reason = self.pause_reason or "canopy_resume_requires_reconciliation"
             return False
         self._paused = False
         self.pause_reason = None
@@ -926,6 +933,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
         if not self.paused and self.context["death_count"] >= self.settings["max_deaths"]:
             self._paused = True
             self.pause_reason = "death_limit"
+            self._phase("paused")
             self._task_end_at_boundary("death_limit")
         # Preserve pending and pause reason, including manual/unknown-result pauses.
         self._checkpoint(context=self.context)
@@ -1006,7 +1014,9 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                         "code": result.error_code, "entity_id": decision.args["entity_id"], "retry_seconds": delay})
                 elif task_replan:
                     delay = 0
-                elif retreat_replan or local_replan:
+                elif retreat_replan:
+                    delay = self._retreat.wait_seconds(observation)
+                elif local_replan:
                     delay = RETREAT_WAIT_SECONDS
                 else:
                     self.failures += 1
@@ -1063,7 +1073,11 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                 else:
                     self.failures = 0
                 if decision.name == "wait":
-                    delay = max(delay, min(60, decision.args.get("seconds", 5)))
+                    if (decision.goal == "safety" and
+                            (self.context.get("retreat_recovery") or {}).get("retry_after", 0) > time.time()):
+                        delay = self._retreat.wait_seconds(observation)
+                    else:
+                        delay = max(delay, min(60, decision.args.get("seconds", 5)))
                 elif (decision.name in {"retreat_from", "canopy_escape"} and result.data.get("retreat_complete") is False
                       and result.data.get("evacuation_stage") == "relay"):
                     delay = 0  # Next tick reobserves; never replay the saved route.
@@ -1089,7 +1103,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
             self._checkpoint(context=self.context, last_result=asdict(result),
                                 pending=self.journal.state.get("pending") if keep_pending else None)
             self._record("INFO" if result.success else "WARN", "STEP_RESULT",
-                         {"step": self.steps, "decision": asdict(decision), "result": asdict(result), "paused": self.paused})
+                         {"step": self.steps, "decision": asdict(decision), "result": asdict(result),
+                          "paused": self.paused, "phase": self.phase, "pause_reason": self.pause_reason})
             return result
         if self.finished:
             return None

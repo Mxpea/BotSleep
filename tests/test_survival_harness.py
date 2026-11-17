@@ -70,6 +70,26 @@ class HarnessTests(unittest.TestCase):
         self.assertIn("DECISION", events)
         self.assertIn("STEP_RESULT", events)
 
+    def test_disconnected_fatal_result_updates_monitor_without_heartbeat(self):
+        from debug.monitor import EventMonitor
+        monitor = EventMonitor()
+        monitor.publish({"timestamp": "2026-11-17T06:33:45Z", "event": "AGENT_PHASE",
+                         "data": {"phase": "observing"}})
+        self.collector.collect.side_effect = APIError("death_loop_cooldown", "Cooldown active")
+        harness = self.harness()
+        harness.request_step()
+        self.assertEqual(self.finish(harness).error_code, "death_loop_cooldown")
+        records = [json.loads(line) for line in harness.journal.events_path.read_text().splitlines()]
+        result = next(row for row in reversed(records) if row["event"] == "STEP_RESULT")
+        monitor.publish(result)
+        monitor.publish({"timestamp": "2026-11-17T06:33:50Z", "event": "HEARTBEAT_FAILED",
+                         "data": {"code": "not_connected"}})
+        state = monitor.state()
+        self.assertEqual(state["run"]["phase"], "paused")
+        self.assertEqual(state["run"]["pause_reason"], "death_loop_cooldown")
+        self.assertFalse(state["status_fresh"])
+        self.assertEqual(state["status_connection"], "unavailable")
+
     def test_pause_serializes_and_requires_resume(self):
         entered = threading.Event()
         def execute(*args, cancel_event=None):
@@ -550,6 +570,20 @@ class HarnessTests(unittest.TestCase):
         self.assertTrue(harness.paused)
         self.assertEqual(harness.pause_reason, "user_requested")
         self.assertEqual(harness.journal.state["pending"], pending)
+        self.skills.execute.assert_not_called()
+
+    def test_idle_death_limit_snapshot_has_paused_phase_and_preserves_pending(self):
+        harness = self.harness()
+        harness.context["death_count"] = self.settings["max_deaths"]
+        harness.phase = "waiting"
+        pending = {"decision": {"name": "retreat_from"}, "action_state": "unknown"}
+        harness.journal.update(pending=pending)
+        harness._monitor_idle()
+        snapshot = harness.snapshot()
+        self.assertTrue(snapshot["paused"])
+        self.assertEqual(snapshot["pause_reason"], "death_limit")
+        self.assertEqual(snapshot["phase"], "paused")
+        self.assertEqual(snapshot["pending"], pending)
         self.skills.execute.assert_not_called()
 
     def test_idle_dimension_change_clears_retreat_but_not_milestones_or_pause(self):

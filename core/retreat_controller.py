@@ -10,11 +10,11 @@ import math
 import time
 from typing import Any, Callable, Dict, Optional
 
-from agent.survival_planner import Decision
+from agent.survival_planner import Decision, RANGED_HOSTILES
 from core.domain import finite_number, parse_pos
 
 
-RETREAT_REPLAN = {"unsafe", "path_not_found", "no_path", "move_unverified", "retreat_unverified"}
+RETREAT_REPLAN = {"unsafe", "path_not_found", "no_path", "move_unverified", "retreat_unverified", "retreat_interrupted"}
 RETREAT_WAIT_SECONDS = 5
 RETREAT_SEARCH_COOLDOWN = 30
 
@@ -51,10 +51,58 @@ class RetreatController:
         }
         return recovery
 
-    @staticmethod
-    def changed(observation: Dict[str, Any], threat: Any, recovery: Dict[str, Any]) -> bool:
-        """Return True if bot position, threat position, or observed blocking cells changed."""
+    def nearby_threats(self, observation: Dict[str, Any]) -> list:
+        """Retain only bounded, observed danger evidence; absence never clears a route."""
+        status = observation.get("status", {})
+        origin = parse_pos(status.get("pos"))
+        rows = {}
+
+        def add(entity, gap):
+            if not isinstance(entity, dict) or not finite_number(gap) or gap < 0:
+                return
+            name = entity.get("name") if isinstance(entity.get("name"), str) else None
+            radius = self.settings.get("threat_radius", 8)
+            limit = max(radius, 16) if name in RANGED_HOSTILES else radius
+            if gap > limit:
+                return
+            entity_id = entity.get("id")
+            if type(entity_id) not in (int, str):
+                entity_id = None
+            key = (entity_id, name)
+            if key not in rows or gap < rows[key]["distance"]:
+                rows[key] = {"id": entity_id, "name": name, "distance": gap}
+
+        if origin is not None:
+            for row in observation.get("entities", [])[:64]:
+                point = parse_pos(row.get("pos")) if isinstance(row, dict) else None
+                if point is not None and row.get("type") == "hostile":
+                    add(row, math.dist(origin, point))
+        nearest = status.get("nearest_hostile")
+        if isinstance(nearest, dict):
+            add(nearest, nearest.get("dist"))
+        return list(rows.values())
+
+    def wait_seconds(self, observation: Optional[Dict[str, Any]]) -> int:
+        """Observe exposed shooters promptly without repeating the terrain search."""
+        return 1 if observation and any(row["name"] in RANGED_HOSTILES
+                                       for row in self.nearby_threats(observation)) else RETREAT_WAIT_SECONDS
+
+    def changed(self, observation: Dict[str, Any], threat: Any, recovery: Dict[str, Any]) -> bool:
+        """Invalidate a failed search when fresh harm, enemies or geometry change its basis."""
         basis = recovery.get("search_basis") or {}
+        health, old_health = observation["status"].get("health"), basis.get("health")
+        if finite_number(health) and finite_number(old_health) and health < old_health:
+            return True
+        old_rows = basis.get("nearby_threats")
+        if isinstance(old_rows, list):
+            previous = {(row.get("id"), row.get("name")): row.get("distance")
+                        for row in old_rows if isinstance(row, dict)}
+            for row in self.nearby_threats(observation):
+                old_gap = previous.get((row["id"], row["name"]))
+                # A new enemy or a two-block approach invalidates the old
+                # failed search; sub-block coordinate noise does not.
+                if old_gap is None or finite_number(old_gap) and row["distance"] <= old_gap - 2:
+                    return True
         origin = parse_pos(observation["status"].get("pos"))
         old_origin = parse_pos(basis.get("pos"))
         old_threat = parse_pos(basis.get("threat_pos"))
@@ -104,7 +152,7 @@ class RetreatController:
         if recovery.get("retry_after", 0) > time.time() and not self.changed(observation, threat, recovery):
             return Decision(
                 "wait",
-                {"seconds": RETREAT_WAIT_SECONDS},
+                {"seconds": self.wait_seconds(observation)},
                 "No verified retreat route; observe again before the bounded search cooldown expires",
                 "safety",
             )
@@ -166,6 +214,8 @@ class RetreatController:
         recovery["search_basis"] = {
             "pos": list(observation["status"]["pos"]),
             "threat_pos": list(decision.args["pos"]),
+            "health": observation["status"].get("health"),
+            "nearby_threats": self.nearby_threats(observation),
         }
         recovery["blocked_cells"] = [
             copy.deepcopy(row)
@@ -178,7 +228,7 @@ class RetreatController:
             {
                 "code": result.error_code,
                 "target": target,
-                "retry_seconds": RETREAT_WAIT_SECONDS,
+                "retry_seconds": self.wait_seconds(observation),
                 "search_retry_after": recovery.get("retry_after"),
             },
         )

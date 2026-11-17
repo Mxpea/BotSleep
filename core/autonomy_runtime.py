@@ -23,7 +23,7 @@ class AutonomyRuntime:
         if self.daily and self.settings.get("autonomy", {}).get("enabled", True):
             from core.autonomous_tasks import AutonomousTaskController
             self.task_controller = AutonomousTaskController(
-                self.settings, saved=self.context.get("autonomous_task"))
+                self.settings, saved=self.context.get("autonomous_task"), scope=self.journal.scope)
             if self.task_controller.snapshot().get("status") == "unknown":
                 self._paused = True
                 self.pause_reason = "task_outcome_requires_resume"

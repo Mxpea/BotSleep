@@ -14,6 +14,7 @@ import re
 from agent.survival_planner import Decision, SurvivalPlanner
 from core.domain import LOG_NAMES, PLANK_NAMES, SAFE_FOOD, TOOL_KINDS, parse_pos
 from core.skill_registry import skills_for_objective
+from core.structure_spec import SHELTER_BUILDING_BLOCKS
 from skills.daily_survival import DailySurvivalSkills
 
 
@@ -27,7 +28,9 @@ COOKING = {"beef": "cooked_beef", "porkchop": "cooked_porkchop", "mutton": "cook
            "deepslate_iron_ore": "iron_ingot", **{name: "charcoal" for name in LOG_NAMES}}
 CROPS = {"wheat": (7, "wheat_seeds"), "carrots": (7, "carrot"),
          "potatoes": (7, "potato"), "beetroots": (3, "beetroot_seeds")}
-BUILDING_MATERIALS = ("oak_planks", "birch_planks", "spruce_planks", "cobblestone")
+BUILDING_MATERIALS = tuple(dict.fromkeys(("oak_planks", "birch_planks", "spruce_planks",
+                                        *sorted(SHELTER_BUILDING_BLOCKS))))
+BUILDING_LOGS = tuple(name for name in LOG_NAMES if name[:-4] + "_planks" in SHELTER_BUILDING_BLOCKS)
 
 
 class DailySurvivalGoals:
@@ -350,8 +353,11 @@ class DailySurvivalGoals:
         return None
 
     def _base_candidate(self, observation, counts, context):
+        if context.get("shelter_survey_reposition") or context.get("shelter_survey_exhausted"):
+            return None
         material = next((name for name in BUILDING_MATERIALS if counts.get(name, 0)), "oak_planks")
         blocked = self.rules._blocked(context)
+        rejected = set(context.get("shelter_rejected_sites") or [])
         candidates = [observation["status"]["pos"]] + [row.get("pos") for row in self._rows(observation.get("safe_stand_candidates"))[:8]]
         seen = set()
         for raw in candidates:
@@ -363,8 +369,14 @@ class DailySurvivalGoals:
             if key in blocked or key in seen:
                 continue
             seen.add(key)
-            return self._action("plan_shelter", {"pos": pos, "material": material},
-                                "Survey a local candidate footprint; a standing cell does not prove a safe base", "base_site")
+            for orientation in ("north", "east", "south", "west"):
+                if key + "|" + orientation in rejected:
+                    continue
+                args = {"pos": pos, "material": material}
+                if orientation != "north":
+                    args["orientation"] = orientation
+                return self._action("plan_shelter", args,
+                                    "Survey a local candidate footprint; a standing cell does not prove a safe base", "base_site")
         return None
 
     def _shelter_action(self, observation, counts, base, context):
@@ -392,7 +404,7 @@ class DailySurvivalGoals:
         if shelter.get("needs_position") is True:
             for raw in shelter.get("stand_candidates") or []:
                 target = self._pos(raw)
-                if (target and 1 < math.dist(target, observation["status"]["pos"]) <= 16
+                if (target and .4 < math.dist(target, observation["status"]["pos"]) <= 16
                         and self.rules._key(target) not in self.rules._blocked(context)):
                     return self._action("move_to", {"pos": target, "range": .5},
                                         "Move to a currently checked construction standing cell, then reobserve", "shelter")
@@ -402,18 +414,37 @@ class DailySurvivalGoals:
             if material:
                 return self._action("build_shelter_step", {"pos": pos, "material": material, **build_extra},
                                     "Build at most one checked blueprint block", "shelter")
-            log = next((name for name in ("oak_log", "birch_log", "spruce_log") if counts.get(name, 0)), None)
+            log = next((name for name in BUILDING_LOGS if counts.get(name, 0)), None)
             if log:
                 count = min(64, counts[log] * 4, math.ceil(shelter["missing_blocks"] / 4) * 4)
                 return self._action("craft_item", {"item": log[:-4] + "_planks", "count": count},
                                     "Prepare available building material for the remaining blueprint", "shelter")
-            return self._gather(("oak_log", "birch_log", "spruce_log"), observation, context, "shelter")
+            return self._gather(BUILDING_LOGS, observation, context, "shelter")
         door = shelter.get("needs_door")
         if isinstance(door, dict) and self._pos(door.get("pos")):
+            if door.get("reason") not in (None, "door_missing"):
+                frame = shelter.get("door") or {}
+                if (door.get("reason") != "door_not_closed" or frame.get("frame_verified") is not True
+                        or frame.get("open") is not True or frame.get("pos") != door["pos"]
+                        or frame.get("name") not in DailySurvivalSkills.DOORS):
+                    return None
+                if math.dist(door["pos"], observation["status"]["pos"]) > 3:
+                    stand = self._pos(door.get("approach_pos") if shelter.get("inside") is True
+                                      else door.get("stand_pos"))
+                    if not stand or self.rules._key(stand) in self.rules._blocked(context):
+                        return None
+                    return self._action("move_to", {"pos": stand, "range": .5},
+                                        "Approach a fresh door stance before closing the existing frame", "shelter")
+                return self._action("set_door", {"pos": door["pos"], "open": False},
+                                    "Close the freshly verified existing door, then recheck the shelter", "shelter")
             held = next((name for name in counts if name.endswith("_door") and name != "iron_door" and counts[name]), None)
             if held:
                 stand = self._pos(door.get("stand_pos"))
-                if stand and math.dist(stand, observation["status"]["pos"]) > 1:
+                approach = self._pos(door.get("approach_pos"))
+                if (shelter.get("inside") is True and approach
+                        and math.dist(approach, observation["status"]["pos"]) > .4):
+                    stand = approach
+                if stand and math.dist(stand, observation["status"]["pos"]) > .4:
                     if self.rules._key(stand) in self.rules._blocked(context):
                         return None
                     return self._action("move_to", {"pos": stand, "range": .5}, "Approach the checked doorway standing cell", "shelter")

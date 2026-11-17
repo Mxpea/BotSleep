@@ -184,7 +184,7 @@ def tools_for_objective(objective="starter"):
     entity_id = {"type": "integer", "minimum": 0}
     def add(name, description, properties, required=None):
         tools.append(_tool(name, description, properties, tuple(properties) if required is None else required))
-    add("run_survival_task", "Prefer ONE bounded survival goal over repeated atomic calls. The local executor finds prerequisites, reobserves and verifies child steps without model calls. Stop on safety, unknown writes or budget; only the final summary is tool feedback. gather requires resource; craft/smelt require target item; others accept neither. No coordinates or action queues.",
+    add("run_survival_task", "Prefer ONE bounded survival goal over repeated atomic calls. The local executor finds prerequisites, reobserves and verifies child steps without model calls. shelter validates a site and supplies wood, planks, a workstation, walls, roof and closed door; it does not require stone tools or a furnace. Stop on safety, unknown writes or budget; only the final summary is tool feedback. gather requires resource; craft/smelt require target item; others accept neither. No coordinates or action queues.",
         {"task": {"type": "string", "enum": list(SURVIVAL_TASK_NAMES)},
          "resource": {"type": "string", "enum": list(SURVIVAL_TASK_RESOURCES)},
          "item": {**_ITEM, "description": "Desired crafted/smelted OUTPUT item, not an ingredient; executor checks supported recipes."},
@@ -236,7 +236,8 @@ def tools_for_objective(objective="starter"):
         {"resource": {"type": "string", "enum": ["logs", "stone", "cobblestone", "coal"]},
          "count": {"type": "integer", "minimum": 1, "maximum": 8},
          "radius": {"type": "integer", "minimum": 1, "maximum": 8, "default": 8}}, ("resource", "count"))
-    materials = {"type": "string", "enum": ["cobblestone", "oak_planks", "birch_planks", "spruce_planks"]}
+    from core.structure_spec import SHELTER_BUILDING_BLOCKS
+    materials = {"type": "string", "enum": sorted(SHELTER_BUILDING_BLOCKS)}
     orient = {"type": "string", "enum": ["north", "south", "east", "west"], "default": "north"}
     add("plan_shelter", "Read-only 5x5 ground site validation at feet pos.",
         {**pos, "material": materials, "orientation": orient}, ("pos", "material"))
