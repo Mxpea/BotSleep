@@ -1,6 +1,6 @@
 # BotSleep 架构与实现状态
 
-更新：2026-11-15。源码核对基线：`3801be9`，另含本轮文档同步与实服测试隔离改动。本页描述拉取后的实际运行路径；未来赛事接口和已确认产品方向见 [HARNESS_INTERFACES.md](HARNESS_INTERFACES.md)。验证结果见 [TESTING.md](TESTING.md)，不要把设计图或历史实服状态当作当前验收。
+更新：2026-11-17。源码核对基准：分支 `develop-tianya/shelter-workflow`（提交 `cee4a03` 之后本轮文档同步）。本页描述拉取与分层重构后的实际运行路径；未来赛事接口和已确认产品方向见 [HARNESS_INTERFACES.md](HARNESS_INTERFACES.md)。验证结果见 [TESTING.md](TESTING.md)，不要把设计图或历史实服状态当作当前验收。
 
 ## 1. 当前入口与运行模式
 
@@ -49,7 +49,11 @@ flowchart TD
 | `skills/portal_speedrun.py` | 独立分步浇筑、点火与门框读取；坐标和阶段由调用者提供，未绑定模型工具 |
 | `skills/portal_telemetry.py`、`skills/lava_lake_generator.py` | 前者主动读取门户动作前后状态并导出 JSON，后者通过 RCON 生成专用测试地形；不是只读 EventMonitor |
 | `skills/crafting.py` | 智能 2x2/3x3 工作台调度合成与工作台自动回收 |
-| `skills/mining.py` | 整树连续自动伐木与掉落物拾取 |
+| `skills/mining.py` | `ChopTreeSkill`（整树连续伐木）与 `MineShaftSkill`（5 层斜井、工作站、地下暗河跨步绕行、`target_ys` 分层采矿与返表兜底） |
+| `skills/action_workflow.py`、`skills/shelter.py`、`skills/container.py` | 确定性动作工作流引擎（`ActionWorkflowRunner`、`pillar_up`/`pillar_down`、`scaffold_drop`、`escape_to_surface`）、庇护所施工与双箱/熔炉窗口操作 |
+| `core/world_3d.py`、`core/pathfinder_3d.py`、`core/cave_probe.py`、`core/mining_targets.py` | 通用持久化 3D 体素世界记忆（`VoxelWorld3D` SQLite chunk-zlib）、3D A* 与锚定搭桥规划器、洞腔探查与主世界 Y 层矿脉带规划 |
+| `skills/world_navigator.py`、`skills/ore_harvester.py`、`skills/cave_explore.py` | 统一 3D 导航/微掘/疾跑合并/4 级撤退执行器、矿脉踩捡收割器与可持久化多分支洞穴探索（未绑定模型目录） |
+| `core/structure_spec.py` | 标准结构蓝图（庇护所/矿井坐标变换、安全选址与结构验收）与挖掘/危险/可替代方块常量 |
 | `skills/exploration.py` | 可开关后台雷达，约每秒读取状态，默认位移 6 格后扫描；不是寻路或导航执行器 |
 | `skills/daily_survival.py` | 日常生存技能库（作物、狩猎、铁矿、装备、熔炼、储物、床门、5x5 庇护所） |
 | `core/domain.py` | 共享领域常量（木种、床色、食物点、危险方块）、纯坐标/体素键解析、背包计数提取与 `TypedDict` 契约 |
@@ -90,7 +94,7 @@ flowchart TD
 
 已有安全监测能识别近敌、生命、火/岩浆、水中和死亡等变化，取消过期模型提案或请求停止动作；日常策略可选择进食、睡眠、撤退和短安全观察。现场安全可能只能返回 unsafe/等待，不能宣称一定脱困。
 
-现有移动/撤退技能有局部几何、支撑、净空、危险地形及位置后验检查；树冠分段撤退、清叶和失败状态更新有离线测试。**通用水面优先导航、Baritone 式局部搜索、surface_swim 和跨虚空/岩浆自动搭路尚未实现。** 普通 move_to 不保证浮水；旧设计的 20Hz 硬实时反射、自动搭高和落地水也不在当前能力中。
+现有生存模型内建移动/撤退技能仍以局部几何、支撑、净空、危险地形及位置后验检查为主；独立工作流层 `Pathfinder3D` / `WorldNavigator` / `ActionWorkflow` 已提供 3D A*、`blocked_edges` 规避、锚定跨涧搭桥、`pillar_up`/`pillar_down`、`scaffold_drop` 与 `escape_to_surface`。**生存模型主循环内的通用水面优先导航、surface_swim 与高频反射仍待正式接入**；普通 `move_to` 仍不保证自动浮水，也不依赖外部 API 补丁。
 
 用户已确认的未来导航方向仍是：harness 全权规划、安全水面优先、不潜没时不计氧气、必要时按资源预算搭路；下意识行为可消耗资源应急，核验后续接原任务意图。实现前必须处理观察覆盖不足和动作互斥，不借用相邻 API 补丁。
 

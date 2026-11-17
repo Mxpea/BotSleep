@@ -65,7 +65,9 @@ starter、daily 支持规则规划或开启模型规划；competition 要求模�
 | 开发模块 | 可用入口 | 与生存模型的关系 |
 | --- | --- | --- |
 | `skills/crafting.py` / `CraftItemSkill` | 独立 Python 技能；`ChatDebugger` 注入 `craft_skill` 后提供 `#craft` | 主入口未注入该聊天技能。模型已有的同名 `craft_item` 仍分派到 `SurvivalSkills` / `DailySurvivalSkills`，不是此独立宏技能。 |
-| `skills/mining.py` / `ChopTreeSkill` | 独立 Python 技能；注入 `chop_skill` 后提供 `#chop` | 主入口未注入；`chop_tree` 未绑定 starter/daily/competition。 |
+| `skills/mining.py` / `ChopTreeSkill`、`MineShaftSkill` | 独立 Python 技能；注入 `chop_skill` 后提供 `#chop` | 主入口未注入；`chop_tree` 与 `MineShaftSkill`（分层斜井/鱼骨/返表）未绑定 starter/daily/competition。 |
+| `skills/cave_explore.py`、`skills/world_navigator.py`、`skills/ore_harvester.py` | 独立 Python 技能；依托 `core/world_3d.py`（`VoxelWorld3D`）与 `core/pathfinder_3d.py`（3D A*） | 独立程序化 3D 探洞与采矿组件，未进入上述模型目录。 |
+| `skills/container.py`、`skills/shelter.py` | 独立容器存取/熔炼（`ContainerSkill`）与标准庇护所工作流（`ShelterSkill`） | 通过显式 Python 技能接口调用，不替换日常模型工具中的同名槽位。 |
 | `skills/exploration.py` / `ContinuousRadarSkill` | 主入口启用调试并加 `--radar`；提供 `#radar on/off/scan/poi` | 属于调试雷达与空间记录入口，`radar_sweep` 未绑定生存模型。 |
 | `skills/portal_speedrun.py` / `NetherPortalSpeedrunSkill` | 独立 Python 技能与专用实服靶场脚本 | `cast_nether_portal` 未绑定生存模型，也无主入口聊天命令。 |
 | `skills/stronghold.py` / 要塞计算 | 独立 Python Skill 与 CLI，schema 为 `STRONGHOLD_TOOL_DEFINITION` | `calculate_stronghold` 未进入上述模型目录。 |
