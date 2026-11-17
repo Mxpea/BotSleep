@@ -1,5 +1,27 @@
 # 配置、客户端、生存、赛事与监控验证
 
+最近合并复核：2026-11-17（Asia/Shanghai），`main 02343f9` + `develop-tianya/shelter-workflow 39afec8`，在独立 main 工作区合并。下方两侧分支的历史日志与实服记录保留，不替代本次合并验证。
+
+## shelter-workflow 合并取舍与回归
+
+| 重复或交叉部分 | 合并后的实现与理由 |
+| --- | --- |
+| 住所规划与施工 | 采用共享 `StructureSpec` 四方向蓝图；保留 main 的单步/有界批量施工、真实库存和几何验收。默认 north 兼容旧检查点，床/箱子/入口随方向旋转，方向写回 `base_project` 并在下一轮重新观察。 |
+| 领域常量、注册和退避 | 采用 `core.domain`、`SkillRegistry`、`RetreatController` 去重；完整保留自主目标、战斗、桶类和树冠/觅食恢复。starter/daily/competition 仍为 9/35/40，危险目的地检查不误拦截战斗目标。 |
+| 模型与长任务 | 保留 main 的一次模型授权、多子步执行、按任务收窄修复目录及串行模型门禁；独立深矿/洞穴工作流没有自动接管 daily。 |
+| API 与实例管理 | 保留 API 1.3.14 断线未知语义和原参数兼容；吸收实例锁、只读 `botctl`、显式会话复用。只读重连最多一次并共用原截止时间；开窗和写入不重试。competition 默认仍登出。 |
+| 结构/矿井/门户未知结果 | 未知写入跨子流程立即返回，不能换站、新建 guard 返程、追加搭柱或姿态清理；有 journal 的矿井入口须保存动作意图，未知结果阻止自动续跑。 |
+| 容器与导航 | 独立容器保留批量能力，四公开入口统一返回未知 `SkillResult`；开窗按副作用记账，缺数据不当空，没有足量产出不宣称熔炼完成。导航安全中止不作为几何障碍吞掉，返程须实际到达。 |
+
+新增回归涵盖旋转住所 native call→检查点→新观察、主线战斗反馈与即时退避、实例/退出默认、客户端超时预算、工作流跨层未知传播、容器真实产出及两项洞穴实服测试的离线隔离。首次全套发现战斗目标被误当生产危险目的地拦截，已修正而非放宽原有测试断言。最终完整回归 **1425 项 / 124.967 秒：1420 通过、5 项实服专用跳过，`OK (skipped=5)`**，命令为 `$env:BOTSLEEP_RUN_LIVE_TESTS='0'; python -B -m unittest discover -s tests -v`。159 个 Python 文件 AST、两个入口的示例配置检查及 `git diff --check` 均通过。
+
+新增分支的离线矿井/洞穴测试原先会创建默认 `MemoryEngine` 并写入受跟踪的历史记忆文件；合并时改为显式注入测试替身，生成的记录已恢复，未纳入提交。全套通过后仅调整这三份测试的记忆依赖注入，相关 41 项用例另以默认记忆构造器拒绝调用的方式验证隔离，全部通过。
+
+本次仅离线测试及本地假服务，不登录游戏、不请求真实模型，不使用 RCON、不更改原存档。洞穴/门户实服用例显式跳过。新分支中的独立 3D 记忆和缓存不代替主线新鲜观察；持久化应注入包含服务器、账号、world_id、dimension 的 `VoxelWorld3D.for_runtime(...)`，便利参数的默认作用域不能作为跨世界隔离保证。普通地图下的深矿返程、完整建屋与完整生存仍需后续实服验收。
+
+
+## main 分支历史验证
+
 最近复核：2026-11-16（Asia/Shanghai），源码基线为 `dev-ink 402cc50` 上的当前未提交修改，包含目标程序、动态模型工具路由及既有狩猎/战斗改动。进程状态只对下述采样时间有效。
 
 ## 树冠与骷髅避险的实服回归（2026-11-16，后续轮次）
@@ -107,6 +129,129 @@
 下方 Python 3.11.3 的 SQLite 清理 ERROR 在本机 Python 3.10.9 未复现；本轮未修改该测试或记忆模块，不能据此宣称跨环境问题已经修复。
 
 ## 历史：拉取后复核（2026-11-15，3801be9）
+
+## shelter-workflow 分支历史验证（原分支记录）
+
+最近独立复核：2026-11-17（Asia/Shanghai），分支 `develop-tianya/shelter-workflow`。首节为最新状态与验证记录；后续各节为历史证据，不代表当前进程在线。
+
+## 分层 Y 带地表下矿、防卡死回地表与掉落物/连续步态验证（2026-11-17）
+
+继 Git 检查点 `2744ccc` 后完成主世界分层矿脉规划与地表-深层闭环加固（相邻 `mc-agent-api` 未作任何修改；`starter 9 / daily 31 / competition 36` 模型目录与既有契约保持不变）：① [`core/mining_targets.py`](../core/mining_targets.py) 新增 `ORE_SPAWN_Y_BANDS`、`target_spawns_at_y`、`unmet_spawnable_targets_at_y` 与 `recommended_mining_bands`（遵循 `coal` 仅 `Y=0..192` 下层不生成、`diamond` 在 `Y=-64..15`、`iron` 在 `Y=16` 峰值与全层分布）；② [`skills/mining.py`](../skills/mining.py) 扩展 `build_mine_shaft(..., target_ys=...)` 与 `mine_targets_from_surface`：单条连续阶梯贯通 `Y=28 -> Y=-54 -> Y=16`（若浅层独占矿物如 `coal` 已达标则跳过冗余 `Y>=20` 鱼骨支线；阶梯遇暗河/洞腔支持最多 10 格水平跨步绕行并避开已有 `trail` 轨迹；`_wf_prepare_entry` 改为先清入口头部与脚部方块再严格站位），新增 `_ensure_returned_to_surface` 与 `deep_retreat_done` / `_retreat_downsampled` 异常收敛护栏；③ [`skills/action_workflow.py`](../skills/action_workflow.py) 将 `escape_to_surface` 与 `pillar_up` 加固至 `max_ascend=160`（覆盖深板岩/矿石/壁炉火把自清理、落沙砂砾占格自挖脱困及 `tolerance=0.35` 烟囱单次迁移防抖动）；④ 新增离线回归 `test_ore_spawn_bands_and_stratified_planning`（[`tests/test_mining_targets.py`](../tests/test_mining_targets.py)）、`test_deep_band_exits_band_complete_when_only_shallow_coal_unmet_and_returns_to_surface` 与 `test_deep_retreat_done_prevents_re_descent_on_branch_retry`（[`tests/test_mining_workflow.py`](../tests/test_mining_workflow.py)）、`test_escape_to_surface_handles_wall_torch_coal_ore_and_falling_gravel`（[`tests/test_action_workflow.py`](../tests/test_action_workflow.py)）。
+
+| 检查 / 实测轮次 | 结果与说明 |
+| --- | --- |
+| 专项离线回归（`test_action_workflow` 6 项、`test_mining_workflow` 11 项、`test_mining_targets` 4 项、`test_world_3d` 8 项） | **29 项全部通过**（含 2 轮实测前缀 `2744ccc` 的 4 种地形捡矿及疾跑合并步态回归）。 |
+| 全仓离线 `unittest`（最后一次 `.py` 代码修改后复跑，`$env:BOTSLEEP_RUN_LIVE_TESTS='0'`） | **963 项运行，OK（`skipped=10`，59.117s）**；跳过的 10 项为需本地 Ninjabrain JAR 的要塞用例、需连实服的 `test_speedrun_portal.py` 及 `test_cave_matrix.py`，不计作实服通过。 |
+| `main.py --config config.example.yaml --check-config` + `compileall` | 输出 `Configuration valid.`，字节码编译全部通过；`git -C ..\mc-agent-api status -s` 无任何改动。 |
+| **MCP 辅助真机排障与地表-深层闭环实测（`task-5561`，`[-159.5, 70, -859.5]` 出发）** | **通过（`success=True`，`stop=branch_done`，耗时 `848.6s`，`END POS=[-159.5, 70, -859.5]`，`on_surface=True`，`HP=20, Food=20`）**：先探浅洞并回到地表；随后开挖单条主斜井在 `Y=53` 提前采满 **`coal: 17/16`** 后于 `Y=28` 自动跳过冗余浅层支线直降至 **`Y=-54`**（沿途于 `[-56, -30, -860]` 挖获首颗钻石），在 `Y=-54` 完成左右鱼骨支线采矿并沿原阶梯直接疾跑步态走回地表起点，全程零漏捡与零死伤，净入包 **`diamond: 6, coal: 17, raw_copper: 16`**；此前对照轮次（`task-5427`）亦在 `[-130, 5, -893]` 一次性采齐 **`raw_iron: 17, coal: 17`**，并通过 `minecraft-debug` MCP 实测定位修复了 `Y=57` 暗河绕行、`coal_ore` / `wall_torch` / 落砂 `occupied` 阻断 `escape_to_surface` 等真机边界。 |
+
+## 历史：通用 3D 空间世界记忆、A* 寻路、导航与采矿分层重构验证（2026-11-16）
+
+继 Git 检查点 `615bba4` 后完成空间记忆与洞穴探索架构四层解耦重构（相邻 `mc-agent-api` 未作任何修改；`starter 9 / daily 31 / competition 36` 模型目录与既有公开契约保持不变）：① [`core/world_3d.py`](../core/world_3d.py) 提供可持久化的通用 `VoxelWorld3D`（chunk-zlib SQLite 存储、visited_stances、scanned_cells 前沿裁剪、open_frontiers、ore_registry 与 blocked_edges，严格遵循 Windows `contextlib.closing` AST 契约）；② [`core/pathfinder_3d.py`](../core/pathfinder_3d.py) 提供 `Pathfinder3D`（局部 horizon 扩展 + `find_path` 有向 3D A* 跨分支寻路 + `find_ore_vantage_path`）；③ [`skills/world_navigator.py`](../skills/world_navigator.py) 提供 `WorldNavigator`（统一移动/搭柱/搭桥/掉落执行、自主微掘清障、`blocked_edges` 记录与四级 `retreat_to_entry`）；④ [`skills/ore_harvester.py`](../skills/ore_harvester.py) 提供 `OreHarvester`（矿脉追踪、`collect=False` 实体提示踩捡及 cache invalidation 同步）；⑤ [`core/cave_probe.py`](../core/cave_probe.py) 与 `Pathfinder3D` 新增**锚定搭桥约束**（桥端必须落在真实实心方块前缘或安全矿点旁 2 格内，杜绝向悬崖虚空无限延伸天桥）与 `blocked_edges` 过滤，重构 [`skills/cave_explore.py`](../skills/cave_explore.py) 与 [`skills/mining.py`](../skills/mining.py)；⑥ 新增 [`tests/test_world_3d.py`](../tests/test_world_3d.py) 专项覆盖 SQLite 往返、A* 避障攀爬、锚定搭桥对比空洞零天桥，以及双分支矿洞穷尽采集与撤回。
+
+| 检查 / 实测轮次 | 结果与说明 |
+| --- | --- |
+| [`tests/test_world_3d.py`](../tests/test_world_3d.py) 离线专项 | **4 项全部通过（0.998s）**，验证 `VoxelWorld3D` SQLite chunk 读写与覆盖裁剪、`Pathfinder3D` 绕开 `blocked_edges` 与 2 格高台 `pillar` / 1 格台阶纯 `walk`、跨岩浆锚定搭桥 vs 悬崖虚空 0 天桥、以及 Y 型多分支矿洞铁+钻石全部采出并安全返回入口。 |
+| 关联模块专项回归（`test_cave_probe`、`test_cave_explore`、`test_mining_workflow`、`test_contracts`） | **36 项全部通过（38.905s）**，包括深层鱼骨 30 铁配额、AST 无裸 `with sqlite3.connect` 检查与工具目录同步校验。 |
+| 全仓离线 `unittest`（最后一次 `.py` 代码修改后复跑，`$env:BOTSLEEP_RUN_LIVE_TESTS='0'`） | **955 项运行，OK（`skipped=10`，61.015s）**；跳过的 10 项为需本地 Ninjabrain JAR 的要塞用例、需连实服的 `test_speedrun_portal.py` 及 `test_cave_matrix.py`，不计作实服通过。 |
+| `main.py --config config.example.yaml --check-config` + `compileall` | 输出 `Configuration valid.`，字节码编译全部通过；`git -C ..\mc-agent-api status -s` 无任何改动。 |
+| **大矿洞实服架构联调 A（`task-4780`，`[-99.3, -42, -982]`，`240s` 窗口，真实未重置地形） | 零失败安全返回（`stop=cave_done`，`HP=20, Food=20`，`END POS=[-99.4, -42, -981.5]`）：在 `VoxelWorld3D` 内累计记忆 **`30,594` 个体素**、访问 **`499` 处站位**（探索 `467` 格）、覆盖 `6,861` 格扫描空间与 `225` 处待探前沿，`551` 步移动单步耗时约 `0.21–0.49s`、**0 次向虚空凌空搭天桥（`PLACE=0`）** 并正确记入 `blocked_edges: 1`；因主区早先实测已采尽铁/钻，本轮记录附近红石脉为 `seen`。 |
+| **大矿洞实服采矿捡矿联调 B（`task-4834`，`150s` 窗口，RCON 恢复 4 处原矿点后重测） | **通过（`stop=cave_done`，`HP=20, Food=20`，`END POS=[-99.5, -42, -981.5]`）**：`VoxelWorld3D` 记录 **`26,015` 个体素**、`219` 站位、`3,612` 格覆盖与 `158` 前沿（`blocked_edges=0`），先导航 17 步抵达 `[-64, -40, -985]` 挖出并踩捡 `[-66, -37, -985]` `deepslate_iron_ore`，随后自主垫脚搭柱 `PILLAR_UP` 至 `[-66, -39, -985]` 采收 `[-67, -36, -983]` `deepslate_iron_ore`，再跟踪寻路至 `[-61, -42, -991]` 连续挖取并实地踩捡 `[-59, -43, -992]` 与 `[-59, -43, -993]` 两块 `deepslate_diamond_ore`（实测入包 **`HARVESTED={'raw_iron': 2, 'diamond': 2}`，4/4 目标矿点全部 `mined`**），最后 5.12s 直跳返回入口并保持 `SleepBot` 在线。 |
+| **大矿洞持续 30 铁矿目标实服联调 C（`task-4954`，`targets={"iron": 30}`，`150.3s` 一轮达标） | **通过（`stop=target_reached`，`HP=20, Food=20`，`END POS=[-99.5, -42, -981.5]`）**：全程共走 `123` 步依次收割并踩捡 5 组岩壁矿脉（挖出 `29` 块深板岩铁矿、净增 **`raw_iron=30/30`**），其中本地前沿清空后主动触发两次 `VoxelWorld3D` 记忆内跨洞 `Pathfinder3D` 3D A* 定向跳点（`23` 步与 `29` 步直达剩余已知未采矿脉，途中零兜圈、零多余搭天桥、`blocked_edges=0`）；配额达标后立刻中止后续盲探并在 9.26s 内直接返回入口，`VoxelWorld3D` 共记录 `16,974` 体素、`1,447` 覆盖格与 `83` 处后续可续探前沿。 |
+
+## 历史：大型复杂矿洞 3D 连通穷尽探索、锚点边界与两级扩图验证（2026-11-16）
+
+本轮根据 `-99.5, -42, -982.5` 深层大型多连通矿洞多轮实测定位到 `173` 格提前止步的根因，并完成两级 3D 穷尽探索、消搭高与踩捡捡矿闭环优化（相邻 `mc-agent-api` 未作任何修改；`starter 9 / daily 31 / competition 36` 模型目录保持不变）：① 通过 `4000` 节点全洞可达性探测（`task-4546`：`X=-111..-45, Y=-54..-25, Z=-1011..-929`）确认旧版在靠近 `explore_radius` 边界时 `frontiers[:16]` 会被越界节点占满，且局部 BFS 在支路死胡同处无法跨洞够到 40 格外的分叉口与上层缝隙；② [`core/cave_probe.py`](../core/cave_probe.py) 将邻接评估拆为“先自由步行（`dy in 0,+1,-1`）、后微掘/跌落/搭桥”消除 1 格台阶无意义 `pillar_up`，新增 `anchor_pos` / `anchor_radius` 硬边界过滤并将 `frontiers` 增至 32 个；③ [`skills/cave_explore.py`](../skills/cave_explore.py) 引入**按剩余读预算自适应的两级 3D 洪水扩图**（日常 ≤700 节点；局部前沿耗尽且 `remaining_reads >= 12000` 时在缓存内存中升级至最多 `4500` 节点跨洞重扫 `path[1:48]`，同时按 `remaining_reads // 12` 对共享小预算守护封顶避免 `MineShaftSkill` `max_reads=6000` 超限），新增 `_collect_mined_drop` 实地踩捡并将独立读预算提至 `150000/200000`；④ [`core/structure_spec.py`](../core/structure_spec.py)、[`core/config.py`](../core/config.py) 与 [`config.example.yaml`](../config.example.yaml) 将默认探洞尺度调为 `explore_radius=48`、`explore_max_visited=600`、`explore_timeout_seconds=360.0`；⑤ 新增 [`test_anchor_radius_preserves_inside_frontiers`](../tests/test_cave_probe.py#L285)、[`test_flood_graph_steps_one_block_ledge_without_meaningless_pillar`](../tests/test_cave_probe.py#L259) 与 [`test_mine_vein_picks_up_lower_floor_ore_drops`](../tests/test_cave_explore.py#L486)。
+
+| 检查 / 实测轮次 | 结果与说明 |
+| --- | --- |
+| 全仓离线 `unittest`（最后一次代码修改后复跑，`$env:BOTSLEEP_RUN_LIVE_TESTS='0'`） | **951 项运行，OK（`skipped=10`，66.041s）**；跳过的 10 项为需本地 Ninjabrain JAR 的要塞用例、需连实服的 `test_speedrun_portal.py` 及 `test_cave_matrix.py`，不计作实服通过。 |
+| `main.py --config config.example.yaml --check-config` + `compileall` | 输出 `Configuration valid.`，字节码编译通过；`git -C ..\mc-agent-api status -s` 无任何改动。 |
+| **深层大矿洞实服递进对照**（`SleepBot` 传送至 `[-99.5, -42, -982.5]`） | ① 初轮（`task-4397`）：131 格，3 次无意义 `pillar_up`，仅拾得 `raw_iron: +1, diamond: +2`；② 中轮（`task-4514`）：消搭高并走 173 格，但触及 `explore_radius=34` 后因越界前沿占满前 16 位而止步；③ **最终两级 4500 节点穷尽实测（`task-4570`，`explore_radius=55, timeout=300s`）**：零卡顿遍历 **`477` 格（横跨至 `X=-46, Z=-1030`）**，主动凌空搭桥跨越峡谷并搭柱攀采 `[-66, -37, -985]` / `[-67, -36, -983]` 深层铁矿与 `[-59, -43, -993..-992]` 双钻石矿（新增入包 `diamond: +2, raw_iron: +1`），至 300s 时间窗口收尾后经 `_recover_step_with_graph` 稳步走回起点 `[-99.5, -42, -982.3]`（`HP=20, Food=20`）。 |
+
+## 历史：大型复杂矿洞 3D 连通探索、消除无意义搭高与实地捡矿验证（2026-11-16）
+
+本轮针对实服洞穴探索“宽大厅原地打转兜圈、单格搭柱后全盘禁用快速撤退、不可达洞口空跑与连续脚本断连”问题完成排查与修复（相邻 `mc-agent-api` 未作任何修改；`starter 9 / daily 31 / competition 36` 模型目录保持不变）：① 在本机配置并接入只读/侵入调试 MCP 服务 `minecraft-debug`（`mc_list_players`、`mc_inspect_player`、`mc_watch_motion`、`mc_voxel_map` 等），通过共享 RCON 与只读会话复用零干扰采集实服玩家 XYZ/Yaw/NBT 与 3D 方块视图；② [`core/cave_probe.py`](../core/cave_probe.py) 与 [`skills/cave_explore.py`](../skills/cave_explore.py) 新增 `covered_cells` 空间覆盖过滤、`goal_hints` 主动矿脉提示、近端 `frontiers` 长路径（`path[1:16]`）优先推进及 `oy in (-2..5)` 矿脉壳层扫描；③ 修复 `pillar_undo` 非空后禁用环路剪枝、禁直接 `stand_cell(entry_cell)` 及 `explore_cave` 内部多步空退的缺陷；④ `navigate_with_ops` 扩图至 `420` 节点并在 `best_dist > 3.5` 且无有效收敛时零步快速失败；⑤ [`tests/test_cave_explore.py`](../tests/test_cave_explore.py) 新增 `test_wide_chamber_avoids_circling_and_shortcuts_retreat` 与 `test_navigate_with_ops_fails_fast_on_unconnected_pocket`。
+
+| 检查 / 实测轮次 | 结果与说明 |
+| --- | --- |
+| 全仓离线 `unittest`（`$env:BOTSLEEP_RUN_LIVE_TESTS='0'`） | **948 项运行，OK（`skipped=10`，33.187s）**；跳过的 10 项为需本地 Ninjabrain JAR 的要塞用例、需连实服的 `test_speedrun_portal.py` 及 `test_cave_matrix.py`，不计作实服通过。 |
+| `main.py --config config.example.yaml --check-config` + `compileall` | 输出 `Configuration valid.`，字节码编译全部通过；`git -C ..\mc-agent-api status -s` 无任何改动。 |
+| **实服对比复测**（`SleepBot`，`attach_or_login` 全程在线 + `mc_watch_motion` 采样） | 修复前首轮被困 7×10 洞角走 `91` 步（45 步前探+45 步折返）且 Cave 1 后因 `low_torch` 早退；中期修改虽突围至 `[183, 53, -674]`，但因一处 1 格 `pillar_up` 导致 `pillar_undo` 禁用直跳，仍消耗 `106` 步（含 `43` 步逐格撤退与 `8` 步误入 Cave 1 朝向 Cave 2）；最终实测（`task-4332`）全程仅 **`46` 步、覆盖 `43` 个唯一坐标点**（仅 3 处边界格路过 2 次、无局部转圈），**`STEP 44` 以单次 `stand_cell` 直接从洞深返回洞口 `[186, 52, -672]`（2.4s）**，不可达的 Cave 2 `[180, 39, -666]` 经 `420` 节点图判定后 **0 冗余步直接跳过**，`SleepBot` 保持在线（`HP=20`）。 |
+
+## 洞穴稳健探索、防退游戏/防轻伤弃洞与在线会话复用验证（2026-11-16）
+
+本轮针对实服探洞暴露的 `missing_torch` 拒入、每转角密集插火把、1~2 点擦伤触发 `damage_taken`/`hurt` 退洞以及多脚本退出断连问题完成改造（相邻 `mc-agent-api` 未作任何修改；`starter 9 / daily 31 / competition 36` 模型目录保持不变）：① [`core/structure_spec.py`](../core/structure_spec.py)、[`core/config.py`](../core/config.py) 与 [`config.example.yaml`](../config.example.yaml) 将 `CAVE_LIMITS` 调整为 `torch_interval=24`、`min_enter_torches=0`、`explore_radius=16`、`explore_max_visited=120`、`explore_timeout_seconds=180.0`，并增加 `mc_api.keep_session_on_exit` / `session_file`；② [`core/client.py`](../core/client.py) 与 [`main.py`](../main.py) 为 `move_to`/`place_block`/`use_item` 增加可选 `stop_on`，新增 `MinecraftAgentClient.attach_or_login`/`save_session`/`load_session` 及 `--keep-connected`（`competition` 模式默认保持在线不调 `logout`）；③ [`skills/action_workflow.py`](../skills/action_workflow.py) 为 `WorkflowGuard` 增加 `damage_tolerance`/`critical_health=6.0` 与 `stop_on=["death"]` 转发，并新增 `scaffold_drop` 与 `escape_to_surface`；④ [`core/cave_probe.py`](../core/cave_probe.py) 与 [`skills/cave_explore.py`](../skills/cave_explore.py) / [`skills/mining.py`](../skills/mining.py) 实现无火把可入洞、自动合火把与洞内进食回血、`lateral_air_clearance` 洞穴中线优先、搭石过岩浆 `bridge`、垫方块安全降落差 `scaffold_drop`、单步卡死循环内重规划、撤退受阻回地面 `escape_to_surface`，并将 `allow_damage=True` 设为默认。
+
+| 检查 / 实测轮次 | 结果与说明 |
+| --- | --- |
+| 专项离线回归（`test_cave_probe`、`test_cave_explore`、`test_mining_workflow`、`test_client`、`test_runtime`） | **76 项全部通过（14.856s）**，覆盖 0 火把入洞、显式 `min_enter_torches=1` 门禁、24 格火把稀疏间隔、2 点擦伤不弃洞、洞穴中线评分高于贴墙格、`bridge` 搭石跨岩浆、`scaffold_drop` 分段垫脚下落、撤退阻塞时 `escape_to_surface` 搭柱脱困回地面、`attach_or_login` 会话复用与 `--keep-connected` 退出不登出（均为离线/内存模拟）。 |
+| 全仓离线 `unittest`（`$env:BOTSLEEP_RUN_LIVE_TESTS='0'`） | **946 项运行，OK（`skipped=10`，37.474s）**；跳过的 10 项为需本地 Ninjabrain JAR 的要塞用例（5 项）、需连实服的 `test_speedrun_portal.py`（3 项）及需连实服 RCON 的 `test_cave_matrix.py`（2 项），未计作实服通过。 |
+| `main.py --config config.example.yaml --check-config` + `compileall` | 输出 `Configuration valid.`，`UNIT=0 CHECK=0 COMPILE=0`。 |
+
+## 原地柱搭高、洪水子图规划与优先探洞验收（2026-11-16）
+
+本轮在不修改 `mc-agent-api` 的前提下实现并验证了：① [`skills/action_workflow.py`](../skills/action_workflow.py) 的原地柱上升 `pillar_up`（`WorkflowGuard.set_jump` + `place_block` + `finally` 复位）与安全下降 `pillar_down`；② [`core/cave_probe.py`](../core/cave_probe.py) 的安全可达子图洪水规划 `flood_safe_cave_graph`（含步行、`opens_to_air` 约束微掘与受保护原地柱，同时以 `feet_corner_dist <= 3.95` 对齐 `mc-agent-api` `goNear(3.5)` 挖矿距离）；③ [`skills/cave_explore.py`](../skills/cave_explore.py) 的大洞安全子图（`allow_tall_cave_subgraph`）、岩石顶板洞口检索 `find_cave_openings` 与陡坡 `navigate_with_ops`、`discover_and_explore_caves`；④ [`skills/mining.py`](../skills/mining.py) `MineShaftSkill.run_with_journal(..., prefer_caves_first=True)`。模型工具目录（`starter 9 / daily 31 / competition 36`）保持不变。
+
+| 检查 / 实测轮次 | 结果与说明 |
+| --- | --- |
+| 专项离线回归（`test_cave_probe`、`test_cave_explore`、`test_mining_workflow`、`test_container_skill`、`test_mining_targets`） | **27 项全部通过（10.888s）**，覆盖高顶含岩浆隔断洞穴 `tall_subgraph` 原地柱上下、`opens_to_air` 穿墙微掘与防掘断柱基座保护、陡坡 `stalled` 恢复与全图洪水路径。 |
+| **实服 RCON 原地柱稳定性专项**（5 轮 × 4 格连续搭高，共 20 步） | **`ok=20/20`、`first_try=18/20`、`fail=0`、平均耗时 `847ms`/格**，验证了仅靠 `posture(jump=True)` + `place_block` 无需改动 `mc-agent-api` 即可稳定搭柱。 |
+| **实服 RCON 洞内微掘与原地柱采高矿专项**（`doMobSpawning false`） | ① 微掘穿石墙阻隔并避开岩浆角安全采回 `raw_iron=2`（`47.02s`，`HEALTH=20`）；② 黑曜石高台强制触发 `pillar_up` 上攀采下 `[255, 74..75, -97]` 共 `raw_iron=2` 后由 `pillar_down` 安全拆柱回到起点（`HEALTH=20`）。修复了高处矿块因 `feet_corner_dist > 4.0` 引发 `mc-agent-api` `dig` 调用 `goNear` 报 `path_not_found` 的边界问题。 |
+| **实服自然地形优先探洞检验与边界说明** | 修复前 `[150.5, 120, -244.5]` 与 `[264.5, 96, -232.5]` 分别耗时 `119.4s`（3 处）与 `112.33s`（2 处）均零伤通过陡坡地形但 `HARVESTED={}`（原因：无露头铁矿且树冠叶片误判为洞口）；增加 `rock_roof_blocks` 岩石顶板校验后复测 `[150.5, 120, -244.5]` 精确过滤树冠（`0` 误报），`[264.5, 96, -232.5]` 精确锁定唯一石顶山洞 `[240, 88, -245]`（`160` 格）。注：自然随机地表若本身无露头铁矿，仍需 `prefer_caves_first=True` 自动衔接下挖并切入地下大洞。 |
+
+## 容器存取熔炼与随机地形 30 铁目标验证（2026-11-16）
+
+本轮新增独立容器与熔炉技能 [`skills/container.py`](../skills/container.py)（`ContainerSkill`：双箱/木桶 `inspect`/`deposit`/`withdraw` 与自动配燃料、清既有产物及支持 `>16` 组轮询的 `smelt`），将其接入 `MineShaftSkill.rest_at_workstation`，并将 `MineShaftSkill` / `CaveExploreSkill` 扩展为支持 `target_y=16` 安全深梯、`mining_mode="fishbone"`（3 格间隔左右肋道）、保留转向角点的 `deep_trail`、时间片预留退回 `timeout_checkpoint`、物理背包增量对账与矿滴靠近拾取（移除按块虚增 `max(gained, 1)`）。相邻 `mc-agent-api` 仓库保持完全未修改；`starter 9 / daily 31 / competition 36` 模型工具目录保持不变。
+
+| 检查 / 实测轮次 | 结果与说明 |
+| --- | --- |
+| 专项离线回归（`test_cave_probe`、`test_mining_targets`、`test_cave_explore`、`test_mining_workflow`、`test_container_skill`） | **24 项全部通过（5.011s）**，覆盖双箱批量存取、满箱 `partial`、30 粗铁配煤轮询熔炼、鱼骨 30 铁配额停机、不安全洞穴封口与检查点恢复（模拟环境）。 |
+| 全仓离线 `unittest`（`$env:BOTSLEEP_RUN_LIVE_TESTS='0'`） | **939 项运行，OK（`skipped=10`，28.119s）**；跳过的 10 项为需本地 Ninjabrain JAR 的要塞用例（5 项）、需连实服的 `test_speedrun_portal.py`（3 项）及需连实服 RCON 的 `test_cave_matrix.py`（2 项），不计作实服通过。 |
+| `main.py --config config.example.yaml --check-config` + `compileall` | 输出 `Configuration valid.`，`UNIT=0 CHECK=0 COMPILE=0`。 |
+| **实服容器与熔炉专项**（双箱 + 熔炉直接验收，`doMobSpawning false`） | `DEPOSIT`（`cobblestone: 32, dirt: 12`）、`INSPECT_DOUBLE_CHEST`（54 槽全量读回）、`WITHDRAW`（`dirt: 5`）、`SMELT`（`3 raw_iron -> 3 iron_ingot`，实际背包确认 `iron_ingot=3`）全部通过。注：工作站大箱子上方必须留空，否则 `mc-agent-api` 返回 `no_window`。 |
+| **实服随机未改地形 30 铁目标终验**（`[338.5, 69, -246.5]`，3 轮检查点循环，共 `1080.95s`） | **完成（`STOP=target_reached`）**：下探至 `Y=16` 鱼骨主干推进 `TRUNK=52`（`[346, 16, -145]`），安全处理/封口 `CAVES=7`；第 1 轮存入大箱 `cobblestone x287` 等杂物，第 2 轮存入 `cobblestone x269` 并起炉熔炼 `raw_iron x16`，第 3 轮在 `242.72s` 内凑齐剩余 `raw_iron x14` 并触发 `target_reached`。最终 `FINAL_SMELT` 炼完并验证 `FINAL_INV iron_ingot=30`、`FINAL_CHEST cobblestone=556`（含 `dirt=16, andesite=101, diorite=66, granite=7, gravel=8`），零死亡。 |
+| 实服过程发现与边界说明（诚实记录） | 早期实测曾暴露 4 类问题：① `[140.5, 121, -249.5]` 高山陡坡在 `move_to_start` 阶段出现 `stalled`（`10.12s` 中止）；② `[281.5, 92, -175.5]` 仅单轮 `540.66s` 未到 30 铁（`raw_iron=4`）；③ `[309.5, 70, -248.5]` 因旧版 `max(gained, 1)` 虚增在实收 `19 iron_ingot` 时提前停机（已修复并重跑验证 30 铁）；④ `[56.5, 90, -154.5]` 多转向深梯因 `deep_trail[::6]` 丢角点在第 2 轮 `stalled`（已改为保留转向角点并按路径长度动态预留退回时间）。 |
+
+## Plan v2：矿道遇洞穴处理、独立洞穴探索、目标挖矿与检查点续探（2026-11-16）
+
+本轮新增并验证了纯逻辑探测/分类/可达扫矿 [`core/cave_probe.py`](../core/cave_probe.py)、目标与回家阈值解析 [`core/mining_targets.py`](../core/mining_targets.py)、独立洞穴探索技能 [`skills/cave_explore.py`](../skills/cave_explore.py) 及其与 [`skills/mining.py`](../skills/mining.py)（`MineShaftSkill`）的联动，同步补充了 `SurvivalJournal.mining_progress` 检查点、`core/config.py` / `config.example.yaml` 的 `mining` 配置段，以及 `DailySurvivalGoals.mining_rest_action`。相邻 `mc-agent-api` 仓库保持未修改；`starter 9 / daily 31 / competition 36` 模型工具目录保持不变。
+
+| 检查 / 实测轮次 | 结果与说明 |
+| --- | --- |
+| 离线专项回归（`test_cave_probe`、`test_mining_targets`、`test_cave_explore`、`test_mining_workflow`、`test_config`） | **51 项全部通过**（`0` 失败、`0` 错误、`0` 跳过），覆盖水洞/高洞/深落差/岩浆/刷怪笼封口换向与 3 次放弃、矮宽洞不按空气格数误拒、废弃矿井与蜘蛛网/矿车规则、8 面扫矿/配额/镐级/危险邻格、`collect=False`、`return_home_requested` 与 `pending` 禁止恢复；以上均基于内存模拟世界。 |
+| 离线全仓 `unittest`（`$env:BOTSLEEP_RUN_LIVE_TESTS='0'`） | **934 项运行，OK（`skipped=9`）**，耗时约 `25s`；跳过的 9 项为未安装本地 Ninjabrain JAR 的要塞用例（5 项）、需连实服的 `test_speedrun_portal.py`（3 项）及需连实服 RCON 的 `test_cave_matrix.py`（1 项 / 后续扩展为 2 项），不计作实服通过。 |
+| `main.py --config config.example.yaml --check-config` + `compileall` | 输出 `Configuration valid.`，`UNIT=0 CHECK=0 COMPILE=0`。 |
+| **实服 RCON 矩阵验收**（`$env:BOTSLEEP_RUN_LIVE_TESTS='1'`，`tests/test_cave_matrix.py`，`doMobSpawning false`） | **2/2 全部通过（108.107s）**：① `[250, 72, -120]` 主干撞水洞（`water_cave`）与侧支撞高洞（`tall_cave`）后均用实心 `cobblestone` 成功封口、原路退回并自动切换方向完成安全分支；② `[210, 72, -120]` 完成 5 层楼梯 + 4×3×2 平台 + 工作站（床与右键重生绑定、工作台+顶部熔炉、2 宽大箱子合并、墙火把），进入废弃矿井后成功联动 `CaveExploreSkill` 插火把、挖 `iron_ore`（`collect=False`）、跳过 `copper_ore` 记为 `seen`，并在地下工作站执行存箱与起炉熔炼 `rest_at_workstation`。修复了实服中暴露的两处真实问题：整数格 `stand_at` 目标偏移 `+0.5` 引发的微距偏差（新增 `stand_cell`）及回归分支对 `CaveExploreSkill` 所插 `wall_torch` 的误报（改用 `is_passable` 并缓存已探洞穴体素避免重复入洞）。 |
+
+## 历史：`develop-tianya` 速通传送门架构与自然岩浆池实测（2026-11-16）
+
+本轮新增并验证了通用结构规约 [`core/structure_spec.py`](../core/structure_spec.py)、动作工作流 [`skills/action_workflow.py`](../skills/action_workflow.py) 以及速通地狱门技能 [`skills/portal_speedrun.py`](../skills/portal_speedrun.py)（含 `keep-alive` 只读重连保护 [`core/client.py`](../core/client.py)）。相邻 `mc-agent-api` 仓库保持完全未修改。
+
+| 检查 / 实测轮次 | 结果与说明 |
+| --- | --- |
+| 离线专项回归（`test_structure_spec`、`test_action_workflow`、`test_portal_workflow`、`test_client`、`test_contracts`） | **96 项全部通过**（`0` 失败、`0` 错误、`0` 跳过）。 |
+| 离线全仓 `unittest`（`PYTHONPATH=.;tests`，排除需连活服的 `test_speedrun_portal.py`） | **901 项运行，OK（skipped=5）**；跳过的 5 项均为缺少本地 Ninjabrain JAR 的要塞引擎/校准用例。 |
+| `main.py --config config.example.yaml --check-config` + `compileall` | 输出 `Configuration valid.`，字节码编译无误。 |
+| R7 实服自然岩浆池基准（Batch 7 代码，12 处全新未改地形：6 地表 + 6 地下） | **9/12（75.0%）**，其中地下洞穴 `6/6（100%）`、地表 `3/6`；3 处失败均为底座倾倒前缘 `damage_taken`。 |
+| R8 实服自然岩浆池基准（Batch 8 修复 `GoalNearXZ` 前缘微调，12 处全新未改地形：6 地表 + 6 地下） | **9/12（75.0%）**，地表 `4/6`、地下 `5/6`，**全部 12 处 `health=20`、`on_fire=False`**（零受伤、零着火）；3 处失败为 `dig_unconfirmed`、`unreachable_stance` 与 `radius=24` 截断导致 `no_portal_site_found`。 |
+| R9 实服自然岩浆池基准（Batch 9 扩展安全清障与 `radius>=32` 探测，12 处全新未改地形：6 地表 + 6 地下） | **4/12（33.3%）**；清障与选址探测正常，但 6/8 失败源于侧壁倾倒保护阈值 `max_back=0.46` 过严误拦 `0.50` / `0.70` 常规贴边站位。收尾阶段已将侧壁安全阈值修正为基于射线几何截断的 `0.52`（离线单测已重跑验证；尚未重新全量跑 12 池活服）。 |
+
+> 说明：R7–R9 尚未达到此前设定的 ≥ 90%（≥ 11/12）自然岩浆池绝对通过率目标，后续如继续冲刺 >90%，重点需针对斜坡落差站位（`dy > 1` 接近/搭坡）及路径寻路贴边停在 `0.70` 时的垫脚/侧向绕行补强。
+
+## 历史：`develop-tianya` 多人协作结构与稳定性验证（2026-11-15）
+
+本轮只跑离线测试与静态契约校验，没有连接 Minecraft、mc-agent-api、RCON 或模型。实服速通用例与缺少本地 JAR 的 Ninjabrain 引擎用例按规范显式跳过（`skipped=8`），不伪装为实服或引擎完整验收。
+
+| 检查 | 本轮结果 |
+| --- | --- |
+| `.\.venv\Scripts\python.exe -X utf8 -B -m unittest discover -s tests -p "test_contracts.py" -v` | **8 项通过**，覆盖全仓 AST 语法与 `with sqlite3.connect` 句柄泄漏静态拦截、starter/daily/competition 工具目录与技能 `ARGUMENTS` / `SKILL_REGISTRY` 一致性、`core/domain.py` 纯函数，以及 `SurvivalJournal.instance_lock()` 跨进程互斥与 `main.py` 重复启动拦截。 |
+| `.\.venv\Scripts\python.exe -X utf8 -B -m unittest discover -s tests -p "test_botctl.py" -v` | **3 项通过**，覆盖 `scripts/botctl.py` 离线只读检查（空闲可替换、实例锁/`pending` 阻塞、`ModelRequestGate` `uncertain` 阻塞与确认后放行）。 |
+| `.\.venv\Scripts\python.exe -X utf8 -B -m unittest discover -s tests -p "test_survival_memory.py" -v` | **30 项通过（0 错误，0 `ResourceWarning`）**；修复 `test_corrupt_and_future_schema_databases_are_preserved` 中裸 `with sqlite3.connect(...)` 未关闭文件句柄导致的 Windows `WinError 32`。 |
+| `.\.venv\Scripts\python.exe -X utf8 -B main.py --config config.example.yaml --check-config` | 输出 `Configuration valid.`，退出码 `0`。 |
+| `.\.venv\Scripts\python.exe -X utf8 -B -m unittest discover -s tests -q` | **853 项运行，0 失败，0 错误，8 项显式跳过（`OK (skipped=8)`）**；其中 5 项为未安装本地 Ninjabrain JAR 的引擎/校准跳过，3 项为离线环境下 `test_speedrun_portal.py` 未连接实服的显式跳过。 |
+
+## 历史：拉取后复核（3801be9）
 
 环境：Windows、Python 3.11.3、requests 2.34.2、PyYAML 6.0.3、Temurin OpenJDK/javac 25.0.2。已有虚拟环境，本轮未安装依赖。只使用离线测试和本机临时假 HTTP 服务，没有连接 Minecraft、实际 mc-agent-api、RCON 或模型，也未修改相邻 API 仓库。
 

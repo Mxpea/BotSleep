@@ -176,6 +176,40 @@ class EmergencyRetreatTests(unittest.TestCase):
         self.assertEqual(decision.name, "retreat_from")
         self.assertEqual(self.skills.execute.call_args.args[0], "retreat_from")
 
+    def test_extracted_retreat_controller_clears_combat_only_after_verified_ground(self):
+        from agent.survival_planner import Decision
+        harness = self.harness()
+        observation = {"status": self.client.status}
+        decision = Decision("retreat_from", {"pos": [3.5, 64, .5], "distance": 8}, "retreat", "safety")
+        harness._retreat_state(observation, decision.args["pos"])
+        harness.context["combat_retreat"] = {"entity_id": 1}
+        relay = SkillResult(True, "Relay", {"retreat_complete": False, "evacuation_stage": "relay"})
+        self.assertFalse(harness._retreat_result(decision, relay, observation))
+        self.assertIn("combat_retreat", harness.context)
+        ground = SkillResult(True, "Ground", {"retreat_complete": True, "evacuation_stage": "ground"})
+        self.assertFalse(harness._retreat_result(decision, ground, observation))
+        self.assertNotIn("retreat_recovery", harness.context)
+        self.assertNotIn("combat_retreat", harness.context)
+
+    def test_extracted_retreat_controller_does_not_replan_explicit_unknown(self):
+        from agent.survival_planner import Decision
+        harness = self.harness()
+        observation = {"status": self.client.status}
+        decision = Decision("retreat_from", {"pos": [3.5, 64, .5], "distance": 8}, "retreat", "safety")
+        harness._retreat_state(observation, decision.args["pos"])
+        before = copy.deepcopy(harness.context["retreat_recovery"])
+        result = SkillResult(False, "Unverified custom result", {
+            "action_state": "unknown", "candidate_failed": True, "target": [-1, 64, 0]}, "unsafe")
+        self.assertFalse(harness._retreat_result(decision, result, observation))
+        self.assertEqual(harness.context["retreat_recovery"], before)
+
+    def test_extracted_retreat_controller_preserves_food_recovery_priority(self):
+        from agent.survival_planner import Decision
+        harness = self.harness()
+        harness.context["retreat_recovery"] = {"evacuating": True, "threat_pos": [12, 64, 0]}
+        decision = Decision("position_for_task", {"pos": [1, 64, 0]}, "Find nearby food", "food_recovery")
+        self.assertIs(harness._retreat_decision({"status": self.client.status}, decision), decision)
+
     def test_missing_hostile_position_waits_without_model_or_production(self):
         self.client.entities = []
         harness = self.harness()

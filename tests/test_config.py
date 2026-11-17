@@ -15,7 +15,7 @@ class ConfigTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.root = Path(self.temp.name)
+        self.root = Path(self.temp.name).resolve()
         self.path = self.root / "config.yaml"
 
     def write(self, config):
@@ -42,6 +42,30 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(config["sleep"]["threat_check"])
         self.assertFalse(config["debug"]["flight_recorder"]["enabled"])
         self.assertEqual(config["debug"]["command_prefix"], "#")
+
+    def test_session_reuse_remains_opt_in_and_path_is_config_relative(self):
+        config = load_config(self.write({}), environ={})
+        self.assertFalse(config["mc_api"]["keep_session_on_exit"])
+        self.assertEqual(config["mc_api"]["session_file"], "")
+        config = load_config(self.write({"mc_api": {"session_file": "runtime/session.json"}}), environ={})
+        self.assertEqual(config["mc_api"]["session_file"], str(self.root / "runtime/session.json"))
+        self.assertFalse((self.root / "runtime").exists())
+
+    def test_session_path_errors_are_redacted_configuration_errors(self):
+        for value in (None, 42, "bad\x00path"):
+            with self.subTest(value=value), self.assertRaises(ConfigError):
+                load_config(self.write({"mc_api": {"session_file": value}}), environ={})
+        self.write({"mc_api": {"session_file": "runtime/session.json"}})
+        original = Path.resolve
+
+        def fail_session_path(path, *args, **kwargs):
+            if path.name == "session.json":
+                raise OSError("private-path-details")
+            return original(path, *args, **kwargs)
+
+        with patch.object(Path, "resolve", fail_session_path), self.assertRaises(ConfigError) as caught:
+            load_config(self.path, environ={})
+        self.assertNotIn("private-path-details", str(caught.exception))
 
     def test_survival_defaults_and_world_partition_are_offline(self):
         config = load_config(self.write({"agent": {"mode": "survival"},

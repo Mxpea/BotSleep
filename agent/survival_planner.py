@@ -8,20 +8,25 @@ import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, Optional
 
+from core.domain import (
+    AIR,
+    HAZARDS,
+    LOG_NAMES,
+    PLANK_NAMES,
+    SAFE_FOOD,
+    STONE_TIERS,
+    WOOD_SPECIES,
+    block_key,
+    blocked_targets,
+    extract_blocks,
+    extract_hostiles,
+    finite_number,
+    has_tool_tier,
+    inventory_counts,
+    parse_pos,
+)
 
-WOOD_SPECIES = ("oak", "spruce", "birch", "jungle", "acacia", "dark_oak", "mangrove", "cherry", "pale_oak")
-LOG_NAMES = tuple(f"{wood}_log" for wood in WOOD_SPECIES)
-PLANK_NAMES = tuple(f"{wood}_planks" for wood in WOOD_SPECIES)
-SAFE_FOOD = {
-    "cooked_beef": 8, "cooked_porkchop": 8, "cooked_mutton": 6, "cooked_chicken": 6,
-    "cooked_salmon": 6, "cooked_cod": 5, "bread": 5, "baked_potato": 5,
-    "golden_carrot": 6, "apple": 4, "carrot": 3, "beetroot": 1,
-    "melon_slice": 2, "sweet_berries": 2, "glow_berries": 2, "dried_kelp": 1,
-}
-HAZARDS = {"lava", "water", "fire", "soul_fire", "magma_block", "cactus", "campfire", "soul_campfire", "powder_snow"}
-AIR = {"air", "cave_air", "void_air"}
 RANGED_HOSTILES = frozenset({"skeleton", "stray", "bogged", "pillager"})
-STONE_TIERS = ("stone", "iron", "diamond", "netherite")
 RECIPES = {
     "wooden_pickaxe": {"planks": 3, "stick": 2},
     "stone_pickaxe": {"cobblestone": 3, "stick": 2},
@@ -59,36 +64,28 @@ class SurvivalPlanner:
 
     @staticmethod
     def _number(value):
-        return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+        return finite_number(value)
 
     @classmethod
     def _pos(cls, value):
-        return list(value) if isinstance(value, (list, tuple)) and len(value) == 3 and all(cls._number(v) for v in value) else None
+        return parse_pos(value)
 
     @staticmethod
     def _key(pos):
         # Harness cooldowns identify block cells, including fractional walk targets.
-        return ",".join(str(math.floor(v)) for v in pos)
+        return block_key(pos)
 
     @classmethod
     def _counts(cls, observation):
-        supplied = observation.get("counts")
-        if isinstance(supplied, dict):
-            return {name: int(count) for name, count in supplied.items() if isinstance(name, str) and cls._number(count) and count > 0}
-        counts = {}
-        for item in observation.get("inventory") or []:
-            if isinstance(item, dict) and isinstance(item.get("name"), str) and cls._number(item.get("count")) and item["count"] > 0:
-                counts[item["name"]] = counts.get(item["name"], 0) + int(item["count"])
-        return counts
+        return inventory_counts(observation)
 
     @classmethod
     def _blocks(cls, observation):
-        return [b for b in observation.get("blocks") or [] if isinstance(b, dict) and isinstance(b.get("name"), str) and cls._pos(b.get("pos")) is not None]
+        return extract_blocks(observation)
 
     @staticmethod
     def _has_tool(counts, kind, *, wooden=False):
-        tiers = (("wooden",) + STONE_TIERS) if wooden else STONE_TIERS
-        return any(counts.get(f"{tier}_{kind}", 0) > 0 for tier in tiers)
+        return has_tool_tier(counts, kind, wooden=wooden)
 
     def progress(self, observation: dict) -> dict:
         """Return current capabilities/items, not persisted completion claims."""
@@ -120,27 +117,12 @@ class SurvivalPlanner:
         return Decision("wait", {"seconds": seconds, "reason": reason}, reason, goal)
 
     def _blocked(self, context):
-        blocked = set()
-        for key in context.get("blocked_targets") or []:
-            if isinstance(key, str):
-                try:
-                    pos = [float(v) for v in key.split(",")]
-                    blocked.add(self._key(pos) if self._pos(pos) else key)
-                except ValueError:
-                    blocked.add(key)
         # Only active cooldowns are authoritative. Historical failure counters may
         # remain after a cooldown expires and must not permanently blacklist a site.
-        return blocked
+        return blocked_targets(context)
 
     def _hostiles(self, observation, origin):
-        found = []
-        for entity in observation.get("entities") or []:
-            if not isinstance(entity, dict) or entity.get("type") != "hostile":
-                continue
-            pos = self._pos(entity.get("pos"))
-            if pos is not None:
-                found.append((math.dist(pos, origin), pos))
-        return sorted(found, key=lambda value: (value[0], value[1]))
+        return extract_hostiles(observation, origin)
 
     def _threat_distance(self, name):
         """Ranged enemies remain dangerous beyond the melee avoidance radius."""

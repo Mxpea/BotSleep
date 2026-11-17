@@ -22,6 +22,7 @@ from core.daily_observation import DailyObservationCollector
 from core.model_gate import ModelRequestGate
 from core.survival_harness import SurvivalHarness
 from skills.daily_survival import DailySurvivalSkills
+from skills import SkillResult
 from test_daily_skills import DailyWorld, envelope
 from test_llm_runtime import FakeChatEndpoint, tool_response
 
@@ -298,6 +299,43 @@ class DailyRuntimeTests(unittest.TestCase):
         self.assertFalse(harness.last_observation["shelter"]["shelter_verified"])
         self.assertEqual(harness.last_observation["shelter"]["missing_blocks"], 54)
         self.assertFalse(harness.completed)
+
+    def test_rotated_native_shelter_plan_survives_context_and_fresh_observation(self):
+        for orientation, door in (("north", [0, 64, -2]), ("south", [0, 64, 2]),
+                                  ("east", [2, 64, 0]), ("west", [-2, 64, 0])):
+            with self.subTest(orientation=orientation):
+                self.world.status["pos"] = [-.5, 64, -.5]
+                self.world.counts = {"oak_planks": 55}
+                harness, endpoint = self.make_harness([tool_response("plan_shelter", {
+                    "pos": [0, 64, 0], "material": "oak_planks", "orientation": orientation}, "plan")])
+                result = self.step(harness)
+                self.assertTrue(result.success, result)
+                self.assertEqual(harness.context["base_project"]["orientation"], orientation)
+                harness.collector.set_context(harness.context)
+                observed = harness.collector.collect()
+                self.assertEqual(observed["daily_evidence"]["base_site"]["orientation"], orientation)
+                self.assertEqual(observed["shelter"]["orientation"], orientation)
+                self.assertEqual(observed["shelter"]["needs_door"]["pos"], door)
+                self.assertEqual(len(endpoint.requests), 1)
+                self.assertFalse([c for c in self.world.calls if c[0] == "place"])
+
+    def test_legacy_base_project_without_orientation_still_observes_north(self):
+        harness, _ = self.make_harness()
+        harness.context["base_project"] = {"pos": [0, 64, 0], "material": "oak_planks", "dimension": "overworld"}
+        harness.collector.set_context(harness.context)
+        observed = harness.collector.collect()
+        self.assertEqual(observed["daily_evidence"]["base_site"]["orientation"], "north")
+        self.assertEqual(observed["shelter"]["needs_door"]["pos"], [0, 64, -2])
+
+    def test_unknown_or_mismatched_plan_does_not_persist_base_orientation(self):
+        harness, _ = self.make_harness()
+        decision = Decision("plan_shelter", {"pos": [0, 64, 0], "material": "oak_planks", "orientation": "east"}, "plan", "shelter")
+        observed = harness.collector.collect()
+        for extra in ({"orientation": "east", "action_state": "unknown"}, {"orientation": "west"}, {}):
+            with self.subTest(extra=extra):
+                result = SkillResult(True, "Incomplete plan evidence", {"geometry": {"floor_verified": True}, **extra})
+                harness._daily_result(decision, result, observed)
+                self.assertNotIn("base_project", harness.context)
 
     def test_starter_inventory_in_daily_rules_mode_continues_real_maintenance_actions(self):
         self.world.counts = {"stone_pickaxe": 1, "stone_axe": 1, "stone_sword": 1, "furnace": 1}

@@ -36,6 +36,11 @@ class LiveTestIsolationTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("skipped=3", result.stderr)
 
+    def test_cave_unittest_skips_live_terrain_changes_without_rcon_or_network(self):
+        result = self.run_fixture("test_cave_matrix.py")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("skipped=2", result.stderr)
+
     def test_crafting_script_refuses_live_setup_without_opt_in(self):
         result = self.run_fixture("test_crafting.py")
         self.assertEqual(result.returncode, 1, result.stdout + result.stderr)

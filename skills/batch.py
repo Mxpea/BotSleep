@@ -43,7 +43,7 @@ class _CheckedClient:
 class BatchSkills:
     ARGUMENTS = {
         "gather_materials": ({"resource", "count", "radius"}, {"resource", "count"}),
-        "build_shelter_batch": ({"pos", "material", "max_blocks"}, {"pos", "material"}),
+        "build_shelter_batch": ({"pos", "material", "max_blocks", "orientation"}, {"pos", "material"}),
     }
     RESOURCES = {
         "logs": (SurvivalSkills.LOGS, SurvivalSkills.LOGS),
@@ -245,18 +245,24 @@ class BatchSkills:
         from .shelter import ShelterSkills
         pos = SurvivalSkills._pos(args["pos"], block=True)
         material = SurvivalSkills._item(args["material"])
+        orientation = args.get("orientation")
+        step_args = {"pos": pos, "material": material}
+        if orientation is not None:
+            step_args["orientation"] = ShelterSkills._normalize_orientation(orientation)
         maximum = self._integer(args.get("max_blocks", 8), "max_blocks")
         if material not in ShelterSkills.MATERIALS:
             raise _Failure("unsupported_item", "Batch building only supports the shelter material whitelist")
         data = context["data"]
         data.update(pos=pos, material=material, max_blocks=maximum, used=0, shelter_verified=False)
+        if orientation is not None:
+            data["orientation"] = step_args["orientation"]
         self._status(context)
         before = self._inventory(context)
         skill = self.shelter_skills or ShelterSkills(context["client"])
         for _ in range(maximum):
             status = self._status(context)
             self._entities(context, status["pos"])
-            result = self._child(context, skill, "build_shelter_step", {"pos": pos, "material": material})
+            result = self._child(context, skill, "build_shelter_step", step_args)
             data["shelter_verified"] = result.data.get("shelter_verified") is True
             data["needs_door"] = result.data.get("needs_door")
             if not result.data.get("executed"):

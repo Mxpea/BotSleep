@@ -9,19 +9,12 @@ import math
 import re
 from collections.abc import Mapping
 
-from agent.survival_planner import Decision, SurvivalPlanner, RANGED_HOSTILES, LOG_NAMES, PLANK_NAMES
+from agent.survival_planner import Decision, SurvivalPlanner, RANGED_HOSTILES
+from core.domain import FOOD_POINTS, LOG_NAMES, PLANK_NAMES, cell_coords, extract_blocks, parse_pos
 from skills.daily_survival import DailySurvivalSkills
 from skills.combat import combat_options
 
 
-FOOD_POINTS = {
-    "cooked_beef": 8, "cooked_porkchop": 8, "cooked_mutton": 6, "cooked_chicken": 6,
-    "cooked_rabbit": 5, "cooked_salmon": 6, "cooked_cod": 5, "bread": 5, "baked_potato": 5,
-    "golden_carrot": 6, "apple": 4, "carrot": 3, "beetroot": 1, "melon_slice": 2,
-    "sweet_berries": 2, "glow_berries": 2, "dried_kelp": 1, "cookie": 2, "pumpkin_pie": 8,
-    "mushroom_stew": 6, "rabbit_stew": 10, "beetroot_soup": 6,
-    "beef": 3, "porkchop": 3, "rabbit": 3, "mutton": 2, "cod": 2, "salmon": 2, "potato": 1,
-}
 CROP_OUTPUT = {"wheat": (7, "wheat"), "carrots": (7, "carrot"), "potatoes": (7, "potato"), "beetroots": (3, "beetroot")}
 FOOD_ACTIONS = frozenset({"harvest_crop", "take_items", "inspect_container", "craft_item", "smelt_collect", "collect_drops", "eat_food", "wait"})
 HAZARDS = DailySurvivalSkills.HAZARDS
@@ -51,11 +44,11 @@ class DailySafetyPolicy:
 
     @staticmethod
     def _point(value):
-        return SurvivalPlanner._pos(value)
+        return parse_pos(value)
 
     @staticmethod
     def _cell(point):
-        return tuple(math.floor(value + .0001) for value in point)
+        return cell_coords(point)
 
     @staticmethod
     def _partial(observation):
@@ -280,8 +273,7 @@ class DailySafetyPolicy:
         return match.group(1) if match else None
 
     def _blocks(self, observation):
-        return [row for row in self._rows(observation.get("blocks")) + self._rows(observation.get("terrain"))
-                if isinstance(row.get("name"), str) and self._point(row.get("pos")) is not None]
+        return extract_blocks(observation, include_terrain=True)
 
     def _near_safe(self, pos, observation, radius, *, complete=False):
         status = observation["status"]
@@ -423,11 +415,13 @@ class DailySafetyPolicy:
         door = shelter.get("door")
         if not isinstance(door, dict):
             return None
+        orientation = str(shelter.get("orientation") or "north").lower()
+        allowed_facings = {"east", "west"} if orientation in {"east", "west"} else {"north", "south"}
         pos = self._point(door.get("pos"))
         if (pos is None or any(value != math.floor(value) for value in pos)
                 or door.get("name") not in DailySurvivalSkills.DOORS
                 or door.get("frame_verified") is not True or type(door.get("open")) is not bool
-                or door.get("facing") not in {"north", "south"}):
+                or door.get("facing") not in allowed_facings):
             return None
         return door
 

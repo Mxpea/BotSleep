@@ -21,6 +21,8 @@ DEFAULTS: Dict[str, Any] = {
         "base_url": "http://127.0.0.1:18900/api/v1",
         "timeout_seconds": 15,
         "login_timeout_seconds": 30,
+        "keep_session_on_exit": False,
+        "session_file": "",
     },
     "agent": {"name": "SleepBot", "password": "", "mode": "sleep"},
     "survival": {
@@ -72,6 +74,39 @@ DEFAULTS: Dict[str, Any] = {
             "model": "qwen3.6-35b-a3b", "temperature": 0.3, "max_tokens": 2048,
             "timeout_seconds": 60, "max_history_turns": 10, "max_repair_attempts": 1,
             "tls_version": "auto"},
+    "mining": {
+        "targets": {
+            "iron": {"count": 24, "min_tool": "stone_pickaxe"},
+            "coal": {"count": 16, "min_tool": "wooden_pickaxe"},
+        },
+        "cave_policy": {
+            "flood_max_cells": 160,
+            "horizontal_radius": 12,
+            "vertical_span": 10,
+            "max_height": 10,
+            "max_drop": 4,
+            "max_water_blocks": 3,
+            "small_bubble_max_air": 4,
+            "min_mineshaft_markers": 3,
+            "min_enter_torches": 0,
+            "explore_radius": 48,
+            "explore_max_visited": 600,
+            "explore_timeout_seconds": 360.0,
+            "torch_interval": 24,
+            "max_vein_blocks": 16,
+            "max_unsafe_retries": 3,
+            "eye_scan_radius": 4.5,
+        },
+        "home_thresholds": {
+            "min_empty_slots": 3,
+            "min_health": 12.0,
+            "min_food": 10.0,
+            "min_torches": 4,
+            "min_blocks": 16,
+            "min_pickaxe_durability_ratio": 0.10,
+            "min_remaining_seconds": 30.0,
+        },
+    },
     "rcon": {"enabled": False},
 }
 
@@ -144,6 +179,16 @@ def _validate(config: Dict[str, Any], config_dir: Path) -> None:
     api["base_url"] = base_url
     for key in ("timeout_seconds", "login_timeout_seconds"):
         _positive(api[key], f"mc_api.{key}")
+    _boolean(api["keep_session_on_exit"], "mc_api.keep_session_on_exit")
+    session_file = _string(api["session_file"], "mc_api.session_file", allow_empty=True)
+    if session_file:
+        try:
+            if "\x00" in session_file:
+                raise ValueError()
+            sf_path = Path(session_file).expanduser()
+            api["session_file"] = str((sf_path if sf_path.is_absolute() else config_dir / sf_path).resolve())
+        except (OSError, ValueError, RuntimeError):
+            raise ConfigError("mc_api.session_file is not a usable path") from None
 
     agent = config["agent"]
     _username(agent["name"], "agent.name")
@@ -303,6 +348,39 @@ def _validate(config: Dict[str, Any], config_dir: Path) -> None:
             raise ConfigError(f"llm.{key} must be an integer between {low} and {high}")
     if llm["tls_version"] not in ("auto", "1.2"):
         raise ConfigError("llm.tls_version must be auto or the string 1.2")
+
+    mining = _mapping(config["mining"], "mining")
+    if set(mining) - set(DEFAULTS["mining"]):
+        raise ConfigError("mining contains unsupported options")
+    targets = _mapping(mining["targets"], "mining.targets")
+    for ore_key, spec in targets.items():
+        if not isinstance(spec, dict) and (type(spec) is not int or spec < 1):
+            raise ConfigError(f"mining.targets.{ore_key} must be a mapping or positive integer")
+        if isinstance(spec, dict):
+            cnt = spec.get("count", 1)
+            if type(cnt) is not int or cnt < 1:
+                raise ConfigError(f"mining.targets.{ore_key}.count must be a positive integer")
+            if "min_tool" in spec:
+                _string(spec["min_tool"], f"mining.targets.{ore_key}.min_tool")
+    cave_policy = _mapping(mining["cave_policy"], "mining.cave_policy")
+    if set(cave_policy) - set(DEFAULTS["mining"]["cave_policy"]):
+        raise ConfigError("mining.cave_policy contains unsupported options")
+    for key in cave_policy:
+        if key == "min_enter_torches":
+            val = cave_policy[key]
+            if type(val) is not int or val < 0:
+                raise ConfigError("mining.cave_policy.min_enter_torches must be a non-negative integer")
+        else:
+            _positive(cave_policy[key], f"mining.cave_policy.{key}")
+    home_thresholds = _mapping(mining["home_thresholds"], "mining.home_thresholds")
+    if set(home_thresholds) - set(DEFAULTS["mining"]["home_thresholds"]):
+        raise ConfigError("mining.home_thresholds contains unsupported options")
+    for key in home_thresholds:
+        val = home_thresholds[key]
+        if type(val) not in (int, float) or not math.isfinite(val) or val < 0:
+            raise ConfigError(f"mining.home_thresholds.{key} must be a non-negative finite number")
+        if key == "min_pickaxe_durability_ratio" and val > 1:
+            raise ConfigError("mining.home_thresholds.min_pickaxe_durability_ratio must be between 0 and 1")
 
 
 def load_config(

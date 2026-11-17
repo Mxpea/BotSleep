@@ -1,6 +1,6 @@
 # BotSleep 架构与实现状态
 
-更新：2026-11-16。本页描述当前源码运行路径，包含此前 `3801be9` 基线之后的 API 适配、短步战斗、桶类技能与阶段建议；不将该历史基线当作本轮提交版本。未来赛事接口和已确认产品方向见 [HARNESS_INTERFACES.md](HARNESS_INTERFACES.md)。验证结果见 [TESTING.md](TESTING.md)，不要把设计图或历史实服状态当作当前验收。
+更新：2026-11-17。本页描述 main 与 develop-tianya/shelter-workflow 合并后的运行路径，包含自主目标、战斗与本地恢复，以及结构工作流、3D 世界记忆和独立分层采矿。模型绑定与独立能力分开列出；验证结果见 [TESTING.md](TESTING.md)，不以历史实服记录代替本次合并验收。
 
 ## 1. 当前入口与运行模式
 
@@ -54,17 +54,25 @@ flowchart TD
 | `skills/portal_speedrun.py` | 独立分步浇筑、点火与门框读取；坐标和阶段由调用者提供，未绑定模型工具 |
 | `skills/portal_telemetry.py`、`skills/lava_lake_generator.py` | 前者主动读取门户动作前后状态并导出 JSON，后者通过 RCON 生成专用测试地形；不是只读 EventMonitor |
 | `skills/crafting.py` | 智能 2x2/3x3 工作台调度合成与工作台自动回收 |
-| `skills/mining.py` | 整树连续自动伐木与掉落物拾取 |
+| `skills/mining.py` | `ChopTreeSkill`（整树连续伐木）与 `MineShaftSkill`（5 层斜井、工作站、地下暗河跨步绕行、`target_ys` 分层采矿与返表兜底） |
+| `skills/action_workflow.py`、`skills/shelter.py`、`skills/container.py` | 确定性动作工作流引擎（`ActionWorkflowRunner`、`pillar_up`/`pillar_down`、`scaffold_drop`、`escape_to_surface`）、庇护所施工与双箱/熔炉窗口操作 |
+| `core/world_3d.py`、`core/pathfinder_3d.py`、`core/cave_probe.py`、`core/mining_targets.py` | 通用持久化 3D 体素世界记忆（`VoxelWorld3D` SQLite chunk-zlib）、3D A* 与锚定搭桥规划器、洞腔探查与主世界 Y 层矿脉带规划 |
+| `skills/world_navigator.py`、`skills/ore_harvester.py`、`skills/cave_explore.py` | 统一 3D 导航/微掘/疾跑合并/4 级有界撤退执行器、矿脉踩捡收割器与可持久化多分支洞穴探索（未绑定模型目录） |
+| `core/structure_spec.py` | 标准结构蓝图（庇护所/矿井坐标变换、安全选址与结构验收）与挖掘/危险/可替代方块常量 |
 | `skills/exploration.py` | 可开关后台雷达，约每秒读取状态，默认位移 6 格后扫描；不是寻路或导航执行器 |
 | `skills/daily_survival.py` | 日常生存技能库（作物、狩猎、铁矿、装备、熔炼、储物、床门、5x5 庇护所） |
 | `skills/combat.py` | `fight_hostile` 短步近战/远程/撤退；按交战预算复查伤害与击杀，安全解除本技能持有的盾姿态 |
 | `skills/buckets.py` | `collect_liquid` 与受限 `hunt_with_lava`；核验源方块、桶转移、源回收和实际库存收益 |
 | `core/survival_playbook.py` | 按 `survival.intent` 生成 survival/speedrun 阶段建议、前置、已绑定动作及未实现缺口 |
+| `core/domain.py` | 共享领域常量（木种、床色、食物点、危险方块）、纯坐标/体素键解析、背包计数提取与 `TypedDict` 契约 |
+| `core/skill_registry.py` | starter / daily / competition 技能注册表（目标作用域、终点安全复核标记、执行器槽位分发），包含自主任务、战斗与桶类入口 |
+| `core/retreat_controller.py` | 树冠/近敌分段撤退恢复状态机、失败落点冷却与中继恢复判定 |
 | `core/survival_harness.py` | 串行任务推进、单游戏动作线程、独立模型 worker、安全复查、取消、失败退避和检查点 |
 | `agent/llm_planner.py`、`agent/tools.py` | 完整注册 starter 9 / daily 35 / competition 40 工具；autonomy 正常规划仅暴露目标及安全/赛事元工具，needs_ai 开放原子修复；严格解析并保留配对工具反馈 |
 | `core/competition_rules.py`、`core/competition_tasks.py` | 读取规则目录、计算可用性和服务器 advancement 证据、管理选择/完成/强退/终止及得分；不执行游戏动作 |
 | `core/model_worker.py`、`core/model_gate.py` | 慢模型异步等待；同服务/凭据作用域的本机线程与进程门禁；未知请求持久化锁定 |
-| `core/survival_state.py` | 有界观察与原子检查点，按 API/账号/world_id 隔离；pending 不自动重放 |
+| `core/survival_state.py` | 有界观察、跨进程文件锁与原子检查点，按 API/账号/world_id 隔离并提供单实例 `instance_lock()`；pending 不自动重放 |
+| `scripts/botctl.py` | 离线只读运维工具，检查生存实例锁、`pending` 意图及 `ModelRequestGate` 状态（`status` / `check-ready-to-replace`） |
 | `agent/daily_survival.py` | 根据当前证据生成日常任务板、依赖、缺口和建议；competition 中仅作生存辅助，不是计分来源 |
 | `core/daily_observation.py`、`core/daily_policy.py` | 日常证据采集、安全情境和模型放行条件；未知资源不当成可执行目标 |
 | `skills/survival.py`、`skills/daily_survival.py` 等 | 采集、制作、移动、撤退、农业、熔炼、住所、容器等执行及后验验证 |
@@ -100,7 +108,7 @@ flowchart TD
 
 短步战斗不等于自动击杀：攻击已发、伤害已证实、目标消失、击杀和实际掉落分别记录。低血、多敌、未知目标或危险地形不放行进攻；苦力怕缺少引信证据，未开放近战击杀。普通狩猎先接近再重新观察，技能只做 2.8 格内站定攻击。岩浆狩猎仅限已核验的不燃容纳坑并立即核验回收源，不能当作开放地面通用攻击。条件和验收边界见 [COMBAT_AND_HUNTING.md](COMBAT_AND_HUNTING.md)。
 
-现有移动/撤退技能有局部几何、支撑、净空、危险地形及位置后验检查；树冠分段撤退、清叶和失败状态更新有离线测试。**通用水面优先导航、Baritone 式局部搜索、surface_swim 和跨虚空/岩浆自动搭路尚未实现。** 普通 move_to 不保证浮水；旧设计的 20Hz 硬实时反射、自动搭高和落地水也不在当前能力中。
+现有生存模型内建移动/撤退技能仍以局部几何、支撑、净空、危险地形及位置后验检查为主；独立工作流层 `Pathfinder3D` / `WorldNavigator` / `ActionWorkflow` 已提供 3D A*、`blocked_edges` 规避、锚定跨涧搭桥、`pillar_up`/`pillar_down`、`scaffold_drop` 与 `escape_to_surface`。**生存模型主循环内的通用水面优先导航、surface_swim 与高频反射仍待正式接入**；普通 `move_to` 仍不保证自动浮水，也不依赖外部 API 补丁。
 
 用户已确认的未来导航方向仍是：harness 全权规划、安全水面优先、不潜没时不计氧气、必要时按资源预算搭路；下意识行为可消耗资源应急，核验后续接原任务意图。实现前必须处理观察覆盖不足和动作互斥，不借用相邻 API 补丁。
 

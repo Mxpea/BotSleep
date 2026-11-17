@@ -11,19 +11,13 @@ import copy
 import math
 import re
 
-from agent.survival_planner import Decision, LOG_NAMES, PLANK_NAMES, SAFE_FOOD, SurvivalPlanner
+from agent.survival_planner import Decision, SurvivalPlanner
+from core.domain import LOG_NAMES, PLANK_NAMES, SAFE_FOOD, TOOL_KINDS, parse_pos
+from core.skill_registry import skills_for_objective
 from skills.daily_survival import DailySurvivalSkills
 
 
-DAILY_SKILLS = frozenset({
-    "gather_block", "gather_resource", "craft_item", "place_item", "eat_food", "move_to",
-    "retreat_from", "auto_sleep", "harvest_crop", "plant_crop", "till_soil", "hunt_animal",
-    "equip_armor", "smelt_start", "smelt_collect", "inspect_container", "store_items",
-    "take_items", "collect_drops", "place_bed", "place_door", "wait",
-    "plan_shelter", "inspect_shelter", "build_shelter_step", "position_for_task",
-    "gather_materials", "build_shelter_batch", "set_door", "gather_seeds", "clear_foliage",
-    "fight_hostile", "collect_liquid", "hunt_with_lava", "run_survival_task",
-})
+DAILY_SKILLS = skills_for_objective("daily")
 TASK_IDS = ("recover_drops", "food_reserve", "wood_reserve", "starter_tools", "furnace",
             "fuel_reserve", "iron_tools", "base_site", "bed", "shelter", "storage",
             "food_production", "maintain")
@@ -33,7 +27,6 @@ COOKING = {"beef": "cooked_beef", "porkchop": "cooked_porkchop", "mutton": "cook
            "deepslate_iron_ore": "iron_ingot", **{name: "charcoal" for name in LOG_NAMES}}
 CROPS = {"wheat": (7, "wheat_seeds"), "carrots": (7, "carrot"),
          "potatoes": (7, "potato"), "beetroots": (3, "beetroot_seeds")}
-TOOL_KINDS = ("pickaxe", "axe", "sword")
 BUILDING_MATERIALS = ("oak_planks", "birch_planks", "spruce_planks", "cobblestone")
 
 
@@ -54,7 +47,7 @@ class DailySurvivalGoals:
 
     @staticmethod
     def _pos(value):
-        return SurvivalPlanner._pos(value)
+        return parse_pos(value)
 
     @staticmethod
     def _rows(value):
@@ -108,31 +101,44 @@ class DailySurvivalGoals:
 
     def _place(self, item, observation, goal, context=None):
         origin = self._pos(observation["status"].get("pos"))
+        directions = {"north": (0, -1), "south": (0, 1), "east": (1, 0), "west": (-1, 0)}
+        opposite = {"north": "south", "south": "north", "east": "west", "west": "east"}
         for row in self._rows(observation.get("placement_candidates"))[:8]:
             pos = self._pos(row.get("pos"))
             base = (observation.get("daily_evidence") or {}).get("base_site")
+            orientation = "north"
             if goal in {"bed", "storage"} and self._verified(base, observation["status"].get("dimension")):
+                orientation = base.get("orientation", "north")
+                if not isinstance(orientation, str) or orientation not in directions:
+                    continue
                 if pos is None or pos[1] != base["pos"][1] or abs(pos[0] - base["pos"][0]) > 1 or abs(pos[2] - base["pos"][2]) > 1:
                     continue  # Reserve the blueprint boundary for walls and exits.
-                if pos[0] == base["pos"][0] and pos[2] <= base["pos"][2]:
-                    continue  # Preserve the north doorway and centre approach.
-                if goal == "bed" and not (pos[2] == base["pos"][2] and abs(pos[0] - base["pos"][0]) == 1):
+                dx, dz = directions[orientation]
+                offset_x, offset_z = pos[0] - base["pos"][0], pos[2] - base["pos"][2]
+                front = offset_x * dx + offset_z * dz
+                side = offset_x * dz - offset_z * dx
+                if side == 0 and front >= 0:
+                    continue  # Preserve the rotated doorway and centre approach.
+                if goal == "bed" and not (front == 0 and abs(side) == 1):
                     continue  # Side-middle foot and rear head leave the centre entry clear.
             if (pos is not None and origin is not None and math.dist(origin, pos) <= 4
                     and self.rules._key(pos) not in self.rules._blocked(context or {})):
                 if goal == "bed":
-                    stance = [pos[0] + .5, pos[1], pos[2] - .5]
-                    if (tuple(math.floor(value) for value in origin) != (pos[0], pos[1], pos[2] - 1)
-                            or DailySurvivalSkills.placement_facings(pos, origin) != ["south"]):
+                    dx, dz = directions[orientation]
+                    front_cell = [pos[0] + dx, pos[1], pos[2] + dz]
+                    stance = [front_cell[0] + .5, front_cell[1], front_cell[2] + .5]
+                    facing = opposite[orientation]
+                    if (tuple(math.floor(value) for value in origin) != tuple(front_cell)
+                            or DailySurvivalSkills.placement_facings(pos, origin) != [facing]):
                         blocked = self.rules._blocked(context or {})
                         if (math.dist(origin, stance) > 3 or math.dist(origin, stance) <= .4
                                 or self.rules._key(stance) in blocked
-                                or self.rules._key([pos[0], pos[1], pos[2] - 1]) in blocked):
+                                or self.rules._key(front_cell) in blocked):
                             continue
                         stands = self._rows(observation.get("safe_stand_candidates"))[:8]
                         if not any(self._pos(row.get("pos")) == stance for row in stands):
                             continue
-                        if DailySurvivalSkills.placement_facings(pos, stance) != ["south"]:
+                        if DailySurvivalSkills.placement_facings(pos, stance) != [facing]:
                             continue
                         return self._action("position_for_task", {"pos": stance},
                             "Use the freshly checked front-side stance; reobserve before placing the bed toward the rear", goal)
@@ -368,9 +374,17 @@ class DailySurvivalGoals:
         if self.rules._key(pos) in self.rules._blocked(context):
             return None
         shelter = observation.get("shelter")
+        orient = base.get("orientation", "north")
+        if not isinstance(orient, str) or orient not in {"north", "south", "east", "west"}:
+            return None
+        inspect_args = {"pos": pos}
+        build_extra = {"orientation": orient} if orient and orient != "north" else {}
+        if build_extra:
+            inspect_args["orientation"] = orient
         if (not isinstance(shelter, dict) or shelter.get("fresh") is not True
-                or shelter.get("dimension") != observation["status"]["dimension"] or shelter.get("pos") != pos):
-            return self._action("inspect_shelter", {"pos": pos}, "Reinspect the base before selecting one construction step", "shelter")
+                or shelter.get("dimension") != observation["status"]["dimension"] or shelter.get("pos") != pos
+                or shelter.get("orientation", "north") != orient):
+            return self._action("inspect_shelter", inspect_args, "Reinspect the base before selecting one construction step", "shelter")
         geometry = shelter.get("geometry") or {}
         if (geometry.get("floor_verified") is not True or geometry.get("exit_verified") is not True
                 or shelter.get("hazards") or shelter.get("occupied_blueprint_cells")):
@@ -386,7 +400,7 @@ class DailySurvivalGoals:
         if type(shelter.get("missing_blocks")) is int and shelter["missing_blocks"] > 0:
             material = next((name for name in BUILDING_MATERIALS if counts.get(name, 0)), None)
             if material:
-                return self._action("build_shelter_step", {"pos": pos, "material": material},
+                return self._action("build_shelter_step", {"pos": pos, "material": material, **build_extra},
                                     "Build at most one checked blueprint block", "shelter")
             log = next((name for name in ("oak_log", "birch_log", "spruce_log") if counts.get(name, 0)), None)
             if log:
@@ -413,7 +427,7 @@ class DailySurvivalGoals:
             needed = self.rules._need_planks(6, observation, context)
             if needed:
                 return self._action(needed.name, needed.args, needed.reason, "shelter")
-        return self._action("inspect_shelter", {"pos": pos}, "Confirm the complete roof, walls, doorway and exit", "shelter")
+        return self._action("inspect_shelter", inspect_args, "Confirm the complete roof, walls, doorway and exit", "shelter")
 
     def build(self, observation, memory=None, context=None):
         """Return current facts, actionable prerequisites and explicit unmet goals."""
@@ -705,6 +719,41 @@ class DailySurvivalGoals:
                 "tasks": tasks, "maintenance_ready": maintenance_ready,
                 "needs": [row["id"] for row in tasks if row["status"] not in {"satisfied"} and row["id"] != "maintain"],
                 "revalidate_candidates": candidates}
+
+    def mining_rest_action(self, observation, context=None):
+        """Choose the next verified rest/resupply daily action for a paused mining checkpoint."""
+        ctx = context or {}
+        if ctx.get("pending") is not None:
+            return None  # Never auto-replay while pending intention exists.
+        progress = ctx.get("mining_progress")
+        if not isinstance(progress, dict):
+            return None
+        status = observation.get("status") or {}
+        counts = self.rules._counts(observation)
+        dimension = status.get("dimension")
+
+        # 1. Store excess cobblestone / clutter if a verified chest exists nearby
+        for row in self._safe_rows(observation, DailySurvivalSkills.CONTAINERS, context=ctx):
+            excess = next((item for item in ("cobblestone", "cobbled_deepslate", "dirt", "andesite", "diorite", "granite")
+                           if counts.get(item, 0) > (32 if item == "cobblestone" else 0)), None)
+            if excess:
+                take_n = counts[excess] - (32 if excess == "cobblestone" else 0)
+                return self._action("store_items", {"pos": row["pos"], "item": excess, "count": min(64, take_n)},
+                                    "Store excess mined blocks in nearby verified chest during mining rest", "storage")
+
+        # 2. Smelt raw ore if furnace + fuel + input exist
+        smelt_step = self._smelt({"iron_ingot", "gold_ingot"}, observation, counts, "iron_tools", context=ctx)
+        if smelt_step is not None:
+            return smelt_step
+
+        # 3. Restock torches or stone pickaxe if needed and craftable
+        if counts.get("torch", 0) < 4 and counts.get("coal", 0) >= 1 and counts.get("stick", 0) >= 1:
+            return self._action("craft_item", {"item": "torch", "count": 1}, "Restock torches at mining rest", "maintain")
+        if not any(counts.get(p, 0) > 0 for p in ("wooden_pickaxe", "stone_pickaxe", "iron_pickaxe", "diamond_pickaxe")):
+            if counts.get("cobblestone", 0) >= 3 and counts.get("stick", 0) >= 2:
+                return self._action("craft_item", {"item": "stone_pickaxe", "count": 1}, "Craft replacement stone_pickaxe during mining rest", "starter_tools")
+
+        return None
 
     def choose(self, observation, memory=None, context=None):
         """Rules-mode convenience only; LLM mode receives the board as context."""

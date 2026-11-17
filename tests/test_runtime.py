@@ -255,6 +255,23 @@ class SurvivalResumeEntryTests(unittest.TestCase):
         client_factory.assert_not_called()
         self.assertIsNone(self.controller)
 
+    def test_keep_connected_flag_skips_logout_on_exit(self):
+        code, output, _ = self.run_main(["--once", "--resume", "--keep-connected"])
+        self.assertEqual(code, 0, output)
+        self.client.logout.assert_not_called()
+        self.client.attach_or_login.assert_called_once()
+        session_file = self.client.attach_or_login.call_args.kwargs["session_file"]
+        self.client.save_session.assert_called_once_with(session_file)
+        self.client.login.assert_not_called()
+
+    def test_keep_connected_config_is_explicit_opt_in(self):
+        self.config["mc_api"]["keep_session_on_exit"] = True
+        code, output, _ = self.run_main(["--once", "--resume"])
+        self.assertEqual(code, 0, output)
+        self.client.logout.assert_not_called()
+        self.client.attach_or_login.assert_called_once()
+        self.client.save_session.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

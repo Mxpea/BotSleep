@@ -10,6 +10,13 @@ from dataclasses import asdict
 
 from agent.survival_planner import Decision, SurvivalPlanner
 from core.client import APIError
+from core.retreat_controller import (
+    RETREAT_REPLAN,
+    RETREAT_SEARCH_COOLDOWN,
+    RETREAT_WAIT_SECONDS,
+    RetreatController,
+)
+from core.skill_registry import destination_checked_skills, resolve_skill_runner
 from core.sleep_controller import SleepController
 from core.survival_state import ObservationCollector, SurvivalJournal
 from skills import SkillResult
@@ -24,9 +31,6 @@ from core.local_recovery_runtime import LocalRecoveryRuntime
 # arrives. An unchanged cached block does not prove the dig never happened.
 UNCERTAIN = {"request_timeout", "network_error", "invalid_json", "invalid_response", "dig_unconfirmed", "action_unconfirmed"}
 FATAL = {"unauthorized", "invalid_credentials", "death_loop", "death_loop_cooldown"}
-RETREAT_REPLAN = {"unsafe", "path_not_found", "no_path", "move_unverified", "retreat_unverified"}
-RETREAT_WAIT_SECONDS = 5
-RETREAT_SEARCH_COOLDOWN = 30
 
 
 def _uncertain_result(result):
@@ -118,6 +122,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
         # life generation across restarts independently of the per-run budget.
         self.context.setdefault("life_generation", self.context.get("death_count", 0))
         self.context["death_count"] = 0
+        self._retreat = RetreatController(self.context, self.settings, self._record)
         if self.competition_mode:
             from core.competition_tasks import CompetitionTasks
             self.competition = CompetitionTasks(settings.get("competition", {}), saved=self.context.get("competition"))
@@ -240,113 +245,22 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
 
     def _retreat_state(self, observation, threat):
         """Persist recovery evidence, never an executable route or old pending action."""
-        status = observation["status"]
-        recovery = self.context.get("retreat_recovery")
-        if not isinstance(recovery, dict) or recovery.get("dimension") != status.get("dimension"):
-            recovery = {"dimension": status.get("dimension"), "evacuating": False,
-                        "evacuation_origin": list(status["pos"]), "excluded_until": {}}
-            self.context["retreat_recovery"] = recovery
-        if recovery.get("evacuating") is not True:
-            recovery["evacuation_origin"] = list(status["pos"])
-        recovery["threat_pos"] = list(threat)
-        now = time.time()
-        recovery["excluded_until"] = {key: expiry for key, expiry in recovery.get("excluded_until", {}).items()
-            if self._safety_rules._number(expiry) and expiry > now}
-        return recovery
+        return self._retreat.state(observation, threat)
 
     def _retreat_changed(self, observation, threat, recovery):
-        basis = recovery.get("search_basis") or {}
-        origin = self._safety_rules._pos(observation["status"].get("pos"))
-        old_origin = self._safety_rules._pos(basis.get("pos"))
-        old_threat = self._safety_rules._pos(basis.get("threat_pos"))
-        if origin and old_origin and (math.dist(origin, old_origin) >= 1
-                or any(math.floor(a) != math.floor(b) for a, b in zip(origin, old_origin))):
-            return True
-        if old_threat and math.dist(threat, old_threat) >= 2:
-            return True
-        # Only compare cells actually observed on both occasions. A missing
-        # resource row is not proof that an obstruction has disappeared.
-        blocks = {tuple(row["pos"]): row for row in observation.get("blocks", []) + observation.get("terrain", [])
-                  if isinstance(row, dict) and self._safety_rules._pos(row.get("pos")) is not None}
-        for row in recovery.get("blocked_cells", []):
-            current = blocks.get(tuple(row["pos"]))
-            if current is not None and current.get("name") != row.get("name"):
-                return True
-        return False
+        return self._retreat.changed(observation, threat, recovery)
 
     def _retreat_decision(self, observation, decision):
-        recovery = self.context.get("retreat_recovery") or {}
-        if decision.name != "retreat_from":
-            if recovery.get("evacuating") is not True:
-                return decision
-            # Lifecycle, immediate hazards, stable footing, food and low health
-            # retain priority. Night alone must not abandon a canopy relay.
-            if decision.goal in {"observe", "recover", "food", "safety"} or observation["status"].get("is_sleeping"):
-                return decision
-            threat = self._safety_rules._pos(recovery.get("threat_pos"))
-            if threat is None:
-                return Decision("wait", {"seconds": RETREAT_WAIT_SECONDS}, "Evacuation needs a verified threat position", "safety")
-            decision = Decision("retreat_from", {"pos": threat, "distance": 8},
-                                "Continue the canopy evacuation until safe ground is verified", "safety")
-        threat = self._safety_rules._pos(decision.args.get("pos"))
-        if threat is None:
-            return decision  # Skill parameter validation still owns malformed input.
-        recovery = self._retreat_state(observation, threat)
-        if recovery.get("retry_after", 0) > time.time() and not self._retreat_changed(observation, threat, recovery):
-            return Decision("wait", {"seconds": RETREAT_WAIT_SECONDS},
-                            "No verified retreat route; observe again before the bounded search cooldown expires", "safety")
-        recovery.pop("retry_after", None)
-        return decision
+        return self._retreat.choose_decision(observation, decision)
 
     def _retreat_options(self, observation, decision):
-        recovery = self._retreat_state(observation, decision.args["pos"])
-        excluded = []
-        for key in recovery["excluded_until"]:
-            try:
-                pos = [int(value) for value in key.split(",")]
-            except (ValueError, AttributeError):
-                continue
-            if len(pos) == 3:
-                excluded.append(pos)
-        return {"excluded_targets": excluded[-8:], "evacuating": recovery.get("evacuating") is True,
-                "evacuation_origin": recovery.get("evacuation_origin")}
+        return self._retreat.options(observation, decision)
 
     def _retreat_result(self, decision, result, observation):
         """Return whether a known route failure uses recovery rather than global failure limits."""
-        if decision.name != "retreat_from" or observation is None:
-            return False
-        recovery = self.context.get("retreat_recovery")
-        if not isinstance(recovery, dict):
-            return False
-        if result.success:
-            if result.data.get("retreat_complete") is False and result.data.get("evacuation_stage") == "relay":
-                recovery["evacuating"] = True
-                recovery.pop("retry_after", None)
-                self._record("INFO", "EVACUATION_RELAY", {"target": result.data.get("target")})
-            elif result.data.get("retreat_complete") is True and result.data.get("evacuation_stage") == "ground":
-                self.context.pop("retreat_recovery", None)
-                self.context.pop("combat_retreat", None)
-            return False
-        # Unknown writes must never become permission to try a different route.
-        if result.error_code in UNCERTAIN | FATAL | {"internal", "internal_error", "cancelled"}:
-            return False
-        if result.error_code not in RETREAT_REPLAN and result.data.get("candidate_failed") is not True:
-            return False
-        target = self._safety_rules._pos(result.data.get("target"))
-        if target is not None:
-            key = ",".join(str(math.floor(value)) for value in target)
-            excluded = recovery.setdefault("excluded_until", {})
-            excluded.pop(key, None)
-            excluded[key] = time.time() + self.settings["target_cooldown_seconds"]
-            recovery["excluded_until"] = dict(list(excluded.items())[-8:])
-        else:
-            recovery["retry_after"] = time.time() + RETREAT_SEARCH_COOLDOWN
-        recovery["search_basis"] = {"pos": list(observation["status"]["pos"]), "threat_pos": list(decision.args["pos"])}
-        recovery["blocked_cells"] = [copy.deepcopy(row) for row in result.data.get("blocked_cells", [])
-                                     if isinstance(row, dict) and self._safety_rules._pos(row.get("pos")) is not None][:4]
-        self._record("WARN", "RETREAT_REPLAN_SCHEDULED", {"code": result.error_code, "target": target,
-                     "retry_seconds": RETREAT_WAIT_SECONDS, "search_retry_after": recovery.get("retry_after")})
-        return True
+        return self._retreat.handle_result(
+            decision, result, observation, uncertain_codes=UNCERTAIN, fatal_codes=FATAL
+        )
 
     @staticmethod
     def _life_marker(observation):
@@ -354,11 +268,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
         return json.dumps({key: status.get(key) for key in ("last_death", "dimension", "alive")}, sort_keys=True)
 
     def _unsafe_destination(self, decision, observation):
-        target_actions = {"move_to", "gather_block", "place_item"}
-        if self.daily:
-            target_actions |= {"gather_resource", "harvest_crop", "gather_seeds", "clear_foliage", "plant_crop", "till_soil", "place_bed", "place_door",
-                               "smelt_start", "smelt_collect", "inspect_container", "store_items", "take_items",
-                               "hunt_animal", "hunt_with_lava", "collect_liquid", "collect_drops", "build_shelter_step", "build_shelter_batch", "set_door", "position_for_task"}
+        target_actions = destination_checked_skills(daily=self.daily)
         if decision.name not in target_actions:
             return None
         if "entity_id" in decision.args:
@@ -652,9 +562,14 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
             self.memory.record_result(decision, result, observation)
         status = (observation or {}).get("status") or {}
         data = result.data
-        if decision.name == "plan_shelter" and result.success and (data.get("geometry") or {}).get("floor_verified"):
+        shelter_orientation = decision.args.get("orientation", "north")
+        if (decision.name == "plan_shelter" and result.success and not _uncertain_result(result)
+                and (data.get("geometry") or {}).get("floor_verified") is True
+                and isinstance(shelter_orientation, str) and shelter_orientation in {"north", "south", "east", "west"}
+                and data.get("orientation", "north") == shelter_orientation):
             self.context["base_project"] = {"pos": decision.args["pos"], "material": decision.args["material"],
-                                            "dimension": status.get("dimension"), "source": "skill_verified"}
+                                            "dimension": status.get("dimension"), "source": "skill_verified",
+                                            "orientation": shelter_orientation}
             if self.memory and status.get("dimension"):
                 self.memory.remember_place("home", "shelter_site", decision.args["pos"], dimension=status["dimension"], source="skill_verified")
         if decision.name == "smelt_start" and (result.success or result.error_code == "partial_completion"):
@@ -856,17 +771,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                     options["recovery_context"] = self._canopy_options(observation)
                 if self._task_child and self.context.get("cautious_bootstrap") is True:
                     options["cautious"] = True
-                runner = self.shelter_skills if self.daily and decision.name in {"plan_shelter", "inspect_shelter", "build_shelter_step"} else self.skills
-                if self.daily and decision.name in {"gather_materials", "build_shelter_batch"}:
-                    runner = self.batch_skills
-                elif self.daily and decision.name == "set_door":
-                    runner = self.door_skills
-                elif self.daily and decision.name == "position_for_task":
-                    runner = self.positioning_skills
-                elif self.daily and decision.name == "fight_hostile":
-                    runner = self.combat_skills
-                elif self.daily and decision.name in {"collect_liquid", "hunt_with_lava"}:
-                    runner = self.bucket_skills
+                runner = resolve_skill_runner(self, decision.name)
                 result = runner.execute(decision.name, decision.args, cancel_event=self._cancel, **options)
             if not isinstance(result, SkillResult):
                 raise TypeError("Skill returned an invalid result")

@@ -237,13 +237,15 @@ def tools_for_objective(objective="starter"):
          "count": {"type": "integer", "minimum": 1, "maximum": 8},
          "radius": {"type": "integer", "minimum": 1, "maximum": 8, "default": 8}}, ("resource", "count"))
     materials = {"type": "string", "enum": ["cobblestone", "oak_planks", "birch_planks", "spruce_planks"]}
-    add("plan_shelter", "Read and validate an empty 5x5 natural ground site centered at integer feet pos. No blocks removed or placed; proposes a fixed small shelter layout.",
-        {**pos, "material": materials})
-    add("inspect_shelter", "Recheck a 5x5 shelter centered at feet pos: floor, walls, roof, door and facilities. Geometric enclosure is not proof of light level or absence of every threat.", pos)
-    add("build_shelter_step", "Place at most ONE missing wall/roof block of a freshly checked shelter layout. Returns progress or required safe positioning; does not claim the entire shelter complete.",
-        {**pos, "material": materials})
-    add("build_shelter_batch", "Build at most 8 shelter blocks, rechecking each child action. Stops for safe repositioning, shortage, danger or unknown writes; never automatically walks or removes obstacles. Inspect current house completion separately.",
-        {**pos, "material": materials,
+    orient = {"type": "string", "enum": ["north", "south", "east", "west"], "default": "north"}
+    add("plan_shelter", "Read-only 5x5 ground site validation at feet pos.",
+        {**pos, "material": materials, "orientation": orient}, ("pos", "material"))
+    add("inspect_shelter", "Recheck 5x5 shelter floor, walls, roof, door at feet pos; geometry != light/safety.",
+        {**pos, "orientation": orient}, ("pos",))
+    add("build_shelter_step", "Place ONE missing shelter block from fresh layout; reports safe move need.",
+        {**pos, "material": materials, "orientation": orient}, ("pos", "material"))
+    add("build_shelter_batch", "Place up to 8 shelter blocks; stops on move, hazard, or unknown write.",
+        {**pos, "material": materials, "orientation": orient,
          "max_blocks": {"type": "integer", "minimum": 1, "maximum": 8, "default": 8}}, ("pos", "material"))
     return tools
 

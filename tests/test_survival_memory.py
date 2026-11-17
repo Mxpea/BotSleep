@@ -1,4 +1,5 @@
 import concurrent.futures
+from contextlib import closing
 import json
 import math
 import sqlite3
@@ -302,11 +303,12 @@ class SurvivalMemoryTests(unittest.TestCase):
             self.make_memory()
         self.assertEqual(self.memory.path.read_bytes(), damaged)
         future = self.make_memory(world_id="future")
-        with sqlite3.connect(future.path) as db:
-            db.execute("PRAGMA user_version=99")
+        with closing(sqlite3.connect(future.path)) as db:
+            with db:
+                db.execute("PRAGMA user_version=99")
         with self.assertRaisesRegex(ValueError, "incompatible"):
             self.make_memory(world_id="future")
-        with sqlite3.connect(future.path) as db:
+        with closing(sqlite3.connect(future.path)) as db:
             self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 99)
 
     def test_memory_operations_use_no_network_or_model(self):

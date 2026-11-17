@@ -23,6 +23,7 @@ def parse_args(argv=None):
     parser.add_argument("--objective", choices=("starter", "daily", "competition"), help="Select starter, daily survival or model-driven competition scoring")
     parser.add_argument("--max-steps", type=int, help="Bound survival observation/action cycles")
     parser.add_argument("--once", action="store_true", help="Run one sleep attempt or survival decision and exit")
+    parser.add_argument("--keep-connected", action="store_true", help="Keep the Minecraft player logged in on exit and reuse cached session token across runs")
     parser.add_argument("--resume", action="store_true", help="Explicitly resume survival from fresh observations; never replay a saved action")
     parser.add_argument("--acknowledge-model-idle", action="store_true", help="Clear model transport uncertainty ONLY after confirming the provider has no running request")
     parser.add_argument("--check-config", action="store_true", help="Validate configuration without connecting")
@@ -65,9 +66,22 @@ def main(argv=None) -> int:
     monitor = None
     client = None
     controller = None
+    instance_lock = None
+    login_attempted = False
+    keep_connected = False
+    session_file = None
     exit_code = 0
     survival = config["agent"]["mode"] == "survival"
     try:
+        keep_connected = bool(
+            getattr(args, "keep_connected", False)
+            or config["mc_api"].get("keep_session_on_exit", False)
+        )
+        cfg_session_file = str(config["mc_api"].get("session_file") or "").strip()
+        if cfg_session_file:
+            session_file = cfg_session_file
+        elif keep_connected:
+            session_file = str(Path(config["survival"]["state_dir"]) / f"session_{config['agent']['name']}.json")
         log_config = config["debug"]["flight_recorder"]
         monitor_config = config["debug"]["monitor"]
         if monitor_config["enabled"]:
@@ -84,13 +98,28 @@ def main(argv=None) -> int:
             password=config["agent"]["password"],
             timeout_seconds=config["mc_api"]["timeout_seconds"],
         )
+        if survival:
+            from core.survival_state import SurvivalJournal
+            journal_guard = SurvivalJournal(
+                config["survival"]["state_dir"],
+                endpoint=client.base_url,
+                username=client.username,
+                world_id=config["survival"]["world_id"],
+            )
+            instance_lock = journal_guard.instance_lock()
+            instance_lock.__enter__()
         if recorder:
             recorder.record("INFO", "main", "STARTUP", {"username": client.username, "mode": config["agent"]["mode"],
                             "planner": "llm" if survival and config["llm"]["enabled"] else "rules",
                             "objective": config["survival"]["objective"] if survival else None,
                             "model": config["llm"]["model"] if config["llm"]["enabled"] else None,
                             "monitor_url": monitor.address if monitor else None})
-        status = client.login(max_wait_seconds=config["mc_api"]["login_timeout_seconds"])
+        login_attempted = True
+        attach_fn = getattr(client, "attach_or_login", None)
+        if session_file and callable(attach_fn):
+            status = attach_fn(session_file=session_file, max_wait_seconds=config["mc_api"]["login_timeout_seconds"])
+        else:
+            status = client.login(max_wait_seconds=config["mc_api"]["login_timeout_seconds"])
         if recorder:
             recorder.add_secret(client.token)
             recorder.record("INFO", "main", "CONNECTED", {"status": status})
@@ -199,12 +228,26 @@ def main(argv=None) -> int:
             except Exception as exc:
                 exit_code = 1
                 print(f"Runner cleanup failed: {exc}", file=sys.stderr)
-        if client:
+        if client and login_attempted:
+            if keep_connected:
+                save_fn = getattr(client, "save_session", None)
+                if session_file and callable(save_fn):
+                    try:
+                        save_fn(session_file)
+                    except Exception as exc:
+                        print(f"Session save warning: {exc}", file=sys.stderr)
+            else:
+                try:
+                    client.logout()
+                except Exception as exc:
+                    exit_code = 1
+                    print(f"Logout failed: {exc}", file=sys.stderr)
+        if instance_lock is not None:
             try:
-                client.logout()
+                instance_lock.__exit__(None, None, None)
             except Exception as exc:
                 exit_code = 1
-                print(f"Logout failed: {exc}", file=sys.stderr)
+                print(f"Instance lock release failed: {exc}", file=sys.stderr)
         if recorder:
             recorder.record("INFO", "main", "SHUTDOWN", {"exit_code": exit_code})
         if monitor:

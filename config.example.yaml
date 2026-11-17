@@ -95,3 +95,35 @@ rcon:
   host: "127.0.0.1"
   port: 25575
   password: ""
+
+# Parameters for the independent mining/cave workflows. These defaults do not
+# register deep mining as a daily tool or enable automatic cave exploration.
+mining:
+  targets:
+    iron: {count: 24, min_tool: "stone_pickaxe"}
+    coal: {count: 16, min_tool: "wooden_pickaxe"}
+  cave_policy:
+    flood_max_cells: 160
+    horizontal_radius: 12
+    vertical_span: 10
+    max_height: 10
+    max_drop: 4
+    max_water_blocks: 3
+    small_bubble_max_air: 4
+    min_mineshaft_markers: 3
+    min_enter_torches: 0
+    explore_radius: 48
+    explore_max_visited: 600
+    explore_timeout_seconds: 360.0
+    torch_interval: 24
+    max_vein_blocks: 16
+    max_unsafe_retries: 3
+    eye_scan_radius: 4.5
+  home_thresholds:
+    min_empty_slots: 3
+    min_health: 12.0
+    min_food: 10.0
+    min_torches: 4
+    min_blocks: 16
+    min_pickaxe_durability_ratio: 0.10
+    min_remaining_seconds: 30.0

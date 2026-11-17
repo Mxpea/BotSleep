@@ -6,9 +6,11 @@
 
 本轮（2026-11-16）接入短步敌对生物防御、源液取桶和受限岩浆狩猎，普通猪牛羊鸡狩猎改为近距站定攻击并核验实际食物收益。日常任务优先补盾和桶，新增纯本地生存/速通阶段建议；这些改动已有离线覆盖，尚不代表本轮真实战斗、岩浆操作或完整速通验收。详见 [战斗与狩猎](docs/COMBAT_AND_HUNTING.md) 和 [阶段建议与未实现边界](docs/SURVIVAL_PLAYBOOK.md)。
 
-日常与赛事模式现在默认使用[目标程序](docs/AUTONOMOUS_TASKS.md)：模型一次指定采集数量、制作产物或维护目标，程序连续寻找前置、执行技能并验证进度。正常模型请求收敛到目标/安全工具；局部恢复耗尽才汇总请求策略调整，避免每挖一块、每做一步都调用模型。已接入 12 类有界目标、应急抢占、检查点和任务监控；最新完整回归 1263 项中 1260 通过、3 实服测试跳过。
+日常与赛事模式现在默认使用[目标程序](docs/AUTONOMOUS_TASKS.md)：模型一次指定采集数量、制作产物或维护目标，程序连续寻找前置、执行技能并验证进度。正常模型请求收敛到目标/安全工具；局部恢复耗尽才汇总请求策略调整，避免每挖一块、每做一步都调用模型。已接入 12 类有界目标、应急抢占、检查点和任务监控；最新完整回归 1425 项中 1420 通过、5 实服测试跳过。
 
 2026-11-16 普通地图实测：一次模型请求授权制作木镐，程序连续执行 12 个子步骤，取得 3 根原木并完成木板、木棍、工作台和木镐；两次工作台放置失败均在本地换位置恢复，目标执行期间没有追加模型请求。另补逐步树冠脱困、单叶开口、多敌退避和威胁消失后的生产恢复。此前夜间仍有被骷髅击杀的记录，不能据此宣称完整夜间生存或全部目标已通过实服验收，详见[测试记录](docs/TESTING.md)。
+
+2026-11-17 合并 `develop-tianya/shelter-workflow`：住所蓝图与门、床、箱子布局支持四个朝向，并统一共享技能注册表和撤退控制器；保留主线自主目标、战斗与模型串行门禁。新增结构/门户工作流、3D 世界记忆、洞穴与分层采矿、独立容器操作及实例锁/只读运维工具。深矿和洞穴导航仍为独立调用，未自动替换生存主循环。合并取舍与回归结果见[测试记录](docs/TESTING.md)。
 
 ## 安装与运行
 
@@ -79,7 +81,9 @@ daily/competition 默认启用 `survival.autonomy.enabled`。正常任务规划�
 | 开发模块 | 可用入口 | 与生存模型的关系 |
 | --- | --- | --- |
 | `skills/crafting.py` / `CraftItemSkill` | 独立 Python 技能；`ChatDebugger` 注入 `craft_skill` 后提供 `#craft` | 主入口未注入该聊天技能。模型已有的同名 `craft_item` 仍分派到 `SurvivalSkills` / `DailySurvivalSkills`，不是此独立宏技能。 |
-| `skills/mining.py` / `ChopTreeSkill` | 独立 Python 技能；注入 `chop_skill` 后提供 `#chop` | 主入口未注入；`chop_tree` 未绑定 starter/daily/competition。 |
+| `skills/mining.py` / `ChopTreeSkill`、`MineShaftSkill` | 独立 Python 技能；注入 `chop_skill` 后提供 `#chop` | 主入口未注入；`chop_tree` 与 `MineShaftSkill`（分层斜井/鱼骨/返表）未绑定 starter/daily/competition。 |
+| `skills/cave_explore.py`、`skills/world_navigator.py`、`skills/ore_harvester.py` | 独立 Python 技能；依托 `core/world_3d.py`（`VoxelWorld3D`）与 `core/pathfinder_3d.py`（3D A*） | 独立程序化 3D 探洞与采矿组件，未进入上述模型目录。 |
+| `skills/container.py`、`skills/shelter.py` | 独立容器存取/熔炼（`ContainerSkill`）与标准庇护所工作流（`ShelterSkill`） | 通过显式 Python 技能接口调用，不替换日常模型工具中的同名槽位。 |
 | `skills/exploration.py` / `ContinuousRadarSkill` | 主入口启用调试并加 `--radar`；提供 `#radar on/off/scan/poi` | 属于调试雷达与空间记录入口，`radar_sweep` 未绑定生存模型。 |
 | `skills/portal_speedrun.py` / `NetherPortalSpeedrunSkill` | 独立 Python 技能与专用实服靶场脚本 | `cast_nether_portal` 未绑定生存模型，也无主入口聊天命令。 |
 | `skills/stronghold.py` / 要塞计算 | 独立 Python Skill 与 CLI，schema 为 `STRONGHOLD_TOOL_DEFINITION` | `calculate_stronghold` 未进入上述模型目录。 |

@@ -343,6 +343,51 @@ class DailyGoalsTests(unittest.TestCase):
         obs["shelter"]["fresh"] = False
         self.assertEqual(self.task(obs, "shelter")["next_action"]["name"], "inspect_shelter")
 
+    def test_rotated_base_requires_matching_current_shelter_orientation(self):
+        obs = self.shelter_world()
+        obs["daily_evidence"]["base_site"]["orientation"] = "east"
+        action = self.task(obs, "shelter")["next_action"]
+        self.assertEqual(action["name"], "inspect_shelter")
+        self.assertEqual(action["args"], {"pos": [0, 64, 0], "orientation": "east"})
+        obs["shelter"]["orientation"] = "east"
+        action = self.task(obs, "shelter")["next_action"]
+        self.assertEqual(action["name"], "build_shelter_step")
+        self.assertEqual(action["args"]["orientation"], "east")
+
+    def test_rotated_bed_uses_fresh_side_stance_then_rearward_placement(self):
+        for orientation, foot, stance in (
+                ("north", [1, 64, 0], [1.5, 64, -.5]),
+                ("south", [-1, 64, 0], [-.5, 64, 1.5]),
+                ("east", [0, 64, 1], [1.5, 64, 1.5]),
+                ("west", [0, 64, -1], [-.5, 64, -.5])):
+            with self.subTest(orientation=orientation):
+                obs = self.shelter_world()
+                obs["daily_evidence"]["base_site"]["orientation"] = orientation
+                obs["daily_evidence"]["shelter"] = verified([0, 64, 0], shelter_verified=True, orientation=orientation)
+                obs["counts"]["white_bed"] = 1
+                obs["status"]["pos"] = [.5, 64, .5]
+                obs["placement_candidates"] = [{"pos": foot}]
+                self.assertIsNone(self.task(obs, "bed")["next_action"])
+                obs["safe_stand_candidates"] = [{"pos": stance, "support": "stone"}]
+                action = self.task(obs, "bed")["next_action"]
+                self.assertEqual(action["name"], "position_for_task")
+                self.assertEqual(action["args"], {"pos": stance})
+                obs["status"]["pos"] = stance
+                action = self.task(obs, "bed")["next_action"]
+                self.assertEqual(action["name"], "place_bed")
+                self.assertEqual(action["args"], {"item": "white_bed", "pos": foot})
+
+    def test_rotated_storage_preserves_entry_and_central_passage(self):
+        for orientation, front in (("north", [0, 64, -1]), ("south", [0, 64, 1]),
+                                   ("east", [1, 64, 0]), ("west", [-1, 64, 0])):
+            with self.subTest(orientation=orientation):
+                obs = self.shelter_world()
+                obs["daily_evidence"]["base_site"]["orientation"] = orientation
+                obs["counts"]["chest"] = 1
+                for pos in (front, [0, 64, 0]):
+                    obs["placement_candidates"] = [{"pos": pos}]
+                    self.assertIsNone(self.task(obs, "storage")["next_action"])
+
     def test_changed_exit_or_occupied_blueprint_blocks_construction(self):
         obs = self.shelter_world()
         obs["shelter"]["geometry"]["exit_verified"] = False
