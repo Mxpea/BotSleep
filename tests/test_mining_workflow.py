@@ -772,6 +772,35 @@ class MiningWorkflowTests(unittest.TestCase):
         self.assertGreaterEqual(esc["pos"][1], 64)
         self.assertNotEqual(str(world.blocks.get(tuple(esc["pos"]), {}).get("name") or "air"), "water")
 
+    def test_find_mine_sites_supports_pale_moss_ground_and_prefers_open_sky_over_canopy(self):
+        world = WorkflowMineWorld(bot_pos=(0.5, 64.0, 0.5))
+        for dx in range(-6, 12):
+            for dz in range(-6, 12):
+                world.blocks[(dx, 63, dz)] = {"name": "pale_moss_block", "properties": {}}
+        # Put pale_oak_leaves canopy directly above nearby origin [0, 64, 0] and its neighbors.
+        for dx in range(-2, 3):
+            for dz in range(-2, 3):
+                world.blocks[(dx, 66, dz)] = {"name": "pale_oak_leaves", "properties": {}}
+        sites = MineShaftSkill(world, memory=Mock()).find_mine_sites(radius=9, max_results=3)
+        self.assertTrue(sites)
+        se = sites[0]["surface_entry"]
+        overhead = world.blocks.get((math.floor(se[0]), math.floor(se[1]) + 2, math.floor(se[2])), {})
+        self.assertNotEqual(overhead.get("name"), "pale_oak_leaves")
+
+    def test_build_mine_shaft_aborts_cleanly_when_no_candidate_surface_entry_is_reachable(self):
+        from skills import SkillResult
+        world = WorkflowMineWorld(bot_pos=(0.5, 64.0, 0.5))
+        skill = MineShaftSkill(world, memory=Mock())
+        with patch.object(skill, "find_mine_sites", return_value=[
+            {"origin": [10, 64, 0], "orientation": "south", "surface_entry": [10.5, 64.0, -0.5], "score": 1.0, "distance": 10.0},
+        ]), patch("skills.mining.CaveExploreSkill") as nav_factory, patch("skills.mining.ActionWorkflowRunner") as runner:
+            nav_factory.return_value.navigate_with_ops.return_value = SkillResult(False, "stalled", {"executed": True}, "stalled")
+            world.bot_pos = (10.5, 67.0, -0.5)
+            res = skill.build_mine_shaft(origin=None, radius=12, place_workstation=False)
+            runner.assert_not_called()
+        self.assertFalse(res.success)
+        self.assertEqual(res.error_code, "unreachable_mine_site")
+
 
 if __name__ == "__main__":
     unittest.main()

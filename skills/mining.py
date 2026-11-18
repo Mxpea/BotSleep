@@ -555,12 +555,13 @@ class MineShaftSkill(BaseSkill):
                 )
             site = sites[0]
             approach_started = False
+            reached_site = False
             try:
                 raw_cur = self.client.get_status()
                 st_cur = raw_cur.get("result") if isinstance(raw_cur, dict) and "result" in raw_cur else raw_cur
                 pos_cur = parse_pos(st_cur.get("pos") if isinstance(st_cur, dict) else None)
                 first_se = parse_pos(site.get("surface_entry"))
-                if pos_cur is not None and first_se is not None and math.dist(pos_cur, first_se) > 1.5:
+                if pos_cur is not None and first_se is not None and (math.dist(pos_cur, first_se) > 0.75 or abs(pos_cur[1] - first_se[1]) > 0.4):
                     nav_pre = CaveExploreSkill(self.client, memory=self.memory)
                     for cand in sites[:6]:
                         se = parse_pos(cand.get("surface_entry"))
@@ -580,9 +581,12 @@ class MineShaftSkill(BaseSkill):
                         raw_chk = self.client.get_status()
                         st_chk = raw_chk.get("result") if isinstance(raw_chk, dict) and "result" in raw_chk else raw_chk
                         pos_chk = parse_pos(st_chk.get("pos") if isinstance(st_chk, dict) else None)
-                        if pos_chk is not None and math.dist(pos_chk, se) <= 1.6:
+                        if pos_chk is not None and math.dist(pos_chk, se) <= 0.85 and abs(pos_chk[1] - se[1]) <= 0.5:
                             site = cand
+                            reached_site = True
                             break
+                else:
+                    reached_site = True
             except WorkflowUncertainError:
                 raise
             except APIError as exc:
@@ -594,6 +598,13 @@ class MineShaftSkill(BaseSkill):
                         "cleanup_skipped": "disconnected_unknown" if exc.code == "not_connected" else "workflow_unknown"}) from None
             except Exception:
                 pass
+            if approach_started and not reached_site:
+                return SkillResult(
+                    False,
+                    f"Could not physically reach any candidate mine site within radius {radius}.",
+                    error_code="unreachable_mine_site",
+                    data={"executed": True, "structure_verified": False},
+                )
             int_origin = list(site["origin"])
             norm_orient = site["orientation"]
         else:
