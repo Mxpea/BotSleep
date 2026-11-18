@@ -693,6 +693,63 @@ class MiningWorkflowTests(unittest.TestCase):
         self.assertTrue(res.success, res)
         self.assertLessEqual(res.data["mining_progress"]["deep_pos"][1], 53)
 
+    def test_uncertain_boundary_and_discover_caves_convert_workflow_step_error_to_skill_result(self):
+        from skills import SkillResult
+        from skills.action_workflow import WorkflowStepError
+        from skills.cave_explore import CaveExploreSkill
+
+        world = WorkflowMineWorld(bot_pos=(0.5, 64.0, 0.5), surface_y=64)
+        world.inventory_counts = {"stone_pickaxe": 1, "cobblestone": 16}
+
+        with patch(
+            "skills.ore_harvester.OreHarvester.read_inventory",
+            side_effect=WorkflowStepError("timeout", "Workflow time budget exceeded", blocker_type="safety_interrupted"),
+        ):
+            cave_res = CaveExploreSkill(world, memory=Mock()).discover_and_explore_caves(origin=[0, 64, 0])
+        self.assertIsInstance(cave_res, SkillResult)
+        self.assertFalse(cave_res.success)
+        self.assertEqual(cave_res.error_code, "timeout")
+
+        with patch(
+            "skills.mining.CaveExploreSkill.discover_and_explore_caves",
+            side_effect=WorkflowStepError("timeout", "Workflow time budget exceeded", blocker_type="safety_interrupted"),
+        ):
+            mine_res = MineShaftSkill(world, memory=Mock()).mine_targets_from_surface(
+                origin=[0, 64, 0],
+                targets={"iron": {"count": 1, "min_tool": "stone_pickaxe"}},
+                prefer_caves_first=True,
+                place_workstation=False,
+            )
+        self.assertIsInstance(mine_res, SkillResult)
+        self.assertFalse(mine_res.success)
+        self.assertEqual(mine_res.error_code, "timeout")
+        self.assertFalse(mine_res.data.get("executed"))
+
+    def test_mine_targets_from_surface_falls_through_to_shaft_when_cave_phase_times_out(self):
+        from skills import SkillResult
+
+        world = WorkflowMineWorld(bot_pos=(0.5, 64.0, 0.5), surface_y=64)
+        world.inventory_counts = {"stone_pickaxe": 1, "cobblestone": 16}
+        shaft_calls = []
+
+        def fake_build(miner_self, *args, **kwargs):
+            shaft_calls.append(kwargs.get("target_ys"))
+            return SkillResult(True, "Shaft done", data={"stop_reason": "target_reached", "mining_progress": {"deep_trail": []}})
+
+        with patch(
+            "skills.mining.CaveExploreSkill.discover_and_explore_caves",
+            return_value=SkillResult(False, "Cave-first expedition interrupted (timeout)", error_code="timeout", data={"stop_reason": "timeout", "harvested": {}}),
+        ), patch("skills.mining.MineShaftSkill.build_mine_shaft", new=fake_build):
+            res = MineShaftSkill(world, memory=Mock()).mine_targets_from_surface(
+                origin=[0, 64, 0],
+                targets={"iron": {"count": 4, "min_tool": "stone_pickaxe"}},
+                prefer_caves_first=True,
+                place_workstation=False,
+            )
+        self.assertEqual(len(shaft_calls), 1)
+        self.assertEqual(res.data["phases"][0]["error_code"], "timeout")
+        self.assertEqual(res.data["phases"][1]["stop_reason"], "target_reached")
+
 
 if __name__ == "__main__":
     unittest.main()

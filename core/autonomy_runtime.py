@@ -186,19 +186,19 @@ class AutonomyRuntime:
         if resource == "cobblestone":
             pos = ((observation.get("status") or {}).get("pos") if isinstance(observation, dict) else None) or [0, 64, 0]
             start_surface = [int(math.floor(float(pos[0]))), int(math.floor(float(pos[1]))), int(math.floor(float(pos[2])))]
-            # Stay shallow (~7 blocks below surface) so a wooden pickaxe never breaks mid-shaft and return stays fast.
-            target_y = max(36, start_surface[1] - 7)
+            # Reach real stone beneath topsoil hills while staying shallow enough for wooden pickaxes and quick return.
+            target_y = max(36, start_surface[1] - 11)
             before_c = dict(self.client.get_inventory_counts() or {})
             res = miner.build_mine_shaft(
                 origin=start_surface,
                 radius=18,
-                branch_length=3,
+                branch_length=4,
                 place_workstation=False,
                 return_to_surface=True,
                 target_y=target_y,
                 mining_mode="single",
                 rib_length=3,
-                max_trunk_steps=3,
+                max_trunk_steps=6,
                 home_thresholds=deep_home_thresholds,
                 cancel_event=getattr(self, "_cancel", None),
                 timeout_seconds=210.0,
@@ -219,7 +219,11 @@ class AutonomyRuntime:
             gained_cobble = max(0, int(after_c.get("cobblestone", 0)) - int(before_c.get("cobblestone", 0)))
             if gained_cobble > 0:
                 data.setdefault("gained", {})["cobblestone"] = gained_cobble
-            return SkillResult(bool((res.success or gained_cobble > 0) and surface_chk.get("on_surface", True)), str(res.message), data, res.error_code)
+            ok = bool(gained_cobble > 0 and surface_chk.get("on_surface", True))
+            err = res.error_code if not ok else None
+            if not ok and err is None and gained_cobble <= 0:
+                err = "no_cobblestone_found"
+            return SkillResult(ok, str(res.message), data, err)
 
         res = miner.mine_targets_from_surface(
             targets=targets,

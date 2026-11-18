@@ -104,6 +104,14 @@ def _uncertain_boundary(function):
             data = dict(exc.data)
             data.setdefault("executed", data.get("action_state") == "unknown")
             return SkillResult(False, str(exc), data=data, error_code=exc.code)
+        except WorkflowStepError as exc:
+            data = dict(exc.data or {})
+            data.setdefault("executed", bool(data.get("executed", False)))
+            if exc.blocker_pos is not None:
+                data.setdefault("blocker_pos", list(exc.blocker_pos))
+            if exc.blocker_block is not None:
+                data.setdefault("blocker_block", exc.blocker_block)
+            return SkillResult(False, str(exc), data=data, error_code=exc.code)
     return wrapped
 
 
@@ -2963,6 +2971,13 @@ class MineShaftSkill(BaseSkill):
                 "harvested": dict(net_now),
                 "surface_return": surface_chk,
             })
+            if cave_res.error_code in {"dead", "not_ready", "damage_taken", "life_changed"}:
+                return SkillResult(
+                    False,
+                    str(cave_res.message),
+                    data={"harvested": net_now, "stop_reason": "safety_interrupted", "phases": phase_reports, "surface_return": surface_chk},
+                    error_code=cave_res.error_code,
+                )
             if (cave_res.data or {}).get("stop_reason") == "target_reached" or (
                 parsed_targets and all(
                     (net_now.get(spec["drop_item"], 0) + (net_now.get("iron_ingot", 0) if spec["drop_item"] == "raw_iron" else 0))

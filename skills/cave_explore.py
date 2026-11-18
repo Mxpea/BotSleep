@@ -844,7 +844,7 @@ class CaveExploreSkill(BaseSkill):
                                 cur_pos = snap
                                 dive_visited.add(tuple(cur_pos))
                                 active_world.record_stance(cur_pos)
-                            if consecutive_step_failures >= 6:
+                            if consecutive_step_failures >= 3:
                                 break
                             continue
                         raise
@@ -901,15 +901,19 @@ class CaveExploreSkill(BaseSkill):
         if not retreat_ok and not escaped_surface:
             stop_reason = "safety_interrupted"
 
-        active_world.invalidate(entry_cell, radius=1)
-        for check_y in (entry_cell[1], entry_cell[1] + 1):
-            for dx, dy, dz in ((0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)):
-                blk = cached_read((entry_cell[0] + dx, check_y + dy, entry_cell[2] + dz))
-                if is_lava_like(blk) or str(blk.get("name") or "") == "spawner":
-                    junction_unsafe = True
-                    break
+        try:
+            active_world.invalidate(entry_cell, radius=1)
+            for check_y in (entry_cell[1], entry_cell[1] + 1):
+                for dx, dy, dz in ((0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)):
+                    blk = cached_read((entry_cell[0] + dx, check_y + dy, entry_cell[2] + dz))
+                    if is_lava_like(blk) or str(blk.get("name") or "") == "spawner":
+                        junction_unsafe = True
+                        break
 
-        after_counts, after_items = OreHarvester.read_inventory(ctx)
+            after_counts, after_items = OreHarvester.read_inventory(ctx)
+        except WorkflowStepError:
+            after_counts = ctx.inventory_counts()
+            after_items = [{"name": k, "count": v} for k, v in after_counts.items()]
         harvested = {
             k: after_counts[k] - before_counts.get(k, 0)
             for k in after_counts
@@ -1326,81 +1330,97 @@ class CaveExploreSkill(BaseSkill):
         ctx = WorkflowContext(guard=guard, spec=MINE_SHAFT_SPEC, origin=[0, 0, 0], orientation="south", extra={})
         active_world = self._resolve_world(world=world, block_cache=None, persistent_world=persistent_world)
 
-        before_counts, _ = OreHarvester.read_inventory(ctx)
-        if before_counts.get("torch", 0) < 4:
-            if self._try_craft_torches(ctx, before_counts):
-                before_counts, _ = OreHarvester.read_inventory(ctx)
-        openings = self.find_cave_openings(origin=origin, search_radius=search_radius, max_candidates=max_caves, world=active_world)
+        before_counts: Dict[str, int] = {}
+        openings: List[Dict[str, Any]] = []
         caves_explored: List[Dict[str, Any]] = []
         ores_all: List[Dict[str, Any]] = []
         torches_total = 0
-        stop_reason = "no_caves_found" if not openings else "caves_exhausted"
+        stop_reason = "no_caves_found"
         home_reason: Optional[str] = None
+        interrupted_error: Optional[str] = None
 
-        for op in openings:
-            if guard.remaining_timeout(999.0) < 25.0:
-                break
-            entry = op["entry_pos"]
-            if norm_coord(entry) in active_world.scanned_cells:
-                continue
-            nav = self.navigate_with_ops(entry, ctx=ctx, world=active_world, allow_pillar=True, allow_dig=True, allow_bridge=True, allow_drop=True, max_steps=32)
-            if not nav.success:
-                continue
-            cur_counts, _ = OreHarvester.read_inventory(ctx)
-            running = {
-                k: max(0, cur_counts.get(k, 0) - before_counts.get(k, 0))
-                for k in cur_counts
-            }
-            ex = self.explore_cave(
-                entry_pos=nav.data.get("pos", entry),
-                origin_air=entry,
-                targets=targets,
-                cave_policy=policy,
-                home_thresholds=home_thresholds,
-                harvested_totals=running,
-                world=active_world,
-                guard=guard,
-                prefer_flood_planner=True,
-                allow_tall_cave_subgraph=True,
-                allow_pillar=True,
-                allow_micro_dig=True,
-                allow_bridge=True,
-                allow_drop=True,
-                allow_surface_escape=True,
-                stop_on_target=True,
-            )
-            caves_explored.extend(ex.data.get("caves") or [])
-            ores_all.extend(ex.data.get("ores") or [])
-            torches_total += int(ex.data.get("torches_placed", 0))
+        try:
+            before_counts, _ = OreHarvester.read_inventory(ctx)
+            if before_counts.get("torch", 0) < 4:
+                if self._try_craft_torches(ctx, before_counts):
+                    before_counts, _ = OreHarvester.read_inventory(ctx)
+            openings = self.find_cave_openings(origin=origin, search_radius=search_radius, max_candidates=max_caves, world=active_world)
+            stop_reason = "no_caves_found" if not openings else "caves_exhausted"
 
-            after_counts, _ = OreHarvester.read_inventory(ctx)
-            net_counts = {k: max(0, after_counts.get(k, 0) - before_counts.get(k, 0)) for k in after_counts}
-            quotas_done = bool(parsed_targets) and all(
-                net_counts.get(spec["drop_item"], 0) >= int(spec["count"])
-                for spec in parsed_targets.values()
-            )
-            if quotas_done:
-                stop_reason = "target_reached"
-                break
-            if ex.data.get("stop_reason") == "return_home" and ex.data.get("home_reason") in {
-                "inventory_full",
-                "no_pickaxe",
-                "low_health",
-                "low_food",
-            }:
-                stop_reason = "return_home"
-                home_reason = ex.data.get("home_reason")
-                break
+            for op in openings:
+                if guard.remaining_timeout(999.0) < 25.0:
+                    break
+                entry = op["entry_pos"]
+                if norm_coord(entry) in active_world.scanned_cells:
+                    continue
+                nav = self.navigate_with_ops(entry, ctx=ctx, world=active_world, allow_pillar=True, allow_dig=True, allow_bridge=True, allow_drop=True, max_steps=32)
+                if not nav.success:
+                    continue
+                cur_counts, _ = OreHarvester.read_inventory(ctx)
+                running = {
+                    k: max(0, cur_counts.get(k, 0) - before_counts.get(k, 0))
+                    for k in cur_counts
+                }
+                ex = self.explore_cave(
+                    entry_pos=nav.data.get("pos", entry),
+                    origin_air=entry,
+                    targets=targets,
+                    cave_policy=policy,
+                    home_thresholds=home_thresholds,
+                    harvested_totals=running,
+                    world=active_world,
+                    guard=guard,
+                    prefer_flood_planner=True,
+                    allow_tall_cave_subgraph=True,
+                    allow_pillar=True,
+                    allow_micro_dig=True,
+                    allow_bridge=True,
+                    allow_drop=True,
+                    allow_surface_escape=True,
+                    stop_on_target=True,
+                )
+                caves_explored.extend(ex.data.get("caves") or [])
+                ores_all.extend(ex.data.get("ores") or [])
+                torches_total += int(ex.data.get("torches_placed", 0))
+
+                after_counts, _ = OreHarvester.read_inventory(ctx)
+                net_counts = {k: max(0, after_counts.get(k, 0) - before_counts.get(k, 0)) for k in after_counts}
+                quotas_done = bool(parsed_targets) and all(
+                    net_counts.get(spec["drop_item"], 0) >= int(spec["count"])
+                    for spec in parsed_targets.values()
+                )
+                if quotas_done:
+                    stop_reason = "target_reached"
+                    break
+                if ex.data.get("stop_reason") == "return_home" and ex.data.get("home_reason") in {
+                    "inventory_full",
+                    "no_pickaxe",
+                    "low_health",
+                    "low_food",
+                }:
+                    stop_reason = "return_home"
+                    home_reason = ex.data.get("home_reason")
+                    break
+        except WorkflowStepError as exc:
+            interrupted_error = exc.code
+            if exc.code in {"dead", "not_ready", "damage_taken", "life_changed", "safety_interrupted"}:
+                stop_reason = "safety_interrupted"
+            else:
+                stop_reason = exc.code or "interrupted"
 
         if active_world.db_path is not None:
             active_world.save()
 
-        after_counts, _ = OreHarvester.read_inventory(ctx)
+        try:
+            after_counts, _ = OreHarvester.read_inventory(ctx)
+        except WorkflowStepError:
+            after_counts = ctx.inventory_counts()
         harvested = {k: max(0, after_counts.get(k, 0) - before_counts.get(k, 0)) for k in after_counts if after_counts.get(k, 0) > before_counts.get(k, 0)}
+        error_code = interrupted_error if interrupted_error and stop_reason != "target_reached" else ("return_home_requested" if stop_reason == "return_home" else None)
         return SkillResult(
-            stop_reason == "target_reached" or bool(caves_explored),
+            stop_reason == "target_reached" or (bool(caves_explored) and error_code is None),
             f"Cave-first expedition visited {len(caves_explored)} cave(s), stop={stop_reason}, harvested={harvested}",
-            error_code="return_home_requested" if stop_reason == "return_home" else None,
+            error_code=error_code,
             data={
                 "caves": caves_explored,
                 "ores": ores_all,

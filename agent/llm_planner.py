@@ -137,11 +137,12 @@ If scout finds nothing or stops to save stamina, decisively stop scouting and pr
 current iron_ingot, armor slots, offhand, food and reserves to decide the next goal yourself:
 Choose among run_survival_task(task="iron_armor") (crafts+equips iron armor), iron_tools,
 craft(iron_pickaxe), smelting more iron, or run_survival_task(task="gather", resource="diamond")
-when ready (diamond mining needs iron_pickaxe >= 2 or diamond_pickaxe). Do NOT craft a furnace
-when one is already held; NEVER call craft(stone_pickaxe/wooden_pickaxe/stone_axe/stone_sword)
-again if you already own >= 1, and NEVER use craft(...) to place a held furnace. To mine iron ore
+when ready (diamond mining needs iron_pickaxe >= 2 or diamond_pickaxe). NEVER call craft(furnace)
+if inventory already holds >= 1 furnace (even if not yet placed in world); NEVER call
+craft(stone_pickaxe/wooden_pickaxe/stone_axe/stone_sword) again if you already own >= 1,
+and defer crafting stone_axe until after raw_iron unless wood gathering fails. To mine iron ore
 and deploy your held furnace automatically, call run_survival_task(task="gather", resource="raw_iron", count=8)
-or run_survival_task(task="iron_tools").
+or run_survival_task(task="iron_tools") (smelt(iron_ingot) also auto-places a held furnace).
 3) Diamond gate: after gathering diamond, decide whether to craft diamond_pickaxe/diamond_sword
 or reinforce armor/food. When coal, raw_iron or diamond is absent on the surface and the required
 pickaxe is ready, run_survival_task launches bounded deep mining with surface return.
