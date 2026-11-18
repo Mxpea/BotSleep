@@ -492,10 +492,15 @@ class AutonomousTaskController:
             stone_plus = sum(counts.get(t + "_pickaxe", 0) for t in ("stone", "iron", "diamond", "netherite"))
             iron_plus = sum(counts.get(t + "_pickaxe", 0) for t in ("iron", "diamond", "netherite"))
             if (resource == "diamond" and counts.get("diamond_pickaxe", 0) == 0
-                    and counts.get("netherite_pickaxe", 0) == 0 and iron_plus < 2):
-                spare_iron = self._craft("iron_pickaxe", 1, obs, context)
-                if spare_iron is not None:
-                    return spare_iron
+                    and counts.get("netherite_pickaxe", 0) == 0):
+                if iron_plus < 2 and (iron_plus == 0 or counts.get("iron_ingot", 0) + counts.get("raw_iron", 0) >= 3):
+                    spare_iron = self._craft("iron_pickaxe", 1, obs, context)
+                    if spare_iron is not None:
+                        return spare_iron
+                elif iron_plus < 3 and counts.get("iron_ingot", 0) >= 3:
+                    spare_iron = self._craft("iron_pickaxe", 1, obs, context)
+                    if spare_iron is not None:
+                        return spare_iron
             if (resource in {"raw_iron", "coal"}
                     and stone_plus < (3 if resource == "raw_iron" else 2)
                     and counts.get("cobblestone", 0) >= 3

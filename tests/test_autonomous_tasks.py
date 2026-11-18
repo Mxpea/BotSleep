@@ -882,6 +882,22 @@ class AutonomousTaskTests(unittest.TestCase):
         self.assertIsNotNone(step)
         self.assertEqual(step.name, "wait")
 
+    def test_gather_diamond_skips_iron_shaft_loop_when_holding_one_iron_pickaxe_and_zero_iron(self):
+        obs = world({"iron_pickaxe": 1, "bucket": 1})
+        ctrl = self.start({"task": "gather", "resource": "diamond", "count": 3}, obs=obs)
+        step = ctrl.next_action(obs, {"deep_mining_enabled": True})
+        self.assertIsNotNone(step)
+        self.assertEqual(step.goal, "deep_mine")
+        self.assertEqual(ctrl.state()["pending_deep_mine"]["resource"], "diamond")
+
+    def test_gather_diamond_crafts_third_iron_pickaxe_when_spare_ingots_held(self):
+        obs = world({"iron_pickaxe": 2, "iron_ingot": 3, "stick": 2})
+        obs["blocks"].append({"name": "crafting_table", "pos": [1, 64, 0], "can_see": True})
+        ctrl = self.start({"task": "gather", "resource": "diamond", "count": 3}, obs=obs)
+        step = ctrl.next_action(obs, {"deep_mining_enabled": True})
+        self.assertIsNotNone(step)
+        self.assertEqual((step.name, step.args["item"]), ("craft_item", "iron_pickaxe"))
+
 
 if __name__ == "__main__":
     unittest.main()

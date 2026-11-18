@@ -827,6 +827,24 @@ class MiningWorkflowTests(unittest.TestCase):
         MineShaftSkill(world, memory=Mock())._dig_cell_safely(ctx, (1, 64, 0), relative=False)
         self.assertEqual(equipped, ["iron_pickaxe"])
 
+    def test_preferred_shaft_orientations_rotates_away_from_previously_dug_sector(self):
+        import json
+        import tempfile
+        from core.memory import MemoryEngine
+
+        world = WorkflowMineWorld(bot_pos=(0.5, 64.0, 0.5))
+        with tempfile.TemporaryDirectory() as tmp:
+            mem = MemoryEngine(tmp)
+            with open(mem.episodes_file, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps({
+                    "event_type": "mine_shaft",
+                    "details": {"origin": [2, 64, 2], "orientation": "north"},
+                }) + "\n")
+            skill = MineShaftSkill(world, memory=mem)
+            rot = skill._preferred_shaft_orientations([0, 64, 0])
+        self.assertIsNotNone(rot)
+        self.assertNotEqual(rot[0], "north")
+
 
 if __name__ == "__main__":
     unittest.main()

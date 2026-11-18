@@ -109,7 +109,7 @@ class AutonomyRuntime:
 
     _MINING_CLUTTER_KEEP = (
         ("granite", 0), ("diorite", 0), ("andesite", 0), ("cobbled_deepslate", 0),
-        ("tuff", 0), ("gravel", 0), ("flint", 2), ("leaf_litter", 0),
+        ("tuff", 0), ("gravel", 8), ("flint", 4), ("leaf_litter", 0),
         ("red_mushroom", 0), ("brown_mushroom", 0), ("rotten_flesh", 0),
         ("raw_copper", 0), ("sand", 0), ("dirt", 0), ("cobblestone", 64),
     )
@@ -160,7 +160,7 @@ class AutonomyRuntime:
             targets = {"coal": {"count": count, "min_tool": "wooden_pickaxe"}}
         else:
             targets = {
-                "iron": {"count": max(count, 16), "min_tool": "stone_pickaxe"},
+                "iron": {"count": max(count, 12), "min_tool": "stone_pickaxe"},
             }
         # Never abort a resource expedition solely because the player lacks torches or scaffold blocks yet.
         deep_home_thresholds = {
@@ -171,14 +171,14 @@ class AutonomyRuntime:
         status_pos = (observation.get("status") or {}).get("pos") if isinstance(observation, dict) else None
         self._discard_mining_clutter(status_pos=status_pos)
 
-        remaining = 1200.0 if resource == "diamond" else 540.0
+        remaining = 1200.0 if resource == "diamond" else 660.0 if resource == "raw_iron" else 540.0
         if hasattr(self, "_remaining_budget"):
             try:
                 remaining = max(60.0, float(self._remaining_budget().get("remaining_seconds", remaining)) - 30.0)
             except Exception:
                 pass
-        total_t = min(1140.0 if resource == "diamond" else 540.0, max(90.0, remaining))
-        band_t = min(960.0 if resource == "diamond" else 460.0, max(75.0, total_t * 0.85))
+        total_t = min(1140.0 if resource == "diamond" else 640.0 if resource == "raw_iron" else 540.0, max(90.0, remaining))
+        band_t = min(960.0 if resource == "diamond" else 560.0 if resource == "raw_iron" else 460.0, max(75.0, total_t * 0.85))
 
         state_root = Path(str(self.settings.get("state_dir") or "runtime/survival"))
         memory = MemoryEngine(str(state_root / "deep_mine_memory"))
@@ -231,13 +231,13 @@ class AutonomyRuntime:
             targets=targets,
             cave_policy={"explore_timeout_seconds": 35.0},
             home_thresholds=deep_home_thresholds,
-            prefer_caves_first=(resource in {"raw_iron", "coal"}),
+            prefer_caves_first=(resource == "coal"),
             cave_search_radius=20,
             max_caves=1,
             place_workstation=False,
-            rib_length=12 if resource == "diamond" else 8 if resource == "raw_iron" else 6,
-            rib_spacing=3 if resource == "diamond" else 4,
-            max_trunk_steps=36 if resource == "diamond" else 18 if resource == "raw_iron" else 10,
+            rib_length=12 if resource in {"diamond", "raw_iron"} else 6,
+            rib_spacing=3 if resource in {"diamond", "raw_iron"} else 4,
+            max_trunk_steps=36 if resource == "diamond" else 28 if resource == "raw_iron" else 10,
             band_timeout_seconds=band_t,
             total_timeout_seconds=total_t,
             cancel_event=getattr(self, "_cancel", None),
