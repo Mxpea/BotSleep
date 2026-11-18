@@ -52,7 +52,7 @@ class StarterMiningTaskTests(unittest.TestCase):
                                                "skills": SurvivalSkills(server)})()
                 for _ in range(60):
                     obs = server.observe()
-                    step = ctl.next_action(obs)
+                    step = ctl.next_action(obs, {"deep_mining_enabled": True})
                     if step is None:
                         break
                     runner = resolve_skill_runner(sources, step.name)
@@ -93,7 +93,7 @@ class StarterMiningTaskTests(unittest.TestCase):
         obs = w.observe()
         ctl = AutonomousTaskController({"objective": "daily"})
         ctl.start({"task": "gather", "resource": "cobblestone", "count": 3}, obs)
-        context = {"base_project": {"pos": [0, 64, 0], "dimension": "overworld"}}
+        context = {"deep_mining_enabled": True, "base_project": {"pos": [0, 64, 0], "dimension": "overworld"}}
         plan = ctl.next_action(obs, context)
         self.assertEqual(plan.args["protected_pos"], [0, 64, 0])
         result = StarterStaircaseSkills(w).execute(plan.name, plan.args)

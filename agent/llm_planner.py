@@ -108,7 +108,8 @@ collect_liquid needs an existing bucket and a verified source. hunt_with_lava
 requires an already contained nonflammable pit and immediate verified source
 recovery; it is never an open-ground hunting strategy. Use ordinary hunt_animal
 when no such containment is verified. Inventory gain is the food evidence.
-Iron ore requires stone-or-better pickaxe. Never mine your floor/overhead column.
+Iron ore requires a stone-or-better pickaxe, diamond ore an iron-or-better pickaxe.
+Never mine your floor/overhead column.
 Prefer visible reachable resources. Movement within range is not movement or escape.
 Unknown geometry is not air; safe stand candidates do not guarantee a traversable path.
 terrain_summary.nearest_pos is diagnostic only, never a gathering/clearing target.
@@ -135,7 +136,16 @@ prerequisites. Waiting/no-op does not erase a failure. Respect active target coo
 All models share one serialized request slot. Provider uncertainty blocks new calls.
 There is no final goal_complete in daily mode: maintain reserves and facilities,
 inspect changes, eat and sleep when appropriate, and wait briefly when nothing safe
-needs doing. Partial results never mean an entire task is complete.
+needs doing. For a custom iron/diamond equipment goal, keep immediate safety and any
+active mainline chapter first. At spawn, if wood and workstations are missing and
+there is no scout report, one scout goal can look for surface resources. Reuse its
+report. With a stone pickaxe and food >= 16, prioritize gather(resource="raw_iron",
+count=8) over optional fuel or wood reserves. Use a held furnace for smelting.
+Inspect current ingots, equipment and food before choosing iron_tools, iron_armor,
+or gather(resource="diamond", count=3). The local mining goal prepares spare picks
+and can attempt a bounded shaft and return if no accessible ore is visible. After
+verifying diamonds in inventory, choose equipment that serves the owner's goal.
+Partial results never mean an entire task is complete.
 Return one native tool call, not simulated calls inside text.
 """
 
@@ -260,7 +270,7 @@ If that goal tool is unavailable, use only the currently advertised tools.
         status = observation.get("status") or {}
         status_keys = ("ready", "alive", "busy", "gamemode", "dimension", "pos", "health", "food", "is_day",
                        "time_of_day", "thundering", "on_ground", "is_sleeping", "in_vehicle", "in_water", "in_lava",
-                       "on_fire", "submerged", "oxygen", "last_death", "nearest_hostile")
+                       "on_fire", "submerged", "oxygen", "offhand", "last_death", "nearest_hostile")
         inventory_unknown = observation.get("inventory_fresh") is False or observation.get("observation_scope") == "safety"
         snapshot = {"status": {key: status[key] for key in status_keys if key in status},
                     "counts": None if inventory_unknown else observation.get("counts") or {}}
@@ -304,8 +314,9 @@ If that goal tool is unavailable, use only the currently advertised tools.
 
             for row in sorted(rows, key=accessibility):
                 name = row.get("name", "")
-                group = ("logs" if name.endswith("_log") else "minerals" if name in {
-                    "stone", "cobblestone", "coal_ore", "deepslate_coal_ore", "iron_ore", "deepslate_iron_ore"} else "stations" if name in {
+                group = ("logs" if name.endswith("_log") or name == "dead_bush" else "minerals" if name in {
+                    "stone", "cobblestone", "coal_ore", "deepslate_coal_ore", "iron_ore", "deepslate_iron_ore",
+                    "diamond_ore", "deepslate_diamond_ore"} else "stations" if name in {
                     "crafting_table", "furnace", "smoker", "blast_furnace", "chest", "barrel"} or name.endswith("_bed")
                     else "food" if name in {"wheat", "carrots", "potatoes", "beetroots", "farmland", "short_grass", "tall_grass"}
                     else "foliage" if name.endswith("_leaves") or name == "vine" else "hazards")
@@ -315,8 +326,10 @@ If that goal tool is unavailable, use only the currently advertised tools.
             # Keep a nearby occluded resource and its blocker visible to the
             # model. Far resources with unknown visibility must not crowd out
             # the local resource that clearing one leaf could unlock.
-            for group, matches in (("logs", lambda name: name.endswith("_log")),
-                                   ("minerals", lambda name: name in {"stone", "cobblestone", "coal_ore", "deepslate_coal_ore", "iron_ore", "deepslate_iron_ore"})):
+            for group, matches in (("logs", lambda name: name.endswith("_log") or name == "dead_bush"),
+                                   ("minerals", lambda name: name in {
+                                       "stone", "cobblestone", "coal_ore", "deepslate_coal_ore",
+                                       "iron_ore", "deepslate_iron_ore", "diamond_ore", "deepslate_diamond_ore"})):
                 close = sorted((row for row in rows if matches(row.get("name", ""))
                                 and row.get("can_see") is False and distance(row) <= 4.5), key=distance)[:2]
                 bucket = groups.setdefault(group, [])
@@ -550,6 +563,8 @@ If that goal tool is unavailable, use only the currently advertised tools.
             "craft": common,
             "starter_tools": common,
             "iron_tools": common | {"gather_resource", "inspect_container", "smelt_start", "smelt_collect"},
+            "iron_armor": (common - {"clear_foliage"}) | {"gather_resource", "inspect_container", "smelt_start", "smelt_collect", "equip_armor"},
+            "scout": {"move_to", "position_for_task", "gather_block", "clear_foliage"},
             "smelt": common | {"gather_resource", "inspect_container", "smelt_start", "smelt_collect"},
             "food": {"move_to", "position_for_task", "harvest_crop", "hunt_animal", "collect_drops",
                      "inspect_container", "take_items", "smelt_collect", "craft_item"},
@@ -564,12 +579,12 @@ If that goal tool is unavailable, use only the currently advertised tools.
         }
         names = set(scopes.get(task.get("task"), common))
         args = task.get("args") if isinstance(task.get("args"), dict) else {}
-        if task.get("task") == "gather" and args.get("resource") == "raw_iron":
+        if task.get("task") == "gather" and args.get("resource") in {"raw_iron", "diamond"}:
             names.add("gather_resource")
         if isinstance(observation, dict):
             from skills.daily_survival import DailySurvivalSkills as Daily
             blocks = {row.get("name") for row in observation.get("blocks", []) if isinstance(row, dict)}
-            for action, candidates in (("gather_block", Daily.GATHERABLE), ("gather_resource", Daily.IRON),
+            for action, candidates in (("gather_block", Daily.GATHERABLE), ("gather_resource", Daily.IRON | Daily.DIAMOND),
                     ("clear_foliage", Daily.FOLIAGE), ("harvest_crop", set(Daily.CROPS)),
                     ("gather_seeds", {"short_grass", "tall_grass"})):
                 if not blocks.intersection(candidates):
@@ -653,10 +668,17 @@ If that goal tool is unavailable, use only the currently advertised tools.
             mode = "emergency_food"
         elif task.get("status") == "needs_ai" and remaining and not unknown:
             normal.update(self._repair_actions(task, observation))
-            return ([tool for tool in self.tool_definitions if tool["function"]["name"] in normal],
-                    {"mode": "atomic_repair", "atomic_repair_remaining": remaining}, task_id)
-        return ([tool for tool in self.tool_definitions if tool["function"]["name"] in normal],
-                {"mode": mode, "atomic_repair_remaining": 0}, None)
+            mode = "atomic_repair"
+        tools = [tool for tool in self.tool_definitions if tool["function"]["name"] in normal]
+        if isinstance(context.get("last_scout_report"), dict):
+            tools = copy.deepcopy(tools)
+            for tool in tools:
+                if tool["function"]["name"] == "run_survival_task":
+                    tasks = tool["function"]["parameters"]["properties"]["task"]["enum"]
+                    tasks.remove("scout")
+        if mode == "atomic_repair":
+            return tools, {"mode": mode, "atomic_repair_remaining": remaining}, task_id
+        return tools, {"mode": mode, "atomic_repair_remaining": 0}, None
 
     def _decision(self, message, observation, context, allowed_names=None, allowed_schemas=None):
         calls = message.get("tool_calls")
@@ -735,7 +757,7 @@ If that goal tool is unavailable, use only the currently advertised tools.
                  "auto_sleep": "sleep", "wait": "observe", "goal_complete": "starter_goal",
                  "run_survival_task": args.get("task")}
         if name == "move_to":
-            known_names = set(self.tool_schemas["gather_block"]["properties"]["expected_name"]["enum"]) | {"crafting_table", "furnace", "chest", "barrel", "smoker", "blast_furnace", "iron_ore", "deepslate_iron_ore"}
+            known_names = set(self.tool_schemas["gather_block"]["properties"]["expected_name"]["enum"]) | {"crafting_table", "furnace", "chest", "barrel", "smoker", "blast_furnace", "iron_ore", "deepslate_iron_ore", "diamond_ore", "deepslate_diamond_ore"}
             target = next((b for b in blocks if (b["name"] in known_names or b["name"].endswith("_bed"))
                            and math.dist(b["pos"], pos) <= 1), None)
             goal = target["name"] if target is not None else "explore"
@@ -756,6 +778,9 @@ If that goal tool is unavailable, use only the currently advertised tools.
                 raise LLMError("llm_unsafe_action", "Bucket collection requires an existing empty bucket and a currently observed matching source")
         if name == "hunt_with_lava" and counts.get("lava_bucket", 0) < 1:
             raise LLMError("llm_unsafe_action", "Contained lava hunting requires an existing lava bucket")
+        if ((name == "craft_item" and args.get("item") == "furnace")
+                or (name == "run_survival_task" and args.get("task") == "craft" and args.get("item") == "furnace")) and counts.get("furnace", 0) >= 1:
+            raise LLMError("llm_no_progress", "Inventory already holds >= 1 furnace; do not craft another furnace or use craft_item to place it. Proceed with gather(raw_iron), iron_tools, or smelt(iron_ingot).")
         decision = Decision(name, args, reason, goal)
         failure = self._failed_actions.get(self._signature(decision))
         if failure and self._unchanged_failure(failure, observation, decision):
@@ -827,8 +852,16 @@ If that goal tool is unavailable, use only the currently advertised tools.
             allowed_names = frozenset(tool["function"]["name"] for tool in request_tools)
             allowed_schemas = {tool["function"]["name"]: copy.deepcopy(tool["function"]["parameters"]) for tool in request_tools}
             prompt_context = {key: context[key] for key in ("blocked_targets", "explore_index", "failures", "last_result",
-                                                          "death_count", "spawn", "remaining_steps", "remaining_seconds",
+                                                          "last_scout_report", "death_count", "spawn", "remaining_steps", "remaining_seconds",
                                                           "daily_tasks", "action_hints", "memory", "survival_constraints", "competition", "playbook", "task_execution", "mainline") if key in context}
+            if routing.get("mode") == "goal" and isinstance(prompt_context.get("action_hints"), list):
+                # In goal mode atomic tools like place_item/move_to are hidden; drop uncallable hints so small models do not emulate them with unrelated craft calls.
+                filtered_hints = [hint for hint in prompt_context["action_hints"]
+                                  if isinstance(hint, dict) and hint.get("name") in allowed_names]
+                if filtered_hints:
+                    prompt_context["action_hints"] = filtered_hints
+                else:
+                    prompt_context.pop("action_hints", None)
             prompt_context["failed_actions"] = [{"action": failure["decision"].name, "args": failure["decision"].args,
                                                   "error_code": failure["code"]}
                                                  for failure in list(self._failed_actions.values())[-8:]

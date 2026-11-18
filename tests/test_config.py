@@ -84,6 +84,17 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(value=bad), self.assertRaises(ConfigError):
                 load_config(self.write({"survival": {"intent": bad}}), environ={})
 
+    def test_daily_sleep_and_mining_settings_load_through_yaml(self):
+        default = load_config(self.write({}), environ={})["survival"]
+        self.assertEqual(default["sleep_policy"], "opportunistic")
+        self.assertFalse(default["disable_deep_mining"])
+        overrides = {"sleep_policy": "strict", "disable_deep_mining": True, "continuous": True}
+        configured = load_config(self.write({"survival": overrides}), environ={})["survival"]
+        self.assertEqual({key: configured[key] for key in overrides}, overrides)
+        for key, value in (("disable_deep_mining", "false"), ("sleep_policy", "off")):
+            with self.subTest(key=key), self.assertRaises(ConfigError):
+                load_config(self.write({"survival": {key: value}}), environ={})
+
     def test_operator_goal_is_optional_bounded_owner_text(self):
         self.assertEqual(load_config(self.write({}), environ={})["survival"]["operator_goal"], "")
         for goal in ("", "采足木头并制作一把木镐；失败先本地恢复。", "木" * 1000):

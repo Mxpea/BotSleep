@@ -34,6 +34,8 @@ DEFAULTS: Dict[str, Any] = {
         "objective": "starter",
         "intent": "survival",
         "continuous": False,
+        "sleep_policy": "opportunistic",
+        "disable_deep_mining": False,
         "operator_goal": "",
         "autonomy": {"enabled": True, "local_opening": False, "mainline": False, "max_steps": 128, "max_seconds": 600,
                      "max_local_failures": 4, "max_no_progress_steps": 8, "max_explore_steps": 8},
@@ -229,8 +231,11 @@ def _validate(config: Dict[str, Any], config_dir: Path) -> None:
     if survival["objective"] not in {"starter", "daily", "competition"}:
         raise ConfigError("survival.objective must be starter, daily or competition")
     _boolean(survival["continuous"], "survival.continuous")
+    _boolean(survival["disable_deep_mining"], "survival.disable_deep_mining")
     if not isinstance(survival["intent"], str) or survival["intent"] not in ("survival", "speedrun"):
         raise ConfigError("survival.intent must be survival or speedrun")
+    if not isinstance(survival["sleep_policy"], str) or survival["sleep_policy"] not in ("opportunistic", "strict"):
+        raise ConfigError("survival.sleep_policy must be opportunistic or strict")
     goal = survival["operator_goal"]
     if (not isinstance(goal, str) or len(goal) > 1000 or goal and not goal.strip()
             or isinstance(goal, str) and any(unicodedata.category(char) in {"Cc", "Cf", "Cs"} for char in goal)):

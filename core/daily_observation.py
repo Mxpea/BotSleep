@@ -544,7 +544,8 @@ class DailyObservationCollector(ObservationCollector):
         observation["footing"] = {"pos": support_pos, "name": support["name"],
             "properties": copy.deepcopy(support.get("properties") or {}),
             "fresh": True, "verified": True, "source": "api_verified"}
-        for types in (("iron_ore", "deepslate_iron_ore", "chest", "barrel", "smoker", "blast_furnace"),
+        for types in (("iron_ore", "deepslate_iron_ore", "diamond_ore", "deepslate_diamond_ore",
+                       "dead_bush", "chest", "barrel", "smoker", "blast_furnace"),
                       ("wheat", "carrots", "potatoes", "beetroots", "farmland", "grass_block", "dirt")):
             self._check_cancel(cancel_event)
             rows = self.client.get_blocks(radius=self.radius, types=list(types), limit=48)

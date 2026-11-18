@@ -264,7 +264,7 @@ class SurvivalTaskPlannerTests(unittest.TestCase):
             {"task": "craft", "item": "stick", "resource": "logs"},
             {"task": "smelt", "item": "iron_ingot", "resource": "raw_iron"},
             {"task": "food", "item": "bread"}, {"task": "maintenance", "resource": "coal"},
-            {"task": "gather", "resource": "diamond"}, {"task": "craft", "item": "../secret"},
+            {"task": "gather", "resource": "obsidian"}, {"task": "craft", "item": "../secret"},
             {"task": "farm", "pos": [1, 64, 1]}, {"task": "bed", "actions": [{"name": "teleport"}]},
             {"task": "food", "count": True}, {"task": "food", "count": 0}, {"task": "food", "count": 65},
             {"task": "food", "radius": 3}, {"task": "food", "radius": 65}, {"task": "food", "radius": 4.5}]
@@ -393,6 +393,49 @@ class SurvivalTaskPlannerTests(unittest.TestCase):
         self.assertEqual(feedback[0]["tool_call_id"], "call_1")
         self.assertEqual(json.loads(feedback[0]["content"])["result"], asdict(result))
         self.assertNotIn("last_result", current["context"])
+
+    def test_goal_mode_keeps_chapter_and_scout_report_after_planner_restart(self):
+        goal = {"task": "craft", "item": "stone_pickaxe", "count": 1}
+        planner, brain = self.planner(response("run_survival_task", goal))
+        obs = observation()
+        ctx = {
+            "mainline": {"fresh": True, "goal": goal},
+            "last_scout_report": {"aborted_empty": True, "estimated_reach": 195.0},
+            "action_hints": [
+                {"name": "place_item", "args": {"item": "furnace", "pos": [1, 64, 1]}, "goal": "furnace"},
+                {"name": "eat_food", "args": {"item": "bread"}, "goal": "food"},
+            ],
+        }
+        planner.choose(obs, ctx)
+        sent = json.loads(brain.requests[-1]["messages"][-1]["content"])["context"]
+        self.assertEqual(sent["mainline"], ctx["mainline"])
+        self.assertEqual(sent["last_scout_report"]["estimated_reach"], 195.0)
+        self.assertEqual([h["name"] for h in sent["action_hints"]], ["eat_food"])
+        tools, _, _ = planner._request_catalog({"last_scout_report": ctx["last_scout_report"]}, obs)
+        task = next(t["function"] for t in tools if t["function"]["name"] == "run_survival_task")
+        self.assertNotIn("scout", task["parameters"]["properties"]["task"]["enum"])
+
+    def test_scout_removed_from_goal_catalog_after_scout_completes_once(self):
+        planner, brain = self.planner(
+            response("run_survival_task", {"task": "scout"}),
+            response("run_survival_task", {"task": "gather", "resource": "raw_iron", "count": 8}),
+        )
+        obs = observation()
+        d1 = planner.choose(obs, {})
+        planner.observe_result(d1, SkillResult(True, "Scout completed", {"scout_report": {"estimated_reach": 195.0}}), obs)
+        planner.choose(obs, {"last_scout_report": {"estimated_reach": 195.0}})
+        second_tools = {t["function"]["name"]: t for t in brain.requests[-1]["tools"]}
+        self.assertNotIn("scout", second_tools["run_survival_task"]["function"]["parameters"]["properties"]["task"]["enum"])
+
+    def test_duplicate_furnace_craft_rejected_when_furnace_already_held(self):
+        planner, brain = self.planner(
+            response("run_survival_task", {"task": "craft", "item": "furnace", "count": 1}),
+            response("run_survival_task", {"task": "gather", "resource": "raw_iron", "count": 8}),
+        )
+        planner.max_repair_attempts = 1
+        decision = planner.choose(observation({"furnace": 1, "stone_pickaxe": 1, "cobblestone": 16}), {})
+        self.assertEqual((decision.name, decision.args["resource"]), ("run_survival_task", "raw_iron"))
+        self.assertEqual(len(brain.requests), 2)
 
 
 if __name__ == "__main__":

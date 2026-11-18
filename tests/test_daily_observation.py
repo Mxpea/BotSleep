@@ -119,6 +119,18 @@ class DailyObservationTests(unittest.TestCase):
         self.assertEqual(len({tuple(call[1]) for call in calls}), 2)
         self.assertEqual(len(obs["containers"]) + len(obs["furnaces"]), 2)
 
+    def test_daily_search_finds_diamond_and_desert_sticks_within_existing_scan_budget(self):
+        rows = [block("diamond_ore", [2, 64, 0]), block("deepslate_diamond_ore", [0, 63, 2]),
+                block("dead_bush", [-1, 64, 0])]
+        self.client.discovered = rows
+        with patch.object(self.client, "get_blocks", wraps=self.client.get_blocks) as scan:
+            obs = self.collect()
+        for row in rows:
+            self.assertIn(row, obs["blocks"])
+        daily_scans = [call.kwargs for call in scan.call_args_list if call.kwargs.get("limit") == 48]
+        self.assertEqual(len(daily_scans), 2)
+        self.assertTrue(all(call["radius"] == self.collector.radius for call in daily_scans))
+
     def test_far_and_ungrounded_windows_are_not_opened(self):
         row = self.client.station("chest", [4, 64, 0])
         self.windows(observation([row]))

@@ -1291,7 +1291,7 @@ class SurvivalTests(unittest.TestCase):
         self.assertFalse(self.world.writes())
 
     def test_retreat_refuses_void_liquid_and_no_direction(self):
-        for ground in ("air", "lava", "sand"):
+        for ground in ("air", "lava", "glass"):
             with self.subTest(ground=ground):
                 self.world.ground = ground
                 result = self.skills.execute("retreat_from", {"pos": [-3, 64, 0.5]})

@@ -20,9 +20,9 @@ def _tool(name, description, properties, required=()):
 
 
 _ITEM = {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$", "maxLength": 64}
-SURVIVAL_TASK_NAMES = ("gather", "craft", "smelt", "food", "starter_tools", "iron_tools",
+SURVIVAL_TASK_NAMES = ("gather", "craft", "smelt", "food", "starter_tools", "iron_tools", "iron_armor", "scout",
                        "shelter", "bed", "storage", "farm", "recover_drops", "maintenance")
-SURVIVAL_TASK_RESOURCES = ("logs", "cobblestone", "coal", "raw_iron")
+SURVIVAL_TASK_RESOURCES = ("logs", "cobblestone", "coal", "raw_iron", "diamond")
 
 TOOL_DEFINITIONS = [
     _tool("gather_block", "Gather ONE observed natural log, stone/cobblestone or coal ore. "
@@ -184,7 +184,7 @@ def tools_for_objective(objective="starter"):
     entity_id = {"type": "integer", "minimum": 0}
     def add(name, description, properties, required=None):
         tools.append(_tool(name, description, properties, tuple(properties) if required is None else required))
-    add("run_survival_task", "Prefer ONE bounded survival goal over repeated atomic calls. The local executor finds prerequisites, reobserves and verifies child steps without model calls. shelter validates a site and supplies wood, planks, a workstation, walls, roof and closed door; it does not require stone tools or a furnace. Stop on safety, unknown writes or budget; only the final summary is tool feedback. gather requires resource; craft/smelt require target item; others accept neither. No coordinates or action queues.",
+    add("run_survival_task", "Choose one bounded goal. The executor finds prerequisites and verifies each step locally. Shelter supplies its own wood, workstation, walls, roof and door. Scout surveys the surface within a travel budget. Iron armor crafts and equips missing pieces. Gather takes a resource, craft/smelt take the output item, and other goals take neither. The final summary reports completion, interrupted work or an exhausted budget.",
         {"task": {"type": "string", "enum": list(SURVIVAL_TASK_NAMES)},
          "resource": {"type": "string", "enum": list(SURVIVAL_TASK_RESOURCES)},
          "item": {**_ITEM, "description": "Desired crafted/smelted OUTPUT item, not an ingredient; executor checks supported recipes."},
@@ -197,8 +197,8 @@ def tools_for_objective(objective="starter"):
         {**pos, "expected_name": {"type": "string", "enum": ["water", "lava"]}})
     add("hunt_with_lava", "Use an existing lava bucket only on one observed passive animal in a verified single-cell nonflammable containment pit. No players, enemies or flammables may be nearby. Recollect and verify the source immediately; success requires actual inventory gain. Never use on open terrain.",
         {"entity_id": entity_id, "expected_name": {"type": "string", "enum": ["pig", "cow", "sheep", "chicken"]}})
-    add("gather_resource", "Mine ONE currently observed iron ore with a stone-or-better pickaxe; block removal and raw iron gain are verified.",
-        {**pos, "expected_name": {"type": "string", "enum": sorted(Daily.IRON)}})
+    add("gather_resource", "Mine one observed iron ore with a stone-or-better pickaxe or diamond ore with an iron-or-better pickaxe. Verify block removal and the matching inventory gain.",
+        {**pos, "expected_name": {"type": "string", "enum": sorted(Daily.IRON | Daily.DIAMOND)}})
     add("harvest_crop", "Harvest ONE observed mature crop; maturity, removal and produce gain are checked. Replant when seeds are available.",
         {**pos, "expected_name": {"type": "string", "enum": sorted(Daily.CROPS)}})
     add("gather_seeds", "Break ONE currently observed short_grass or tall_grass plant within checked reach to try for wheat seeds. Drops are random: plant removal with gained=0 is not seed acquisition. Never use on crops or replay an unknown dig.",

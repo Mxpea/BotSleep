@@ -717,7 +717,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
             self.context.pop("retreat_recovery", None)
             self.context.pop("combat_retreat", None)
             self.context.pop("combat_blocked_until", None)
-            for key in ("canopy_recovery", "food_recovery", "local_footing", "cautious_bootstrap", "cautious_bootstrap_basis"):
+            for key in ("canopy_recovery", "food_recovery", "local_footing", "cautious_bootstrap", "cautious_bootstrap_basis",
+                        "last_scout_report"):
                 self.context.pop(key, None)
             self._record("WARN", "DIMENSION_CHANGED", {"from": old_dimension, "to": dimension})
         if dimension:
@@ -739,7 +740,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
             self.context.pop("combat_retreat", None)
             self.context.pop("combat_blocked_until", None)
             self.context["life_generation"] += 1
-            for key in ("canopy_recovery", "food_recovery", "local_footing", "cautious_bootstrap", "cautious_bootstrap_basis"):
+            for key in ("canopy_recovery", "food_recovery", "local_footing", "cautious_bootstrap", "cautious_bootstrap_basis",
+                        "last_scout_report"):
                 self.context.pop(key, None)
             self._record("WARN", "DEATH_OBSERVED", {"last_death": death, "count": self.context["death_count"]})
             self._death_awaiting_marker = not bool(new_marker)
@@ -949,8 +951,11 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
                     options["recovery_context"]["excluded_targets"] = (excluded + [[x, y-d, z] for d in (0, 1, 2)])[-8:]
                 if self._task_child and self.context.get("cautious_bootstrap") is True:
                     options["cautious"] = True
-                runner = resolve_skill_runner(self, decision.name)
-                result = runner.execute(decision.name, decision.args, cancel_event=self._cancel, **options)
+                if self._task_child and decision.goal in {"deep_mine", "scout_surface", "equip_loadout"}:
+                    result = self._run_task_workflow(decision, observation)
+                else:
+                    runner = resolve_skill_runner(self, decision.name)
+                    result = runner.execute(decision.name, decision.args, cancel_event=self._cancel, **options)
             if not isinstance(result, SkillResult):
                 raise TypeError("Skill returned an invalid result")
             if (decision.name in ("canopy_escape", "clear_foliage") and _uncertain_result(result)
@@ -1163,8 +1168,9 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
             status.get("dimension") != baseline.get("dimension")
             or status.get("last_death") != baseline.get("last_death")
             or status.get("health", 0) < baseline.get("health", 20))
+        surface_expedition = self._task_child and decision is not None and decision.goal in {"deep_mine", "scout_surface"}
         danger = (not status.get("alive") or status.get("in_lava") or status.get("on_fire")
-                  or status.get("submerged") or status.get("in_water")
+                  or status.get("submerged") or (status.get("in_water") and not surface_expedition)
                   or status.get("health", 20) <= self.settings["low_health_threshold"] and not (food_turn or local_recovery_turn)
                   or combat_changed
                   or (not combat_action and isinstance(hostile.get("dist"), (int, float))

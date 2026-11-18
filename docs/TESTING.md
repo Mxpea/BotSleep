@@ -1,5 +1,13 @@
 # 配置、客户端、生存、赛事与监控验证
 
+## dev-ink 合并铁矿与钻石流程（2026-11-18）
+
+本次合并的两个基线为 `dev-ink ef907be` 和 `develop-tianya/ai-iron-diamond-loop 1431a15`。主线第 11 章的离线测试从已有石镐、熔炉、基地和补给，但附近没有露铁的状态开始，验证控制器直接发起本地采铁。可见钻矿另测铁镐门槛、方块变化和实际掉落。深采的库存回执、取消和返程失败均有回归覆盖。
+
+下方按原分支保留实服记录。`dev-ink` 已在原服采到 3 块圆石；铁钻分支的和平新档曾取得铁器。合并版本尚待实服复验，铁甲穿戴和实际采钻另待端到端验证。
+
+Windows 上设置 `BOTSLEEP_RUN_LIVE_TESTS=0`，运行 `python -X utf8 -B -m unittest discover -s tests -q`。最终合并版本共发现 1886 项，1881 项通过，5 项实服专用测试跳过，耗时 120.442 秒。示例配置通过 `main.py --config config.example.yaml --check-config`。
+
 ## 日常持续运行（2026-11-18）
 
 16:31 的旧会话在第 572 步达到原来的单轮 3 死上限。17:16 同一账号、同一普通世界开启 `survival.continuous`。监控心跳发布 `continuous=true`、`paused=false` 和本次累计死亡数。机器人自行制作木镐，从 `[4,69,29]` 选定朝北的阶梯。第 54 步向第三阶移动，实际落点和后续站位检查不一致；第 55 步只读取当前状态，保存原动作结果未知，然后继续决策。该会话执行到第 99 步，未因这次未知动作永久暂停。木镐与下阶已有实服记录，此时背包中尚无石镐。
@@ -118,7 +126,56 @@ Windows / Python 3.12.10，禁用实服用例后运行 `py -3.12 -X utf8 -B -m u
 
 合并前主线 `9018f76` 曾在本地真实服务器从 Y=92 经 7 次移动下到 Y=88 草方块，生命/饥饿维持 20，未请求模型；该测试与此次合并后的离线回归是两次独立验证。合并版本未请求真实模型或重跑实服。
 
-最近合并复核：2026-11-17（Asia/Shanghai），`main 02343f9` + `develop-tianya/shelter-workflow 39afec8`，在独立 main 工作区合并。下方两侧分支的历史日志与实服记录保留，不替代本次合并验证。
+最近复核：2026-11-18（Asia/Shanghai），`develop-tianya/ai-iron-diamond-loop`（已提交节点 `db6dbb1`、`28417cf`、`01f22a4`、`8c35c51`、`4eee47e` 及本次文档同步）。
+
+## 和平模式全新存档实服闭环调测（2026-11-18，Run 1～Run 6）
+
+在本地 Leaves 1.21.11 和平模式（`difficulty=peaceful`）空新存档、`mc-agent-api`（`127.0.0.1:18900`，零本地改动）与真实模型（`qwen3.6-35b-a3b`）环境下共执行 6 轮实服迭代验证（每轮清空 `world`/`world_nether`/`world_the_end` 重生）：
+
+- **Run 1（`live_20261118_1`，commit `496d1a8` 基线）**：开局树顶 `[2.5, 88, -1.3]` 触发 3 格安全 `canopy_escape` 成功脱困并在 ~5 分钟完成基础石器；随后暴露 `craft(stone_pickaxe)` 重复制作 24 把及深矿遇到含水层时 `_wf_deep_fishbone` 掘顶卡死（修复于 `db6dbb1`）。
+- **Run 2（`live_20261118_2`，commit `db6dbb1`）**：彻底消除重复石镐循环，且夜间无床状态下继续正常推进；第 126 步 `gather_resource(deep_mine)` 因 `discover_and_explore_caves` 在守卫超时后读取背包触发未捕获 `WorkflowStepError("timeout")` 并经 `_uncertain_boundary` 漏出导致 `error_code="internal"` 与 `paused=True`，同时暴露 `craft(furnace)` 与表层泥土采石零产率问题（修复于 `28417cf`）。
+- **Run 3（`live_20261118_3`，commit `28417cf`）**：20 步树冠脱离、全套石器、单次熔炉部署、烧炭与火把一次完成；`gather(coal)` 穿过浅洞探查并下探 `Y=28` 后因仅带 1 把石镐耗尽触发 `no_pickaxe` 安全返程带回 105 圆石；随后因 `SurfaceScoutSkill` 将 16 格内自建工作台/熔炉计入结构及工具目录未屏蔽 `scout`，引发 `scout` 连续调用 17 次及 `coal` 缺备用石镐（修复于 `01f22a4`）。
+- **Run 4（`live_20261118_4`，commit `01f22a4`）**：10.5 分钟完成木/石套、27 圆石、3 煤与单炉部署并烤熟羊肉；离开原基地 24 格后受 `daily_tasks.furnace` 影响反复用 `craft_item(furnace)` / `craft(furnace)` 误图放置，随后于 `8c35c51` 在 `agent/llm_planner.py` 硬拦截持炉重复合成并在 `DAILY_SYSTEM_PROMPT` 强化铁器优先级。
+- **Run 5（`live_20261118_5`，commit `8c35c51`，45 分钟 / 205 步完整跑完，37 轮模型调用 / 规避 160 次调用）**：**零崩溃、零重复工具/熔炉循环**，完整跑通新档前中期闭环——`scout` 仅执行 1 次并退场 → 约 8 分钟完成全套石器与单炉合成 → 约 13.5 分钟（`06:22:39Z`）完成首次 `Y=16` 深矿带回 `7 raw_iron` 并炼出铁锭 → 约 17.5 分钟（`06:26:57Z`）合出首把 **`iron_pickaxe`** → 后续自主再下矿带回 `8 raw_iron`，于 ~26 分钟（`06:35:25Z`）与 ~37 分钟（`06:46:28Z`）依次合出 **`iron_axe`、`iron_sword`、`shield`、`bucket` 与补充 `iron_pickaxe`**。最后 7 分钟受 `daily_tasks.fuel_reserve` 诱导转去烧木炭与无效 `smelt(copper_ingot)` 直到预算耗尽，未继续切入 `iron_armor` 与 `Y=-54` `diamond`；已在 `4eee47e` 收紧提示词跳过 `fuel_reserve` 直切铁甲/采钻。
+- **Run 6（`live_20261118_6`，commit `4eee47e`，45 分钟 / 150 步）**：实服仍暴露两项待继续打磨的问题：（1）第 39 步（`07:13:00Z`）`coal` 深矿在 `[-13.5, 46, 30.5]` 落入水淹洞穴且 `recover` 无已验证脱离路径，于 `07:14:44Z` 溺亡后自动重生；（2）重生后重做木镐并完成 30 格圆石矿井（第 136 步）返回地表落入云杉树冠 `[36.5, 70, 3.5]`，第 137–150 步在树冠放置工作台连续失败并在清除 2 块树叶后因重复调用 `run_survival_task(craft, stone_pickaxe)` 触发 `llm_repeated_failure` 暂停至 45 分钟超时。
+- **当前实服边界结论**：新存档从空手到 **`iron_pickaxe` + 全套铁器（铁镐/铁斧/铁剑/盾牌/铁桶）与深层分层 `Y=16` 采铁安全返程**已在 Run 5 完整实服跑通；受 Run 5 后期燃料支线与 Run 6 溺亡/树冠 `llm_repeated_failure` 影响，**`iron_armor` 实服穿戴闭环与 `Y=-54` 真实提取钻石**仍仅由离线单元测试覆盖，尚未在无人工干预的单一新存档实服中完整闭环。
+
+## 装备副手、树冠/夜雨解锁、沙漠取木、200 格前向侦察与阶段决策回归（2026-11-18）
+
+围绕和平模式开局体验、沙漠适应性、装备穿戴与大模型阶段接管完成了下列实现与离线验证：
+- **装备与副手管理**：新增 `skills/equipment.py`（`EquipmentSkill`，与 `ContainerSkill` 同层 `WorkflowGuard` + `SkillResult` + 断线 `unknown` 契约），统一管理 `head`/`torso`/`legs`/`feet`/`off-hand`/`hand`（含 API `armor.chest` ↔ `torso` 映射与最佳防具/盾牌自动穿戴），`iron_tools`/`iron_armor` 内部直接联动 `equip_loadout`。
+- **树冠脱困、夜/暴雨解锁与沙漠支撑**：`core/config.py` 与 `config.example.yaml` 默认启用 `survival.sleep_policy: "opportunistic"`，`core/daily_policy.py` 与 `core/autonomous_tasks.py` 不再因白天雷暴或无床夜晚硬阻塞生产工作（仅在已有近床/安全庇护所内或 `sleep_policy="strict"` 时阻塞）。`skills/survival.py` 扩展 `sand`/`sandstone`/`terracotta`/`gravel` 等自然地形支撑，将 `dead_bush` 加入 `GATHERABLE`（空手采集可零掉落完成并优先用于沙漠凑木棍），并放宽健康状态下高树冠（`-12 <= dy <= 2`）、3 格安全落差与同层树叶开路。
+- **200 格前向低耗侦察与 Stage-Gate 决策**：新增 `skills/scouting.py`（`SurfaceScoutSkill`）在不改动 `mc-agent-api`（`find_blocks radius<=64`）的前提下从出生点单向推进多航点（覆盖 ~200 格跨度），发现结构/绿洲原木立即早停、无果或体力下降果断放弃；更新 `agent/llm_planner.py` 快照与 `DAILY_SYSTEM_PROMPT`，在 `scout` 结束及铁阶段完成后交还大模型自行决断做铁甲还是找钻石。
+- **离线验证与边界**：全部改动完成后最终完整回归结果为：**1453 项 / 67.987 秒：1443 通过、10 项跳过（2 项 `test_cave_matrix` 与 3 项 `test_speedrun_portal` 实服专用跳过，5 项 `test_stronghold.EngineTests` 因未安装 ninjabrain JAR 跳过），`OK (skipped=10)`**，命令为 `$env:BOTSLEEP_RUN_LIVE_TESTS='0'; .\.venv\Scripts\python.exe -B -m unittest discover -s tests -v`。`compileall -q main.py agent core skills debug integrations`、`main.py --config config.example.yaml --check-config` 及 `git diff --check` 均通过；相邻 `mc-agent-api` 零改动。因调整 `sand` 至 `SurvivalSkills.SUPPORT`，同步将 `tests/test_survival_skills.py` 中“拒绝非支撑地面”用例中的替代方块由 `"sand"` 更新为 `"glass"`（上方落沙危险检测保持不变）。当前尚无新的实服开局（树顶/沙漠/完整铁甲+钻石）复测结果。
+
+---
+
+历史复核：2026-11-17（Asia/Shanghai），`develop-tianya/ai-iron-diamond-loop`（commit `e76597b`，基于 `origin/main 9018f76`）。
+
+## AI 自主铁套/钻石闭环与矿井优化回归（2026-11-17）
+
+本轮围绕“出生开局 → 铁镐/铁套 → 钻石闭环”与效率/防卡死优化完成了离线实现与分阶段实服调测：
+- **策略与规划**：`agent/tools.py`、`agent/llm_planner.py` 与 `core/autonomous_tasks.py` 新增 `diamond` 采集及 `diamond_pickaxe`/`diamond_sword`/`diamond_axe`/`diamond_hoe` 合成目标，保留 starter 9 / daily 35 / competition 40 目录上限。
+- **开局与采矿速度优化**：`logs` 采集优先可达主干（`dy <= 2.1`）并过滤树冠高处原木；`raw_iron`/`coal` 采集开启近处矿洞优先探查（半径 24、最多 2 处，单洞超时 65s）后再切换阶梯矿井；`raw_iron` 直下 `Y=16` 峰值矿层。
+- **背包与熔炼修复**：`core/client.py` 封装 `/drop`，`core/autonomy_runtime.py` 在深矿前或背包满时主动丢弃花岗岩、闪长岩、安山岩、深板岩圆石、凝灰岩、沙砾、粗铜、多余圆石等杂物（仅附近已有箱子时入箱）；`skills/daily_survival.py` 修复高 2 格熔炉观察距离与 `inspected_furnace` 单步交接，避免反复 `inspect_container`。
+- **矿井安全与溶洞防卡死**：`skills/mining.py` 对矿井入口 `_wf_prepare_entry` 与阶梯前移增加精确站位与脚下实心核验、`corridor_only` 跳过冗余工作站开挖、`_wf_deep_fishbone` 增加溶洞多向岩石优先级转向与 24 次转向预算，以及 `_retreat_downsampled` 连续 2 次卡滞即提前交由 3D 寻路返程。
+
+### 离线回归与静态检查
+
+全部 Python 改动完成后的最终完整回归结果为：**1440 项 / 67.756 秒：1430 通过、10 项跳过（2 项 `test_cave_matrix` 与 3 项 `test_speedrun_portal` 实服专用跳过，5 项 `test_stronghold.EngineTests` 因未安装 ninjabrain JAR 跳过），`OK (skipped=10)`**，命令为 `$env:BOTSLEEP_RUN_LIVE_TESTS='0'; .\.venv\Scripts\python.exe -B -m unittest discover -s tests -v`。`compileall -q main.py agent core skills debug integrations`、`main.py --config config.example.yaml --check-config` 及 `git diff --check` 均通过；相邻 `mc-agent-api` 工作区零改动。
+
+### 实服阶段验证与未闭环阻塞说明
+
+使用本地 Minecraft 服务端（`127.0.0.1:25565`）、官方 `mc-agent-api` 与远端 LLM 对新存档进行多轮实测，确认到以下阶段表现：
+- **Run 4**：空手开局依次完成 `wooden_pickaxe`（约 1.9m）→ `stone_pickaxe`（约 6.6m）→ `furnace`（约 7.8m）→ `6 raw_iron + 4 coal`（约 14.5m）→ `iron_pickaxe`（约 17.2m）。
+- **Run 7**：空手开局完成 `wooden_pickaxe`（约 2.5m）→ `28 cobblestone`（67.84s）→ `stone_pickaxe`（约 4.3m）→ `furnace`（约 8.0m）→ `4 raw_iron`（约 17.4m，含约 3m 雷雨等待）→ `iron_pickaxe`（总耗时约 25m / 有效约 21–22m），随后到达 `Y=16` 再采 `7 raw_iron + 5 coal` 并冶炼出 `8 iron_ingot`。
+- **Run 10 / Run 12**：完成 `smelt` 铁锭、`iron_tools`（`iron_axe`/`iron_sword`/`shield`/`bucket`）、放置箱子存物后携带铁镐沿矿井下探至深板岩层（Run 10 下至 `Y=-5` 并安全返回地表 `[-125.7, 63, 412.5]`；Run 12 下至 `Y=2.0`）。
+
+**阻塞与未完成项**：在后续实测与最终“新存档完整铁套 + `Y=-54` 采钻闭环”基准测试前，本地 Minecraft 服务端与 RCON（`127.0.0.1:25565` / `25575`）离线停止响应，导致最终改版后的新档全程实服基准与实服采钻验收未能运行。因此当前版本**未宣称已实服跑通整套铁甲/钻石提取全闭环**，需在重启 MC 服务端后于独立测试存档复测。
+
+---
+
+历史合并复核：2026-11-17（Asia/Shanghai），`main 02343f9` + `develop-tianya/shelter-workflow 39afec8`，在独立 main 工作区合并。下方两侧分支的历史日志与实服记录保留，不替代上述验证。
 
 ## shelter-workflow 合并取舍与回归
 

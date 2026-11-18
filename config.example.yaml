@@ -14,6 +14,8 @@ survival:
   intent: survival                         # survival or speedrun; phase hints never enable unbound actions.
   objective: "starter"                     # starter, daily, competition (requires llm.enabled; no chat debug).
   continuous: true                         # Daily survival keeps running across deaths and overall budgets.
+  sleep_policy: "opportunistic"            # opportunistic (sleep only if nearby bed exists; thunder/night no-bed keeps working) or strict.
+  disable_deep_mining: false               # True keeps ore collection local and skips deep expeditions.
   operator_goal: ""                        # Optional current user goal (<=1000 visible characters); safety still wins.
   autonomy:                               # Daily/competition: one model goal, locally verified child steps.
     mainline: true                        # In daily survival, follow the no-dragon progression with local goals.

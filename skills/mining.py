@@ -79,6 +79,10 @@ from core.world_3d import VoxelWorld3D
 from . import BaseSkill, SkillResult
 
 
+EXPEDITION_INTERRUPTS = frozenset({"dead", "not_ready", "not_connected", "damage_taken", "life_changed",
+                                   "unsafe_state", "safety_interrupted", "interrupted", "cancelled"})
+
+
 def _unknown_result(result: SkillResult) -> bool:
     data = result.data if isinstance(result.data, dict) else {}
     return data.get("action_state") == "unknown" or result.error_code in UNKNOWN_ERROR_CODES
@@ -103,6 +107,14 @@ def _uncertain_boundary(function):
         except WorkflowUncertainError as exc:
             data = dict(exc.data)
             data.setdefault("executed", data.get("action_state") == "unknown")
+            return SkillResult(False, str(exc), data=data, error_code=exc.code)
+        except WorkflowStepError as exc:
+            data = dict(exc.data or {})
+            data.setdefault("executed", bool(data.get("executed", False)))
+            if exc.blocker_pos is not None:
+                data.setdefault("blocker_pos", list(exc.blocker_pos))
+            if exc.blocker_block is not None:
+                data.setdefault("blocker_block", exc.blocker_block)
             return SkillResult(False, str(exc), data=data, error_code=exc.code)
     return wrapped
 
@@ -566,9 +578,12 @@ class MineShaftSkill(BaseSkill):
                             allow_bridge=True,
                             allow_drop=True,
                             max_steps=28,
+                            cancel_event=cancel_event,
                             timeout_seconds=12.0,
                         )
                         _raise_if_unknown(approach)
+                        if approach.error_code in EXPEDITION_INTERRUPTS:
+                            return approach
                         raw_chk = self.client.get_status()
                         st_chk = raw_chk.get("result") if isinstance(raw_chk, dict) and "result" in raw_chk else raw_chk
                         pos_chk = parse_pos(st_chk.get("pos") if isinstance(st_chk, dict) else None)
@@ -744,6 +759,27 @@ class MineShaftSkill(BaseSkill):
                 spec_to_check = self._hub_only_spec(branch_len, include_workstations=include_ws)
             else:
                 spec_to_check = mine_shaft_spec(branch_length=branch_len, include_workstations=include_ws)
+            corridor_only = (
+                not include_ws
+                and (
+                    c.extra.get("target_y") is not None
+                    or c.extra.get("target_ys")
+                    or str(c.extra.get("mining_mode") or "").lower() == "fishbone"
+                )
+            )
+            if corridor_only:
+                kept = tuple(
+                    cell for cell in spec_to_check.cells
+                    if cell.stage not in {"platform_clear", "platform_floor"} or int(cell.rel_pos[0]) == 0
+                )
+                spec_to_check = StructureSpec(
+                    spec_id=spec_to_check.spec_id,
+                    stages=spec_to_check.stages,
+                    cells=kept,
+                    anchors=spec_to_check.anchors,
+                    clearance_rel=spec_to_check.clearance_rel,
+                    site_spec=None,
+                )
             return inspect_structure(spec_to_check, c.origin, c.read_block, orientation=c.orientation)
 
         result = ActionWorkflowRunner().run(
@@ -1067,6 +1103,30 @@ class MineShaftSkill(BaseSkill):
                 for dz in (-1, 0, 1):
                     cache.pop((px + dx, py + dy, pz + dz), None)
 
+    SOFT_ROCK_TOOL_PRIORITY: Tuple[str, ...] = (
+        "stone_pickaxe",
+        "iron_pickaxe",
+        "diamond_pickaxe",
+        "netherite_pickaxe",
+        "golden_pickaxe",
+        "wooden_pickaxe",
+    )
+    SOFT_TERRAIN_BLOCKS: Set[str] = {
+        "stone",
+        "cobblestone",
+        "andesite",
+        "diorite",
+        "granite",
+        "dirt",
+        "grass_block",
+        "coarse_dirt",
+        "gravel",
+        "sand",
+        "sandstone",
+        "tuff",
+        "netherrack",
+    }
+
     def _dig_cell_safely(
         self,
         ctx: WorkflowContext,
@@ -1086,7 +1146,9 @@ class MineShaftSkill(BaseSkill):
                 break
             above_name = str(self._cached_read(ctx, [world[0], world[1] + 1, world[2]]).get("name") or "air")
             aim_at(ctx, world, relative=False)
-            res = dig_block(ctx, world, relative=False, allowed_blocks=allowed, collect=False)
+            # Preserve iron/diamond pickaxe durability on soft upper stone when a stone pickaxe is available.
+            tool_prio = self.SOFT_ROCK_TOOL_PRIORITY if bname in self.SOFT_TERRAIN_BLOCKS else None
+            res = dig_block(ctx, world, relative=False, allowed_blocks=allowed, collect=False, tool_priority=tool_prio)
             self._invalidate_cache(ctx, world)
             if not res.get("skipped"):
                 dug += 1
@@ -1135,19 +1197,37 @@ class MineShaftSkill(BaseSkill):
             blocker_block=name,
         )
 
-    def _step_to(self, ctx: WorkflowContext, rel_pos: Tuple[float, float, float], *, tolerance: float = 0.75) -> None:
+    def _step_to(
+        self,
+        ctx: WorkflowContext,
+        rel_pos: Tuple[float, float, float],
+        *,
+        tolerance: float = 0.75,
+        exact: bool = False,
+    ) -> None:
         """Move cleanly within the already-excavated corridor/platform."""
-        stand_at(ctx, rel_pos, relative=True, tolerance=tolerance)
+        stand_at(ctx, rel_pos, relative=True, tolerance=tolerance, exact=exact)
 
     def _wf_prepare_entry(self, ctx: WorkflowContext) -> Dict[str, Any]:
         dug = 0
+        # Ensure we are standing behind/level with surface_entry before clearing (0, 1, -1) / (0, 0, -1),
+        # so an elevated bot on a slope cannot stand on (0, 0, -1) as its own floor cell.
+        st_pos = parse_pos((ctx.guard.check_status(require_safe=False) or {}).get("pos"))
+        bot_floor = (
+            [int(math.floor(st_pos[0])), int(math.floor(st_pos[1])) - 1, int(math.floor(st_pos[2]))]
+            if st_pos is not None
+            else None
+        )
         for rel in ((0, 1, -1), (0, 0, -1)):
             wpos = ctx.world_pos(rel, integer=True)
             bname = str(self._cached_read(ctx, wpos).get("name") or "air")
             if bname not in AIR:
+                if bot_floor is not None and wpos == bot_floor:
+                    self._step_to(ctx, (0.5, 0.0, -1.5), tolerance=0.75, exact=True)
+                    bot_floor = None
                 dug += self._dig_cell_safely(ctx, rel, collect=False)
         patched = self._ensure_floor_cell(ctx, (0, -1, -1))
-        self._step_to(ctx, (0.5, 0.0, -0.5), tolerance=0.9)
+        self._step_to(ctx, (0.5, 0.0, -0.5), tolerance=0.75, exact=True)
         return {"dug": dug, "patched": patched}
 
     def _wf_excavate_stairs(self, ctx: WorkflowContext) -> Dict[str, Any]:
@@ -1157,7 +1237,7 @@ class MineShaftSkill(BaseSkill):
             dz = step - 1
             foot_y = -step
             prev_rel = (0.5, 0.0, -0.5) if step == 1 else (0.5, float(-(step - 1)), float(dz - 1) + 0.5)
-            self._step_to(ctx, prev_rel, tolerance=0.75)
+            self._step_to(ctx, prev_rel, tolerance=0.75, exact=True)
 
             # Dig top-down so headroom and view stay clear and no block falls onto bot head.
             for off in (2, 1):
@@ -1178,9 +1258,18 @@ class MineShaftSkill(BaseSkill):
         dug = 0
         patched = 0
         self._step_to(ctx, (0.5, -5.0, 4.5), tolerance=0.75)
+        corridor_only = (
+            not ctx.extra.get("deploy_workstation")
+            and (
+                ctx.extra.get("target_y") is not None
+                or ctx.extra.get("target_ys")
+                or str(ctx.extra.get("mining_mode") or "").lower() == "fishbone"
+            )
+        )
+        dx_limit = 1 if corridor_only else 4
 
         for dz in range(5, 9):
-            for dx in range(0, 4):
+            for dx in range(0, dx_limit):
                 stand_x = 0.5 if dx <= 2 else 1.5
                 stand_z = float(dz) + 0.5 if dz == 5 and dx >= 1 else float(dz - 1) + 0.5
                 self._step_to(ctx, (stand_x, -5.0, stand_z), tolerance=0.8)
@@ -1595,27 +1684,37 @@ class MineShaftSkill(BaseSkill):
             indices.append(len(seq) - 1)
         goal = [int(seq[-1][0]), int(seq[-1][1]), int(seq[-1][2])]
         prev_idx = -1
+        consec_stalls = 0
         for idx in indices:
             if ctx.guard.remaining_timeout(999.0) < 1.5:
                 break
             try:
                 stand_cell(ctx, seq[idx], tolerance=1.15)
+                consec_stalls = 0
             except WorkflowStepError as exc:
                 if exc.code not in {"path_not_found", "stalled", "timeout", "unreachable_stance"}:
                     raise
+                step_ok = False
                 for sub_idx in range(prev_idx + 1, idx + 1):
                     if ctx.guard.remaining_timeout(999.0) < 1.5:
                         break
                     try:
                         stand_cell(ctx, seq[sub_idx], tolerance=1.35)
+                        step_ok = True
+                        consec_stalls = 0
                     except WorkflowStepError as sub_exc:
                         if sub_exc.code not in {"path_not_found", "stalled", "timeout", "unreachable_stance"}:
                             raise
                         if sub_idx == len(seq) - 1:
                             try:
                                 stand_cell(ctx, goal, tolerance=1.8)
+                                step_ok = True
                             except WorkflowStepError:
                                 pass
+                        break
+                if not step_ok:
+                    consec_stalls += 1
+                    if consec_stalls >= 2:
                         break
             prev_idx = idx
 
@@ -1902,7 +2001,8 @@ class MineShaftSkill(BaseSkill):
             # Phase 1: Safe descending staircase down to band_y along continuous trail
             stair_timed_out = False
             if band_y is not None and cur_foot[1] > int(band_y):
-                turns_left = 8
+                turns_left = 24
+                backtracks_left = 3
                 step_counter = 0
                 visited_turns: Set[Tuple[Tuple[int, int, int], Tuple[int, int, int]]] = set()
                 while cur_foot[1] > int(band_y) and turns_left > 0:
@@ -1961,54 +2061,100 @@ class MineShaftSkill(BaseSkill):
                         turns_left -= 1
                         recent_cells = {(int(p[0]), int(p[2])) for p in trail[-10:-1]}
                         turn_cands = [
-                            tuple(fwd),
                             (-fwd[2], 0, fwd[0]),
                             (fwd[2], 0, -fwd[0]),
+                            tuple(fwd),
                             (-fwd[0], 0, -fwd[2]),
                         ]
-                        chosen_fwd = None
-                        for cand in turn_cands:
-                            if (tuple(cur_foot), cand) in visited_turns:
-                                continue
-                            if (cur_foot[0] + cand[0], cur_foot[2] + cand[2]) in recent_cells:
-                                continue
-                            chosen_fwd = cand
-                            break
-                        if chosen_fwd is None:
-                            for cand in turn_cands[1:]:
-                                if (cur_foot[0] + cand[0], cur_foot[2] + cand[2]) not in recent_cells:
-                                    chosen_fwd = cand
+                        ordered = [
+                            c for c in turn_cands
+                            if (tuple(cur_foot), c) not in visited_turns
+                            and (cur_foot[0] + c[0], cur_foot[2] + c[2]) not in recent_cells
+                        ]
+                        if not ordered:
+                            ordered = [
+                                c for c in turn_cands
+                                if (cur_foot[0] + c[0], cur_foot[2] + c[2]) not in recent_cells
+                            ] or [turn_cands[0]]
+
+                        def _rock_heading_score(cand_dir: Tuple[int, int, int]) -> int:
+                            cx = cur_foot[0] + cand_dir[0]
+                            cy = cur_foot[1]
+                            cz = cur_foot[2] + cand_dir[2]
+                            s = 0
+                            for dy in (0, -1, 1):
+                                bname = str(self._cached_read(ctx, (cx, cy + dy, cz)).get("name") or "unknown")
+                                if bname in MINE_HAZARD_BLOCKS:
+                                    s -= 10
+                                elif bname not in DEFAULT_REPLACEABLE and bname != "unknown":
+                                    s += 2 if dy <= 0 else 1
+                            return s
+
+                        ordered.sort(key=lambda c: -_rock_heading_score(c))
+                        moved_any = False
+                        for cand in ordered:
+                            visited_turns.add((tuple(cur_foot), cand))
+                            moved_pad = 0
+                            # Jog flat (dy=0) across underwater rivers / cave seams until floor+subfloor ahead is hazard-free
+                            for _pad in range(8):
+                                p_foot = [cur_foot[0] + cand[0], cur_foot[1], cur_foot[2] + cand[2]]
+                                p_head = [p_foot[0], p_foot[1] + 1, p_foot[2]]
+                                p_floor = [p_foot[0], p_foot[1] - 1, p_foot[2]]
+                                try:
+                                    dug += self._dig_cell_safely(ctx, tuple(p_head), collect=False, relative=False)
+                                    p_patch = self._ensure_floor_cell(ctx, p_floor, relative=False)
+                                    patched += p_patch
+                                    dug += self._dig_cell_safely(ctx, tuple(p_foot), collect=False, relative=False)
+                                    if _pad % 2 == 1 or p_patch > 0 or _pad == 7:
+                                        stand_cell(ctx, p_foot, tolerance=0.95)
+                                    cur_foot = list(p_foot)
+                                    trail.append(list(cur_foot))
+                                    moved_pad += 1
+                                    if _pad >= 1:
+                                        df_x, df_y, df_z = cur_foot[0] + cand[0], cur_foot[1] - 1, cur_foot[2] + cand[2]
+                                        df_name = str(self._cached_read(ctx, (df_x, df_y - 1, df_z)).get("name") or "unknown")
+                                        sub_name = str(self._cached_read(ctx, (df_x, df_y - 2, df_z)).get("name") or "unknown")
+                                        if (
+                                            df_name not in (DEFAULT_REPLACEABLE | MINE_HAZARD_BLOCKS)
+                                            and sub_name not in MINE_HAZARD_BLOCKS
+                                        ):
+                                            break
+                                except WorkflowStepError:
                                     break
-                        fwd = chosen_fwd or (-fwd[2], 0, fwd[0])
-                        visited_turns.add((tuple(cur_foot), tuple(fwd)))
-                        # Jog flat (dy=0) across underwater rivers / cave seams until floor+subfloor ahead is hazard-free
-                        for _pad in range(10):
-                            p_foot = [cur_foot[0] + fwd[0], cur_foot[1], cur_foot[2] + fwd[2]]
-                            p_head2 = [p_foot[0], p_foot[1] + 2, p_foot[2]]
-                            p_head = [p_foot[0], p_foot[1] + 1, p_foot[2]]
-                            p_floor = [p_foot[0], p_foot[1] - 1, p_foot[2]]
-                            try:
-                                if _pad == 0:
-                                    dug += self._dig_cell_safely(ctx, tuple(p_head2), collect=False, relative=False)
-                                dug += self._dig_cell_safely(ctx, tuple(p_head), collect=False, relative=False)
-                                p_patch = self._ensure_floor_cell(ctx, p_floor, relative=False)
-                                patched += p_patch
-                                dug += self._dig_cell_safely(ctx, tuple(p_foot), collect=False, relative=False)
-                                if _pad % 2 == 1 or p_patch > 0 or _pad == 9:
-                                    stand_cell(ctx, p_foot, tolerance=0.95)
-                                cur_foot = list(p_foot)
-                                trail.append(list(cur_foot))
-                                if _pad >= 1:
-                                    df_x, df_y, df_z = cur_foot[0] + fwd[0], cur_foot[1] - 1, cur_foot[2] + fwd[2]
-                                    df_name = str(self._cached_read(ctx, (df_x, df_y - 1, df_z)).get("name") or "unknown")
-                                    sub_name = str(self._cached_read(ctx, (df_x, df_y - 2, df_z)).get("name") or "unknown")
-                                    if (
-                                        df_name not in (DEFAULT_REPLACEABLE | MINE_HAZARD_BLOCKS)
-                                        and sub_name not in MINE_HAZARD_BLOCKS
-                                    ):
-                                        break
-                            except WorkflowStepError:
+                            if moved_pad > 0:
+                                fwd = cand
+                                moved_any = True
                                 break
+                        if not moved_any:
+                            if backtracks_left > 0 and len(trail) >= 4:
+                                backtracks_left -= 1
+                                retreat_steps = min(4, len(trail) - 1)
+                                back_slice = trail[-retreat_steps:]
+                                trail = trail[: len(trail) - retreat_steps + 1]
+                                for b_cell in reversed(back_slice[:-1]):
+                                    stand_cell(ctx, b_cell, tolerance=0.95)
+                                cur_foot = list(trail[-1])
+                                perp_dirs = [(-fwd[2], 0, fwd[0]), (fwd[2], 0, -fwd[0])]
+                                perp_dirs.sort(key=lambda c: -_rock_heading_score(c))
+                                jogged = False
+                                for perp in perp_dirs:
+                                    for _j in range(5):
+                                        jf = [cur_foot[0] + perp[0], cur_foot[1], cur_foot[2] + perp[2]]
+                                        try:
+                                            dug += self._dig_cell_safely(ctx, (jf[0], jf[1] + 1, jf[2]), collect=False, relative=False)
+                                            patched += self._ensure_floor_cell(ctx, (jf[0], jf[1] - 1, jf[2]), relative=False)
+                                            dug += self._dig_cell_safely(ctx, tuple(jf), collect=False, relative=False)
+                                            stand_cell(ctx, jf, tolerance=0.95)
+                                            cur_foot = list(jf)
+                                            trail.append(list(cur_foot))
+                                            jogged = True
+                                        except WorkflowStepError:
+                                            break
+                                    if jogged:
+                                        fwd = perp
+                                        break
+                                continue
+                            break
                         stand_cell(ctx, cur_foot, tolerance=0.95)
                         continue
 
@@ -2020,13 +2166,43 @@ class MineShaftSkill(BaseSkill):
 
                     if step_counter % 8 == 0:
                         cur_status = ctx.guard.check_status(require_safe=True)
-                        _, cur_items = cave_skill._read_inventory(ctx)
+                        cur_counts, cur_items = cave_skill._read_inventory(ctx)
                         home_eval = evaluate_home_trigger(
                             cur_status,
                             cur_items,
                             remaining_seconds=ctx.guard.remaining_timeout(999.0),
                             thresholds=ctx.extra.get("home_thresholds"),
                         )
+                        if home_eval["home_reason"] == "inventory_full" and callable(getattr(ctx.guard.client, "drop", None)):
+                            try:
+                                ctx.guard.write(
+                                    ctx.guard.client.look_at,
+                                    float(cur_foot[0]) + 0.5 - float(fwd[0]) * 2.0,
+                                    float(cur_foot[1]) + 1.5,
+                                    float(cur_foot[2]) + 0.5 - float(fwd[2]) * 2.0,
+                                )
+                            except Exception:
+                                pass
+                            clutter_keep = (
+                                ("granite", 0), ("diorite", 0), ("andesite", 0), ("cobbled_deepslate", 0),
+                                ("tuff", 0), ("gravel", 0), ("flint", 0), ("dirt", 0), ("cobblestone", 64),
+                            )
+                            for cname, keep in clutter_keep:
+                                if cname == "dirt" and cur_counts.get("cobblestone", 0) < 32:
+                                    continue
+                                excess = int(cur_counts.get(cname, 0)) - int(keep)
+                                if excess > 0:
+                                    try:
+                                        ctx.guard.write(ctx.guard.client.drop, cname, excess)
+                                    except Exception:
+                                        break
+                            _, cur_items = cave_skill._read_inventory(ctx)
+                            home_eval = evaluate_home_trigger(
+                                cur_status,
+                                cur_items,
+                                remaining_seconds=ctx.guard.remaining_timeout(999.0),
+                                thresholds=ctx.extra.get("home_thresholds"),
+                            )
                         if home_eval["trigger"]:
                             ctx.extra["deep_pos"] = list(cur_foot)
                             ctx.extra["deep_fwd"] = list(fwd)
@@ -2653,8 +2829,9 @@ class MineShaftSkill(BaseSkill):
                 self._retreat_downsampled(trail_ctx, retreat_trail, step_stride=2, reverse=True)
             except WorkflowUncertainError:
                 raise
-            except Exception:
-                pass
+            except WorkflowStepError as exc:
+                if exc.code in EXPEDITION_INTERRUPTS:
+                    raise
             raw_t = self.client.get_status()
             st_t = raw_t.get("result") if isinstance(raw_t, dict) and "result" in raw_t else raw_t
             pos_t = parse_pos(st_t.get("pos") if isinstance(st_t, dict) else None)
@@ -2669,9 +2846,12 @@ class MineShaftSkill(BaseSkill):
             allow_bridge=True,
             allow_drop=True,
             max_steps=96,
+            cancel_event=cancel_event,
             timeout_seconds=min(60.0, max(20.0, float(timeout_seconds) * 0.55)),
         )
         _raise_if_unknown(nav)
+        if nav.error_code in EXPEDITION_INTERRUPTS:
+            raise WorkflowStepError(nav.error_code, nav.message, data=nav.data)
         raw2 = self.client.get_status()
         st2 = raw2.get("result") if isinstance(raw2, dict) and "result" in raw2 else raw2
         pos2 = parse_pos(st2.get("pos") if isinstance(st2, dict) else None)
@@ -2690,7 +2870,9 @@ class MineShaftSkill(BaseSkill):
         esc: Dict[str, Any] = {"escaped": False, "pos": list(pos2 or pos)}
         try:
             esc = escape_to_surface(ctx, max_ascend=160, blocks=SCAFFOLD_BLOCKS)
-        except WorkflowStepError:
+        except WorkflowStepError as exc:
+            if exc.code in EXPEDITION_INTERRUPTS:
+                raise
             esc = {"escaped": False, "pos": list(pos2 or pos)}
         if not esc.get("escaped"):
             ep = parse_pos(esc.get("pos")) or pos2
@@ -2704,13 +2886,18 @@ class MineShaftSkill(BaseSkill):
                             allow_bridge=True,
                             allow_drop=True,
                             max_steps=8,
+                            cancel_event=cancel_event,
                             timeout_seconds=10.0,
                         )
                         _raise_if_unknown(lateral)
+                        if lateral.error_code in EXPEDITION_INTERRUPTS:
+                            raise WorkflowStepError(lateral.error_code, lateral.message, data=lateral.data)
                         esc = escape_to_surface(ctx, max_ascend=160, blocks=SCAFFOLD_BLOCKS)
                     except WorkflowUncertainError:
                         raise
-                    except Exception:
+                    except WorkflowStepError as exc:
+                        if exc.code in EXPEDITION_INTERRUPTS:
+                            raise
                         continue
                     if esc.get("escaped"):
                         break
@@ -2789,7 +2976,7 @@ class MineShaftSkill(BaseSkill):
                 timeout_seconds=cave_t,
                 allow_damage=allow_damage,
             )
-            if _unknown_result(cave_res):
+            if _unknown_result(cave_res) or cave_res.error_code in EXPEDITION_INTERRUPTS:
                 return cave_res
             surface_chk = self._ensure_returned_to_surface(start_surface, cancel_event=cancel_event)
             net_now = _net_counts()
@@ -2802,6 +2989,11 @@ class MineShaftSkill(BaseSkill):
                 "harvested": dict(net_now),
                 "surface_return": surface_chk,
             })
+            if not surface_chk.get("on_surface"):
+                return SkillResult(False, "Could not verify return from the surface cave", error_code="surface_return_failed",
+                                   data={"harvested": net_now, "phases": phase_reports, "surface_return": surface_chk})
+            if cave_res.error_code == "return_home_requested":
+                return cave_res
             if (cave_res.data or {}).get("stop_reason") == "target_reached" or (
                 parsed_targets and all(
                     (net_now.get(spec["drop_item"], 0) + (net_now.get("iron_ingot", 0) if spec["drop_item"] == "raw_iron" else 0))
@@ -2824,7 +3016,10 @@ class MineShaftSkill(BaseSkill):
         else:
             schedule = [int(b["target_y"]) for b in bands]
             rem_total = max(90.0, float(total_timeout_seconds) - (time.monotonic() - t_start) - 10.0)
-            self._ensure_returned_to_surface(start_surface, cancel_event=cancel_event)
+            entry_check = self._ensure_returned_to_surface(start_surface, cancel_event=cancel_event)
+            if not entry_check.get("on_surface"):
+                return SkillResult(False, "Could not verify the surface before starting the shaft",
+                                   error_code="surface_return_failed", data={"surface_return": entry_check})
             res = self.build_mine_shaft(
                 radius=20,
                 branch_length=4,
@@ -2843,7 +3038,7 @@ class MineShaftSkill(BaseSkill):
                 cancel_event=cancel_event,
                 allow_damage=allow_damage,
             )
-            if _unknown_result(res):
+            if _unknown_result(res) or res.error_code in EXPEDITION_INTERRUPTS:
                 return res
             retreat_trail = ((res.data or {}).get("mining_progress") or {}).get("deep_trail") or []
             surface_chk = self._ensure_returned_to_surface(
@@ -2871,18 +3066,14 @@ class MineShaftSkill(BaseSkill):
             elif time.monotonic() - t_start >= float(total_timeout_seconds) - 10.0:
                 stop_reason = "timeout"
 
-        final_surface = self._ensure_returned_to_surface(
-            start_surface,
-            retreat_trail=retreat_trail if bands else None,
-            cancel_event=cancel_event,
-        )
+        final_surface = surface_chk if bands else self._ensure_returned_to_surface(start_surface, cancel_event=cancel_event)
         final_net = _net_counts()
         target_drop_items = {spec["drop_item"] for spec in parsed_targets.values()} | {"iron_ingot", "gold_ingot"}
         target_ore_gained = sum(int(final_net.get(k, 0)) for k in target_drop_items)
         shaft_ok = (not bands) or bool(phase_reports and phase_reports[-1].get("success"))
-        done_ok = stop_reason == "target_reached" or bool(
-            final_surface.get("on_surface") and target_ore_gained > 0 and shaft_ok
-        )
+        done_ok = bool(final_surface.get("on_surface") and (stop_reason == "target_reached" or (target_ore_gained > 0 and shaft_ok)))
+        if not final_surface.get("on_surface"):
+            stop_reason = "surface_return_failed"
         return SkillResult(
             done_ok,
             f"Surface stratified mining finished (stop={stop_reason}, on_surface={final_surface.get('on_surface')}, harvested={final_net})",

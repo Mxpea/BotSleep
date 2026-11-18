@@ -169,7 +169,7 @@ class ArchitectureContractTests(unittest.TestCase):
         )
         self.assertEqual(
             set(daily_tools["gather_resource"]["parameters"]["properties"]["expected_name"]["enum"]),
-            set(DailySurvivalSkills.IRON),
+            set(DailySurvivalSkills.IRON | DailySurvivalSkills.DIAMOND),
         )
         self.assertEqual(
             set(daily_tools["clear_foliage"]["parameters"]["properties"]["expected_name"]["enum"]),

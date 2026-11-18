@@ -644,6 +644,7 @@ def dig_block(
     allowed_blocks: Optional[Iterable[str]] = None,
     collect: bool = False,
     verify_timeout: float = 1.5,
+    tool_priority: Optional[Sequence[str]] = None,
 ) -> Dict[str, Any]:
     """Safely equip an appropriate pickaxe, dig a target block, and verify removal."""
     world = [int(v) for v in (ctx.world_pos(rel_pos, integer=True) if relative else rel_pos)]
@@ -674,7 +675,7 @@ def dig_block(
             suggested_recovery=f"inspect_and_handle_block_at {world}",
         )
 
-    pickaxe = ctx.select_item(PICKAXE_PRIORITY)
+    pickaxe = ctx.select_item(tool_priority or PICKAXE_PRIORITY)
     if pickaxe is not None:
         ctx.guard.write(ctx.guard.client.equip, item=pickaxe, slot="hand")
 

@@ -21,7 +21,9 @@ class DailySurvivalSkills(SurvivalSkills):
              "potatoes": ("potato", "potato"), "beetroots": ("beetroot", "beetroot_seeds")}
     SEEDS = {value[1]: key for key, value in CROPS.items()}
     IRON = frozenset({"iron_ore", "deepslate_iron_ore"})
-    IRON_PICKS = frozenset({"stone_pickaxe", "iron_pickaxe", "diamond_pickaxe", "netherite_pickaxe"})
+    DIAMOND = frozenset({"diamond_ore", "deepslate_diamond_ore"})
+    DIAMOND_PICKS = frozenset({"iron_pickaxe", "diamond_pickaxe", "netherite_pickaxe"})
+    IRON_PICKS = DIAMOND_PICKS | {"stone_pickaxe"}
     ANIMALS = {"cow": {"beef", "leather"}, "pig": {"porkchop"},
                "sheep": {"mutton"} | {color + "_wool" for color in (
                    "white", "orange", "magenta", "light_blue", "yellow", "lime", "pink", "gray",
@@ -204,12 +206,16 @@ class DailySurvivalSkills(SurvivalSkills):
     def _gather_resource(self, args, context):
         pos, name = self._pos(args["pos"], block=True), self._item(args["expected_name"])
         self._prepare(context)
-        if name not in self.IRON:
-            raise _Failure("unsupported_block", "Daily resource gathering currently supports iron ores only")
+        if name in self.IRON:
+            picks, drop, tier = self.IRON_PICKS, "raw_iron", "stone"
+        elif name in self.DIAMOND:
+            picks, drop, tier = self.DIAMOND_PICKS, "diamond", "iron"
+        else:
+            raise _Failure("unsupported_block", "Select an observed iron or diamond ore")
         counts, _ = self._inventory(context)
-        if not any(counts.get(item, 0) for item in self.IRON_PICKS):
-            raise _Failure("missing_tool", "Iron ore requires a stone, iron, diamond or netherite pickaxe")
-        return self._dig_daily(pos, name, {"raw_iron", name}, context)
+        if not any(counts.get(item, 0) for item in picks):
+            raise _Failure("missing_tool", f"{name} needs a {tier} or higher-tier pickaxe")
+        return self._dig_daily(pos, name, {drop, name}, context)
 
     def _harvest_crop(self, args, context):
         pos, name = self._pos(args["pos"], block=True), self._item(args["expected_name"])
@@ -427,6 +433,8 @@ class DailySurvivalSkills(SurvivalSkills):
         return hunt_animal(self, args, context)
 
     def _equip_armor(self, args, context):
+        from .equipment import read_worn_slot_item
+
         item, slot = self._item(args["item"]), args["slot"]
         self._prepare(context)
         if not isinstance(slot, str) or item not in self.ARMOR.get(slot, ()):
@@ -435,19 +443,29 @@ class DailySurvivalSkills(SurvivalSkills):
         self._daily_action(context, self.client.equip, item, slot=slot)
         self._prepare(context)
         inv = self._result(self.client.inventory())
-        armor = inv.get("armor", {}).get("chest" if slot == "torso" else slot)
+        armor = read_worn_slot_item(inv, slot)
         if not isinstance(armor, dict) or armor.get("name") != item:
             raise _Failure("equip_unverified", "The requested armor was not observed in its armor slot")
         return self._verified(context, item=item, slot=slot, equipped=armor)
 
-    def _window(self, pos, context, names):
+    def _window(self, pos, context, names, *, inspect=False):
         block = self._block(pos, context)
         if block["name"] not in names:
             raise _Failure("unsupported_container", "Target is not a supported observed container")
-        self._approach(pos, context)
         def target(status):
             if self._block(pos, context)["name"] != block["name"]:
                 raise _Failure("target_changed", "The observed container changed before opening")
+        status = self._prepare(context)
+        distance = math.dist(status["pos"], pos)
+        if inspect and 3 < distance <= 32 and not context.get("cautious"):
+            # Inspect within the observation collector's radius, including elevated furnaces.
+            y = math.floor(status["pos"][1]) if abs(pos[1] - status["pos"][1]) > 1 else pos[1]
+            self._daily_action(context, self.client.move_to, pos[0], y, pos[2],
+                               range=1, timeout_ms=15000, validate=target)
+            if math.dist(self._prepare(context)["pos"], pos) > 3:
+                raise _Failure("out_of_reach", "Container inspection did not reach observation range")
+        else:
+            self._approach(pos, context)
         window = self._daily_action(context, self.client.window_view, pos, readonly=True, validate=target)
         context["window_target"] = (list(pos), block["name"])
         sections = window.get("sections")
@@ -502,7 +520,7 @@ class DailySurvivalSkills(SurvivalSkills):
     def _inspect_container(self, args, context):
         pos = self._pos(args["pos"], block=True)
         self._prepare(context)
-        window = self._window(pos, context, self.CONTAINERS | self.FURNACES)
+        window = self._window(pos, context, self.CONTAINERS | self.FURNACES, inspect=True)
         self._prepare(context)
         return self._verified(context, pos=pos, window=window, inventory_mutated=False)
 

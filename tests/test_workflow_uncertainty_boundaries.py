@@ -65,6 +65,30 @@ class MiningUnknownBoundaryTests(unittest.TestCase):
         self.assertTrue(result.data["executed"])
         self.client.get_status.assert_called_once()
 
+    def test_interrupted_expedition_ends_before_any_return_or_new_shaft(self):
+        for code in ("dead", "cancelled", "not_connected"):
+            for caves in (True, False):
+                with self.subTest(code=code, caves=caves), patch("skills.mining.CaveExploreSkill") as cave:
+                    failure = SkillResult(False, "interrupted", error_code=code)
+                    cave.return_value.discover_and_explore_caves.return_value = failure
+                    self.skill._ensure_returned_to_surface = Mock(return_value={"on_surface": True})
+                    self.skill.build_mine_shaft = Mock(return_value=failure)
+                    result = self.skill.mine_targets_from_surface(
+                        origin=[0, 64, 0], targets=self.targets, prefer_caves_first=caves)
+                    self.assertIs(result, failure)
+                    self.assertEqual(self.skill._ensure_returned_to_surface.call_count, int(not caves))
+                    self.assertEqual(self.skill.build_mine_shaft.call_count, int(not caves))
+
+    def test_collected_cave_quota_without_surface_return_does_not_complete(self):
+        with patch("skills.mining.CaveExploreSkill") as cave:
+            cave.return_value.discover_and_explore_caves.return_value = SkillResult(
+                True, "collected", {"stop_reason": "target_reached"})
+            self.skill._ensure_returned_to_surface = Mock(return_value={"on_surface": False})
+            self.skill.build_mine_shaft = Mock()
+            result = self.skill.mine_targets_from_surface(origin=[0, 64, 0], targets=self.targets)
+        self.assertEqual(result.error_code, "surface_return_failed")
+        self.skill.build_mine_shaft.assert_not_called()
+
     def test_unknown_trail_does_not_create_fresh_navigation_guard(self):
         self.client.get_status.return_value["result"]["pos"] = [.5, 5, .5]
         self.skill._retreat_downsampled = Mock(side_effect=WorkflowUncertainError(

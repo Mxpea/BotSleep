@@ -97,6 +97,34 @@ class MainlineTests(unittest.TestCase):
             finally:
                 h.close()
 
+    def test_iron_chapter_uses_a_local_deep_mine_for_missing_ore(self):
+        with tempfile.TemporaryDirectory() as temp:
+            settings = copy.deepcopy(DEFAULTS["survival"])
+            settings.update(objective="daily", state_dir=temp)
+            settings["autonomy"]["mainline"] = True
+            world = TaskWorld()
+            world.counts.update(stone_pickaxe=2, stone_axe=1, stone_sword=1, stick=4,
+                                cooked_beef=8, torch=4, coal=8, birch_planks=8)
+            world.block([2, 64, 0], "crafting_table")
+            world.furnace()
+            brain = Brain()
+            planner = LLMSurvivalPlanner({"enabled": True}, settings, brain=brain)
+            harness = SurvivalHarness(world, settings, DEFAULTS["sleep"], planner=planner)
+            try:
+                harness.context["mainline_sites"] = {
+                    key: {"pos": [35, 64, 0], "dimension": world.status["dimension"]}
+                    for key in ("shelter", "bed", "storage")}
+                obs = harness._observe()
+                harness._prepare_context(obs)
+                goal = harness._mainline_action(obs)
+                self.assertEqual(goal.args, {"task": "iron_tools"})
+                self.assertTrue(harness._task_start(goal, obs).success)
+                self.assertEqual(harness._task_next(obs).goal, "deep_mine")
+                self.assertEqual(harness.task_controller.state()["pending_deep_mine"]["resource"], "raw_iron")
+                self.assertEqual(brain.requests, [])
+            finally:
+                harness.close()
+
     def test_native_wood_reserve_is_normalized_once_and_policy_still_applies(self):
         settings = dict(DEFAULTS["survival"], objective="daily")
         args = {"task": "wood_reserve", "count": 1, "reason": "Gather a log"}

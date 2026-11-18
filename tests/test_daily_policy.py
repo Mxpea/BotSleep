@@ -720,6 +720,33 @@ class DailyPolicyTests(unittest.TestCase):
         self.assertFalse(limits["route_evidence_is_actual_trajectory"])
         self.assertEqual(limits["shelter_spawn_safety"], "unknown")
 
+    def test_opportunistic_sleep_policy_allows_thunder_and_night_work_without_bed_still_sleeps_near_bed(self):
+        opp = DailySafetyPolicy({"sleep_policy": "opportunistic"})
+        thunder_day = observed(is_day=True, thundering=True, time_of_day=3000)
+        self.assertIsNone(opp.choose(thunder_day, self.baseline))
+        self.assertIsNone(opp.validate(action("gather_block", pos=[2, 64, 0], expected_name="oak_log"), thunder_day))
+        self.assertTrue(opp.constraints(thunder_day)["model_allowed"])
+
+        night_no_bed = observed(is_day=False, time_of_day=14000)
+        self.assertIsNone(opp.choose(night_no_bed, self.baseline))
+        self.assertIsNone(opp.validate(action("gather_block", pos=[2, 64, 0], expected_name="oak_log"), night_no_bed))
+
+        night_with_bed = observed(is_day=False, time_of_day=14000)
+        night_with_bed["blocks"] = [{"name": "white_bed", "pos": [2, 64, 0], "properties": {"occupied": False}}]
+        self.assertEqual(opp.choose(night_with_bed, self.baseline).name, "auto_sleep")
+        thunder_day["blocks"] = night_with_bed["blocks"]
+        self.assertEqual(opp.choose(thunder_day, self.baseline).name, "auto_sleep")
+
+    def test_opportunistic_home_route_has_priority_over_night_work_at_low_health(self):
+        policy = DailySafetyPolicy({"sleep_policy": "opportunistic", "low_health_threshold": 8})
+        obs = observed(is_day=False, time_of_day=14000, health=7, food=15)
+        self.gated_shelter(obs)
+        decision = policy.choose(obs, self.baseline)
+        self.assertEqual(decision.name, "set_door")
+        self.assertIsNone(policy.validate(decision, obs))
+        self.assertEqual(policy.constraints(obs)["allowed_actions"], ["wait", "set_door"])
+        self.assertIsNotNone(policy.validate(action("gather_resource", pos=[2, 64, 0], expected_name="iron_ore"), obs))
+
 
 if __name__ == "__main__":
     unittest.main()

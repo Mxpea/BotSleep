@@ -18,7 +18,7 @@
 
 ### 当前已绑定的目标程序
 
-`run_survival_task({task, resource?, item?, count?, radius?})` 只在 daily/competition 启用；默认目录为 9/35/40，`survival.autonomy.enabled=false` 时从模型请求移除该工具。`task` 限 12 类，`count` 为 1～64、默认 8，`radius` 为 4～64、默认 32；不接受位置队列或任意技能名。`gather` 必须有 `resource`，`craft/smelt` 必须有受支持的产物 `item`，其余不接受二者。
+`run_survival_task({task, resource?, item?, count?, radius?})` 只在 daily/competition 启用；默认目录为 9/35/40，`survival.autonomy.enabled=false` 时从模型请求移除该工具。`task` 限 14 类，`count` 为 1～64、默认 8，`radius` 为 4～64、默认 32；不接受位置队列或任意技能名。`gather` 必须有 `resource`，`craft/smelt` 必须有受支持的产物 `item`，其余不接受二者。
 
 上述数量是完整注册数。正常目标规划阶段动态过滤为目标工具与必要安全/赛事管理工具；无 pending/unknown 的 `needs_ai` 每个 task_id 最多接受 2 次生产原子修复。明确低血/饥饿情境仅额外开放受限食物动作。模型响应即使包含完整目录中存在的原子动作，也必须通过当前请求阶段的允许集合，不能绕过目标授权。
 

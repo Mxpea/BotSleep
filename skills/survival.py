@@ -28,7 +28,7 @@ class SurvivalSkills:
     WOODS = ("oak", "spruce", "birch", "jungle", "acacia", "dark_oak", "mangrove", "cherry", "pale_oak")
     LOGS = frozenset(wood + "_log" for wood in WOODS)
     PLANKS = frozenset(wood + "_planks" for wood in WOODS)
-    GATHERABLE = LOGS | {"stone", "cobblestone", "coal_ore", "deepslate_coal_ore"}
+    GATHERABLE = LOGS | {"stone", "cobblestone", "coal_ore", "deepslate_coal_ore", "dead_bush"}
     PICKAXES = frozenset(tier + "_pickaxe" for tier in ("wooden", "copper", "stone", "iron", "golden", "diamond", "netherite"))
     AIR = frozenset({"air", "cave_air", "void_air"})
     # Verified zero-collision, replaceable targets in Minecraft 1.21.11.
@@ -39,10 +39,24 @@ class SurvivalSkills:
     RETREAT_TRUNKS = LOGS | frozenset(wood + "_wood" for wood in WOODS)
     HAZARDS = frozenset({"water", "lava", "bubble_column", "fire", "soul_fire", "magma_block",
                          "campfire", "soul_campfire", "cactus", "sweet_berry_bush", "powder_snow"})
-    SUPPORT = LOGS | PLANKS | {"stone", "cobblestone", "dirt", "grass_block", "coarse_dirt", "rooted_dirt",
-                               "andesite", "granite", "diorite", "deepslate", "cobbled_deepslate", "moss_block",
-                               "crafting_table", "furnace"}
-    PLACEABLE = LOGS | PLANKS | {"stone", "cobblestone", "dirt", "crafting_table", "furnace", "chest", "torch"}
+    SUPPORT = LOGS | PLANKS | {
+        "stone", "cobblestone", "dirt", "grass_block", "coarse_dirt", "rooted_dirt",
+        "podzol", "mycelium", "mud", "packed_mud",
+        "sand", "red_sand", "sandstone", "cut_sandstone", "chiseled_sandstone", "smooth_sandstone",
+        "red_sandstone", "cut_red_sandstone", "chiseled_red_sandstone", "smooth_red_sandstone",
+        "terracotta", "gravel",
+        *(color + "_terracotta" for color in (
+            "white", "orange", "magenta", "light_blue", "yellow", "lime", "pink", "gray",
+            "light_gray", "cyan", "purple", "blue", "brown", "green", "red", "black",
+        )),
+        "andesite", "granite", "diorite", "deepslate", "cobbled_deepslate",
+        "tuff", "calcite", "dripstone_block", "snow_block", "moss_block",
+        "crafting_table", "furnace",
+    }
+    PLACEABLE = LOGS | PLANKS | {
+        "stone", "cobblestone", "cobbled_deepslate", "dirt", "sand", "sandstone",
+        "crafting_table", "furnace", "chest", "torch",
+    }
     FOODS = frozenset({"apple", "bread", "carrot", "baked_potato", "beetroot", "melon_slice", "cookie",
                        "pumpkin_pie", "cooked_beef", "cooked_porkchop", "cooked_chicken", "cooked_mutton",
                        "cooked_rabbit", "cooked_cod", "cooked_salmon", "golden_carrot", "dried_kelp",
@@ -266,7 +280,7 @@ class SurvivalSkills:
         status = self._status(context)
         target = self._gather_guard(pos, name, status, context)
         before, items = self._inventory(context)
-        if name not in self.LOGS:
+        if name not in self.LOGS | {"dead_bush"}:
             usable = [item for item in items if item["name"] in self.PICKAXES and item["count"] > 0
                       and (not item.get("durability") or item["durability"][0] > 0)]
             if not usable:
@@ -301,6 +315,8 @@ class SurvivalSkills:
             expected_drops.add("cobblestone")
         if name in {"coal_ore", "deepslate_coal_ore"}:
             expected_drops.add("coal")
+        if name == "dead_bush":
+            expected_drops = {"stick", "dead_bush"}
         try:
             dig_result = self._action(context, self.client.dig, pos, collect=not context.get("cautious", False))
         except APIError as error:
@@ -317,6 +333,8 @@ class SurvivalSkills:
             evidence["collection"] = dig_result["collection"]
         if evidence["block_removed"] and not gained:
             self._uncollected_drops(pos, expected_drops, context, evidence)
+            if name == "dead_bush" and not evidence.get("visible_drops"):
+                return evidence
         if remaining["name"] == name or not gained:
             raise _Failure("gather_unverified", "Block removal and expected inventory gain were not both observed", evidence)
         return evidence
@@ -633,7 +651,8 @@ class SurvivalSkills:
                 if health_lost:
                     raise _Failure("action_unconfirmed", "Health fell before the checked landing was verified")
                 minimum_height = -1.1 if target[1] > before["pos"][1] else -.15
-                if not same_column or not minimum_height <= height <= 2.1 or status.get("on_ground") is True:
+                max_drop_height = max(2.1, before["pos"][1] - target[1] + 0.15)
+                if not same_column or not minimum_height <= height <= max_drop_height or status.get("on_ground") is True:
                     # A stable wrong landing is known, not a transient fall.
                     raise _Failure("retreat_unverified", "Observed movement landed outside the checked step",
                                    {"pos": status["pos"], "candidate_failed": True})
@@ -690,8 +709,10 @@ class SurvivalSkills:
         source = read((start[0], start[1] - 1, start[2]))
         if not supported(source) or source["name"] not in self.RETREAT_LEAVES | self.RETREAT_TRUNKS:
             return None  # Edge contact and solid platforms do not authorize digging.
+        allow_three_drop = self._number(before.get("health", 0), "health", 0, 1024) > 10
+        drops = ((1, 2, 3, 0) if allow_three_drop else (1, 2, 0)) if allow_level else ((1, 2, 3) if allow_three_drop else (1, 2))
         for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-            for drop in ((1, 2, 0) if allow_level else (1, 2)):
+            for drop in drops:
                 cell = (start[0] + dx, start[1] - drop, start[2] + dz)
                 if cell in excluded:
                     continue
@@ -1255,15 +1276,17 @@ class SurvivalSkills:
                 tolerance = 0.5 if len(path) == 1 else 1e-9
                 ordered = directions if escaping else sorted(directions, key=lambda delta: threat_score(
                     [current[0] + delta[0] + .5, current[1], current[2] + delta[1] + .5]), reverse=True)
+                step_ys = (0, -1, -2, -3, 1) if (escaping and before["health"] > 10) else (0, -1, -2, 1)
+                min_dy = -12 if escaping else -6
                 for sx, sz in ordered:
-                    for step_y in (0, -1, -2, 1):
+                    for step_y in step_ys:
                         cell = (current[0] + sx, current[1] + step_y, current[2] + sz)
                         if cell in visited or cell in excluded:
                             continue
                         point = [cell[0] + 0.5, cell[1], cell[2] + 0.5]
                         horizontal = math.hypot(point[0] - threat[0], point[2] - threat[2])
                         if (math.hypot(point[0] - origin[0], point[2] - origin[2]) > min(distance, 8)
-                                or not -6 <= point[1] - origin[1] <= 2
+                                or not min_dy <= point[1] - origin[1] <= 2
                                 or (not escaping and (horizontal < norm - 0.5
                                                      or horizontal + tolerance < current_distance))):
                             continue

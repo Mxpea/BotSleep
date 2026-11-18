@@ -47,6 +47,14 @@ class RepairContextTests(unittest.TestCase):
         self.assertIn("gather_resource", {tool["function"]["name"] for tool in tools})
         self.assertIn("clear_foliage", {tool["function"]["name"] for tool in tools})
 
+    def test_exposed_diamond_has_a_registered_repair_action(self):
+        planner, _ = self.planner(response("wait"))
+        obs = observation({"iron_pickaxe": 1})
+        obs["blocks"].append({"name": "deepslate_diamond_ore", "pos": [3, 64, 1]})
+        tools, _, _ = planner._request_catalog(self.context(resource="diamond"), obs)
+        gather = next(tool["function"] for tool in tools if tool["function"]["name"] == "gather_resource")
+        self.assertIn("deepslate_diamond_ore", gather["parameters"]["properties"]["expected_name"]["enum"])
+
     def test_unrelated_tool_cannot_escape_via_format_repair_or_spend_action_credit(self):
         planner, brain = self.planner(response("place_bed", {"pos": [2, 64, 0], "item": "white_bed"}, "hidden"),
                                      response("wait", call_id="fixed"))
