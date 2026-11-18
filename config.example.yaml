@@ -13,11 +13,13 @@ agent:
 survival:
   intent: survival                         # survival or speedrun; phase hints never enable unbound actions.
   objective: "starter"                     # starter, daily, competition (requires llm.enabled; no chat debug).
+  continuous: true                         # Daily survival keeps running across deaths and overall budgets.
   operator_goal: ""                        # Optional current user goal (<=1000 visible characters); safety still wins.
   autonomy:                               # Daily/competition: one model goal, locally verified child steps.
+    mainline: true                        # In daily survival, follow the no-dragon progression with local goals.
     enabled: true                         # False retains atomic model tools; no new long task may start.
     local_opening: false                  # Daily: start an observed starter_tools goal without a model request.
-    max_steps: 128                        # Per task; 1..2048. Overall run/death budgets still apply.
+    max_steps: 128                        # Per task; 1..2048. Applies in continuous mode too.
     max_seconds: 600                      # Per task; finite positive seconds, at most 3600.
     max_local_failures: 4                 # 1..32 before returning a real failure summary for replanning.
     max_no_progress_steps: 8              # 1..128; waits/no-ops do not prove progress.
@@ -39,7 +41,7 @@ survival:
   scan_radius: 24
   poll_interval_seconds: 1
   retry_seconds: 5
-  max_steps: 256
+  max_steps: 256                          # Overall limits apply to bounded runs.
   max_runtime_seconds: 3600
   max_target_failures: 2
   target_cooldown_seconds: 300

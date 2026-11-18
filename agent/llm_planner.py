@@ -68,6 +68,8 @@ commands, teleports, material grants, arbitrary code, player combat or chat tool
 Build a sustainable overworld routine: food, tools, fuel, smelting, bed, small shelter,
 storage, safe drop recovery and maintenance. The local task board describes verified
 progress and missing prerequisites; prioritize urgent food and safety over projects.
+Use gather(resource=logs) for wood. wood_reserve is a board row. When
+context.mainline is present, repair the displayed chapter and its prerequisites.
 When available, prefer run_survival_task for one useful bounded goal instead of
 requesting an atomic action for every block or recipe. The executor finds resources
 and prerequisites, performs fresh safety/side-effect checks, and runs ordinary child
@@ -580,6 +582,30 @@ If that goal tool is unavailable, use only the currently advertised tools.
         return names
 
     def _request_catalog(self, context, observation=None):
+        tools, routing, repair_id = self._base_request_catalog(context, observation)
+        mainline = context.get("mainline")
+        if (self.objective != "daily" or not isinstance(mainline, dict) or not mainline.get("fresh")
+                or not isinstance(mainline.get("goal"), dict) or routing["mode"] in {"cautious_bootstrap", "emergency_food"}):
+            return tools, routing, repair_id
+        goal = mainline["goal"]
+        tools = copy.deepcopy(tools)
+        for tool in tools:
+            if tool["function"]["name"] != "run_survival_task":
+                continue
+            schema = tool["function"]["parameters"]
+            properties = schema["properties"]
+            for key in ("task", "item", "resource"):
+                if key in goal:
+                    properties[key]["enum"] = [goal[key]]
+                    if key not in schema["required"]:
+                        schema["required"].append(key)
+            if "count" in goal:
+                properties["count"].update(minimum=goal["count"], maximum=goal["count"])
+                if "count" not in schema["required"]:
+                    schema["required"].append("count")
+        return tools, routing, repair_id
+
+    def _base_request_catalog(self, context, observation=None):
         """Keep capability metadata complete, but grant tools per planning turn."""
         if self.objective not in {"daily", "competition"}:
             return self.tool_definitions, {"mode": "starter", "atomic_repair_remaining": 0}, None
@@ -654,6 +680,12 @@ If that goal tool is unavailable, use only the currently advertised tools.
         if name not in allowed_names or name not in allowed_schemas:
             raise LLMError("llm_invalid_arguments", "This tool is not allowed in the current request; choose an advertised bounded goal or safety tool")
         args = self._json_arguments(function.get("arguments"))
+        # The daily board uses a stock level, while the task API names the
+        # operation and resource separately. Normalize this one known spelling
+        # before applying the actual per-turn schema and all normal safety checks.
+        if (name == "run_survival_task" and args.get("task") == "wood_reserve"
+                and args.get("resource", "logs") == "logs" and "item" not in args):
+            args = {**args, "task": "gather", "resource": "logs"}
         self._validate(args, allowed_schemas[name])
         args = copy.deepcopy(args)
         content = message.get("content")
@@ -796,7 +828,7 @@ If that goal tool is unavailable, use only the currently advertised tools.
             allowed_schemas = {tool["function"]["name"]: copy.deepcopy(tool["function"]["parameters"]) for tool in request_tools}
             prompt_context = {key: context[key] for key in ("blocked_targets", "explore_index", "failures", "last_result",
                                                           "death_count", "spawn", "remaining_steps", "remaining_seconds",
-                                                          "daily_tasks", "action_hints", "memory", "survival_constraints", "competition", "playbook", "task_execution") if key in context}
+                                                          "daily_tasks", "action_hints", "memory", "survival_constraints", "competition", "playbook", "task_execution", "mainline") if key in context}
             prompt_context["failed_actions"] = [{"action": failure["decision"].name, "args": failure["decision"].args,
                                                   "error_code": failure["code"]}
                                                  for failure in list(self._failed_actions.values())[-8:]

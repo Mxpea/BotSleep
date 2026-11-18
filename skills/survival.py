@@ -217,6 +217,12 @@ class SurvivalSkills:
     def _safe_block(cls, block):
         return block["name"] not in cls.HAZARDS and (block.get("properties") or {}).get("waterlogged") not in (True, "true")
 
+    @staticmethod
+    def contact_overlap(point, cell):
+        """Physical contact guaranteed across the API's rounded player position."""
+        return [min(max(0, min(center + .3001, cell[axis] + 1) - max(center - .3001, cell[axis]))
+                    for center in (point[axis] - .05, point[axis] + .05)) for axis in (0, 2)]
+
     def _approach(self, pos, context):
         status = self._status(context)
         if context.get("cautious") and math.dist(status["pos"], pos) > 3:
@@ -746,6 +752,7 @@ class SurvivalSkills:
                     raise _Failure("near_hostile", "A hostile appeared before the canopy clearing write")
 
             outcome.update(operation="clear_foliage", cleared_pos=list(leaf), cleared_name=block["name"],
+                           destination_support_name=support_before["name"],
                            descent_target=destination, target=None, planned_path=None, final_target=None,
                            moved=0, ground_route_verified=False, retreat_complete=False)
             context["navigation_write"] = True
@@ -1010,16 +1017,6 @@ class SurvivalSkills:
                            for level in range(cell[1] + 2, current[1] + 2))
             return True
 
-        def contact_overlap(point, cell):
-            # mc-agent-api rounds position to 0.1; its physical half-width is
-            # 0.3001. Require positive contact for every possible true position.
-            overlaps = []
-            for axis in (0, 2):
-                overlaps.append(min(max(0, min(center + 0.3001, cell[axis] + 1)
-                                             - max(center - 0.3001, cell[axis]))
-                                    for center in (point[axis] - 0.05, point[axis] + 0.05)))
-            return overlaps
-
         def swept_entry_cells(point, cell):
             center = [cell[0] + 0.5, cell[1], cell[2] + 0.5]
             low_x = math.floor(min(point[0] - 0.05, center[0]) - 0.3001)
@@ -1170,7 +1167,7 @@ class SurvivalSkills:
             for x in range(math.floor(origin[0] - 0.3501), math.floor(origin[0] + 0.3501) + 1):
                 for z in range(math.floor(origin[2] - 0.3501), math.floor(origin[2] + 0.3501) + 1):
                     cell = (x, y, z)
-                    overlap = contact_overlap(origin, cell)
+                    overlap = self.contact_overlap(origin, cell)
                     if cell == start or min(overlap) <= 1e-4 or cell in excluded:
                         continue
                     support = safe_cell(cell, temporary_leaves=True)
@@ -1431,7 +1428,7 @@ class SurvivalSkills:
                 entry = feet(target)
                 contact = edge_contacts.get(entry)
                 if (abs(status["pos"][1] - y) > .05
-                        or contact is None or min(contact_overlap(status["pos"], contact)) <= 1e-4
+                        or contact is None or min(self.contact_overlap(status["pos"], contact)) <= 1e-4
                         or not edge_sweep(status["pos"], entry).issubset(edge_sweeps.get(entry, set()))
                         or (entry in edge_drops and (not drop_contact_aligned(status["pos"], contact)
                                                    or not drop_threat_safe(status["pos"], entry)))):

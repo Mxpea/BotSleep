@@ -105,7 +105,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_autonomy_defaults_and_partial_disable_preserve_run_budget(self):
         config = load_config(self.write({"survival": {"objective": "daily"}}), environ={})
-        self.assertEqual(config["survival"]["autonomy"], {"enabled": True, "local_opening": False, "max_steps": 128,
+        self.assertEqual(config["survival"]["autonomy"], {"enabled": True, "local_opening": False, "mainline": True, "max_steps": 128,
             "max_seconds": 600, "max_local_failures": 4, "max_no_progress_steps": 8, "max_explore_steps": 8})
         config = load_config(self.write({"survival": {"autonomy": {"enabled": False, "max_explore_steps": 0}}}), environ={})
         self.assertFalse(config["survival"]["autonomy"]["enabled"])
@@ -113,6 +113,16 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config["survival"]["autonomy"]["max_steps"], 128)
         self.assertEqual(config["survival"]["max_steps"], 256)
         self.assertFalse((self.root / "runtime").exists())
+
+    def test_normal_daily_mainline_respects_existing_custom_profiles_and_explicit_settings(self):
+        for profile in ({"operator_goal": "Build a shelter"}, {"intent": "speedrun"},
+                        {"autonomy": {"local_opening": True}}, {"autonomy": {"mainline": False}}):
+            with self.subTest(profile=profile):
+                config = load_config(self.write({"survival": {"objective": "daily", **profile}}), environ={})
+                self.assertFalse(config["survival"]["autonomy"]["mainline"])
+        profile = {"objective": "daily", "operator_goal": "Keep this world's base supplied", "autonomy": {"mainline": True}}
+        config = load_config(self.write({"survival": profile}), environ={})
+        self.assertTrue(config["survival"]["autonomy"]["mainline"])
 
     def test_autonomy_limits_are_bounded_and_do_not_accept_boolean_numbers(self):
         for key, low, high in (("max_steps", 1, 2048), ("max_local_failures", 1, 32),

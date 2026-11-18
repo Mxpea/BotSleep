@@ -20,9 +20,9 @@ from test_llm_planner import observation, response
 class InternalShelterContractTests(unittest.TestCase):
     def test_internal_names_never_expand_public_catalogs(self):
         expected = {"plan_shelter_preparation", "prepare_shelter_step"}
-        self.assertEqual(INTERNAL_SKILLS, expected)
+        self.assertEqual(INTERNAL_SKILLS, expected | {"plan_starter_staircase", "step_starter_staircase"})
         self.assertEqual(internal_skills_for_objective("starter"), set())
-        self.assertEqual(internal_skills_for_objective("daily"), expected)
+        self.assertEqual(internal_skills_for_objective("daily"), INTERNAL_SKILLS)
         self.assertEqual(internal_skills_for_objective("competition"), expected)
         self.assertFalse(INTERNAL_SKILLS & DAILY_SKILLS)
         for objective, count in (("starter", 9), ("daily", 35), ("competition", 40)):
@@ -47,8 +47,8 @@ class InternalShelterContractTests(unittest.TestCase):
         from skills.shelter_preparation import ShelterPreparationSkills
         runner = object()
         harness = Mock(daily=True, skills=object(), shelter_preparation_skills=runner)
-        self.assertEqual(set(ShelterPreparationSkills.ARGUMENTS), INTERNAL_SKILLS)
-        for name in INTERNAL_SKILLS:
+        self.assertEqual(set(ShelterPreparationSkills.ARGUMENTS), {"plan_shelter_preparation", "prepare_shelter_step"})
+        for name in ShelterPreparationSkills.ARGUMENTS:
             self.assertIs(resolve_skill_runner(harness, name), runner)
             self.assertEqual(SKILL_REGISTRY[name].runner_slot, "shelter_preparation_skills")
             self.assertEqual(ShelterPreparationSkills.ARGUMENTS[name], ({"pos", "orientation"}, {"pos"}))
@@ -65,7 +65,7 @@ class InternalShelterContractTests(unittest.TestCase):
             try:
                 self.assertIsInstance(harness.shelter_preparation_skills, ShelterPreparationSkills)
                 self.assertIs(harness.shelter_preparation_skills.client, world)
-                for name in INTERNAL_SKILLS:
+                for name in ShelterPreparationSkills.ARGUMENTS:
                     self.assertIs(resolve_skill_runner(harness, name), harness.shelter_preparation_skills)
                 self.assertEqual(world.calls, [])
             finally:

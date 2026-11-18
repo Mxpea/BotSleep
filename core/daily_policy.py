@@ -11,6 +11,7 @@ from collections.abc import Mapping
 
 from agent.survival_planner import Decision, SurvivalPlanner, RANGED_HOSTILES
 from core.domain import FOOD_POINTS, LOG_NAMES, PLANK_NAMES, cell_coords, extract_blocks, parse_pos
+from core.night_home_route import exterior_step
 from skills.daily_survival import DailySurvivalSkills
 from skills.combat import combat_options
 
@@ -426,6 +427,19 @@ class DailySafetyPolicy:
         return door
 
     def _return_home(self, observation):
+        short = self._short_home(observation)
+        if short:
+            return short
+        shelter = self._shelter(observation)
+        if not shelter or self._partial(observation) or not self._door(shelter, observation):
+            return None
+        target = exterior_step(observation["status"], shelter)
+        if target and self._near_safe(target, observation, 2):
+            return Decision("position_for_task", {"pos": target},
+                            "Follow one checked step of the complete level route to the verified shelter door", "safety")
+        return None
+
+    def _short_home(self, observation):
         shelter = self._shelter(observation)
         if shelter is None:
             return None
@@ -513,6 +527,9 @@ class DailySafetyPolicy:
             elif self._canopy(observation, context):
                 scenario, allowed, radius, model = "canopy_escape", ["canopy_escape", "wait"], 1, False
                 reason = "Canopy support requires one local verified escape step before production or food search"
+            elif self._night(status) and (home := self._return_home(observation)):
+                scenario, allowed, radius, model = "shelter_time", ["wait", home.name], 4, False
+                reason = home.reason
             elif status["health"] <= self.low_health:
                 scenario, allowed, radius, model = "low_health", ["wait"], 0, False
                 reason = ("Food is below 18: natural regeneration cannot restore health; seek only verified nearby food"
@@ -562,6 +579,8 @@ class DailySafetyPolicy:
                 return foods[0]
         if self._canopy(observation, context):
             return self._canopy_decision()
+        if self._night(status) and (home := self._return_home(observation)):
+            return home
         if status["health"] <= self.low_health:
             if self._partial(observation) and status["food"] < 18:
                 return self._wait("Collect a complete fresh food and ground observation before resuming bounded recovery", "observe")
@@ -574,9 +593,6 @@ class DailySafetyPolicy:
             return self._wait("Food recovery is blocked: food is below 18 and no currently verified safe food is available; waiting cannot regenerate health"
                               if status["food"] < 18 else "Observe natural regeneration without hunting or gathering", "recover")
         if self._night(status):
-            home = self._return_home(observation)
-            if home:
-                return home
             if (not status["is_day"] or status["thundering"]) and self._bed(observation):
                 return Decision("auto_sleep", {}, "Use a currently observed free bed through the verified sleep skill", "sleep")
             shelter = self._shelter(observation)
@@ -612,6 +628,8 @@ class DailySafetyPolicy:
             return None if decision.name == "canopy_escape" and not decision.args else "canopy_escape_required"
         if decision.name == "canopy_escape":
             return "canopy_support_unverified"
+        if self._night(status) and (home := self._return_home(observation)):
+            return None if decision.name == home.name and decision.args == home.args else "night_requires_verified_sleep_or_shelter_route"
         if status["health"] <= self.low_health:
             if status["food"] < 18 and not self._night(status) and self._food_valid(decision, observation, low_health=True):
                 return None
@@ -622,9 +640,6 @@ class DailySafetyPolicy:
                 return None
             return "low_health_food_only"
         if self._night(status):
-            home = self._return_home(observation)
-            if home is not None:
-                return None if decision.name == home.name and decision.args == home.args else "night_requires_verified_sleep_or_shelter_route"
             if decision.name == "auto_sleep" and (not status["is_day"] or status["thundering"]) and self._bed(observation):
                 return None
             return "night_requires_verified_sleep_or_shelter_route"

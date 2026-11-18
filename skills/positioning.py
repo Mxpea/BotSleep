@@ -18,6 +18,8 @@ class PositioningSkills(DailySurvivalSkills):
     MAX_READS = 96
     READ_SECONDS = 20
     HALF_WIDTH = .36  # Player .3, rounded position .05 and a small margin.
+    EDGE_GROUND = frozenset({"grass_block", "dirt", "coarse_dirt", "rooted_dirt", "moss_block",
+                             "stone", "andesite", "diorite", "granite", "deepslate"})
 
     @staticmethod
     def _cell(pos):
@@ -155,8 +157,6 @@ class PositioningSkills(DailySurvivalSkills):
             raise _Failure("unsafe", "A terrain step entered a hazardous body state")
         if type(status.get("on_ground")) is not bool:
             raise _Failure("invalid_response", "Terrain step grounded state is unknown")
-        velocity = self._pos(status.get("velocity"))
-        speed = self._number(status.get("speed"), "speed", 0, 1024)
         if ("busy" not in status or status["busy"] is not None
                 or any(status.get(k) for k in ("jumping", "held_controls"))
                 or status.get("last_death") != before.get("last_death")
@@ -174,10 +174,16 @@ class PositioningSkills(DailySurvivalSkills):
         pending = []
         if status["on_ground"] is not True:
             pending.append("airborne")
-        if speed > .1:
-            pending.append("speed")
-        if math.dist(velocity, [0, 0, 0]) > .1:
-            pending.append("velocity")
+        # The API reports an explicit null pair until the next physics sample
+        # after a motion reset. Only a post-write observer may wait for it.
+        if (allow_motion and "speed" in status and status["speed"] is None
+                and "velocity" in status and status["velocity"] is None):
+            pending.append("motion_sample")
+        else:
+            if self._number(status.get("speed"), "speed", 0, 1024) > .1:
+                pending.append("speed")
+            if math.dist(self._pos(status.get("velocity")), [0, 0, 0]) > .1:
+                pending.append("velocity")
         if abs(status["pos"][1] - round(status["pos"][1])) > .05:
             pending.append("height")
         if pending and not allow_motion:
@@ -270,6 +276,8 @@ class PositioningSkills(DailySurvivalSkills):
             threats = self._step_threats(current["pos"], target, context)
             final = self._status(context)
             same_start(final)
+            if proof.get("rounded_origin") and final["pos"] != current["pos"]:
+                raise _Failure("safety_changed", "The measured stair contact changed during inspection")
             if not set(self._columns(final["pos"], target)).issubset(self._columns(current["pos"], target)):
                 raise _Failure("safety_changed", "Final player footprint left the checked terrain step")
             if not set(self._columns(final["pos"], final["pos"])).issubset(self._columns(current["pos"], current["pos"])):
@@ -282,8 +290,11 @@ class PositioningSkills(DailySurvivalSkills):
         self._daily_action(context, self.client.move_to, *target, range=0, timeout_ms=8000, validate=validate)
         return self._settled_position(target, before, context)
 
+    def _in_step_landing(self, pos, target):
+        return self._cell(pos) == self._cell(target) and math.dist(pos, target) <= .3
+
     def _settled_position(self, target, before, context):
-        origin, destination = list(before["pos"]), self._cell(target)
+        origin = list(before["pos"])
         evidence = context["retreat_evidence"]
         # Everything after the single write is observation. A missing or
         # interrupted landing never authorizes stop, replay, or a second move.
@@ -325,10 +336,11 @@ class PositioningSkills(DailySurvivalSkills):
                 # secondary shooter while we spend the read-only settle budget.
                 threats = self._step_threats(current["pos"], current["pos"], context)
                 if not pending:
-                    if self._cell(current["pos"]) != destination or math.dist(current["pos"], target) > .3:
+                    if not self._in_step_landing(current["pos"], target):
                         raise _Failure("action_unconfirmed", "Terrain step did not reach its checked landing")
-                    self._step_geometry(current["pos"], current["pos"], context, landing=True)
-                    if previous is not None and math.dist(current["pos"], previous["pos"]) <= .05:
+                    proof = self._step_geometry(current["pos"], current["pos"], context, landing=True)
+                    if (previous is not None and math.dist(current["pos"], previous["pos"]) <= .05
+                            and (not proof.get("rounded_origin") or previous["pos"] == current["pos"])):
                         threats = self._step_threats(current["pos"], current["pos"], context)
                         final = self._status(context)
                         final_pending = observe(final)
@@ -336,8 +348,8 @@ class PositioningSkills(DailySurvivalSkills):
                         if final_pending:
                             previous = None
                         else:
-                            if (time.monotonic() > deadline or self._cell(final["pos"]) != destination
-                                    or math.dist(final["pos"], target) > .3
+                            if (time.monotonic() > deadline or not self._in_step_landing(final["pos"], target)
+                                    or (proof.get("rounded_origin") and final["pos"] != current["pos"])
                                     or math.dist(final["pos"], current["pos"]) > .05
                                     or not set(self._columns(final["pos"], final["pos"])).issubset(
                                         self._columns(current["pos"], current["pos"]))):
@@ -358,6 +370,8 @@ class PositioningSkills(DailySurvivalSkills):
                 self._check(context)
             raise _Failure("action_unconfirmed", "Terrain step landing did not settle in time")
         except Exception as error:
+            if isinstance(error, _Failure):
+                diagnostics.update({k: error.data[k] for k in ("blocked_cell", "block") if k in error.data})
             diagnostics.update(termination=("deadline" if time.monotonic() >= deadline else
                                             "read_budget" if context.get("position_reads", 0) >= self.MAX_READS else
                                             getattr(error, "code", "internal_error")),
@@ -366,29 +380,81 @@ class PositioningSkills(DailySurvivalSkills):
             raise _Failure("action_unconfirmed", "Terrain step landing could not be fully verified",
                            {"action_state": "unknown", "recovery_error": getattr(error, "code", "internal_error")}) from None
 
-    def _position_margin_escape(self, target, before, context):
-        """One outward move from an already occupied wall-edge margin; no replay."""
+    @classmethod
+    def contacts_adjacent_centre(cls, origin, target):
+        source, dest = cls._cell(origin), cls._cell(target)
+        return (abs(origin[1] - target[1]) <= .05 and target[1] == round(target[1])
+                and all(target[i] == dest[i] + .5 for i in (0, 2))
+                and sum(abs(dest[i] - source[i]) for i in (0, 2)) == 1
+                and .55 < math.dist(origin, target) <= 1
+                and min(cls.contact_overlap(origin, dest)) > .0001)
+
+    def _contact_corridor(self, origin, target, context):
+        """Move only toward the same-level block already carrying the player's weight."""
+        if not self.contacts_adjacent_centre(origin, target):
+            raise _Failure("unsafe_route", "The player does not already touch the destination support")
+        source, dest = self._cell(origin), self._cell(target)
+        y = dest[1]
+        axis = 0 if source[0] != dest[0] else 2
+        start = set(self._columns(origin, origin))
+        columns = self._columns(origin, target)
+        for x, z in columns:
+            for level in (y, y + 1):
+                block = self._block([x, level, z], context)
+                if block["name"] not in PASS_THROUGH or not self._safe_block(block):
+                    raise _Failure("unsafe_route", "The support recovery needs clear, dry body space")
+            ground = self._block([x, y - 1, z], context)
+            if ground["name"] in self.EDGE_GROUND and self._safe_block(ground):
+                if (x, z) == (source[0], source[2]):
+                    raise _Failure("unsafe_route", "The observed source air cell has changed")
+                continue
+            if ((x, z) not in start or (x, z)[axis // 2] != source[axis]
+                    or ground["name"] != "air" or not self._safe_block(ground)):
+                raise _Failure("unsafe_route", "The move would cross new or hazardous unsupported ground")
+            # Limit the existing overhang to two dry air blocks. All of the
+            # destination-side columns require contiguous natural support.
+            below = self._block([x, y - 2, z], context)
+            if below["name"] == "air" and self._safe_block(below):
+                below = self._block([x, y - 3, z], context)
+            if below["name"] not in self.EDGE_GROUND or not self._safe_block(below):
+                raise _Failure("unsafe_route", "The pre-existing drop is too deep, wet, or unobserved")
+        return columns
+
+    def _checked_flat_step(self, target, before, context, mode):
+        """Verify a sensitive same-level move immediately before sending and after arrival."""
         origin = list(before["pos"])
-        self._step_stable(before, before)
         evidence = context["retreat_evidence"]
-        evidence["start_margin_recovery"] = True
-        self._step_threats(origin, target, context)
-        self._corridor(origin, target, context, leave_start_margin=True)
+        evidence[mode] = True
+
+        def geometry(point):
+            if mode == "edge_support_recovery":
+                return self._contact_corridor(point, target, context)
+            return self._corridor(point, target, context, leave_start_margin=mode == "start_margin_recovery")
 
         def same_start(current):
             self._step_stable(current, before)
+            if mode == "edge_support_recovery" and (current.get("is_day") is not True or current.get("thundering") is not False
+                    or type(current.get("time_of_day")) not in (int, float) or not 0 <= current["time_of_day"] < 11000
+                    or current["health"] <= 8 or current.get("food", 0) <= 6):
+                raise _Failure("unsafe_state", "Returning to a supported centre requires healthy daylight conditions")
+            if mode == "night_home_step" and (current.get("thundering") is not False
+                    or not (current.get("is_day") is False or current.get("time_of_day", 0) >= 11000)):
+                raise _Failure("safety_changed", "Night return conditions changed before movement")
             if self._cell(current["pos"]) != self._cell(origin) or math.dist(current["pos"], origin) > .05:
-                raise _Failure("safety_changed", "Wall-edge recovery origin changed before movement")
+                raise _Failure("safety_changed", "Edge recovery origin changed before movement")
 
+        same_start(before)
+        self._step_threats(origin, target, context)
+        geometry(origin)
         def validate(current):
             same_start(current)
-            columns = self._corridor(current["pos"], target, context, leave_start_margin=True)
+            columns = geometry(current["pos"])
             threats = self._step_threats(current["pos"], target, context)
             final = self._status(context)
             same_start(final)
             if (not set(self._columns(final["pos"], target)).issubset(columns)
                     or final["pos"] != current["pos"]):
-                raise _Failure("safety_changed", "Wall-edge source changed during its final geometry check")
+                raise _Failure("safety_changed", "Edge recovery source changed during its final geometry check")
             self._step_threats(final["pos"], target, context, entities=threats)
 
         context["navigation_write"] = True
@@ -411,16 +477,24 @@ class PositioningSkills(DailySurvivalSkills):
         evidence.update(origin=origin, target=target, actual_path_verified=False,
                         read_budget=self.MAX_READS, observation_budget_seconds=self.READ_SECONDS)
         self._threats(origin, target, context)
+        if status.get("is_day") is False or status.get("time_of_day", 0) >= 11000:
+            source, dest = self._cell(origin), self._cell(target)
+            if abs(source[0] - dest[0]) + abs(source[2] - dest[2]) == 1:
+                return self._checked_flat_step(target, status, context, "night_home_step")
         try:
             self._corridor(origin, target, context)
         except _Failure as error:
             cell = error.data.get("blocked_cell")
+            if (error.code == "unsafe_route" and isinstance(cell, list) and len(cell) == 3
+                    and cell[1] == self._cell(origin)[1] - 1 and error.data.get("block") == "air"
+                    and self.contacts_adjacent_centre(origin, target)):
+                return self._checked_flat_step(target, status, context, "edge_support_recovery")
             if (error.code != "unsafe_route" or not isinstance(cell, list) or len(cell) != 3
                     or cell[1] not in {self._cell(origin)[1], self._cell(origin)[1] + 1}
                     or error.data.get("block") not in self.SUPPORT
                     or not self.leaves_start_margin(origin, target, (cell[0], cell[2]))):
                 raise
-            return self._position_margin_escape(target, status, context)
+            return self._checked_flat_step(target, status, context, "start_margin_recovery")
         if self._cell(origin) == self._cell(target) and math.dist(origin, target) <= .4:
             return self._verified(context, pos=origin, already_positioned=True, moved=False)
 

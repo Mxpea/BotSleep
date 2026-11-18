@@ -6,8 +6,8 @@ import sys
 import time
 from pathlib import Path
 
-from core.client import APIError, MinecraftAgentClient
-from core.config import ConfigError, load_config
+from core.client import APIError, MinecraftAgentClient, connection_retry_delay
+from core.config import ConfigError, continuous_daily, load_config
 from core.sleep_controller import SleepController
 from debug.chat_debugger import ChatDebugger
 from debug.logger import FlightRecorder
@@ -28,6 +28,24 @@ def parse_args(argv=None):
     parser.add_argument("--acknowledge-model-idle", action="store_true", help="Clear model transport uncertainty ONLY after confirming the provider has no running request")
     parser.add_argument("--check-config", action="store_true", help="Validate configuration without connecting")
     return parser.parse_args(argv)
+
+
+def _connect_continuously(client, session_file, recorder):
+    delay = 1
+    while True:
+        try:
+            return client.connect_continuous(session_file=session_file)
+        except APIError as error:
+            if (error.code not in {"not_connected", "not_ready", "wrong_server", "ready_timeout", "network_error",
+                                   "request_timeout", "death_loop", "death_loop_cooldown", "rate_limited"}
+                    and error.status_code not in (429, 500, 502, 503, 504)):
+                raise
+            seconds = connection_retry_delay(error, delay)
+            if recorder:
+                recorder.record("WARN", "main", "CONNECTION_RETRY", {
+                    "phase": "reconnecting", "code": error.code, "retry_in_seconds": seconds})
+            time.sleep(seconds)
+            delay = min(30, delay * 2)
 
 
 def main(argv=None) -> int:
@@ -55,6 +73,8 @@ def main(argv=None) -> int:
             budget = (config["survival"]["competition"]
                       if config["survival"]["objective"] == "competition" else config["survival"])
             budget["max_steps"] = args.max_steps
+        if args.once or args.max_steps is not None:
+            config["survival"]["continuous"] = False
     except (ConfigError, OSError) as exc:
         print(f"Configuration error: {exc}", file=sys.stderr)
         return 1
@@ -72,6 +92,7 @@ def main(argv=None) -> int:
     session_file = None
     exit_code = 0
     survival = config["agent"]["mode"] == "survival"
+    continuous = survival and continuous_daily(config["survival"])
     try:
         keep_connected = bool(
             getattr(args, "keep_connected", False)
@@ -112,11 +133,14 @@ def main(argv=None) -> int:
             recorder.record("INFO", "main", "STARTUP", {"username": client.username, "mode": config["agent"]["mode"],
                             "planner": "llm" if survival and config["llm"]["enabled"] else "rules",
                             "objective": config["survival"]["objective"] if survival else None,
+                            "continuous": continuous,
                             "model": config["llm"]["model"] if config["llm"]["enabled"] else None,
                             "monitor_url": monitor.address if monitor else None})
         login_attempted = True
         attach_fn = getattr(client, "attach_or_login", None)
-        if session_file and callable(attach_fn):
+        if continuous:
+            status = _connect_continuously(client, session_file, recorder)
+        elif session_file and callable(attach_fn):
             status = attach_fn(session_file=session_file, max_wait_seconds=config["mc_api"]["login_timeout_seconds"])
         else:
             status = client.login(max_wait_seconds=config["mc_api"]["login_timeout_seconds"])

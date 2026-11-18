@@ -4,12 +4,14 @@ import copy
 import math
 import time
 
-from core.block_geometry import trace_block_visibility
+from core.block_geometry import PASS_THROUGH, trace_block_visibility
 from core.client import APIError
+from core.night_home_route import inspect_exterior
 from core.structure_spec import normalize_orientation, transform_rel_pos
 from core.shelter_project import active_project
 from core.survival_state import ObservationCollector
 from skills.survival import SurvivalSkills
+from skills.positioning import PositioningSkills
 from skills.combat import HOSTILES, combat_options
 
 
@@ -17,10 +19,11 @@ class DailyObservationCollector(ObservationCollector):
     FURNACES = {"furnace", "smoker", "blast_furnace"}
     CONTAINERS = {"chest", "barrel"}
     SEED_PLANTS = {"short_grass", "tall_grass"}
-    def __init__(self, client, radius=24, *, low_health_threshold=8):
+    def __init__(self, client, radius=24, *, low_health_threshold=8, mainline=False):
         super().__init__(client, radius, include_terrain=True)
         self.context = {}
         self.low_health_threshold = low_health_threshold
+        self.mainline = mainline
 
     def set_context(self, context):
         self.context = copy.deepcopy(context) if isinstance(context, dict) else {}
@@ -319,6 +322,86 @@ class DailyObservationCollector(ObservationCollector):
                 cell = [x + dx, y + dy, z + dz]
                 self._replace_block(observation, cell, self._read(cell, cancel_event))
 
+    def _ground_log(self, obs, cancel_event):
+        """Inspect a rooted trunk and a short level approach ending in actual hand reach."""
+        if not self.mainline:
+            return
+        status, origin = obs["status"], obs["status"]["pos"]
+        x, y, z = self._cell(origin)
+        if (obs.get("local_geometry_origin") != origin or abs(origin[1] - y) > .05
+                or status.get("is_day") is not True or status.get("thundering") is not False
+                or status.get("time_of_day", 24000) >= 11000 or status.get("on_ground") is not True
+                or status.get("health", 0) <= self.low_health_threshold or status.get("food", 0) <= 6):
+            return
+        rows = self._rows(obs, SurvivalSkills.LOGS)
+        roots = [row for row in rows if row["pos"][1] == y and math.dist(origin, row["pos"]) <= 8][:3]
+        if not roots:
+            return
+        cache = {}
+        deadline = time.monotonic() + 2
+
+        def read(point):
+            key = tuple(point)
+            if key not in cache:
+                if len(cache) >= 80 or time.monotonic() >= deadline:
+                    raise APIError("survey_budget", "Ground log survey reached its read budget")
+                cache[key] = self._read(list(key), cancel_event)
+            return cache[key]
+
+        def clear(col):
+            cx, cz = col
+            support = read((cx, y - 1, cz))
+            if support["name"] not in PositioningSkills.EDGE_GROUND or not SurvivalSkills._safe_block(support):
+                return False
+            for level in (y, y + 1):
+                body = read((cx, level, cz))
+                if body["name"] not in PASS_THROUGH or not SurvivalSkills._safe_block(body):
+                    return False
+            return True
+
+        try:
+            if not all(clear(col) for col in PositioningSkills._columns(origin, origin)):
+                return
+            for row in roots:
+                target = row["pos"]
+                tx, _, tz = target
+                base, log = read((tx, y - 1, tz)), read(target)
+                if (base["name"] not in PositioningSkills.EDGE_GROUND or not SurvivalSkills._safe_block(base)
+                        or log["name"] != row["name"] or log.get("diggable") is not True):
+                    continue
+                # Only level ground within six cardinal steps, first trying the
+                # nearest reachable stance. No proposed waypoint is replayed.
+                stances = sorted((abs(cx-x) + abs(cz-z), cx, cz)
+                    for cx in range(tx-4, tx+4) for cz in range(tz-4, tz+4)
+                    if (cx, cz) != (tx, tz) and abs(cx-x) + abs(cz-z) <= 6
+                    and math.dist([cx+.5, y, cz+.5], target) <= 4)
+                for steps, cx, cz in stances:
+                    stance = [cx+.5, y, cz+.5] if steps else origin
+                    if (math.dist(stance, target) > 4 or not clear((cx, cz))
+                            or not steps and log.get("can_dig", log.get("harvest_tool_ok")) is not True):
+                        continue
+                    for axes in ((0, 1), (1, 0)):
+                        p, path = [x, z], []
+                        for axis in axes:
+                            goal = (cx, cz)[axis]
+                            while p[axis] != goal:
+                                p[axis] += 1 if goal > p[axis] else -1
+                                path.append(tuple(p))
+                        first = [path[0][0]+.5, y, path[0][1]+.5] if path else origin
+                        if (not all(clear(col) for col in PositioningSkills._columns(origin, first))
+                                or not all(clear(col) for col in path)):
+                            continue
+                        sight = trace_block_visibility(stance, target, read, max_queries=20, max_distance=6)
+                        if sight["visible"] is not True:
+                            break  # The other axis order ends at the same viewing angle.
+                        obs["ground_log_approach"] = {"origin": list(origin), "target": target,
+                            "name": row["name"], "stance": list(stance), "next": first if path else None,
+                            "ground": base["name"], "steps": steps, "visibility": sight, "verified": True}
+                        return
+        except APIError as error:
+            if error.code not in {"not_loaded", "survey_budget", "request_timeout"}:
+                raise
+
     def _home(self, observation, cancel_event):
         project = active_project(self.context.get("shelter_project")) or self.context.get("base_project")
         status = observation["status"]
@@ -372,6 +455,10 @@ class DailyObservationCollector(ObservationCollector):
             route = self._return_route(status, pos, cancel_event, orientation=norm_orient) if not data["inside"] or door["open"] else None
             if route:
                 observation["daily_evidence"]["shelter"]["return_route"] = route
+            if not data["inside"]:
+                outside = inspect_exterior(self, observation, data, cancel_event)
+                if outside:
+                    observation["daily_evidence"]["shelter"]["exterior_route"] = outside
 
     def _return_route(self, status, center, cancel_event, *, orientation="north"):
         origin, center = self._position(status), self._block_pos(center)
@@ -442,7 +529,7 @@ class DailyObservationCollector(ObservationCollector):
             result["blocked_door"] = blocked_door
         return result
 
-    def collect(self, cancel_event=None):
+    def collect(self, cancel_event=None, *, inspect_windows=True):
         observation = super().collect(cancel_event)
         status = observation["status"]
         observation["daily_evidence"] = {}
@@ -474,11 +561,13 @@ class DailyObservationCollector(ObservationCollector):
             if not isinstance(inventory["armor"], dict):
                 raise APIError("invalid_response", "Armor evidence is malformed")
             observation["armor"] = copy.deepcopy(inventory["armor"])
-        self._windows(observation, cancel_event)
+        if inspect_windows:
+            self._windows(observation, cancel_event)
         self._farm(observation, cancel_event)
         self._seed_plants(observation, cancel_event)
         self._food_neighborhoods(observation, cancel_event)
         self._local_foliage(observation, cancel_event)
+        self._ground_log(observation, cancel_event)
         self._home(observation, cancel_event)
         observation["status"] = self._status(status, cancel_event)
         observation["combat"] = combat_options(observation)

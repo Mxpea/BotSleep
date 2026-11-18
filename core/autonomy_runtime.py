@@ -5,11 +5,14 @@ of game writes. Each child uses the ordinary harness journal and skill checks.
 """
 
 import copy
+import time
 from dataclasses import asdict
 
 from agent.brain import LLMError
 from agent.survival_planner import Decision
 from core.model_gate import ModelGateError
+from core.survival_mainline import choose_chapter, mainline_enabled, same_goal
+from core.starter_mining_task import recover_interrupted_mine
 from skills import SkillResult
 
 
@@ -21,6 +24,12 @@ class AutonomyRuntime:
         self._task_safety = False
         self._task_resume_requested = False
         self._task_event_signature = None
+        self._mainline_decision = None
+        self._mainline_repair_id = None
+        self._mainline_repair_after = 0
+        self.mainline_enabled = mainline_enabled(self.settings)
+        if not self.mainline_enabled:
+            self.context.pop("mainline", None)
         if self.daily and self.settings.get("autonomy", {}).get("enabled", True):
             from core.autonomous_tasks import AutonomousTaskController
             self.task_controller = AutonomousTaskController(
@@ -38,6 +47,47 @@ class AutonomyRuntime:
     def _task_active(self):
         return (self.task_controller is not None
                 and self.task_controller.snapshot().get("status") in {"running", "suspended"})
+
+    def _update_mainline(self, observation):
+        self._mainline_decision = None
+        if not self.mainline_enabled or not self.daily_board:
+            return
+        status = observation.get("status") or {}
+        if (not self.task_controller._fresh(observation) or status.get("gamemode") != "survival"
+                or status.get("dimension") not in ("overworld", "minecraft:overworld")):
+            if self.context.get("mainline"):
+                self.context["mainline"]["fresh"] = False
+            return
+        old = self.context.get("mainline") or {}
+        view, self._mainline_decision = choose_chapter(observation, self.daily_board, self.settings,
+                                                       self.context.setdefault("mainline_sites", {}))
+        if old.get("stage") != view["stage"]:
+            self._mainline_repair_id = None
+            self._mainline_repair_after = 0
+            self._record("INFO", "MAINLINE_STAGE", {"mainline": view})
+        self.context["mainline"] = view
+
+    def _mainline_action(self, observation):
+        if not self.mainline_enabled:
+            return None
+        goal = self._mainline_decision
+        if goal is None or self.journal.state.get("pending"):
+            return Decision("wait", {"seconds": 2}, "Reobserve before choosing a mainline goal", "observe")
+        if self.daily_policy.validate(goal, observation, context=self.context):
+            return Decision("wait", {"seconds": 2}, "Mainline production requires a fresh safe opening", "observe")
+        task = self._task_snapshot() or {}
+        if (goal.name == "run_survival_task" and task.get("status") == "needs_ai"
+                and same_goal(task.get("args"), goal.args)):
+            now = time.monotonic()
+            if self._mainline_repair_id != task["task_id"]:
+                if now < self._mainline_repair_after:
+                    return Decision("wait", {"seconds": min(5, self._mainline_repair_after - now)},
+                                    "Local recovery exhausted; recheck before another repair request", "observe")
+                self._mainline_repair_id = task["task_id"]
+                self._mainline_repair_after = now + 30
+                if self.uses_llm and not self._model_blocked:
+                    return None  # One serial, stage-scoped repair turn.
+        return goal
 
     def _local_opening(self, observation):
         """Start one observed tool goal through the same controller used by native calls."""
@@ -91,6 +141,11 @@ class AutonomyRuntime:
             self.task_controller.start(decision.args, observation, self.context)
         except ValueError as error:
             return SkillResult(False, str(error), {"executed": False}, "bad_args")
+        if self.mainline_enabled:
+            self.context["mainline_task_id"] = self._task_snapshot()["task_id"]
+            view = self.context.get("mainline") or {}
+            self.context["mainline_task_stage"] = (view.get("stage")
+                if same_goal(decision.args, view.get("goal")) else None)
         if self._model_feedback:
             # Keep the original tool_call_id open until the goal ends. Children
             # are not fabricated native tool calls and never trigger the model.
@@ -104,7 +159,34 @@ class AutonomyRuntime:
     def _task_next(self, observation):
         if not self._task_active():
             return None
+        if self.mainline_enabled and not self.journal.state.get("pending"):
+            task = self._task_snapshot()
+            view = self.context.get("mainline") or {}
+            previous_stage = self.context.get("mainline_task_stage")
+            chapter_changed = previous_stage is not None and previous_stage != view.get("stage")
+            if (view.get("fresh") and (self.context.get("mainline_task_id") != task["task_id"] or chapter_changed)
+                    and not (task.get("starter_mine") or {}).get("site")):
+                if not same_goal(task.get("args"), view.get("goal")):
+                    self.task_controller.stop("Fresh evidence selects another chapter; replan at this confirmed boundary",
+                                              cancelled=True)
+                    self._save_task("TASK_CANCELLED")
+                    self._finish_task_feedback(observation)
+                    return Decision("wait", {"seconds": .25}, "Continue from the current mainline chapter", "mainline")
+                self.context["mainline_task_id"] = task["task_id"]
+                self.context["mainline_task_stage"] = view["stage"]
+        recovered = None
+        if self.continuous and not self.journal.state.get("pending"):
+            old = self.context.get("last_abandoned_action") or {}
+            if old.get("name") == "step_starter_staircase" and old.get("generation") == self.context["life_generation"]:
+                if "mine_landmark" not in old:
+                    old["mine_landmark"] = recover_interrupted_mine(self.journal, old)
+                if old["mine_landmark"] and self.task_controller.restore_interrupted_mine(observation, self.context, old):
+                    recovered = old
         decision = self.task_controller.next_action(observation, self.context)
+        if recovered and self._task_snapshot()["status"] in {"running", "suspended", "completed"}:
+            self._record("INFO", "STARTER_MINE_LANDMARK_RECOVERED", {"pos": observation["status"]["pos"],
+                         "site": recovered["mine_landmark"]["site"], "original_action_confirmed": False})
+            recovered["mine_landmark"] = None
         if decision is None:
             status = self._task_snapshot().get("status")
             event = {"completed": "TASK_COMPLETED", "needs_ai": "TASK_NEEDS_AI",

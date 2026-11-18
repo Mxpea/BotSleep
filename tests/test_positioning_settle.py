@@ -60,6 +60,47 @@ class TerrainLandingSettleTests(unittest.TestCase):
         self.assertEqual(evidence["last"]["waiting_for"], [])
         self.assertEqual(evidence["termination"], "verified")
 
+    def test_official_motion_reset_pair_waits_at_real_night_return_landing(self):
+        from test_daily_skills import DailyWorld
+        world = DailyWorld()
+        world.status.update(pos=[-4.5, 67, 10.5], is_day=False, time_of_day=17657, thundering=False,
+                            speed=0, velocity=[0, 0, 0], nearest_hostile={"id": 12059, "name": "skeleton", "dist": 18.3})
+        for x in (-5, -4):
+            world.block([x, 66, 10], "grass_block")
+        result, sleeps, reads = self.run_samples(world, [-3.5, 67, 10.5], [
+            {"speed": None, "velocity": None, "on_ground": True, "held_controls": None, "jumping": False},
+            {"speed": 0, "velocity": [0, 0, 0]}])
+        self.assertTrue(result.success, result)
+        evidence = result.data["landing_observation"]
+        self.assertEqual(evidence["first"]["waiting_for"], ["motion_sample"])
+        self.assertTrue(result.data["night_home_step"])
+        self.assertTrue(result.data["landing_stable"])
+        self.assertGreaterEqual(reads, 4)
+
+    def test_null_motion_does_not_hide_a_new_shooter_or_certify_a_persistent_reset(self):
+        for danger in (True, False):
+            w, target = self.world()
+            def enemies(w, sample):
+                if danger:
+                    w.entities = [{"id": 5, "name": "skeleton", "type": "hostile", "pos": list(target)}]
+            result, _, reads = self.run_samples(w, target, [{"speed": None, "velocity": None}], entity_effect=enemies)
+            self.assertEqual(result.data["action_state"], "unknown")
+            self.assertEqual(result.data["landing_observation"]["termination"], "unsafe" if danger else "deadline")
+            if danger:
+                self.assertEqual(reads, 1)
+
+    def test_null_motion_before_writing_and_incomplete_pairs_cannot_certify_a_step(self):
+        w, target = self.world()
+        w.status.update(speed=None, velocity=None)
+        result = PositioningSkills(w).execute("position_for_task", {"pos": target})
+        self.assertFalse(result.success, result)
+        self.assertEqual(self.writes(w), [])
+        for values in ({"speed": 0, "velocity": None}, {"speed": None, "velocity": [0, 0, 0]}):
+            w, target = self.world()
+            result, _, reads = self.run_samples(w, target, [values])
+            self.assertEqual(result.data["action_state"], "unknown", result)
+            self.assertEqual(reads, 1)
+
     def test_grounded_height_error_and_airborne_sample_can_settle_without_another_write(self):
         for first in ({"pos": [1.5,63.12,.5]},
                       {"on_ground": False, "speed": .8, "velocity": [0,-.8,0]}):

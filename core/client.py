@@ -8,6 +8,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import time
 from typing import Any, Dict, List, Optional, Union
 
@@ -46,6 +47,18 @@ class APIError(MinecraftAPIError):
         RuntimeError.__init__(self, f"{code}: {message}")
 
 
+def connection_retry_delay(error, base_seconds):
+    seconds = error.details.get("retry_after_s")
+    if error.code == "death_loop_cooldown":
+        # The current upstream only includes its remaining cooldown in the message.
+        match = re.search(r"\b(\d+)s remaining\b", error.message)
+        if match:
+            seconds = int(match.group(1))
+    if type(seconds) in (int, float) and math.isfinite(seconds) and seconds >= 0:
+        return max(base_seconds, seconds)
+    return base_seconds
+
+
 class MinecraftAgentClient:
     """Return API envelopes, except the documented list convenience methods."""
 
@@ -73,6 +86,7 @@ class MinecraftAgentClient:
         self.password = password
         self.timeout_seconds = self._positive(timeout_seconds, "timeout_seconds")
         self.token: Optional[str] = None
+        self._continuous_session_file = None
         self._session = requests.Session()
 
     @staticmethod
@@ -171,17 +185,52 @@ class MinecraftAgentClient:
     def _action_timeout(self, deadline_seconds: float) -> float:
         return max(self.timeout_seconds, deadline_seconds + self.ACTION_MARGIN_SECONDS)
 
+    def _open_session(self):
+        data = self._request("POST", "auth/login", payload={"username": self.username, "password": self.password},
+                             authenticated=False)
+        token = data.get("token")
+        if not isinstance(token, str) or not token:
+            raise APIError("invalid_response", "Login response has no token")
+        self.token = token
+
+    def connect_continuous(self, *, session_file=None):
+        """One connection check. Keep a valid session through spawn delays and death cooldowns."""
+        if session_file is not None:
+            self._continuous_session_file = session_file
+        session_file = self._continuous_session_file
+        if not self.token and session_file is not None:
+            self.load_session(session_file)
+        if not self.token:
+            self._open_session()
+            if session_file is not None:
+                self.save_session(session_file)
+        try:
+            status = self._result(self.get_status())
+        except APIError as error:
+            if error.code in {"unauthorized", "invalid_token"}:
+                self.token = None
+                self._open_session()
+                if session_file is not None:
+                    self.save_session(session_file)
+                raise APIError("not_ready", "New game session is starting") from None
+            if (error.code == "internal" and error.status_code == 200
+                    and error.message == "Cannot read properties of undefined (reading 'toFixed')"):
+                raise APIError("not_ready", "Waiting for the spawn status") from None
+            if error.code not in {"not_connected", "wrong_server", "not_ready"}:
+                raise
+        else:
+            if status.get("ready") is True:
+                return status
+        self.connect()
+        raise APIError("not_ready", "Waiting for the current game session to become ready")
+
     def login(self, max_wait_seconds: float = 15) -> Dict[str, Any]:
         """Log in and return a ready status; clean up the session on failure."""
         max_wait_seconds = self._positive(max_wait_seconds, "max_wait_seconds")
         if self.token:
             self.logout()
         try:
-            data = self._request("POST", "auth/login", payload={"username": self.username, "password": self.password}, authenticated=False)
-            token = data.get("token")
-            if not isinstance(token, str) or not token:
-                raise APIError("invalid_response", "Login response has no token")
-            self.token = token
+            self._open_session()
             deadline = time.monotonic() + max_wait_seconds
             while True:
                 remaining = deadline - time.monotonic()

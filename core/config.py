@@ -16,6 +16,11 @@ class ConfigError(ValueError):
     """A configuration file or override cannot be used safely."""
 
 
+def continuous_daily(settings):
+    return (settings.get("continuous") is True and settings.get("objective") == "daily"
+            and settings.get("intent", "survival") == "survival")
+
+
 DEFAULTS: Dict[str, Any] = {
     "mc_api": {
         "base_url": "http://127.0.0.1:18900/api/v1",
@@ -28,8 +33,9 @@ DEFAULTS: Dict[str, Any] = {
     "survival": {
         "objective": "starter",
         "intent": "survival",
+        "continuous": False,
         "operator_goal": "",
-        "autonomy": {"enabled": True, "local_opening": False, "max_steps": 128, "max_seconds": 600,
+        "autonomy": {"enabled": True, "local_opening": False, "mainline": False, "max_steps": 128, "max_seconds": 600,
                      "max_local_failures": 4, "max_no_progress_steps": 8, "max_explore_steps": 8},
         "competition": {"eligibility_overrides": {}, "defer_seconds": 300,
                         "advancement_poll_seconds": 5, "max_seconds": 28800, "max_steps": 100000},
@@ -222,6 +228,7 @@ def _validate(config: Dict[str, Any], config_dir: Path) -> None:
         raise ConfigError("survival contains unsupported options")
     if survival["objective"] not in {"starter", "daily", "competition"}:
         raise ConfigError("survival.objective must be starter, daily or competition")
+    _boolean(survival["continuous"], "survival.continuous")
     if not isinstance(survival["intent"], str) or survival["intent"] not in ("survival", "speedrun"):
         raise ConfigError("survival.intent must be survival or speedrun")
     goal = survival["operator_goal"]
@@ -233,6 +240,9 @@ def _validate(config: Dict[str, Any], config_dir: Path) -> None:
         raise ConfigError("survival.autonomy contains unsupported options")
     _boolean(autonomy["enabled"], "survival.autonomy.enabled")
     _boolean(autonomy["local_opening"], "survival.autonomy.local_opening")
+    _boolean(autonomy["mainline"], "survival.autonomy.mainline")
+    if survival["objective"] == "daily" and autonomy["mainline"] and not autonomy["enabled"]:
+        raise ConfigError("The daily mainline requires survival.autonomy.enabled")
     for key, minimum, maximum in (("max_steps", 1, 2048), ("max_local_failures", 1, 32),
                                  ("max_no_progress_steps", 1, 128), ("max_explore_steps", 0, 64)):
         if type(autonomy[key]) is not int or not minimum <= autonomy[key] <= maximum:
@@ -430,4 +440,11 @@ def load_config(
         config["agent"]["name"] = username
 
     _validate(config, config_path.parent)
+    # The objective can still be selected on the command line. Daily survival
+    # activates the mainline at runtime, leaving explicit custom goals intact.
+    survival = config["survival"]
+    autonomy = survival["autonomy"]
+    if "mainline" not in supplied.get("survival", {}).get("autonomy", {}):
+        autonomy["mainline"] = (autonomy["enabled"] and not autonomy["local_opening"]
+                               and not survival["operator_goal"] and survival["intent"] == "survival")
     return config

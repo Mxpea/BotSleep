@@ -65,7 +65,7 @@ const $ = id => document.getElementById(id);
 const txt = (id, value) => { $(id).textContent = value == null ? '—' : String(value); };
 const pretty = value => typeof value === 'string' ? value : JSON.stringify(value, null, 2);
 const stateNames = {waiting:'等待 Agent 数据',starting:'正在启动',running:'运行中',paused:'已暂停',completed:'阶段目标完成',finished:'运行已结束',stopped:'已停止',error:'运行异常'};
-const phaseNames = {idle:'空闲',observing:'正在观察环境',thinking:'等待模型返回',rechecking:'正在复核最新状态',acting:'正在执行技能',waiting:'等待下一步',paused:'自动运行已暂停',complete:'阶段目标完成'};
+const phaseNames = {idle:'空闲',reconnecting:'等待重新连接',observing:'正在观察环境',thinking:'等待模型返回',rechecking:'正在复核最新状态',acting:'正在执行技能',waiting:'等待下一步',paused:'自动运行已暂停',complete:'阶段目标完成'};
 let cursor = 0, events = [], currentState = null, selectedTab = 'content', autoScroll = true;
 let dropped = 0, lastModelText = null, lastGood = 0;
 function badge(id, text, kind='') { $(id).textContent=text; $(id).className='pill' + (kind ? ' '+kind : ''); }
@@ -183,18 +183,20 @@ function renderCompetition(state) {
   txt('competition-json',pretty(board));
 }
 function renderSurvival(state) {
-  const plan=object(state.playbook), combat=object(state.combat), entry=object(state.combat_result);
-  $('survival-panel').classList.toggle('hidden',!state.playbook && !state.combat && !state.combat_result);
+  const plan=object(state.playbook), mainline=object(state.mainline), combat=object(state.combat), entry=object(state.combat_result);
+  $('survival-panel').classList.toggle('hidden',!state.mainline && !state.playbook && !state.combat && !state.combat_result);
   const stages={opening:'初期工具与食物',iron_defense:'铁器与防御',home_farm:'住所、床与生产点',maintenance:'日常维护',nether_preparation:'下界准备',nether_portal:'下界入口',nether_resources:'下界资源',stronghold:'要塞定位',end_preparation:'末地准备',dragon:'末影龙阶段',post_dragon:'击龙后阶段',recovery:'死亡或未知结果恢复',safety:'本地安全处理'};
-  badge('survival-freshness',plan.fresh===false ? '旧阶段建议 · 待完整观察' : plan.fresh===true ? '完整观察时生成' : '新鲜度未确认',plan.fresh===false ? 'warn' : '');
+  const fresh=mainline.stage ? mainline.fresh : plan.fresh;
+  badge('survival-freshness',fresh===false ? '旧阶段建议 · 待完整观察' : fresh===true ? '完整观察时生成' : '新鲜度未确认',fresh===false ? 'warn' : '');
   txt('survival-stage',(stages[plan.stage] || display(plan.stage))+' · '+display(plan.state)+' · '+display(plan.goal));
+  if (mainline.stage) txt('survival-stage','生存主线 '+mainline.chapter+'/'+mainline.chapters+' · '+mainline.label);
   txt('survival-missing','缺少前置：'+display(plan.missing)+'；尚未绑定：'+display(plan.unsupported)+'；建议不代表阶段已完成');
   txt('combat-available','本轮战斗候选：'+display(combat.mode)+' · allowed '+display(combat.allowed)+' · '+display(combat.reason)+'；候选仍须技能复核');
   const result=object(entry.result), evidence=object(result.data);
   const labels={attack_sent:'已发攻击',damage_verified:'伤害已确认',killed:'击杀已确认',completed:'动作目标已完成',shield_commanded:'已发举盾',source_recovered:'岩浆源已回收',lava_outstanding:'岩浆尚待回收',retreat_required:'需要撤退'};
   const flags=Object.entries(labels).map(([key,label])=>label+'：'+(evidence[key]===true ? '是' : evidence[key]===false ? '否' : '未确认'));
   txt('combat-evidence',entry.skill ? display(entry.skill)+' · '+ageText(entry.updated_at)+'\n'+flags.join(' · ')+'\n'+display(result.error_code)+' · '+display(result.message)+'；单步成功不等于击杀，旧结果不代表当前状态' : '尚无狩猎、战斗或桶类执行结果');
-  txt('survival-json',pretty({playbook:state.playbook,combat:state.combat,last_result:state.combat_result}));
+  txt('survival-json',pretty({mainline:state.mainline,playbook:state.playbook,combat:state.combat,last_result:state.combat_result}));
 }
 const taskStatusLabels={idle:'空闲',running:'执行中',suspended:'应急中断 / 已挂起',completed:'已完成（运行时发布）',needs_ai:'需要 AI 决策',unknown:'执行结果未知',cancelled:'已取消'};
 const longTaskLabels={gather:'采集材料',craft:'制作物品',smelt:'熔炼物品',food:'获取食物',starter_tools:'基础工具',iron_tools:'铁器升级',shelter:'住所',bed:'床与睡眠',storage:'储物',farm:'农作',recover_drops:'死亡掉落恢复',maintenance:'持续维护'};
@@ -234,7 +236,8 @@ function renderState(state) {
   txt('model-name', llm.actual_model || '未确认');
   txt('model-route', '请求路由 '+(llm.request_model || run.model || '—'));
   txt('planner-name', '规划器 '+(run.planner || '—'));
-  txt('steps','已执行 '+(run.steps || 0)+' 步');
+  txt('steps',(run.continuous ? '持续运行 · ' : '')+'已执行 '+(run.steps || 0)+' 步'+
+      (run.continuous && Number.isInteger(run.death_count) ? ' · 本次死亡 '+run.death_count+' 次' : ''));
   $('paused-banner').classList.toggle('hidden',!run.paused);
   txt('paused-banner','自动运行已暂停'+(run.pause_reason ? ' · 原因：'+run.pause_reason : '')+(run.objective==='competition' ? '。查看 pending 与最近结果；监控不提供恢复操作。' : '。监控仍在更新；游戏内使用 #resume 恢复。'));
   const blocked=!!run.model_blocked || llm.slot_state==='uncertain';

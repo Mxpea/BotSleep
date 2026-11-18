@@ -14,14 +14,17 @@ from datetime import datetime, timezone
 from agent.daily_survival import DAILY_SKILLS, DailySurvivalGoals
 from agent.survival_planner import Decision, LOG_NAMES, PLANK_NAMES, SAFE_FOOD, WOOD_SPECIES
 from core.daily_policy import DailySafetyPolicy
-from core.skill_registry import internal_skills_for_objective
-from core.route_foliage_recovery import choose_route_foliage, cleared_route_targets, position_foliage_hint
+from core.skill_registry import STARTER_MINING_SKILLS, internal_skills_for_objective
+from core.route_foliage_recovery import choose_route_foliage, cleared_route_targets, confirmed_leaf_removal, position_foliage_hint
 from core.shelter_project import active_project, same_site
 from core.shelter_approach import avoids_shell, entrance_geometry, entrance_waypoint
 from core.shelter_route_recovery import changed_shelter_routes, shelter_route_refusal
 from core.shelter_return import MAX_RETURN_STEPS, choose_shelter_return
+from core.starter_mining_task import StarterMiningTask, rung_depth
+from core.survival_mainline import mainline_enabled
 from core.structure_spec import SHELTER_5X5_SPEC, SHELTER_BUILDING_BLOCKS
 from skills.daily_survival import DailySurvivalSkills
+from skills.positioning import PositioningSkills
 
 
 TASKS = frozenset({"gather", "craft", "smelt", "food", "starter_tools", "iron_tools",
@@ -88,6 +91,7 @@ class AutonomousTaskController:
         self.daily = DailySurvivalGoals(self.settings)
         self.rules = self.daily.rules
         self.safety_policy = DailySafetyPolicy(self.settings)
+        self._mine = StarterMiningTask()
         self._data = {"version": 1, "task_id": None, "task": None, "status": "idle", "args": {},
                       "progress": {"current": 0, "target": 0, "unit": "items"}, "current_step": None,
                       "local_recoveries": 0, "emergency_interruptions": 0, "ai_escalations": 0,
@@ -103,6 +107,7 @@ class AutonomousTaskController:
                       "pending_digest": None, "baseline": 0, "sequence": 0, "life_generation": 0}
         if saved is not None:
             self._restore(saved)
+            self._mine = StarterMiningTask(saved.get("starter_mine"))
             self._restore_shelter_search(saved.get("shelter_search_cache"))
 
     @staticmethod
@@ -306,6 +311,7 @@ class AutonomousTaskController:
         sequence = self._data["sequence"] + 1
         replacement = AutonomousTaskController(self.settings)
         self._data = replacement._data
+        self._mine = replacement._mine
         self._data.update(task_id=f"task-{int(time.time() * 1000)}-{sequence}", task=args["task"], args=args,
                           sequence=sequence, started_at=time.time(), dimension=status["dimension"],
                           life=self._life(status), life_generation=generation,
@@ -381,7 +387,9 @@ class AutonomousTaskController:
         result["blocked_targets"] = sorted(self.rules._blocked(result) | (set(self._data["blocked"]) - changed_routes))
         result["capabilities"] = list(set(result.get("capabilities", DAILY_SKILLS)) - {"gather_materials", "build_shelter_batch"})
         if self._data["task"] == "shelter":
-            result["capabilities"] = sorted(set(result["capabilities"]) | internal_skills_for_objective("daily"))
+            result["capabilities"] = sorted(set(result["capabilities"]) | (internal_skills_for_objective("daily") - STARTER_MINING_SKILLS))
+        if self._data["task"] in {"gather", "starter_tools", "craft", "smelt", "iron_tools"} and self.settings.get("objective", "daily") == "daily":
+            result["capabilities"] = sorted(set(result["capabilities"]) | STARTER_MINING_SKILLS)
         result["smelting_jobs"] = (self.daily._rows(result.get("smelting_jobs")) + copy.deepcopy(self._data["jobs"]))[-8:]
         result["explore_index"] = self._data["explore_steps"]
         self._prune_shelter_search()
@@ -405,14 +413,14 @@ class AutonomousTaskController:
                 return self._decision("collect_drops", {"entity_id": row["id"], "expected_item": item}, "Collect freshly observed needed drops before producing more")
         return None
 
-    def _gather(self, resource, obs, context, names=None):
+    def _gather(self, resource, obs, context, names=None, *, target_count=None):
         counts = obs["counts"]
         cautious = context.get("_bounded_bootstrap") is True
         if cautious and resource != "logs":
             return None
         origin = obs["status"]["pos"]
         failures = self._gather_navigation_hints(obs)
-        needs_stance = any(tuple(map(math.floor, row["origin"])) == tuple(map(math.floor, origin))
+        needs_stance = any("blocker" not in row and tuple(map(math.floor, row["origin"])) == tuple(map(math.floor, origin))
                            and math.dist(row["origin"], origin) <= .5 for row in failures)
         drops = None if cautious else self._drop(set(names or LOG_NAMES) if resource == "logs" else {resource}, obs, context)
         if drops and not needs_stance:
@@ -422,14 +430,62 @@ class AutonomousTaskController:
             minimum = ("stone", "iron", "diamond", "netherite") if resource == "raw_iron" else ("wooden", "stone", "iron", "diamond", "netherite")
             if not any(counts.get(tier + "_pickaxe", 0) for tier in minimum):
                 return self._craft(required, 1, obs, context)
+        if (resource == "cobblestone" and "plan_starter_staircase" in context["capabilities"]
+                and obs.get("local_geometry_origin") == origin
+                and (self.safety_policy._footing(obs) or {}).get("name") == "air"):
+            blocked = self.rules._blocked(context)
+            for row in self.daily._rows(obs.get("safe_stand_candidates"))[:8]:
+                target = self.rules._pos(row.get("pos"))
+                if (target is not None and row.get("support") in PositioningSkills.EDGE_GROUND
+                        and self.rules._key(target) not in blocked
+                        and PositioningSkills.contacts_adjacent_centre(origin, target)):
+                    return Decision("position_for_task", {"pos": list(target)},
+                                    "Centre on the natural ground already touching the player before mining", "starter_mining")
+            return None
         blocks = self.rules._blocks(obs)
         blocked, hostiles = self.rules._blocked(context), self.rules._hostiles(obs, origin)
         blocked_occlusion = {key for key, code in self._data["blocked_codes"].items()
                              if code in {"target_occluded", "visibility_unknown"}}
         blocked_columns = {tuple(row["target"][i] for i in (0, 2)) for row in failures
-                           if row["expected_name"] in LOG_NAMES}
+                           if row["expected_name"] in LOG_NAMES and "blocker" not in row}
+        occluded_columns = {tuple(row["target"][i] for i in (0, 2)) for row in failures if "blocker" in row}
+        ground = obs.get("ground_log_approach")
+        if (resource == "logs" and not cautious and mainline_enabled(self.settings)
+                and isinstance(ground, dict) and ground.get("verified") is True
+                and ground.get("origin") == obs.get("local_geometry_origin") == origin
+                and ground.get("ground") in PositioningSkills.EDGE_GROUND
+                and (ground.get("visibility") or {}).get("visible") is True
+                and ground.get("name") in (names or LOG_NAMES)):
+            for row in blocks:
+                if (row["name"] not in (names or LOG_NAMES) or row.get("can_see") is not False
+                        or math.dist(origin, row["pos"]) > 4 or not self.rules._safe_target(
+                            row, origin, blocks, blocked - blocked_occlusion, hostiles, observation=obs)):
+                    continue
+                prior = {"name": "gather_block", "args": {"pos": row["pos"], "expected_name": row["name"]},
+                         "goal": self._data["task"]}
+                clear = self.daily._foliage_hint(prior, obs, context, context["capabilities"])
+                if clear["name"] == "clear_foliage":
+                    return self._row_decision(clear)
+            target = self.rules._pos(ground.get("target"))
+            log = next((row for row in blocks if row["name"] == ground["name"] and row["pos"] == target), None)
+            step = self.rules._pos(ground.get("next"))
+            if (log is not None and self.rules._key(target) not in blocked and (target[0], target[2]) not in blocked_columns
+                    and self.rules._safe_target(log, origin, blocks, blocked, hostiles, observation=obs)):
+                if (step is None and ground.get("steps") == 0 and math.dist(origin, target) <= 4):
+                    return self._decision("gather_block", {"pos": target, "expected_name": log["name"]},
+                                          "Harvest the rooted trunk from the verified ground stance without approaching")
+                if (step is not None and (target[0], target[2]) not in occluded_columns and self.rules._key(step) not in blocked
+                        and step[1] == math.floor(origin[1]) and sum(abs(math.floor(step[i]) - math.floor(origin[i])) for i in (0, 2)) == 1
+                        and not self.rules._dangerous_hostiles(obs, step)
+                        and any(row.get("pos") == step and row.get("support") in PositioningSkills.EDGE_GROUND
+                                for row in self.daily._rows(obs.get("safe_stand_candidates")))):
+                    return self._decision("position_for_task", {"pos": step},
+                                          "Move one level ground cell toward the checked low trunk, then reobserve")
         candidates = [row for row in blocks if row["name"] in (names or RESOURCE_NAMES[resource])
                       and math.dist(origin, row["pos"]) <= self._data["args"]["radius"]
+                      and (resource != "cobblestone" or "plan_starter_staircase" not in context["capabilities"]
+                           or obs.get("local_geometry_origin") != origin or row.get("can_see") is True
+                           or math.dist(origin, row["pos"]) <= 4)
                       and (not needs_stance or math.dist(origin, row["pos"]) <= 4
                            and row.get("can_see") is True and row.get("can_dig") is True)
                       and (row["name"] not in LOG_NAMES or tuple(row["pos"][i] for i in (0, 2)) not in blocked_columns)
@@ -443,8 +499,18 @@ class AutonomousTaskController:
                       "args": {"pos": list(row["pos"]), "expected_name": row["name"]},
                       "reason": "Gather one fresh resource for the selected goal", "goal": self._data["task"]}
             alternative = self.daily._foliage_hint(action, obs, context, context["capabilities"])
-            if alternative["name"] == "clear_foliage" or (row.get("can_see") is not False and self.rules._key(row["pos"]) not in blocked):
+            if alternative["name"] == "clear_foliage":
                 return self._row_decision(alternative)
+            if (row["name"] in LOG_NAMES and (row["pos"][0], row["pos"][2]) in occluded_columns
+                    and not (math.dist(origin, row["pos"]) <= 4 and row.get("can_see") is True and row.get("can_dig") is True)):
+                continue
+            if row.get("can_see") is not False and self.rules._key(row["pos"]) not in blocked:
+                return self._row_decision(alternative)
+        if resource == "cobblestone" and "plan_starter_staircase" in context["capabilities"] and not cautious:
+            if target_count is None:
+                target_count = (self._data["progress"]["target"] if self._data["task"] == "gather"
+                                else counts.get("cobblestone", 0) + 3)
+            return self._mine.survey(obs, context, target_count)
         return None
 
     def _gather_navigation_hints(self, obs):
@@ -468,8 +534,15 @@ class AutonomousTaskController:
         data = result.data if isinstance(result.data, dict) else {}
         target = self.rules._pos(decision.args.get("pos"))
         origin = self.rules._pos(data.get("pos_before"))
+        visibility = data.get("visibility")
+        blocker = (self.rules._pos(visibility.get("blocker")) if isinstance(visibility, dict)
+                   and visibility.get("state") == "occluded" and visibility.get("visible") is False else None)
+        approach_occluded = (result.error_code == "target_occluded" and decision.name == "gather_block"
+                             and decision.args.get("expected_name") in LOG_NAMES and data.get("target") == target
+                             and data.get("executed") is True and data.get("can_see") is False
+                             and blocker is not None and all(v == math.floor(v) for v in blocker))
         if (decision.name not in {"gather_block", "gather_resource"} or result.success is not False
-                or result.error_code not in GATHER_NAVIGATION_FAILURES
+                or result.error_code not in GATHER_NAVIGATION_FAILURES and not approach_occluded
                 or data.get("action_state") == "unknown" or data.get("block_removed") is True or data.get("gained")
                 or target is None or origin is None or math.dist(origin, target) <= 4
                 or not self._fresh(observation)):
@@ -481,6 +554,8 @@ class AutonomousTaskController:
         recent["gather_navigation"] = {"origin": list(status["pos"]), "target": target,
             "expected_name": decision.args.get("expected_name"), "dimension": status["dimension"],
             "life": self._life(status), "expires_at": time.time() + 30}
+        if approach_occluded:
+            recent["gather_navigation"]["blocker"] = list(blocker)
 
     def _obtain(self, item, needed, obs, context, depth):
         counts = obs["counts"]
@@ -495,7 +570,7 @@ class AutonomousTaskController:
         if item == "iron_ingot":
             return self._smelt(item, obs, context, depth + 1)
         if item in {"cobblestone", "coal", "raw_iron"}:
-            return self._gather(item, obs, context)
+            return self._gather(item, obs, context, target_count=counts.get(item, 0) + needed)
         if item in LOG_NAMES:
             return self._gather("logs", obs, context, {item})
         if item == "wheat":
@@ -648,7 +723,8 @@ class AutonomousTaskController:
         This is a planning filter, not route proof. PositioningSkills checks
         the transition body, headroom, support and final position again.
         """
-        if (self._data["task"] != "shelter" or obs.get("local_geometry_origin") != origin
+        if (self._data["task"] != "shelter" and not self._mine.rejected
+                or obs.get("local_geometry_origin") != origin
                 or abs(origin[1] - round(origin[1])) > .05
                 or pos[1] != math.floor(pos[1])
                 or abs(pos[1] - round(origin[1])) != 1
@@ -678,8 +754,8 @@ class AutonomousTaskController:
             key = self.rules._key(pos)
             distance = math.dist(origin, pos)
             enough_movement = (distance > .4 and tuple(map(math.floor, pos)) != tuple(map(math.floor, origin))
-                               if self._data["task"] == "shelter" or gather_recovery else distance >= 1)
-            if (key in blocked or key in self._data["visited"]
+                               if self._data["task"] == "shelter" or gather_recovery or self._mine.rejected else distance >= 1)
+            if (key in blocked or key in self._data["visited"] or len(self._mine.rejected.get(key, [])) == 4
                     or self._data["task"] == "shelter" and key in context.get("shelter_visited_stances", [])
                     or not enough_movement or distance > 3
                     or abs(pos[1] - origin[1]) > .15 and not self._local_shelter_step(origin, pos, obs)
@@ -838,6 +914,10 @@ class AutonomousTaskController:
                         return candidate
             return None
         candidate = choose(row)
+        if (task == "starter_tools" and "plan_starter_staircase" in context["capabilities"]
+                and not self.rules._has_tool(obs["counts"], "pickaxe") and obs["counts"].get("wooden_pickaxe", 0)
+                and not (candidate and candidate.name == "take_items")):
+            return self._craft("stone_pickaxe", 1, obs, context), False
         if task == "shelter" and candidate and candidate.name == "inspect_shelter":
             shelter = obs.get("shelter") or {}
             base = (obs.get("daily_evidence") or {}).get("base_site") or {}
@@ -1044,7 +1124,9 @@ class AutonomousTaskController:
             self._escalate("bounded_local_recovery_exhausted")
             return None
         recovery = choose_route_foliage(self._data["recent_results"], obs, local, self.daily, task)
-        if recovery is not None:
+        if self._mine.site is not None:
+            decision = self._mine.step(obs, local)
+        elif recovery is not None:
             decision = recovery
         elif task == "gather":
             decision = self._gather(args["resource"], obs, local)
@@ -1134,7 +1216,7 @@ class AutonomousTaskController:
             key = TASK_ROWS.get(task, task)
             complete = any(row["id"] == key and row["status"] == "satisfied" for row in board["tasks"])
             current = int(complete)
-        if not complete:
+        if not complete or self._mine.site is not None:
             return False
         self._data["progress"]["current"] = current
         self._data["fresh"] = True
@@ -1163,6 +1245,16 @@ class AutonomousTaskController:
         if code in {"dead", "lifecycle_changed", "life_changed", "dimension_changed"}:
             self._escalate("life_or_dimension_changed")
             return
+        if decision.name in STARTER_MINING_SKILLS:
+            if not self._fresh(observation) or observation["status"].get("dimension") != self._data["dimension"] or self._life(observation["status"]) != self._data["life"]:
+                self._escalate("staircase_result_requires_fresh_same_life_observation")
+                return
+            issue = self._mine.observe_result(decision, result, observation)
+            if issue:
+                self._escalate(issue)
+                return
+            recent.update(operation=data.get("operation"), depth=data.get("depth"),
+                          gained_cobblestone=data.get("gained_cobblestone", 0))
         if self._data["task"] == "shelter":
             refused = shelter_route_refusal(decision, result, observation)
             if refused is not None:
@@ -1176,6 +1268,12 @@ class AutonomousTaskController:
                 self._data["blocked"].pop(key, None)
                 self._data["blocked_codes"].pop(key, None)
                 self._data["visited"] = [old for old in self._data["visited"] if old != key]
+        cleared = confirmed_leaf_removal(decision, result, observation)
+        if cleared is not None:
+            for previous in self._data["recent_results"]:
+                navigation = previous.get("gather_navigation") or {}
+                if navigation.get("blocker") == cleared:
+                    del previous["gather_navigation"]
         self._remember_gather_navigation(recent, decision, result, observation)
         intent = self._data["preparation_site"]
         preparation_rejected = (intent is not None and decision.name == "plan_shelter_preparation"
@@ -1367,6 +1465,9 @@ class AutonomousTaskController:
         result = {key: copy.deepcopy(self._data[key]) for key in keys}
         if self._data["task"] == "shelter":
             result["shelter_search"] = self._shelter_search_report()
+        if self._mine.target:
+            result["starter_mine"] = {"site": copy.deepcopy(self._mine.site), "cobblestone_target": self._mine.target,
+                                      "returning": self._mine.returning}
         return result
 
     def stop(self, reason, *, unknown=False, cancelled=False):
@@ -1395,8 +1496,37 @@ class AutonomousTaskController:
         self._set("cancelled", "Explicit fresh reobservation abandoned the old goal; unknown evidence is retained")
         return True
 
+    def restore_interrupted_mine(self, obs, context, old):
+        """Adopt an entrance into a new goal only at a freshly grounded rung of the same life."""
+        anchor = old.get("mine_landmark")
+        status = obs.get("status") or {}
+        previous = old.get("observed")
+        if (not isinstance(anchor, dict) or not isinstance(previous, dict)
+                or type(anchor.get("target")) is not int or not 1 <= anchor["target"] <= 4096
+                or anchor.get("operation") not in ("descend", "ascend", "dig")
+                or self._mine.site is not None or self._data.get("pending_digest") or self._unknown(context)
+                or self._data["status"] not in {"running", "suspended"} or not self._fresh(obs)
+                or obs.get("local_geometry_origin") != status["pos"] or status.get("on_ground") is not True
+                or "busy" not in status or status["busy"] not in (False, None) or status.get("gamemode") != "survival"
+                or self._generation_changed(context) or old.get("generation") != self._data["life_generation"]
+                or status.get("dimension") != self._data["dimension"] or status.get("dimension") != previous.get("dimension")
+                or status.get("last_death") != previous.get("life") or self._data["args"] != anchor.get("goal")):
+            return False
+        site = anchor.get("site")
+        depth = rung_depth(site, status["pos"])
+        old_depth = rung_depth(site, anchor.get("from"))
+        if (depth is None or old_depth is None or rung_depth(site, previous.get("cell")) is None
+                or set(site) != {"entry", "direction"} or (anchor["operation"] == "ascend" and depth == old_depth)):
+            return False
+        self._mine.site = copy.deepcopy(site)
+        self._mine.target = anchor["target"]
+        # Continue below the old descent only if already on a deeper rung.
+        # A stationary uncertain dig or descent can only lead to a checked return.
+        self._mine.returning = not (anchor["operation"] == "descend" and depth > old_depth)
+        return True
+
     def state(self):
         """Serializable bounded evidence checkpoint; pending hashes cannot execute."""
         self._prune_shelter_search()
-        return {**copy.deepcopy(self._data),
+        return {**copy.deepcopy(self._data), "starter_mine": self._mine.state(),
                 "shelter_search_cache": {"version": 1, **copy.deepcopy(self._shelter_search)}}

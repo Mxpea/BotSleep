@@ -18,9 +18,9 @@ class LocalRecoveryRuntime:
                 return True
         return False
 
-    def _request_canopy_resume(self):
-        # This authority is process-local and belongs to one explicit resume.
-        # A checkpoint/restart or an ordinary automatic tick cannot recreate it.
+    def _request_canopy_resume(self, *, automatic=False):
+        # Only the request is process-local. Actual movement still requires a
+        # new full observation and the ordinary checks of the escape skill.
         self._canopy_resume_request = None
         state = self.context.get("canopy_recovery")
         if (not self.daily or not isinstance(state, dict) or state.get("exhausted") is not True
@@ -33,7 +33,7 @@ class LocalRecoveryRuntime:
             return False
         self._canopy_resume_request = {"dimension": state.get("dimension"),
             "life": copy.deepcopy(state.get("life")), "life_generation": state.get("life_generation", 0),
-            "steps": state["steps"], "requested_at": time.time()}
+            "steps": state["steps"], "requested_at": time.time(), "automatic": automatic}
         return True
 
     def _resume_canopy_window(self, observation, stable_full, footing, nearby):
@@ -58,7 +58,7 @@ class LocalRecoveryRuntime:
                 or status.get("gamemode") != "survival" or status.get("jumping") is True
                 or status.get("held_controls") or nearby or len(observation.get("entities") or []) >= 40
                 or self._safety_rules._dangerous_hostiles(observation, status["pos"])
-                or budget["remaining_steps"] <= 0 or budget["remaining_seconds"] <= 0):
+                or budget["remaining_steps"] == 0 or budget["remaining_seconds"] == 0):
             return
         self._canopy_resume_request = None
         previous = {"steps": state["steps"], "reason": state.get("reason"),
@@ -68,7 +68,8 @@ class LocalRecoveryRuntime:
         state["window_history"] = (state.get("window_history", []) + [previous])[-8:]
         cell = [math.floor(value + .0001) for value in status["pos"]]
         state["visited"] = ([old for old in state["visited"] if old != cell] + [cell])[-32:]
-        state.update(steps=0, exhausted=False, reason="explicit_resume_fresh_canopy_window")
+        state.update(steps=0, exhausted=False, reason="continuous_fresh_canopy_window"
+                     if request["automatic"] else "explicit_resume_fresh_canopy_window")
         state.pop("retry_after", None)
         state.pop("search_origin", None)
         self._record("INFO", "CANOPY_RECOVERY_WINDOW_REOPENED", {"previous_window": previous,
@@ -125,6 +126,11 @@ class LocalRecoveryRuntime:
             and status.get("ready") is True and status.get("alive") is True and status.get("on_ground") is True
             and not status.get("busy") and not any(status.get(key) for key in
                 ("in_water", "in_lava", "on_fire", "submerged", "in_vehicle", "is_sleeping")))
+        if (self.continuous and self._automatic_cycle and not self.paused and stable_full and not nearby
+                and not getattr(self, "_canopy_resume_request", None) and isinstance(canopy, dict)
+                and canopy.get("exhausted") is True and time.time() >= canopy.get("retry_after", 0)
+                and not self._canopy_resume_blocked(canopy)):
+            self._request_canopy_resume(automatic=True)
         self._resume_canopy_window(observation, stable_full, verified_footing, nearby)
         if (stable_full and retreat.get("evacuating") is True and verified_footing is not None
                 and len(observation.get("entities") or []) < 40 and not nearby
@@ -165,11 +171,16 @@ class LocalRecoveryRuntime:
             if state["steps"] >= 64:
                 if not state.get("exhausted"):
                     state.update(exhausted=True, reason="canopy_step_budget_exhausted")
+                    if self.continuous:
+                        state["retry_after"] = time.time() + 15
                     self._record("WARN", "CANOPY_RECOVERY_EXHAUSTED", {"recovery": copy.deepcopy(state)})
                     if self._task_active():
                         self.task_controller.stop("canopy_step_budget_exhausted")
                         self._save_task("TASK_NEEDS_AI")
                         self._finish_task_feedback(observation)
+                if self.continuous:
+                    return Decision("wait", {"seconds": 2},
+                        "Canopy recovery window exhausted; reobserve footing and threats before another window", "safety")
                 self._paused = True
                 self.pause_reason = "canopy_recovery_exhausted"
                 return Decision("wait", {"seconds": 2},

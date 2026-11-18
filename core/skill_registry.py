@@ -82,8 +82,13 @@ SKILL_SPECS = (
 INTERNAL_SKILL_SPECS = (
     SkillSpec("plan_shelter_preparation", _DAILY_COMP, "shelter_preparation_skills", checks_destination=False),
     SkillSpec("prepare_shelter_step", _DAILY_COMP, "shelter_preparation_skills", checks_destination=True),
+    # A stair step derives its exact dig or movement from a freshly inspected
+    # entry and live footing, so the runner checks the actual destination.
+    SkillSpec("plan_starter_staircase", frozenset({"daily"}), "starter_staircase_skills"),
+    SkillSpec("step_starter_staircase", frozenset({"daily"}), "starter_staircase_skills"),
 )
 INTERNAL_SKILLS = frozenset(spec.name for spec in INTERNAL_SKILL_SPECS)
+STARTER_MINING_SKILLS = frozenset(spec.name for spec in INTERNAL_SKILL_SPECS if spec.runner_slot == "starter_staircase_skills")
 
 SKILL_REGISTRY: Dict[str, SkillSpec] = {spec.name: spec for spec in SKILL_SPECS + INTERNAL_SKILL_SPECS}
 
@@ -126,7 +131,7 @@ def resolve_skill_runner(harness: Any, skill_name: str) -> Any:
     if spec is None or not getattr(harness, "daily", False):
         return harness.skills
     slot = spec.runner_slot
-    if slot in {"shelter_skills", "shelter_preparation_skills", "batch_skills", "door_skills", "positioning_skills",
+    if slot in {"shelter_skills", "shelter_preparation_skills", "starter_staircase_skills", "batch_skills", "door_skills", "positioning_skills",
                 "combat_skills", "bucket_skills"}:
         runner = getattr(harness, slot, None)
         if runner is not None:

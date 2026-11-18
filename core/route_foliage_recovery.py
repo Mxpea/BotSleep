@@ -91,8 +91,8 @@ def choose_route_foliage(recent_results, observation, context, daily, goal):
     return None
 
 
-def cleared_route_targets(recent_results, decision, result, observation):
-    """Return only routes whose known blocking leaf was actually removed."""
+def confirmed_leaf_removal(decision, result, observation):
+    """Return the position of an independently verified, completed foliage cut."""
     data = result.data if isinstance(result.data, dict) else {}
     if (decision.name != "clear_foliage" or result.success is not True
             or data.get("executed") is not True or data.get("verified") is not True
@@ -100,8 +100,16 @@ def cleared_route_targets(recent_results, decision, result, observation):
             or data.get("action_state") == "unknown" or data.get("pos") != decision.args.get("pos")
             or data.get("cleared") != decision.args.get("expected_name")
             or not isinstance(observation, dict) or observation.get("fresh") is not True):
+        return None
+    return data.get("pos")
+
+
+def cleared_route_targets(recent_results, decision, result, observation):
+    """Return only routes whose known blocking leaf was actually removed."""
+    pos = confirmed_leaf_removal(decision, result, observation)
+    if pos is None:
         return []
     return [list(row["route_foliage"]["target"]) for row in recent_results[-8:] if isinstance(row, dict)
             and _current_hint(row.get("route_foliage"), observation)
-            and row["route_foliage"]["blocker"] == data["pos"]
-            and row["route_foliage"]["name"] == data["cleared"]]
+            and row["route_foliage"]["blocker"] == pos
+            and row["route_foliage"]["name"] == decision.args.get("expected_name")]
