@@ -653,6 +653,9 @@ class AutonomousTaskController:
             return self._drop(set(inputs), obs, context)
         if not any(counts.get(fuel, 0) for fuel in {"coal", "charcoal", *PLANK_NAMES}):
             return self._obtain("planks", 2, obs, context, depth + 1)
+        dim = obs["status"].get("dimension")
+        if any(self.daily._verified(row, dim) and self.daily._burning(row) for row in self.daily._rows(smelt_obs.get("furnaces"))):
+            return self._decision("wait", {"seconds": 5}, "Wait for residual furnace burn to finish before loading next batch")
         return None
 
     def _hunt(self, names, obs, context):

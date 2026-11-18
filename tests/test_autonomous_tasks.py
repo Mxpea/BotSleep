@@ -862,6 +862,26 @@ class AutonomousTaskTests(unittest.TestCase):
         self.assertIsNotNone(step)
         self.assertEqual((step.name, step.goal), ("move_to", "scout_logs"))
 
+    def test_smelt_waits_for_residual_burning_furnace_instead_of_exploring(self):
+        obs = world({"raw_iron": 3, "coal": 2})
+        obs["blocks"].append({"name": "furnace", "pos": [1, 64, 0], "can_see": True})
+        obs["furnaces"] = [{
+            "pos": [1, 64, 0],
+            "name": "furnace",
+            "dimension": "overworld",
+            "fresh": True,
+            "verified": True,
+            "source": "inspect_container",
+            "input": {"name": None, "count": 0},
+            "fuel": {"name": None, "count": 0},
+            "output": {"name": None, "count": 0},
+            "burning": True,
+        }]
+        ctrl = self.start({"task": "smelt", "item": "iron_ingot", "count": 3}, obs=obs)
+        step = ctrl.next_action(obs)
+        self.assertIsNotNone(step)
+        self.assertEqual(step.name, "wait")
+
 
 if __name__ == "__main__":
     unittest.main()

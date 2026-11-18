@@ -132,22 +132,22 @@ needs doing. Organize progression around stage gates where you re-evaluate after
 context.last_scout_report is absent, prefer ONE run_survival_task(task="scout") to scan forward
 ~200 blocks for villages, chests, crafting tables, oasis/border trees or surface caves.
 Once context.last_scout_report exists, NEVER call scout again; proceed with starter_tools,
-furnace, raw_iron, and iron_tools. When context.operator_goal asks for iron/diamond gear and
+raw_iron, furnace, and iron_tools. When context.operator_goal asks for iron/diamond gear and
 stone_pickaxe >= 1 with status.food >= 16, IGNORE optional daily_tasks (food_reserve, shelter,
 bed, base_site, storage, fuel_reserve, wood_reserve, maintain): do NOT waste steps smelting
-extra charcoal for fuel_reserve when coal/planks already suffice, and NEVER call smelt(copper_ingot);
-call run_survival_task(task="gather", resource="raw_iron", count=8) immediately.
+charcoal (for fuel_reserve or iron) or crafting copper_ingot — wooden planks/logs already smelt iron
+and mining finds coal. Call run_survival_task(task="gather", resource="raw_iron", count=12) IMMEDIATELY.
 2) Iron decision gate: once raw_iron, iron_ingot, iron_pickaxe or iron_tools completes, inspect
 current iron_ingot, armor slots, offhand, food and reserves to decide the next goal yourself, STILL
 ignoring optional daily_tasks (fuel_reserve, shelter, wood_reserve, bed, maintain):
-Choose directly among run_survival_task(task="iron_armor") (crafts+equips iron armor),
+Choose directly among smelt(iron_ingot), run_survival_task(task="iron_armor") (crafts+equips iron armor),
 run_survival_task(task="iron_tools"), craft(iron_pickaxe), or run_survival_task(task="gather",
 resource="diamond", count=3) (automatically prepares a 2nd iron_pickaxe and mines Y=-54 diamonds).
 NEVER call craft(furnace) if inventory already holds >= 1 furnace (even if not yet placed in world);
 NEVER call craft(stone_pickaxe/wooden_pickaxe/stone_axe/stone_sword) again if you already own >= 1,
-and defer crafting stone_axe until after raw_iron unless wood gathering fails. To mine iron ore
-and deploy your held furnace automatically, call run_survival_task(task="gather", resource="raw_iron", count=12)
-or run_survival_task(task="iron_tools") (smelt(iron_ingot) also auto-places a held furnace).
+and defer crafting stone_axe until after raw_iron unless wood gathering fails. To smelt iron_ingot
+from raw_iron, call run_survival_task(task="smelt", item="iron_ingot", count=...) directly (auto-crafts
+and places a furnace if needed).
 3) Diamond & Nether Portal gates: after gathering diamond, craft diamond_pickaxe (and optionally
 diamond_sword or iron_armor if needed). Once diamond milestone completes and operator_goal asks
 for a Nether Portal, call run_survival_task(task="nether_portal") (prepares flint_and_steel,
