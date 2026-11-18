@@ -823,7 +823,7 @@ If that goal tool is unavailable, use only the currently advertised tools.
                 compact_context["operator_goal"] = self.operator_goal
             if competition_context is not None:
                 compact_context["competition"] = competition_context
-            # Catalogue rows and fresh evidence must survive intact. JSON
+            # Staged choices and fresh evidence must survive intact. JSON
             # whitespace is dispensable; the hard wire-byte budget still applies.
             json_options = {"separators": (",", ":")} if self.objective == "competition" else {}
             turn.append({"role": "user", "content": json.dumps(self._redact({"observation": self._snapshot(observation),
@@ -933,11 +933,10 @@ Use context.task_execution progress; unknown/active tasks cannot be replaced or 
 gather needs resource; craft/smelt need target OUTPUT item; others accept neither.
 count is new output for gather/craft/smelt, current reserve for food. No positions/queues.
 terrain_summary.nearest_pos is diagnostic only; gathering/clearing requires an exact observation.blocks match.
-Read context.competition. task_columns defines concise rows for ALL catalogue goals.
-Eligibility scored means approved by rules; pending/excluded goals are not selectable.
-Availability is computed by the harness. needs_prerequisites requires preparation; unsupported is not executable.
-When phase is selection, choose select_task(goal_id) from selectable_goal_ids; if nothing is feasible use wait.
-While active, use registered survival skills to pursue the goal. You decide strategy.
+Read context.competition. During selection, tasks lists only choices unlocked by current evidence.
+Choose select_task(goal_id) from selectable_goal_ids; if there are no choices, use wait.
+needs_prerequisites means preparation is still needed. Do not select goals absent from the list.
+While active, use active_goal details and registered survival skills. You decide strategy.
 Keep a short update_progress card when intent/progress changes. If replan_required, change strategy or force_exit_task.
 Only server advancement records count as completion. Inventory/crafting results are preparation.
 Use finish_task after goal checks are available; use force_exit_task to defer a blocked goal.

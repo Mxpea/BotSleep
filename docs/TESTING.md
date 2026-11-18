@@ -62,6 +62,14 @@
 
 加入跨目标/重启负缓存、内部天然土块准备及其调度后的完整回归：**1592 项 / 160.881 秒，1587 通过、5 项实服专用跳过**，日志为本机 `.test-runtime/shelter-preparation-final-regression-20261117.log`。命令仍为 `$env:BOTSLEEP_RUN_LIVE_TESTS='0'; python -B -m unittest discover -s tests -q`。172 个受版本管理或待提交 Python 文件 AST 通过，示例/隔离配置有效，`git diff --check` 通过；私有配置、世界、日志没有纳入 Git，mc-agent-api 跟踪源码未修改。准备技能 19 项专项另经独立复审；真实快照缺失邻格时正确拒绝，仍须自然白天补读并做实服验收。
 
+## main 与 dev-aure 本地集成（2026-11-18）
+
+基线为 `main 9018f76` 与 `dev-aure 4e0a59e`。沿用主线 `canopy_escape` 和自主任务控制器，不保留并行下降或调度实现。选择性迁入赛事候选投影、单工具请求约束、只读日志补看；可选本地开局复用同一 `starter_tools` 任务入口。
+
+Windows / Python 3.12.10，禁用实服用例后运行 `py -3.12 -X utf8 -B -m unittest discover -s tests -v`：**1457 项，1452 通过、5 项实服专用跳过，191.625 秒**。合成卡树场景沿主线恢复落到 Y=88、未请求模型、无残留 pending。赛事全目录仍用于本地评估；模型已验证只收到阶段候选或活动任务详情。示例配置及本地既有配置均通过 `--check-config`。
+
+合并前主线 `9018f76` 曾在本地真实服务器从 Y=92 经 7 次移动下到 Y=88 草方块，生命/饥饿维持 20，未请求模型；该测试与此次合并后的离线回归是两次独立验证。合并版本未请求真实模型或重跑实服。
+
 最近合并复核：2026-11-17（Asia/Shanghai），`main 02343f9` + `develop-tianya/shelter-workflow 39afec8`，在独立 main 工作区合并。下方两侧分支的历史日志与实服记录保留，不替代本次合并验证。
 
 ## shelter-workflow 合并取舍与回归

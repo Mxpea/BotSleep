@@ -9,6 +9,7 @@ from dataclasses import asdict
 
 from agent.brain import LLMError
 from agent.survival_planner import Decision
+from core.model_gate import ModelGateError
 from skills import SkillResult
 
 
@@ -37,6 +38,34 @@ class AutonomyRuntime:
     def _task_active(self):
         return (self.task_controller is not None
                 and self.task_controller.snapshot().get("status") in {"running", "suspended"})
+
+    def _local_opening(self, observation):
+        """Start one observed tool goal through the same controller used by native calls."""
+        if (self.task_controller is None or self.settings.get("objective") != "daily"
+                or self.settings.get("autonomy", {}).get("local_opening") is not True
+                or self.settings.get("operator_goal") or self.settings.get("intent", "survival") != "survival"
+                or self._task_snapshot().get("status") != "idle"
+                or self.journal.state.get("pending") or self._model_blocked
+                or self._model_worker is not None and self._model_worker.pending):
+            return None
+        gate = getattr(getattr(self.planner, "brain", None), "request_gate", None)
+        if gate is not None:
+            try:
+                if gate.snapshot()["state"] != "idle":
+                    return None
+            except ModelGateError:
+                return None
+        if (observation.get("fresh") is not True or observation.get("stale") is True
+                or observation.get("observation_scope") == "safety" or observation.get("inventory_fresh") is False):
+            return None
+        row = next((row for row in (self.daily_board or {}).get("tasks", []) if row["id"] == "starter_tools"), None)
+        action = (row or {}).get("next_action")
+        if not action or action["name"] not in {"craft_item", "place_item", "gather_block", "gather_materials",
+                                                 "clear_foliage", "take_items"}:
+            return None
+        decision = Decision("run_survival_task", {"task": "starter_tools"},
+                            "Current observations support starting the basic tool goal", "autonomous_task")
+        return decision if self.daily_policy.validate(decision, observation, context=self.context) is None else None
 
     def _save_task(self, event=None):
         if self.task_controller is None:
