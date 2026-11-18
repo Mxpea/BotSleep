@@ -31,7 +31,11 @@ class SurvivalSkills:
     GATHERABLE = LOGS | {"stone", "cobblestone", "coal_ore", "deepslate_coal_ore", "dead_bush"}
     PICKAXES = frozenset(tier + "_pickaxe" for tier in ("wooden", "copper", "stone", "iron", "golden", "diamond", "netherite"))
     AIR = frozenset({"air", "cave_air", "void_air"})
-    RETREAT_PASSABLE = AIR | {"short_grass", "leaf_litter"}
+    RETREAT_PASSABLE = AIR | {
+        "short_grass", "tall_grass", "fern", "large_fern", "leaf_litter",
+        "vine", "glow_lichen", "hanging_roots", "moss_carpet", "pale_moss_carpet",
+        "pale_hanging_moss", "eyeblossom", "open_eyeblossom", "closed_eyeblossom",
+    }
     RETREAT_LEAVES = frozenset(wood + "_leaves" for wood in WOODS)
     RETREAT_TRUNKS = LOGS | frozenset(wood + "_wood" for wood in WOODS)
     HAZARDS = frozenset({"water", "lava", "bubble_column", "fire", "soul_fire", "magma_block",
@@ -47,7 +51,7 @@ class SurvivalSkills:
             "light_gray", "cyan", "purple", "blue", "brown", "green", "red", "black",
         )),
         "andesite", "granite", "diorite", "deepslate", "cobbled_deepslate",
-        "tuff", "calcite", "dripstone_block", "snow_block", "moss_block",
+        "tuff", "calcite", "dripstone_block", "snow_block", "moss_block", "pale_moss_block",
         "crafting_table", "furnace",
     }
     PLACEABLE = LOGS | PLANKS | {

@@ -300,6 +300,16 @@ class ObservedCanopyEscapeTests(unittest.TestCase):
         self.assertTrue(result.success, result)
         self.assertEqual(result.data.get("operation"), "clear_foliage")
 
+    def test_pale_garden_moss_floor_and_hanging_moss_complete_canopy_escape(self):
+        world = terrain([(0, 70, 0, "pale_oak_leaves"), (1, 69, 0, "pale_moss_block")])
+        world.set_block([0, 69, 0], "pale_oak_leaves", properties={"waterlogged": False})
+        world.set_block([1, 68, 0], "pale_moss_block")
+        world.set_block([1, 70, 0], "pale_hanging_moss")
+        result = DailySurvivalSkills(world).execute("canopy_escape", {})
+        self.assertTrue(result.success, result)
+        self.assertTrue(result.data["retreat_complete"])
+        self.assertEqual(result.data["evacuation_stage"], "ground")
+
 
 if __name__ == "__main__":
     unittest.main()

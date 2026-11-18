@@ -476,6 +476,7 @@ class LocalRecoveryRuntimeTests(unittest.TestCase):
         harness._local_recovery_result(Decision("canopy_escape", {}, "Step", "safety"), res, obs)
         opts = harness._canopy_options(obs)
         self.assertEqual(opts["recent_targets"][-1], [1, 70, 0])
+        self.assertIn([1, 70, 0], opts["excluded_targets"])
         self.assertEqual(len(opts["recent_targets"]), 8)
 
 

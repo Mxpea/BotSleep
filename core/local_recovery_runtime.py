@@ -138,6 +138,8 @@ class LocalRecoveryRuntime:
 
     def _canopy_options(self, observation):
         state = self._recovery_state("canopy_recovery", observation)
+        now = time.time()
+        state["excluded_until"] = {k: v for k, v in state["excluded_until"].items() if v > now}
         excluded = []
         for key in state["excluded_until"]:
             try:
@@ -171,6 +173,10 @@ class LocalRecoveryRuntime:
             pos = self._safety_rules._pos(observation["status"].get("pos"))
             if pos and observation.get("fresh") is True:
                 cell = [math.floor(value + .0001) for value in pos]
+                if canopy and cell in state["visited"]:
+                    cell_key = self._safety_rules._key(cell)
+                    state["excluded_until"][cell_key] = time.time() + self.settings["target_cooldown_seconds"]
+                    state["excluded_until"] = dict(list(state["excluded_until"].items())[-16:])
                 state["visited"] = ([row for row in state["visited"] if row != cell] + [cell])[-32:]
             if canopy:
                 state["evacuating"] = result.data.get("evacuation_stage") != "ground"
