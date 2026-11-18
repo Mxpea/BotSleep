@@ -16,6 +16,10 @@ from agent.survival_planner import Decision, LOG_NAMES, PLANK_NAMES, SAFE_FOOD, 
 from core.daily_policy import DailySafetyPolicy
 from core.skill_registry import internal_skills_for_objective
 from core.route_foliage_recovery import choose_route_foliage, cleared_route_targets, position_foliage_hint
+from core.shelter_project import active_project, same_site
+from core.shelter_approach import avoids_shell, entrance_geometry, entrance_waypoint
+from core.shelter_route_recovery import changed_shelter_routes, shelter_route_refusal
+from core.shelter_return import MAX_RETURN_STEPS, choose_shelter_return
 from core.structure_spec import SHELTER_5X5_SPEC, SHELTER_BUILDING_BLOCKS
 from skills.daily_survival import DailySurvivalSkills
 
@@ -94,6 +98,7 @@ class AutonomousTaskController:
                       "drop_before": None,
                       "local_failures": 0, "no_progress": 0, "explore_steps": 0,
                       "survey_steps": 0, "survey_since_move": 0, "rejected_sites": [],
+                      "shelter_return_steps": 0, "shelter_return_visited": [],
                       "preparation_site": None, "preparation_attempts": {},
                       "pending_digest": None, "baseline": 0, "sequence": 0, "life_generation": 0}
         if saved is not None:
@@ -142,11 +147,12 @@ class AutonomousTaskController:
         self._data["args"] = args
         for key in ("steps", "local_failures", "no_progress", "explore_steps", "baseline", "sequence",
                     "local_recoveries", "emergency_interruptions", "ai_escalations", "life_generation",
-                    "survey_steps", "survey_since_move"):
+                    "survey_steps", "survey_since_move", "shelter_return_steps"):
             if type(self._data[key]) is not int or self._data[key] < 0:
                 raise ValueError("Saved counters are invalid")
         for key, maximum in (("recent_results", 8), ("visited", 16), ("jobs", 8),
-                             ("observed_drop_ids", 40), ("recovered_drop_ids", 40), ("rejected_sites", 128)):
+                             ("observed_drop_ids", 40), ("recovered_drop_ids", 40), ("rejected_sites", 128),
+                             ("shelter_return_visited", 64)):
             if not isinstance(self._data[key], list) or len(self._data[key]) > maximum:
                 raise ValueError("Saved evidence exceeds its limit")
         if not all(isinstance(key, str) and len(key) <= 100 for key in self._data["rejected_sites"]):
@@ -356,6 +362,13 @@ class AutonomousTaskController:
         if self._fresh(observation):
             self._bind_shelter_search(observation["status"], self._data["life_generation"])
         self._data["blocked"] = {k: v for k, v in self._data["blocked"].items() if _finite(v) and v > now}
+        changed_routes = set()
+        if (self._data["task"] == "shelter" and not self._unknown(context)
+                and not self._generation_changed(context) and self._fresh(observation)):
+            for target in changed_shelter_routes(self._data["recent_results"], observation):
+                key = self.rules._key(target)
+                if self._data["blocked_codes"].get(key) == "unsafe_route":
+                    changed_routes.add(key)
         if observation is not None:
             for row in self.rules._blocks(observation):
                 key = self.rules._key(row["pos"])
@@ -363,7 +376,9 @@ class AutonomousTaskController:
                     self._data["blocked"].pop(key, None)
         self._data["blocked_codes"] = {k: v for k, v in self._data["blocked_codes"].items() if k in self._data["blocked"]}
         self._data["blocked_entities"] = {k: v for k, v in self._data["blocked_entities"].items() if _finite(v) and v > now}
-        result["blocked_targets"] = sorted(self.rules._blocked(result) | set(self._data["blocked"]))
+        # Keep the original refused sweep cooling down. Only its projection
+        # onto a different fresh origin changes; external risk blocks still win.
+        result["blocked_targets"] = sorted(self.rules._blocked(result) | (set(self._data["blocked"]) - changed_routes))
         result["capabilities"] = list(set(result.get("capabilities", DAILY_SKILLS)) - {"gather_materials", "build_shelter_batch"})
         if self._data["task"] == "shelter":
             result["capabilities"] = sorted(set(result["capabilities"]) | internal_skills_for_objective("daily"))
@@ -501,7 +516,16 @@ class AutonomousTaskController:
             for resource, names in RESOURCE_NAMES.items():
                 if expected in names:
                     return self._gather(resource, obs, context)
-        if decision and (decision.name == "place_item" and decision.args.get("item") == "crafting_table"
+        # A table visible across the valley should not pull the builder away
+        # from the doorway when it is already carrying its own workstation.
+        base = (obs.get("daily_evidence") or {}).get("base_site")
+        local_table_for_door = (decision and decision.name == "move_to" and self._data["task"] == "shelter"
+            and obs["counts"].get("crafting_table", 0) > 0
+            and self.daily._verified(base, obs["status"].get("dimension"))
+            and math.dist(obs["status"]["pos"], base["pos"]) <= 5
+            and any(row["name"] == "crafting_table" and row["pos"] == decision.args.get("pos")
+                    and math.dist(obs["status"]["pos"], row["pos"]) > 3.5 for row in self.rules._blocks(obs)))
+        if decision and (local_table_for_door or decision.name == "place_item" and decision.args.get("item") == "crafting_table"
                 or decision.name == "wait" and decision.goal == "crafting_table" and obs["counts"].get("crafting_table", 0)):
             origin = obs["status"]["pos"]
             if not self._fresh(obs) or obs.get("local_geometry_origin") != origin:
@@ -704,12 +728,15 @@ class AutonomousTaskController:
                 or shelter.get("hazards") != [] or shelter.get("occupied_blueprint_cells") != []
                 or type(missing) is not int or not 0 <= missing <= maximum):
             return None, False
-        counts = obs["counts"]
         door = shelter.get("door") or {}
         if not isinstance(door, dict):
             return None, False
-        needs_door = (door.get("frame_verified") is not True
-                      and not any(counts.get(name, 0) for name in DailySurvivalSkills.DOORS))
+        return self._shelter_material_stockpile(obs, context, missing, door.get("frame_verified") is not True)
+
+    def _shelter_material_stockpile(self, obs, context, missing, door_needed):
+        """Compute inventory demand separately from authority to build at a site."""
+        counts = obs["counts"]
+        needs_door = door_needed and not any(counts.get(name, 0) for name in DailySurvivalSkills.DOORS)
         tables = self.daily._safe_rows(obs, {"crafting_table"}, context=context)
         table_planks = 4 if needs_door and not counts.get("crafting_table", 0) and not tables else 0
         wall_materials = sum(counts.get(name, 0) for name in SHELTER_BUILDING_BLOCKS - set(PLANK_NAMES))
@@ -745,6 +772,18 @@ class AutonomousTaskController:
         return decision, True
 
     def _board_action(self, task, obs, context):
+        project = active_project(context.get("shelter_project"), scope=self._world_scope,
+                                 dimension=obs["status"].get("dimension"))
+        base = (obs.get("daily_evidence") or {}).get("base_site")
+        if task == "shelter" and project and not (
+                self.daily._verified(base, obs["status"].get("dimension")) and same_site(project, base)):
+            # Historical counts can guide safe local resource work, never
+            # fabricate a base_site or authorize placement or site preparation.
+            stock, required = self._shelter_material_stockpile(obs, context,
+                project["missing_blocks_hint"], project["door_needed_hint"])
+            if required:
+                return stock, False
+            return self._return_to_project(obs, context, project), False
         if task == "shelter":
             stock, required = self._shelter_stockpile(obs, context)
             if required:
@@ -827,6 +866,12 @@ class AutonomousTaskController:
                 return self._craft(wood + "_door", 1, obs, context), False
         if candidate is None:
             counts = obs["counts"]
+            entrance = entrance_geometry(obs.get("shelter")) if task == "shelter" else None
+            if (entrance and project and self.daily._verified(base, obs["status"].get("dimension"))
+                    and same_site(project, base)):
+                # A temporarily unavailable work/door stance is not permission
+                # to abandon a verified house and resume generic exploration.
+                return self._return_to_project(obs, context, {**project, "pos": entrance["outside"]}), False
             if task == "bed" and not any(counts.get(bed, 0) for bed in DailySurvivalSkills.BEDS):
                 wool = next((name for name, count in counts.items() if name.endswith("_wool") and count >= 3), None)
                 candidate = self._craft(wool[:-5] + "_bed", 1, obs, context) if wool else self._hunt({"sheep"}, obs, context)
@@ -836,6 +881,23 @@ class AutonomousTaskController:
                     count and name.endswith("_hoe") for name, count in counts.items()):
                 candidate = self._craft("stone_hoe", 1, obs, context)
         return self._resource_child(candidate, obs, context), False
+
+    def _return_to_project(self, obs, context, project):
+        if self._data["shelter_return_steps"] >= MAX_RETURN_STEPS:
+            self._escalate("shelter_return_budget_exhausted")
+            return None
+        visited = self._data["shelter_return_visited"]
+        if not visited:
+            visited.append(list(obs["status"]["pos"]))
+        entrance = entrance_geometry(obs.get("shelter"))
+        if entrance and (obs.get("shelter") or {}).get("dimension") == obs["status"].get("dimension"):
+            obs = {**obs, "safe_stand_candidates": [row for row in self.daily._rows(obs.get("safe_stand_candidates"))
+                if avoids_shell(obs["status"]["pos"], row.get("pos"), entrance)]}
+        move = choose_shelter_return(obs, project, {**context, "threat_radius": self.rules.threat_radius},
+            visited=visited, allow_step=self._local_shelter_step)
+        if move is None:
+            self._escalate("shelter_project_requires_fresh_geometry_or_safe_return")
+        return move
 
     def _preparation_stance(self, obs, context, targets):
         origin = obs["status"]["pos"]
@@ -887,12 +949,21 @@ class AutonomousTaskController:
         else:
             return None
         origin = status["pos"]
+        entrance = entrance_geometry(shelter)
+        if entrance and requested in stands:
+            targets = [entrance_waypoint(origin, entrance)]
+        project = active_project(context.get("shelter_project"), scope=self._world_scope,
+                                 dimension=status.get("dimension"))
+        if project and same_site(project, base) and min(math.dist(origin, p) for p in targets) > 3:
+            target = min(targets, key=lambda p: math.dist(origin, p))
+            return self._return_to_project(obs, context, {**project, "pos": list(target)})
         blocked = self.rules._blocked(context)
         def usable(pos):
             return (pos is not None and (abs(pos[1] - origin[1]) <= .05
                                         or self._local_shelter_step(origin, pos, obs))
                     and .4 < math.dist(origin, pos) <= 3
                     and self.rules._key(pos) not in blocked
+                    and (entrance is None or avoids_shell(origin, pos, entrance))
                     and not self.rules._dangerous_hostiles(obs, pos))
         candidates = [p for p in targets if usable(p)]
         if not candidates and obs.get("local_geometry_origin") == origin:
@@ -905,6 +976,9 @@ class AutonomousTaskController:
                         and min(math.dist(pos, p) for p in targets) < before - .25):
                     candidates.append(pos)
         if not candidates:
+            if entrance and project and same_site(project, base):
+                target = min(targets, key=lambda p: math.dist(origin, p))
+                return self._return_to_project(obs, context, {**project, "pos": list(target)})
             return None
         target = min(candidates, key=lambda p: (min(math.dist(p, t) for t in targets), math.dist(origin, p)))
         return self._decision("position_for_task", {"pos": list(target)},
@@ -989,11 +1063,19 @@ class AutonomousTaskController:
                 self._data["progress"]["current"] = 1
                 self._set("completed", "Fresh task evidence verifies the selected goal")
                 return None
+        if self._data["status"] == "needs_ai":
+            return None
         if decision and decision.goal == "explore":
             decision = None
         if decision and decision.name == "move_to" and decision.args.get("pos") not in (
                 [b["pos"] for b in self.rules._blocks(obs)] + [row.get("pos") for row in self.daily._rows(obs.get("entities"))]):
             decision = self._shelter_stance(decision, obs, local)
+            project = active_project(local.get("shelter_project"), scope=self._world_scope,
+                                     dimension=status.get("dimension"))
+            if decision is None and task == "shelter" and project:
+                decision = self._return_to_project(obs, local, project)
+                if decision is None:
+                    return None
         if decision is None:
             decision = self._explore(obs, local)
         if decision is None:
@@ -1081,6 +1163,10 @@ class AutonomousTaskController:
         if code in {"dead", "lifecycle_changed", "life_changed", "dimension_changed"}:
             self._escalate("life_or_dimension_changed")
             return
+        if self._data["task"] == "shelter":
+            refused = shelter_route_refusal(decision, result, observation)
+            if refused is not None:
+                recent["shelter_route_refusal"] = refused
         hint = position_foliage_hint(decision, result, observation)
         if hint is not None:
             recent["route_foliage"] = hint
@@ -1210,6 +1296,13 @@ class AutonomousTaskController:
             target = self.rules._pos(decision.args.get("pos"))
             if target:
                 self._data["visited"] = (self._data["visited"] + [self.rules._key(target)])[-16:]
+        if decision.goal == "shelter_return":
+            self._data["shelter_return_steps"] += 1
+            if (result.success is True and data.get("verified") is True and self._fresh(observation)
+                    and math.dist(observation["status"]["pos"], decision.args["pos"]) <= .4):
+                arrived = list(observation["status"]["pos"])
+                if not self._data["shelter_return_visited"] or self._data["shelter_return_visited"][-1] != arrived:
+                    self._data["shelter_return_visited"] = (self._data["shelter_return_visited"] + [arrived])[-64:]
         if result.success and decision.name == "smelt_start" and data.get("verified") is True:
             output = DailySurvivalSkills.SMELTABLE.get(decision.args.get("input_item"))
             if output:

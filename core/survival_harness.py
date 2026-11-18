@@ -19,6 +19,7 @@ from core.retreat_controller import (
 from core.skill_registry import destination_checked_skills, resolve_skill_runner
 from core.sleep_controller import SleepController
 from core.survival_state import ObservationCollector, SurvivalJournal
+from core.shelter_project import active_project, completion_observed, project_anchor, recover_project, same_site, verified_build_anchor
 from skills import SkillResult
 from skills.sleep import AutoSleepSkill
 from skills.survival import SurvivalSkills
@@ -55,6 +56,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
         self.uses_llm = getattr(self.planner, "uses_llm", False) is True
         self._safety_rules = SurvivalPlanner(settings)
         self._model_feedback = False
+        self._automatic_cycle = False
         self.competition_mode = settings.get("objective", "starter") == "competition"
         self.competition = None
         self._competition_board_signature = None
@@ -160,6 +162,17 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
         self._init_autonomy()
         if self._paused:
             self._record("WARN", "RECOVERY_REQUIRED", {"reason": self.pause_reason})
+        if self.daily and self.context.get("shelter_project_migration") != 1:
+            recovered = (recover_project(self.journal)
+                         if project_anchor(self.context.get("shelter_project"), scope=self.journal.scope) is None else None)
+            if recovered is not None:
+                self.context["shelter_project"] = recovered
+                if recovered.get("complete") is not True:
+                    self.context["base_project"] = {key: recovered[key] for key in ("pos", "material", "dimension", "orientation")}
+                self._record("INFO", "SHELTER_PROJECT_RECOVERED", {"project": recovered,
+                    "note": "Historical verified placement recovered as intent; current geometry remains required"})
+            self.context["shelter_project_migration"] = 1
+            self._checkpoint(context=self.context)
 
     @property
     def busy(self):
@@ -396,6 +409,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
             if self.daily_policy:
                 self.context["survival_constraints"] = self.daily_policy.constraints(observation, context=self.context)
             return
+        self._observe_shelter_project(observation)
         self.context["milestones"] = self.planner.progress(observation)
         if self.playbook:
             self.context["playbook"] = self.playbook.build(observation,
@@ -488,7 +502,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
 
     def _observe(self, *, safety_only=False):
         if callable(getattr(self.collector, "set_context", None)):
-            self.collector.set_context(self.context)
+            self.collector.set_context({**self.context, "shelter_project": project_anchor(
+                self.context.get("shelter_project"), scope=self.journal.scope)})
         # Optional collector capability preserves custom collector injection.
         if callable(getattr(type(self.collector), "collect_safety", None)):
             recovery = self.context.get("retreat_recovery") or {}
@@ -536,6 +551,18 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
             model_context.pop("daily_tasks", None)
             model_context.pop("action_hints", None)
             model_context["competition"] = self.competition.model_view()
+        project = self._shelter_project_lock(observation["status"].get("dimension"))
+        if project:
+            model_context = copy.deepcopy(model_context)
+            # task_execution is already included in the model's bounded context;
+            # retain the anchor as intent, never as fresh construction evidence.
+            model_context["task_execution"] = {**(model_context.get("task_execution") or self._task_snapshot())}
+            model_context["task_execution"]["shelter_recovery_constraint"] = {
+                **{key: project[key] for key in ("pos", "orientation", "dimension")},
+                "requires_revalidation": True,
+                "reason": "Continue this already started shelter. These are its blueprint centre and orientation; "
+                          "a wall block or standing cell is not a different building centre. "
+                          "Reobserve the original site before construction; old geometry never authorizes a write."}
         stats = self.context.get("autonomy_stats", {})
         stats["model_planning_rounds"] = stats.get("model_planning_rounds", 0) + 1
         worker.start(observation, model_context)
@@ -545,6 +572,28 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                 code = "llm_cancelled" if self.paused else "llm_preempted"
                 raise LLMError(code, "Local safety or pause superseded model planning; response will be drained")
         return worker.take(observation)
+
+    def _shelter_project_lock(self, dimension):
+        task = self._task_snapshot() or {}
+        if (not self.daily or self.competition_mode
+                or not (self._task_child or self._automatic_cycle)
+                or task.get("task") != "shelter"
+                or task.get("status") not in {"running", "suspended", "needs_ai"}):
+            return None
+        return active_project(self.context.get("shelter_project"), scope=self.journal.scope, dimension=dimension)
+
+    def _observe_shelter_project(self, observation):
+        project = active_project(self.context.get("shelter_project"), scope=self.journal.scope)
+        if (project and observation.get("fresh") is True and observation.get("observation_scope") != "safety"
+                and observation.get("status", {}).get("dimension") == project["dimension"]
+                and completion_observed(project, observation.get("shelter"))):
+            project["complete"] = True
+            self.context["shelter_project"] = project
+            self.context["base_project"] = {key: project[key] for key in ("pos", "material", "dimension", "orientation")}
+            self._record("INFO", "SHELTER_PROJECT_COMPLETED", {"project": project,
+                "shelter": observation["shelter"],
+                "note": "Fresh closed-door complete geometry releases construction selection lock"})
+            self._checkpoint(context=self.context)
 
     def _daily_result(self, decision, result, observation):
         if not self.daily:
@@ -557,11 +606,27 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
             self.memory.record_result(decision, result, observation)
         status = (observation or {}).get("status") or {}
         data = result.data
+        project = project_anchor(self.context.get("shelter_project"), scope=self.journal.scope)
+        built = verified_build_anchor(decision, result, self.journal.scope)
+        if built and (project is None or same_site(project, built) or not self._shelter_project_lock(status.get("dimension"))):
+            self.context["shelter_project"] = project = built
+            self.context["base_project"] = {key: built[key] for key in ("pos", "material", "dimension", "orientation")}
+            self._checkpoint(context=self.context)
+        elif (project and decision.name == "inspect_shelter" and result.success is True
+                and not _uncertain_result(result) and data.get("fresh") is True and same_site(project, data)
+                and type(data.get("missing_blocks")) is int and 0 <= data["missing_blocks"] <= 55):
+            project.update(missing_blocks_hint=data["missing_blocks"],
+                           door_needed_hint=(data.get("door") or {}).get("frame_verified") is not True)
+            self.context["shelter_project"] = project
         shelter_orientation = decision.args.get("orientation", "north")
         if (decision.name == "plan_shelter" and result.success and not _uncertain_result(result)
+                and (not self._shelter_project_lock(status.get("dimension"))
+                     or same_site(project, {**decision.args, "dimension": status.get("dimension")}))
                 and (data.get("geometry") or {}).get("floor_verified") is True
                 and isinstance(shelter_orientation, str) and shelter_orientation in {"north", "south", "east", "west"}
                 and data.get("orientation", "north") == shelter_orientation):
+            if project and not same_site(project, {**decision.args, "dimension": status.get("dimension")}):
+                self.context.pop("shelter_project", None)
             self.context["base_project"] = {"pos": decision.args["pos"], "material": decision.args["material"],
                                             "dimension": status.get("dimension"), "source": "skill_verified",
                                             "orientation": shelter_orientation}
@@ -631,6 +696,10 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
         observation = None
         self._task_child = False
         self._task_safety = False
+        # Retain the decision source through result persistence: model feedback
+        # is consumed before _daily_result, and an exhausted task has no child.
+        # Explicit manual decisions and completed/replaced goals may change site.
+        self._automatic_cycle = manual is None
         try:
             self._phase("observing")
             observation = self._observe()
@@ -736,6 +805,14 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                 rejected = self._unsafe_destination(decision, observation) or self.daily_policy.validate(decision, observation, context=self.context)
                 if rejected:
                     return decision, SkillResult(False, rejected, {"executed": False}, "safety_changed"), observation
+            project = self._shelter_project_lock(observation["status"].get("dimension"))
+            if (project and decision.name in {"plan_shelter", "plan_shelter_preparation", "prepare_shelter_step",
+                                             "build_shelter_step", "build_shelter_batch"}
+                    and not same_site(project, {**decision.args, "dimension": observation["status"].get("dimension")})):
+                return decision, SkillResult(False,
+                    "Continue the already started shelter at its original blueprint centre and orientation; "
+                    "a wall or standing cell cannot replace the site. Reobserve that site before building",
+                    {"executed": False, "project": project, "requires_revalidation": True}, "shelter_project_active"), observation
             self._active_decision = decision
             self._safety_baseline = copy.deepcopy(observation["status"])
             self._record("INFO", "DECISION", {"decision": asdict(decision), "status": observation["status"],

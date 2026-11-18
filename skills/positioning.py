@@ -82,15 +82,46 @@ class PositioningSkills(DailySurvivalSkills):
                     found.append((x, z))
         return found
 
-    def _corridor(self, origin, target, context):
+    @classmethod
+    def leaves_start_margin(cls, origin, target, column):
+        """Negative geometry filter for leaving an existing rounded wall contact.
+
+        This is not ordinary clearance: only the source margin may touch a wall.
+        The nominal .3 half-width body must not penetrate it and the entire move must
+        increase separation along one separating axis. The full .36 envelope
+        still applies to every new column and the final stance.
+        """
+        if (abs(origin[1] - target[1]) > .05 or cls._cell(origin) == cls._cell(target)
+                or not .5 < math.dist(origin, target) <= 1.5
+                or tuple(column) not in cls._columns(origin, origin)
+                or tuple(column) in cls._columns(target, target)):
+            return False
+        for axis, cell in ((0, column[0]), (2, column[1])):
+            if origin[axis] <= cell:
+                gap, movement = cell - origin[axis], origin[axis] - target[axis]
+            elif origin[axis] >= cell + 1:
+                gap, movement = origin[axis] - cell - 1, target[axis] - origin[axis]
+            else:
+                continue
+            if .3 - 1e-9 <= gap <= cls.HALF_WIDTH + 1e-9 and movement > 1e-9 and gap + movement > cls.HALF_WIDTH + 1e-9:
+                return True
+        return False
+
+    def _corridor(self, origin, target, context, *, leave_start_margin=False):
         columns = self._columns(origin, target)
         y = math.floor(target[1] + .0001)
         for x, z in columns:
             for dy in (0, 1):
                 body = self._block([x, y + dy, z], context)
                 if body["name"] not in PASS_THROUGH or not self._safe_block(body):
-                    raise _Failure("unsafe_route", "Task stance corridor contains blocked or uncertain body space",
-                                   {"blocked_cell": [x, y + dy, z], "block": body["name"]})
+                    if (leave_start_margin and body["name"] in self.SUPPORT and self._safe_block(body)
+                            and self.leaves_start_margin(origin, target, (x, z))):
+                        cells = context["retreat_evidence"].setdefault("start_margin_cells", [])
+                        if [x, y + dy, z] not in cells:
+                            cells.append([x, y + dy, z])
+                    else:
+                        raise _Failure("unsafe_route", "Task stance corridor contains blocked or uncertain body space",
+                                       {"blocked_cell": [x, y + dy, z], "block": body["name"]})
             ground = self._block([x, y - 1, z], context)
             if ground["name"] not in self.SUPPORT or not self._safe_block(ground):
                 raise _Failure("unsafe_route", "Task stance corridor lacks known solid non-leaf ground",
@@ -249,6 +280,11 @@ class PositioningSkills(DailySurvivalSkills):
         context["navigation_write"] = True
         context["navigation_observe_only"] = True
         self._daily_action(context, self.client.move_to, *target, range=0, timeout_ms=8000, validate=validate)
+        return self._settled_position(target, before, context)
+
+    def _settled_position(self, target, before, context):
+        origin, destination = list(before["pos"]), self._cell(target)
+        evidence = context["retreat_evidence"]
         # Everything after the single write is observation. A missing or
         # interrupted landing never authorizes stop, replay, or a second move.
         deadline = min(context["position_deadline"], time.monotonic() + 1.5)
@@ -330,6 +366,36 @@ class PositioningSkills(DailySurvivalSkills):
             raise _Failure("action_unconfirmed", "Terrain step landing could not be fully verified",
                            {"action_state": "unknown", "recovery_error": getattr(error, "code", "internal_error")}) from None
 
+    def _position_margin_escape(self, target, before, context):
+        """One outward move from an already occupied wall-edge margin; no replay."""
+        origin = list(before["pos"])
+        self._step_stable(before, before)
+        evidence = context["retreat_evidence"]
+        evidence["start_margin_recovery"] = True
+        self._step_threats(origin, target, context)
+        self._corridor(origin, target, context, leave_start_margin=True)
+
+        def same_start(current):
+            self._step_stable(current, before)
+            if self._cell(current["pos"]) != self._cell(origin) or math.dist(current["pos"], origin) > .05:
+                raise _Failure("safety_changed", "Wall-edge recovery origin changed before movement")
+
+        def validate(current):
+            same_start(current)
+            columns = self._corridor(current["pos"], target, context, leave_start_margin=True)
+            threats = self._step_threats(current["pos"], target, context)
+            final = self._status(context)
+            same_start(final)
+            if (not set(self._columns(final["pos"], target)).issubset(columns)
+                    or final["pos"] != current["pos"]):
+                raise _Failure("safety_changed", "Wall-edge source changed during its final geometry check")
+            self._step_threats(final["pos"], target, context, entities=threats)
+
+        context["navigation_write"] = True
+        context["navigation_observe_only"] = True
+        self._daily_action(context, self.client.move_to, *target, range=0, timeout_ms=8000, validate=validate)
+        return self._settled_position(target, before, context)
+
     def _position_for_task(self, args, context):
         target = self._pos(args["pos"])
         if (abs(target[0] - (math.floor(target[0]) + .5)) > 1e-6
@@ -345,7 +411,16 @@ class PositioningSkills(DailySurvivalSkills):
         evidence.update(origin=origin, target=target, actual_path_verified=False,
                         read_budget=self.MAX_READS, observation_budget_seconds=self.READ_SECONDS)
         self._threats(origin, target, context)
-        self._corridor(origin, target, context)
+        try:
+            self._corridor(origin, target, context)
+        except _Failure as error:
+            cell = error.data.get("blocked_cell")
+            if (error.code != "unsafe_route" or not isinstance(cell, list) or len(cell) != 3
+                    or cell[1] not in {self._cell(origin)[1], self._cell(origin)[1] + 1}
+                    or error.data.get("block") not in self.SUPPORT
+                    or not self.leaves_start_margin(origin, target, (cell[0], cell[2]))):
+                raise
+            return self._position_margin_escape(target, status, context)
         if self._cell(origin) == self._cell(target) and math.dist(origin, target) <= .4:
             return self._verified(context, pos=origin, already_positioned=True, moved=False)
 

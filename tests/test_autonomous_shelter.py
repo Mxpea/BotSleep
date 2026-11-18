@@ -177,6 +177,43 @@ class AutonomousShelterTests(unittest.TestCase):
         self.assertEqual(result.error_code, "unsafe_route")
         self.assertFalse(any(row[0] == "move" for row in self.client.actions))
 
+    def test_aligned_interior_stance_can_install_closed_door_without_leaving_house(self):
+        for orientation in ("north", "east", "south", "west"):
+            with self.subTest(orientation=orientation):
+                client = ConstructionWorld(orientation)
+                walls, roof, opening = ShelterSkills._blueprint([0, 64, 0], orientation)
+                for pos in walls + roof:
+                    client.blocks[pos] = {"name": "oak_planks", "properties": {}}
+                client.items = {"birch_door": 3}
+                client.status["pos"] = list(client.observe()["shelter"]["needs_door"]["approach_pos"])
+                # Reproduce the one-fifth block lateral offset seen at the real door.
+                client.status["pos"][2 if orientation in ("east", "west") else 0] -= .2
+                obs = client.observe()
+                controller = AutonomousTaskController()
+                controller.start({"task": "shelter"}, obs)
+                step = controller.next_action(obs)
+                self.assertEqual((step.name, step.args), ("place_door", {"pos": list(opening), "item": "birch_door"}))
+                result = DailySurvivalSkills(client).execute(step.name, step.args)
+                self.assertTrue(result.success, result)
+                self.assertEqual(client.items["birch_door"], 2)
+                self.assertTrue(client.observe()["shelter"]["shelter_verified"])
+
+    def test_finished_shell_with_held_door_has_no_wood_reserve_dependency(self):
+        client = ConstructionWorld("east")
+        walls, roof, _ = ShelterSkills._blueprint([0, 64, 0], "east")
+        for pos in walls + roof:
+            client.blocks[pos] = {"name": "oak_planks", "properties": {}}
+        client.items = {"birch_door": 3}
+        obs = client.observe()
+        goals = DailySurvivalGoals()
+        board = goals.build(obs)
+        row = next(t for t in board["tasks"] if t["id"] == "shelter")
+        self.assertNotIn("wood_reserve", row["depends_on"])
+        client.items = {}
+        supply_board = goals.build(client.observe())
+        row = next(t for t in supply_board["tasks"] if t["id"] == "shelter")
+        self.assertIn("wood_reserve", row["depends_on"])
+
     def test_existing_fresh_open_door_is_closed_without_crafting_or_placing(self):
         self.client.existing_house()
         controller, obs = self.start()

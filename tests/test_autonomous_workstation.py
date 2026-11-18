@@ -41,6 +41,18 @@ class AutonomousWorkstationTests(unittest.TestCase):
         self.assertIsNone(controller.next_action(obs))
         self.assertEqual(controller.snapshot()["status"], "completed")
 
+    def test_builder_uses_held_table_at_door_instead_of_leaving_for_remote_table(self):
+        _, obs = self.setup_goal("oak_door")
+        obs["daily_evidence"]["base_site"] = verified(pos=[0, 64, 0], orientation="east")
+        obs["blocks"] = [{"pos": [13, 68, -10], "name": "crafting_table"}]
+        obs["placement_candidates"] = [{"pos": [-1, 64, 1], "support": "grass_block"}]
+        controller = AutonomousTaskController()
+        controller.start({"task": "shelter"}, obs)
+        approach = controller.rules._workspace(obs, {})
+        self.assertEqual(approach.name, "move_to")
+        child = controller._resource_child(approach, obs, {})
+        self.assertEqual(child.args, {"item": "crafting_table", "pos": [-1, 64, 1]})
+
     def test_missing_candidate_repositions_once_then_places_newly_observed_cell(self):
         controller, obs = self.setup_goal(max_explore_steps=1)
         obs["placement_candidates"] = []

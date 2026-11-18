@@ -437,13 +437,19 @@ class DailySurvivalGoals:
                                         "Approach a fresh door stance before closing the existing frame", "shelter")
                 return self._action("set_door", {"pos": door["pos"], "open": False},
                                     "Close the freshly verified existing door, then recheck the shelter", "shelter")
-            held = next((name for name in counts if name.endswith("_door") and name != "iron_door" and counts[name]), None)
+            held = next((name for name in counts if name in DailySurvivalSkills.DOORS and counts[name]), None)
             if held:
                 stand = self._pos(door.get("stand_pos"))
                 approach = self._pos(door.get("approach_pos"))
-                if (shelter.get("inside") is True and approach
-                        and math.dist(approach, observation["status"]["pos"]) > .4):
-                    stand = approach
+                origin = observation["status"]["pos"]
+                if shelter.get("inside") is True and approach:
+                    if math.dist(approach, origin) > .4:
+                        stand = approach
+                    elif isinstance(door.get("allowed_facing"), list) and not DailySurvivalSkills._body_at(door["pos"], origin):
+                        facings = DailySurvivalSkills.placement_facings(door["pos"], origin)
+                        if facings and all(facing in door["allowed_facing"] for facing in facings):
+                            return self._action("place_door", {"pos": door["pos"], "item": held},
+                                "Install the door from its aligned interior stance and verify both closed halves", "shelter")
                 if stand and math.dist(stand, observation["status"]["pos"]) > .4:
                     if self.rules._key(stand) in self.rules._blocked(context):
                         return None
@@ -660,9 +666,17 @@ class DailySurvivalGoals:
         task("bed", 74, bool(complete_beds), missing=[] if complete_beds else ["complete_unoccupied_bed"], action=bed_action,
              depends_on=("base_site", "shelter"), proof={"positions": complete_beds[:4]}, reason="Need wool, planks and a safe two-block placement inside the completed shelter; held beds are not deployed beds")
 
+        site = observation.get("shelter")
+        door_only = (base_ok and isinstance(site, dict) and site.get("fresh") is True and site.get("pos") == base["pos"]
+                     and site.get("orientation", "north") == base.get("orientation", "north")
+                     and site.get("dimension") == dimension and type(site.get("missing_blocks")) is int
+                     and site["missing_blocks"] == 0
+                     and isinstance(site.get("needs_door"), dict)
+                     and any(counts.get(item, 0) for item in DailySurvivalSkills.DOORS))
         task("shelter", 73, shelter_ok, missing=[] if shelter_ok else ["fresh_roof_walls_exit_survey"],
              action=self._shelter_action(observation, counts, base, context),
-             depends_on=("base_site", "wood_reserve"), proof=copy.deepcopy(shelter) if shelter_ok else {},
+             depends_on=("base_site",) if door_only else ("base_site", "wood_reserve"),
+             proof=copy.deepcopy(shelter) if shelter_ok else {},
              reason="Shelter geometry must be freshly surveyed; a roof or remembered house alone is insufficient")
 
         storage_rows = self._containers(observation, context)

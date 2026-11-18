@@ -7,6 +7,7 @@ import time
 from core.block_geometry import trace_block_visibility
 from core.client import APIError
 from core.structure_spec import normalize_orientation, transform_rel_pos
+from core.shelter_project import active_project
 from core.survival_state import ObservationCollector
 from skills.survival import SurvivalSkills
 from skills.combat import HOSTILES, combat_options
@@ -319,7 +320,7 @@ class DailyObservationCollector(ObservationCollector):
                 self._replace_block(observation, cell, self._read(cell, cancel_event))
 
     def _home(self, observation, cancel_event):
-        project = self.context.get("base_project")
+        project = active_project(self.context.get("shelter_project")) or self.context.get("base_project")
         status = observation["status"]
         if not isinstance(project, dict) or project.get("dimension") != status["dimension"]:
             return
