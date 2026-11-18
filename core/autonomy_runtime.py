@@ -188,10 +188,11 @@ class AutonomyRuntime:
             start_surface = [int(math.floor(float(pos[0]))), int(math.floor(float(pos[1]))), int(math.floor(float(pos[2])))]
             # Reach real stone beneath topsoil hills while staying shallow enough for wooden pickaxes and quick return.
             target_y = max(36, start_surface[1] - 11)
-            before_c = dict(self.client.get_inventory_counts() or {})
+            counts_fn = getattr(self.client, "get_inventory_counts", None)
+            before_c = dict((counts_fn() if callable(counts_fn) else getattr(self.client, "counts", None)) or {})
             res = miner.build_mine_shaft(
-                origin=start_surface,
-                radius=18,
+                origin=None,
+                radius=24,
                 branch_length=4,
                 place_workstation=False,
                 return_to_surface=True,
@@ -209,13 +210,14 @@ class AutonomyRuntime:
             if data.get("action_state") == "unknown" or res.error_code == "action_unconfirmed":
                 return SkillResult(False, str(res.message), data, res.error_code)
             retreat_trail = ((data.get("mining_progress") or {}).get("deep_trail")) or []
+            surface_anchor = data.get("surface_entry") or data.get("origin") or start_surface
             surface_chk = miner._ensure_returned_to_surface(
-                start_surface,
+                surface_anchor,
                 retreat_trail=retreat_trail,
                 cancel_event=getattr(self, "_cancel", None),
             )
             data["surface_return"] = surface_chk
-            after_c = dict(self.client.get_inventory_counts() or {})
+            after_c = dict((counts_fn() if callable(counts_fn) else getattr(self.client, "counts", None)) or {})
             gained_cobble = max(0, int(after_c.get("cobblestone", 0)) - int(before_c.get("cobblestone", 0)))
             if gained_cobble > 0:
                 data.setdefault("gained", {})["cobblestone"] = gained_cobble

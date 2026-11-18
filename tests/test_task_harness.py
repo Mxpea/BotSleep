@@ -807,6 +807,25 @@ class TaskHarnessTests(unittest.TestCase):
         self.assertEqual(harness.snapshot()["task_execution"]["progress"]["current"], 1)
         self.assertEqual(len(brain.requests), 1)
 
+    def test_cobblestone_deep_mine_passes_origin_none_to_auto_select_clean_site(self):
+        self.world.counts = {"wooden_pickaxe": 1}
+        calls = []
+
+        def fake_build(mine_self, **kwargs):
+            calls.append(kwargs)
+            self.world.counts["cobblestone"] = 12
+            return SkillResult(True, "Mined cobblestone", {"executed": True, "surface_entry": [4, 64, 0]})
+
+        harness, brain = self.harness(response("run_survival_task", {"task": "gather", "resource": "cobblestone", "count": 8}, "cobble"))
+        with patch("skills.mining.MineShaftSkill.build_mine_shaft", new=fake_build), \
+             patch("skills.mining.MineShaftSkill._ensure_returned_to_surface", return_value={"on_surface": True, "pos": [4, 64, 0], "escaped": False}):
+            self.cycle(harness)
+            self.until(harness, lambda: harness.snapshot()["task_execution"]["status"] == "completed")
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(calls[0]["origin"])
+        self.assertEqual(calls[0]["radius"], 24)
+        self.assertEqual(len(brain.requests), 1)
+
 
 if __name__=="__main__":
     unittest.main()

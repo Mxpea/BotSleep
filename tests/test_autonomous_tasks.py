@@ -854,6 +854,14 @@ class AutonomousTaskTests(unittest.TestCase):
         self.assertTrue(ctrl.confirm_completion(obs))
         self.assertEqual(ctrl.snapshot()["status"], "completed")
 
+    def test_craft_missing_crafting_table_and_planks_delegates_to_log_gathering(self):
+        obs = world({"cobblestone": 8, "stick": 2, "oak_planks": 3})
+        obs["blocks"] = [{"name": "stone", "pos": [1, 63, 0], "can_see": True}]
+        ctrl = self.start({"task": "craft", "item": "stone_pickaxe", "count": 1}, obs=obs)
+        step = ctrl.next_action(obs, {"remote_log_target": [20, 64, 0]})
+        self.assertIsNotNone(step)
+        self.assertEqual((step.name, step.goal), ("move_to", "scout_logs"))
+
 
 if __name__ == "__main__":
     unittest.main()

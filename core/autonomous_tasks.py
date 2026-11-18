@@ -585,6 +585,8 @@ class AutonomousTaskController:
         if item not in {"stick", "crafting_table", "torch", *PLANK_NAMES}:
             workspace = self.rules._workspace(obs, context)
             if workspace:
+                if workspace.goal == "explore":
+                    return self._gather("logs", obs, context) or workspace
                 return self._resource_child(workspace, obs, context) if workspace.name != "wait" else None
         return self._decision("craft_item", {"item": item, "count": min(64, needed, output)}, "Craft one available recipe and verify the new inventory")
 
