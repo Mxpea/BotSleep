@@ -94,7 +94,7 @@ flowchart TD
 
 ## 5. 上下文、进度与记忆
 
-当前规划器发送精简观察、目标板、受限记忆和最近完整原生工具事务；按历史轮数和请求 JSON 字节预算裁剪。starter 默认上限 30,000 字节，daily/competition 48,000 字节（含工具定义），不是 provider 的 token 窗口。最近未交付工具结果受保护；当前输入本身过大则报 `llm_context_limit`，不发送请求。competition 保留当前日常设施证据和完整赛事目录，通过紧凑 JSON 及去除与原生工具结果完全相同的上下文副本节省空间。
+当前规划器发送精简观察、目标板、受限记忆和最近完整原生工具事务；按历史轮数和请求 JSON 字节预算裁剪。starter 默认上限 30,000 字节，daily/competition 48,000 字节（含工具定义），不是 provider 的 token 窗口。最近未交付工具结果受保护；当前输入本身过大则报 `llm_context_limit`，不发送请求。competition 选择时只发送当前证据解锁的短候选，执行时展开当前目标；完整目录仍供本地计分、终态检测和监控。有工具的模型请求要求一次调用，禁止并行；不兼容时不会自动降级为 `auto`。
 
 `context.playbook` 只提供阶段建议，不构成执行队列或完成证据。`survival.intent` 默认 `survival`，显式 `speedrun` 不改变 objective 或扩大工具权限；当前可建议盾、桶、铁镐等已绑定前置，下界移动/交易、要塞采样执行和末地战斗等后段仍标记 unsupported/blocked。完整观察更新建议；短安全观察只将保留的建议标为 `fresh=false`。详见 [SURVIVAL_PLAYBOOK.md](SURVIVAL_PLAYBOOK.md)。
 

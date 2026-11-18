@@ -113,9 +113,11 @@ function ageText(timestamp) {
 }
 function renderFreshness() {
   const state=currentState || {}, stamp=state.heartbeat_at;
+  const source=object(state.source), historical=source.mode==='log_tail';
   const parsed=typeof stamp==='string' ? Date.parse(stamp) : NaN;
   const stale=Number.isFinite(parsed) && Date.now()-parsed>15000;
-  txt('heartbeat-state',!Number.isFinite(parsed) ? '未确认 · 尚无有效心跳时间' : (stale ? 'stale · ' : '新鲜 · ')+ageText(stamp));
+  txt('heartbeat-state',historical ? '只读日志 · 上次记录：'+ageText(source.last_event_at)
+      : !Number.isFinite(parsed) ? '未确认 · 尚无有效心跳时间' : (stale ? 'stale · ' : '新鲜 · ')+ageText(stamp));
   const board=object(object(state.competition).board);
   txt('competition-freshness','快照更新：'+ageText(board.updated_at)+' · stale：'+(board.stale===true ? '是（运行时标记）' : board.stale===false ? '否（运行时标记）' : '未确认')+'；保留发布时的状态');
   renderStatusObservation(state);
@@ -143,8 +145,9 @@ function renderStatusObservation(state) {
 }
 function renderSystem(state) {
   const run=object(state.run), llm=object(state.llm);
+  const historical=object(state.source).mode==='log_tail';
   const slot=run.model_blocked || llm.slot_state==='uncertain' ? 'uncertain' : llm.slot_state || (run.model_pending===true || llm.state==='requesting' ? 'inflight' : state.has_data && llm.state==='idle' ? 'idle' : 'unknown');
-  txt('model-slot',({idle:'idle · 无在途请求',inflight:'inflight · 等待请求结果',uncertain:'uncertain · 请求结果不明'})[slot] || '未确认');
+  txt('model-slot',historical ? '实时状态未确认' : ({idle:'idle · 无在途请求',inflight:'inflight · 等待请求结果',uncertain:'uncertain · 请求结果不明'})[slot] || '未确认');
   txt('model-slot-note',slot==='uncertain' ? '持久化未知状态；监控不会重试、清锁或恢复请求' : '模型槽与游戏动作独立；空闲不代表任务完成');
   const busy=state.has_data ? run.busy : null;
   const flag=value => value===true ? '是' : value===false ? '否' : '未确认';

@@ -314,6 +314,7 @@ class CompetitionTasks:
             return False, {}, set()
         status = observation.get("status")
         if (observation.get("fresh") is not True or observation.get("stale", False) is not False
+                or observation.get("observation_scope") == "safety" or observation.get("inventory_fresh") is False
                 or not isinstance(status, dict) or status.get("ready") is not True
                 or status.get("alive") is not True or status.get("busy") not in (None, False)
                 or not isinstance(observation.get("blocks"), list)):
@@ -664,11 +665,69 @@ class CompetitionTasks:
                 and all(check["checked"] for check in self._assessment.values())
                 and catalog["complete"])
 
+    @staticmethod
+    def _opening_stage(counts):
+        if any(counts.get(name, 0) for name in ("stone_pickaxe", "iron_pickaxe", "diamond_pickaxe",
+                "netherite_pickaxe", "raw_iron", "iron_ingot", "iron_ore", "deepslate_iron_ore")):
+            return "iron"
+        if any(counts.get(name, 0) for name in ("wooden_pickaxe", "golden_pickaxe", "cobblestone")):
+            return "stone"
+        return "bootstrap"
+
+    def _stage_access(self, goal_id, stage, counts, blocks):
+        path = goal_id.split("/")[-1]
+        if stage == "unobserved":
+            return False
+        if path == "mine_stone":
+            return True
+        if path == "upgrade_tools":
+            return stage in {"stone", "iron"}
+        if path == "smelt_iron":
+            return stage == "iron"
+        if path in {"iron_tools", "obtain_armor"}:
+            raw = any(counts.get(name, 0) for name in ("raw_iron", "iron_ore", "deepslate_iron_ore"))
+            return bool(counts.get("iron_ingot") or raw and (counts.get("furnace") or "furnace" in blocks))
+        if path == "sleep_in_bed":
+            entities = (self._observation or {}).get("entities")
+            sheep = isinstance(entities, list) and any(isinstance(row, dict)
+                     and row.get("name") in {"sheep", "minecraft:sheep"} for row in entities)
+            return (sheep or any(name.endswith("_bed") for name in blocks)
+                    or any(name.endswith("_bed") and n > 0 or name.endswith("_wool") and n >= 3
+                           for name, n in counts.items()))
+        if path == "plant_seed":
+            return (any(counts.get(name, 0) for name in ("wheat_seeds", "beetroot_seeds", "carrot", "potato"))
+                    or bool(blocks & {"wheat", "carrots", "potatoes", "beetroots", "short_grass", "tall_grass"}))
+        if path == "kill_a_mob":
+            return self._plans.get(goal_id, {}).get("availability") == "ready"
+        return False
+
+    @_synchronized
+    def model_view(self) -> dict:
+        """Expose available choices or one active task; keep scoring data in snapshot()."""
+        board = self.snapshot()
+        candidates = [{key: row[key] for key in ("id", "title", "points", "availability")}
+                      for row in board["tasks"] if row["selectable"]]
+        active = next((row for row in board["tasks"] if row["id"] == board["active_goal_id"]), None)
+        details = None
+        if active:
+            details = {key: active[key] for key in ("id", "title", "difficulty", "points", "eligibility",
+                "availability", "completion", "stage", "missing", "next_steps", "reason", "required_skills")}
+            details["condition"] = self._by_id[active["id"]]["condition"]
+            details["completion_criteria"] = "Only a confirmed server advancement awards points."
+            details["abort_criteria"] = "Defer with force_exit_task; never assume an unknown action completed."
+        return {**{key: board[key] for key in ("rules_version", "phase", "stage", "active_goal_id",
+                 "progress_card", "score", "stale", "remaining_seconds", "last_exit", "advancements", "assessment_complete")},
+                "tasks": candidates, "selectable_goal_ids": [row["id"] for row in candidates], "active_goal": details,
+                "catalog_assessment": {key: board["catalog_assessment"][key]
+                                       for key in ("checked", "total", "known_count", "complete")}}
+
     @_synchronized
     def snapshot(self) -> dict:
         """Return a serializable, consistent all-catalog board without mutations."""
         now = self._now()
         confirmed = set(self._state["confirmed"])
+        known, counts, blocks = self._resources(self._observation)
+        stage = self._opening_stage(counts) if known else "unobserved"
         tasks, scored, pending, excluded = [], [], [], []
         for source in self._catalog:
             row = copy.deepcopy(source)
@@ -686,6 +745,7 @@ class CompetitionTasks:
             row["selectable"] = (self._state["phase"] == "selection" and self._remaining(now) > 0
                 and row["eligibility"] == "scored" and ident not in confirmed
                 and row["availability"] in ("ready", "needs_prerequisites")
+                and self._stage_access(ident, stage, counts, blocks)
                 and (row["deferred_until"] is None or row["deferred_until"] <= now))
             tasks.append(row)
             if ident in confirmed:
@@ -704,7 +764,7 @@ class CompetitionTasks:
                        if self._fetched_at is not None else None)
         return {"rules_version": RULES_VERSION, "updated_at": fetched_utc,
                 "stale": not self._api["ready"] or not fresh,
-                "phase": self._state["phase"], "active_goal_id": self._state["active_goal_id"],
+                "phase": self._state["phase"], "stage": stage, "active_goal_id": self._state["active_goal_id"],
                 "availability": active_row["availability"] if active_row else "unknown",
                 "assessment": active_row["completion"] if active_row else "unknown",
                 "progress_card": {"goal_id": self._state["active_goal_id"], "summary": self._state["summary"],

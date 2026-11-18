@@ -6,6 +6,8 @@
 
 daily/competition 默认启用 `run_survival_task`。模型选择一个目标，程序持续使用新观察计算下一步，直到目标得到验证、需要 AI 改变策略或到达中止边界。它复用现有原子技能，不新增游戏连接，不调用额外模型，不接收可直接执行的动作队列。
 
+启用模型的普通 `daily` 可显式设 `survival.autonomy.local_opening: true`（默认关闭）。没有自定义目标、没有活动任务且当前观察支持工具开局时，harness 用同一控制器先启动一次 `starter_tools`。出结果或受阻后恢复原有决策；游戏 pending、模型槽未知及安全优先级不变。本地启动不伪造模型工具反馈，不适用于 competition。
+
 实际工具目录按阶段路由：正常规划只暴露目标工具和必要安全/赛事管理工具，目标报告 `needs_ai` 后开放原子修复动作；解析同时检查本轮允许集合。不是只在 prompt 中写 prefer，也不是把全部原子工具一直暴露并假设模型会主动少调用。关闭 autonomy 时保留原有单步工具模式。
 
 正常 daily 请求集合为 `run_survival_task/wait/eat_food/auto_sleep/retreat_from/fight_hostile`；competition 再加 5 个赛事管理工具。有 `task_id` 的 `needs_ai`、且没有 pending/unknown 时，每个目标最多接受 2 次生产原子修复提案，额度用尽后回到高层目录。wait、安全动作、赛事管理和解析格式 repair 不扣这项额度；提案是否成功仍由实际技能验证。明确的低血/饥饿受限食物情境只额外开放 `FOOD_ACTIONS`，不因此开放挖矿、建造或全部生产。`LLM_REQUEST.tool_mode/atomic_repair_remaining` 记录本轮路由和剩余额度，工具不在本轮允许集合时解析拒绝。

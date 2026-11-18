@@ -105,7 +105,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_autonomy_defaults_and_partial_disable_preserve_run_budget(self):
         config = load_config(self.write({"survival": {"objective": "daily"}}), environ={})
-        self.assertEqual(config["survival"]["autonomy"], {"enabled": True, "max_steps": 128,
+        self.assertEqual(config["survival"]["autonomy"], {"enabled": True, "local_opening": False, "max_steps": 128,
             "max_seconds": 600, "max_local_failures": 4, "max_no_progress_steps": 8, "max_explore_steps": 8})
         config = load_config(self.write({"survival": {"autonomy": {"enabled": False, "max_explore_steps": 0}}}), environ={})
         self.assertFalse(config["survival"]["autonomy"]["enabled"])
@@ -133,7 +133,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_autonomy_rejects_malformed_or_secret_unknown_options(self):
         for value in (None, [], "enabled", {"enabled": "true"}, {"enabled": 1},
-                      {"parallel_models": "private-autonomy-value"}):
+                      {"local_opening": "true"}, {"parallel_models": "private-autonomy-value"}):
             with self.subTest(value=value), self.assertRaises(ConfigError) as caught:
                 load_config(self.write({"survival": {"autonomy": value}}), environ={})
             self.assertNotIn("private-autonomy-value", str(caught.exception))
