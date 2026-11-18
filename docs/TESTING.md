@@ -1,6 +1,18 @@
 # 配置、客户端、生存、赛事与监控验证
 
-最近复核：2026-11-18（Asia/Shanghai），`develop-tianya/ai-iron-diamond-loop`（最新未提交本地验证）。
+最近复核：2026-11-18（Asia/Shanghai），`develop-tianya/ai-iron-diamond-loop`（已提交节点 `db6dbb1`、`28417cf`、`01f22a4`、`8c35c51`、`4eee47e` 及本次文档同步）。
+
+## 和平模式全新存档实服闭环调测（2026-11-18，Run 1～Run 6）
+
+在本地 Leaves 1.21.11 和平模式（`difficulty=peaceful`）空新存档、`mc-agent-api`（`127.0.0.1:18900`，零本地改动）与真实模型（`qwen3.6-35b-a3b`）环境下共执行 6 轮实服迭代验证（每轮清空 `world`/`world_nether`/`world_the_end` 重生）：
+
+- **Run 1（`live_20261118_1`，commit `496d1a8` 基线）**：开局树顶 `[2.5, 88, -1.3]` 触发 3 格安全 `canopy_escape` 成功脱困并在 ~5 分钟完成基础石器；随后暴露 `craft(stone_pickaxe)` 重复制作 24 把及深矿遇到含水层时 `_wf_deep_fishbone` 掘顶卡死（修复于 `db6dbb1`）。
+- **Run 2（`live_20261118_2`，commit `db6dbb1`）**：彻底消除重复石镐循环，且夜间无床状态下继续正常推进；第 126 步 `gather_resource(deep_mine)` 因 `discover_and_explore_caves` 在守卫超时后读取背包触发未捕获 `WorkflowStepError("timeout")` 并经 `_uncertain_boundary` 漏出导致 `error_code="internal"` 与 `paused=True`，同时暴露 `craft(furnace)` 与表层泥土采石零产率问题（修复于 `28417cf`）。
+- **Run 3（`live_20261118_3`，commit `28417cf`）**：20 步树冠脱离、全套石器、单次熔炉部署、烧炭与火把一次完成；`gather(coal)` 穿过浅洞探查并下探 `Y=28` 后因仅带 1 把石镐耗尽触发 `no_pickaxe` 安全返程带回 105 圆石；随后因 `SurfaceScoutSkill` 将 16 格内自建工作台/熔炉计入结构及工具目录未屏蔽 `scout`，引发 `scout` 连续调用 17 次及 `coal` 缺备用石镐（修复于 `01f22a4`）。
+- **Run 4（`live_20261118_4`，commit `01f22a4`）**：10.5 分钟完成木/石套、27 圆石、3 煤与单炉部署并烤熟羊肉；离开原基地 24 格后受 `daily_tasks.furnace` 影响反复用 `craft_item(furnace)` / `craft(furnace)` 误图放置，随后于 `8c35c51` 在 `agent/llm_planner.py` 硬拦截持炉重复合成并在 `DAILY_SYSTEM_PROMPT` 强化铁器优先级。
+- **Run 5（`live_20261118_5`，commit `8c35c51`，45 分钟 / 205 步完整跑完，37 轮模型调用 / 规避 160 次调用）**：**零崩溃、零重复工具/熔炉循环**，完整跑通新档前中期闭环——`scout` 仅执行 1 次并退场 → 约 8 分钟完成全套石器与单炉合成 → 约 13.5 分钟（`06:22:39Z`）完成首次 `Y=16` 深矿带回 `7 raw_iron` 并炼出铁锭 → 约 17.5 分钟（`06:26:57Z`）合出首把 **`iron_pickaxe`** → 后续自主再下矿带回 `8 raw_iron`，于 ~26 分钟（`06:35:25Z`）与 ~37 分钟（`06:46:28Z`）依次合出 **`iron_axe`、`iron_sword`、`shield`、`bucket` 与补充 `iron_pickaxe`**。最后 7 分钟受 `daily_tasks.fuel_reserve` 诱导转去烧木炭与无效 `smelt(copper_ingot)` 直到预算耗尽，未继续切入 `iron_armor` 与 `Y=-54` `diamond`；已在 `4eee47e` 收紧提示词跳过 `fuel_reserve` 直切铁甲/采钻。
+- **Run 6（`live_20261118_6`，commit `4eee47e`，45 分钟 / 150 步）**：实服仍暴露两项待继续打磨的问题：（1）第 39 步（`07:13:00Z`）`coal` 深矿在 `[-13.5, 46, 30.5]` 落入水淹洞穴且 `recover` 无已验证脱离路径，于 `07:14:44Z` 溺亡后自动重生；（2）重生后重做木镐并完成 30 格圆石矿井（第 136 步）返回地表落入云杉树冠 `[36.5, 70, 3.5]`，第 137–150 步在树冠放置工作台连续失败并在清除 2 块树叶后因重复调用 `run_survival_task(craft, stone_pickaxe)` 触发 `llm_repeated_failure` 暂停至 45 分钟超时。
+- **当前实服边界结论**：新存档从空手到 **`iron_pickaxe` + 全套铁器（铁镐/铁斧/铁剑/盾牌/铁桶）与深层分层 `Y=16` 采铁安全返程**已在 Run 5 完整实服跑通；受 Run 5 后期燃料支线与 Run 6 溺亡/树冠 `llm_repeated_failure` 影响，**`iron_armor` 实服穿戴闭环与 `Y=-54` 真实提取钻石**仍仅由离线单元测试覆盖，尚未在无人工干预的单一新存档实服中完整闭环。
 
 ## 装备副手、树冠/夜雨解锁、沙漠取木、200 格前向侦察与阶段决策回归（2026-11-18）
 
