@@ -110,6 +110,27 @@ class ShelterSearchCacheTests(unittest.TestCase):
         self.obs["safe_stand_candidates"] = [{"pos": landed, "support": "grass_block"}]
         self.assertIsNone(self.controller._explore(self.obs, self.controller._context(self.context, self.obs)))
 
+    def test_four_cached_centers_rank_new_search_without_inheriting_budget(self):
+        for _ in range(4): self.reject()
+        self.restart_goal()
+        up, down = [1.5, 65, .5], [-.5, 63, .5]
+        self.obs["safe_stand_candidates"] = [{"pos": pos, "support": "grass_block"} for pos in (up, down)]
+        context = self.controller._context(self.context, self.obs)
+        self.assertEqual(self.controller.state()["survey_steps"], 0)
+        self.assertEqual(self.controller.state()["explore_steps"], 0)
+        self.assertEqual(self.controller._explore(self.obs, context).args["pos"], down)
+        expiry = max(row["expires_at"] for row in self.controller.state()["shelter_search_cache"]["rejected"].values())
+        with patch("core.autonomous_tasks.time.time", return_value=expiry + 1):
+            self.assertEqual(self.controller._explore(self.obs, context).args["pos"], up)
+
+    def test_one_cached_center_with_four_orientations_does_not_trigger_ranking(self):
+        self.reject()
+        self.restart_goal()
+        up, down = [1.5, 65, .5], [-.5, 63, .5]
+        self.obs["safe_stand_candidates"] = [{"pos": pos, "support": "grass_block"} for pos in (up, down)]
+        self.assertEqual(len(self.controller.state()["shelter_search_cache"]["rejected"]), 4)
+        self.assertEqual(self.controller._explore(self.obs, self.controller._context(self.context, self.obs)).args["pos"], up)
+
     def test_cache_is_bounded_and_invalid_timestamp_does_not_erase_unknown_state(self):
         for i in range(160):
             self.controller._remember_shelter_search("rejected", f"{i},64,0|north",

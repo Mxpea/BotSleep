@@ -21,6 +21,7 @@ from core.structure_spec import (
     DEFAULT_REPLACEABLE,
     SHELTER_5X5_SPEC,
     SHELTER_BUILDING_BLOCKS,
+    SHELTER_STRUCTURE_BLOCKS,
     SHELTER_CLEARABLE_BLOCKS,
     SHELTER_GROUND_BLOCKS,
     WOODEN_DOOR_BLOCKS,
@@ -54,6 +55,7 @@ class ShelterSkills(SurvivalSkills):
         "build_shelter_step": ({"pos", "material", "orientation"}, {"pos", "material"}),
     }
     MATERIALS = SHELTER_BUILDING_BLOCKS
+    STRUCTURE_BLOCKS = SHELTER_STRUCTURE_BLOCKS
     NATURAL_GROUND = SHELTER_GROUND_BLOCKS
     DOORS = WOODEN_DOOR_BLOCKS
     # Both have empty collision in 1.21.11 and are replaceable by API.place.
@@ -290,7 +292,7 @@ class ShelterSkills(SurvivalSkills):
         floor_blocks = self.NATURAL_GROUND | self.MATERIALS
         floor_ok = all(cache[p]["name"] in floor_blocks and self._safe_block(cache[p]) for p in floor)
         hazards = [list(pos) for pos, block in cache.items() if not self._safe_block(block)]
-        filled = lambda pos: cache[pos]["name"] in self.MATERIALS and self._safe_block(cache[pos])
+        filled = lambda pos: cache[pos]["name"] in self.STRUCTURE_BLOCKS and self._safe_block(cache[pos])
         missing = [(p, "wall" if p in wall_set else "roof") for p in walls + roof if cache[p]["name"] in self.REPLACEABLE_SPACE]
         occupied = [list(p) for p in walls + roof if cache[p]["name"] not in self.REPLACEABLE_SPACE and not filled(p)]
         door = self._door(anchor, cache, orientation=norm_orient)
@@ -1064,7 +1066,7 @@ class ShelterSkills(SurvivalSkills):
         for target_tuple in walls + roof:
             target = list(target_tuple)
             cur = str(ctx.read_block(target).get("name") or "air")
-            if cur in self.MATERIALS:
+            if cur in self.STRUCTURE_BLOCKS:
                 continue
             if cur not in AIR:
                 if cur in (SHELTER_CLEARABLE_BLOCKS | DEFAULT_REPLACEABLE):
@@ -1225,7 +1227,7 @@ class ShelterSkills(SurvivalSkills):
         if bpos_cell is not None:
             time.sleep(0.25)
             cur = str(ctx.read_block(bpos_cell).get("name") or "air")
-            if cur in self.MATERIALS:
+            if cur in self.STRUCTURE_BLOCKS:
                 return True
         status = ctx.guard.check_status(require_safe=True)
         bot_p = parse_pos(status.get("pos")) or (0.0, 0.0, 0.0)

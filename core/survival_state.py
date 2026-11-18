@@ -189,7 +189,7 @@ class ObservationCollector:
                     continue
                 head = block_at([candidate[0], candidate[1] + 1, candidate[2]])
                 can_stand = safe(head) and head["name"] in self.PASSABLE
-                can_place = feet["name"] in SurvivalSkills.AIR
+                can_place = feet["name"] in SurvivalSkills.PLACEMENT_SPACE
                 if can_stand and len(standing) < 8:
                     standing.append({"pos": [candidate[0] + 0.5, candidate[1], candidate[2] + 0.5],
                                      "support": below["name"]})

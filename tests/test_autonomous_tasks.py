@@ -160,6 +160,8 @@ class AutonomousTaskTests(unittest.TestCase):
 
     def test_workstation_wood_prerequisite_uses_fresh_leaf_recovery(self):
         obs = world({"oak_planks": 3, "stick": 2})
+        obs.update(local_geometry_origin=list(obs["status"]["pos"]),
+                   placement_candidates=[{"pos": [0, 64, 1], "support": "grass_block"}])
         obs["blocks"] = [{"name": "birch_log", "pos": [2, 64, 0], "can_see": False,
                           "visibility": {"blocker": [1, 65, 0]}},
                          {"name": "birch_leaves", "pos": [1, 65, 0], "fresh": True, "can_see": True}]
@@ -317,6 +319,8 @@ class AutonomousTaskTests(unittest.TestCase):
 
     def test_craft_stone_pickaxe_from_empty_builds_prerequisites_one_atomic_child_at_a_time(self):
         obs = world()
+        obs.update(local_geometry_origin=list(obs["status"]["pos"]),
+                   placement_candidates=[{"pos": [0, 64, 1], "support": "grass_block"}])
         obs["blocks"] = ([{"name": "oak_log", "pos": [2, 64, z], "can_see": True} for z in range(4)]
                          + [{"name": "stone", "pos": [4, 64, z], "can_see": True} for z in range(4)])
         self.start({"task": "craft", "item": "stone_pickaxe", "count": 1}, obs)

@@ -1056,7 +1056,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                 # A disconnected worker may already have executed the write.
                 # Preserve the pending result without sending more actions.
                 cleanup_prohibited = result.data.get("cleanup_skipped") in {
-                    "disconnected_unknown", "combat_unknown", "unknown_bucket", "task_unknown", "navigation_unknown"}
+                    "disconnected_unknown", "combat_unknown", "unknown_bucket", "task_unknown", "navigation_unknown", "placement_unknown"}
                 if uncertain_action and not dig_cleanup_attempted and not cleanup_prohibited:
                     try:
                         options = {"timeout_seconds": 2.0} if result.error_code == "dig_unconfirmed" else {}

@@ -116,16 +116,20 @@ class PositioningSkills(DailySurvivalSkills):
             if math.dist(pos, nearest) <= 8:
                 raise _Failure("unsafe", "A hostile is too close to the task stance corridor")
 
-    def _step_stable(self, status, before):
-        self._safe_status(status)
+    def _step_stable(self, status, before, *, allow_motion=False):
+        self._overworld(status)
+        if status.get("gamemode", "survival") != "survival":
+            raise _Failure("unsafe_state", "A terrain step requires survival mode")
+        if any(status.get(k) for k in ("in_water", "in_lava", "on_fire", "submerged")):
+            raise _Failure("unsafe", "A terrain step entered a hazardous body state")
+        if type(status.get("on_ground")) is not bool:
+            raise _Failure("invalid_response", "Terrain step grounded state is unknown")
         velocity = self._pos(status.get("velocity"))
         speed = self._number(status.get("speed"), "speed", 0, 1024)
-        if ("busy" not in status or status["busy"] is not None or speed > .1
-                or math.dist(velocity, [0, 0, 0]) > .1
+        if ("busy" not in status or status["busy"] is not None
                 or any(status.get(k) for k in ("jumping", "held_controls"))
                 or status.get("last_death") != before.get("last_death")
-                or status["health"] < before["health"]
-                or abs(status["pos"][1] - round(status["pos"][1])) > .05):
+                or status["health"] < before["health"]):
             raise _Failure("safety_changed", "A terrain step requires stable, idle, same-life footing")
         nearest = status.get("nearest_hostile")
         if nearest is not None:
@@ -136,6 +140,18 @@ class PositioningSkills(DailySurvivalSkills):
             radius = 16 if nearest["name"] in {"skeleton", "stray", "bogged", "pillager"} else 8
             if nearest["dist"] <= radius:
                 raise _Failure("unsafe", "A hostile is too close for a terrain step")
+        pending = []
+        if status["on_ground"] is not True:
+            pending.append("airborne")
+        if speed > .1:
+            pending.append("speed")
+        if math.dist(velocity, [0, 0, 0]) > .1:
+            pending.append("velocity")
+        if abs(status["pos"][1] - round(status["pos"][1])) > .05:
+            pending.append("height")
+        if pending and not allow_motion:
+            raise _Failure("safety_changed", "A terrain step requires stable, idle, same-life footing")
+        return pending
 
     def _step_geometry(self, origin, target, context, *, landing=False):
         """Observe full player width; plants never provide structural support."""
@@ -237,33 +253,65 @@ class PositioningSkills(DailySurvivalSkills):
         # interrupted landing never authorizes stop, replay, or a second move.
         deadline = min(context["position_deadline"], time.monotonic() + 1.5)
         context["position_deadline"] = deadline
+        settling_started = time.monotonic()
+        diagnostics = {"budget_seconds": 1.5, "poll_seconds": .1, "status_samples": 0,
+                       "motion_wait_samples": 0, "first": None, "last": None}
+        evidence["landing_observation"] = diagnostics
         previous = None
+        last_observed = before
+
+        def observe(status):
+            nonlocal last_observed
+            finite = lambda value: value if type(value) in (int, float) and math.isfinite(value) else None
+            velocity = status.get("velocity")
+            snapshot = {"pos": list(status["pos"]), "on_ground": status.get("on_ground"),
+                        "speed": finite(status.get("speed")),
+                        "velocity": [finite(v) for v in velocity] if isinstance(velocity, (list, tuple)) and len(velocity) == 3 else None,
+                        "height_error": round(abs(status["pos"][1] - round(status["pos"][1])), 4),
+                        "health": status["health"], "jumping": bool(status.get("jumping")),
+                        "held_controls": bool(status.get("held_controls"))}
+            diagnostics["status_samples"] += 1
+            if diagnostics["first"] is None:
+                diagnostics["first"] = snapshot
+            diagnostics["last"] = snapshot
+            pending = self._step_stable(status, last_observed, allow_motion=True)
+            snapshot["waiting_for"] = pending
+            if pending:
+                diagnostics["motion_wait_samples"] += 1
+            last_observed = status
+            return pending
+
         try:
             while time.monotonic() < deadline:
                 current = self._status(context)
-                if (current.get("last_death") != before.get("last_death") or current["health"] < before["health"]
-                        or any(current.get(k) for k in ("in_water", "in_lava", "on_fire", "submerged", "held_controls"))):
-                    raise _Failure("action_unconfirmed", "Terrain step was interrupted before landing")
-                if current.get("on_ground") is True:
-                    self._step_stable(current, before)
+                pending = observe(current)
+                # Even a transient velocity/Y sample must not hide a new
+                # secondary shooter while we spend the read-only settle budget.
+                threats = self._step_threats(current["pos"], current["pos"], context)
+                if not pending:
                     if self._cell(current["pos"]) != destination or math.dist(current["pos"], target) > .3:
                         raise _Failure("action_unconfirmed", "Terrain step did not reach its checked landing")
                     self._step_geometry(current["pos"], current["pos"], context, landing=True)
                     if previous is not None and math.dist(current["pos"], previous["pos"]) <= .05:
                         threats = self._step_threats(current["pos"], current["pos"], context)
                         final = self._status(context)
-                        self._step_stable(final, before)
-                        if (time.monotonic() > deadline or self._cell(final["pos"]) != destination
-                                or math.dist(final["pos"], target) > .3
-                                or math.dist(final["pos"], current["pos"]) > .05
-                                or not set(self._columns(final["pos"], final["pos"])).issubset(
-                                    self._columns(current["pos"], current["pos"]))):
-                            raise _Failure("action_unconfirmed", "Terrain landing changed during its final observation")
+                        final_pending = observe(final)
                         self._step_threats(final["pos"], final["pos"], context, entities=threats)
-                        context["navigation_verified"] = True
-                        return self._verified(context, pos=final["pos"], moved=math.dist(origin, final["pos"]),
-                                              already_positioned=False, landing_stable=True)
-                    previous = current
+                        if final_pending:
+                            previous = None
+                        else:
+                            if (time.monotonic() > deadline or self._cell(final["pos"]) != destination
+                                    or math.dist(final["pos"], target) > .3
+                                    or math.dist(final["pos"], current["pos"]) > .05
+                                    or not set(self._columns(final["pos"], final["pos"])).issubset(
+                                        self._columns(current["pos"], current["pos"]))):
+                                raise _Failure("action_unconfirmed", "Terrain landing changed during its final observation")
+                            diagnostics.update(termination="verified", elapsed_seconds=round(time.monotonic() - settling_started, 3))
+                            context["navigation_verified"] = True
+                            return self._verified(context, pos=final["pos"], moved=math.dist(origin, final["pos"]),
+                                                  already_positioned=False, landing_stable=True)
+                    else:
+                        previous = current
                 else:
                     previous = None
                 delay = min(.1, max(0, deadline - time.monotonic()))
@@ -274,6 +322,11 @@ class PositioningSkills(DailySurvivalSkills):
                 self._check(context)
             raise _Failure("action_unconfirmed", "Terrain step landing did not settle in time")
         except Exception as error:
+            diagnostics.update(termination=("deadline" if time.monotonic() >= deadline else
+                                            "read_budget" if context.get("position_reads", 0) >= self.MAX_READS else
+                                            getattr(error, "code", "internal_error")),
+                               elapsed_seconds=round(time.monotonic() - settling_started, 3),
+                               error=str(error)[:200])
             raise _Failure("action_unconfirmed", "Terrain step landing could not be fully verified",
                            {"action_state": "unknown", "recovery_error": getattr(error, "code", "internal_error")}) from None
 

@@ -15,6 +15,7 @@ from agent.daily_survival import DAILY_SKILLS, DailySurvivalGoals
 from agent.survival_planner import Decision, LOG_NAMES, PLANK_NAMES, SAFE_FOOD, WOOD_SPECIES
 from core.daily_policy import DailySafetyPolicy
 from core.skill_registry import internal_skills_for_objective
+from core.structure_spec import SHELTER_5X5_SPEC, SHELTER_BUILDING_BLOCKS
 from skills.daily_survival import DailySurvivalSkills
 
 
@@ -455,11 +456,20 @@ class AutonomousTaskController:
             for resource, names in RESOURCE_NAMES.items():
                 if expected in names:
                     return self._gather(resource, obs, context)
-        if (context.get("_bounded_bootstrap") is True and decision
-                and decision.name == "place_item" and decision.args.get("item") == "crafting_table"):
+        if decision and (decision.name == "place_item" and decision.args.get("item") == "crafting_table"
+                or decision.name == "wait" and decision.goal == "crafting_table" and obs["counts"].get("crafting_table", 0)):
+            origin = obs["status"]["pos"]
+            if not self._fresh(obs) or obs.get("local_geometry_origin") != origin:
+                return None
+            feet = [math.floor(v) for v in origin]
+            blocked = self.rules._blocked(context)
             for row in self.daily._rows(obs.get("placement_candidates"))[:8]:
                 pos = self.rules._pos(row.get("pos"))
-                if pos is None or math.dist(obs["status"]["pos"], pos) > 3:
+                if (pos is None or any(v != math.floor(v) for v in pos)
+                        or row.get("support") not in DailySurvivalSkills.SUPPORT
+                        or math.dist(origin, pos) > 3 or pos in (feet, [feet[0], feet[1] + 1, feet[2]])
+                        or self.rules._key(pos) in blocked or self.rules._dangerous_hostiles(obs, pos)
+                        or self._workspace_cell_reserved(pos, obs)):
                     continue
                 candidate = self._decision("place_item", {"item": "crafting_table", "pos": list(pos)},
                                            "Place the held workstation at one freshly verified close empty cell")
@@ -467,6 +477,24 @@ class AutonomousTaskController:
                     return candidate
             return None
         return decision
+
+    def _workspace_cell_reserved(self, pos, obs):
+        """A base is only an exclusion hint; placement still needs fresh geometry."""
+        base = (obs.get("daily_evidence") or {}).get("base_site")
+        if not self.daily._verified(base, obs["status"].get("dimension")):
+            return False
+        directions = {"north": (0, -1), "south": (0, 1), "east": (1, 0), "west": (-1, 0)}
+        orientation = base.get("orientation", "north")
+        direction = directions.get(orientation) if isinstance(orientation, str) else None
+        if direction is None:
+            return True
+        x, y, z = (pos[i] - base["pos"][i] for i in range(3))
+        if 0 <= y <= 2 and abs(x) <= 2 and abs(z) <= 2 and (max(abs(x), abs(z)) == 2 or y == 2):
+            return True  # Do not occupy unfinished walls or roof.
+        front, side = x * direction[0] + z * direction[1], x * direction[1] - z * direction[0]
+        if 0 <= y <= 1 and side == 1 and -1 <= front <= 1:
+            return True  # Preserve one complete bed side, including its front stance.
+        return 0 <= y <= 1 and side == 0 and 0 <= front <= 3  # Centre, inner approach, door and exit.
 
     def _craft(self, item, needed, obs, context, depth=0):
         if depth > 8 or item not in RECIPES:
@@ -486,7 +514,7 @@ class AutonomousTaskController:
         if item not in {"stick", "crafting_table", "torch", *PLANK_NAMES}:
             workspace = self.rules._workspace(obs, context)
             if workspace:
-                return self._resource_child(workspace, obs, context) if workspace.name != "wait" else None
+                return self._resource_child(workspace, obs, context)
         return self._decision("craft_item", {"item": item, "count": min(64, needed, output)}, "Craft one available recipe and verify the new inventory")
 
     def _smelt(self, item, obs, context, depth=0):
@@ -567,25 +595,113 @@ class AutonomousTaskController:
         if self._data["explore_steps"] >= self.limits["max_explore_steps"]:
             return None
         origin = obs["status"]["pos"]
-        if obs.get("local_geometry_origin") != origin:
+        if not self._fresh(obs) or obs.get("local_geometry_origin") != origin:
             return None
         blocked = self.rules._blocked(context)
         hostiles = self.rules._hostiles(obs, origin)
+        candidates = []
         for row in self.daily._rows(obs.get("safe_stand_candidates"))[:8]:
             pos = self.rules._pos(row.get("pos"))
             if pos is None or row.get("support") not in DailySurvivalSkills.SUPPORT:
                 continue
             key = self.rules._key(pos)
+            distance = math.dist(origin, pos)
+            enough_movement = (distance > .4 and tuple(map(math.floor, pos)) != tuple(map(math.floor, origin))
+                               if self._data["task"] == "shelter" else distance >= 1)
             if (key in blocked or key in self._data["visited"]
                     or self._data["task"] == "shelter" and key in context.get("shelter_visited_stances", [])
-                    or not 1 <= math.dist(origin, pos) <= 3
+                    or not enough_movement or distance > 3
                     or abs(pos[1] - origin[1]) > .15 and not self._local_shelter_step(origin, pos, obs)
                     or any(math.dist(pos, point) <= self.rules.threat_radius for _, point in hostiles)):
                 continue
-            return Decision("position_for_task", {"pos": list(pos)}, "Inspect from one freshly checked local stance; route is revalidated by the skill", "explore")
+            candidates.append(pos)
+        self._prune_shelter_search()
+        rejected_centers = {tuple(row["pos"]) for row in self._shelter_search["rejected"].values()}
+        if self._data["task"] == "shelter" and (self._data["survey_steps"] >= 4 or len(rejected_centers) >= 4):
+            # Local height density is only a search hint, never flat-site or
+            # route proof. Rank the already permitted candidates; no new move
+            # coordinates or wider stair permissions are introduced here.
+            neighbours_pool = tuple(candidates)
+            def search_rank(pos):
+                level = 0 if abs(pos[1] - origin[1]) <= .15 else 1 if pos[1] < origin[1] else 2
+                neighbours = {tuple(other) for other in neighbours_pool
+                              if other != pos and abs(other[1] - pos[1]) <= .15
+                              and math.dist(pos, other) <= 1.5}
+                return level, -len(neighbours)
+            candidates.sort(key=search_rank)
+        if candidates:
+            return Decision("position_for_task", {"pos": list(candidates[0])}, "Inspect from one freshly checked local stance; route is revalidated by the skill", "explore")
         return None
 
+    def _shelter_stockpile(self, obs, context):
+        """Gather the bounded fresh house deficit before returning to build.
+
+        These quantities are planning hints, never remembered site authority.
+        Recompute from the current complete inspection and current inventory on
+        every child; restart/life/safety/unknown gates remain in next_action.
+        """
+        base = (obs.get("daily_evidence") or {}).get("base_site")
+        shelter = obs.get("shelter")
+        dimension = obs["status"].get("dimension")
+        if (not self._fresh(obs) or not self.daily._verified(base, dimension)
+                or not isinstance(shelter, dict) or shelter.get("fresh") is not True
+                or shelter.get("pos") != base["pos"] or shelter.get("dimension") != dimension
+                or shelter.get("orientation", "north") != base.get("orientation", "north")
+                or not isinstance(base.get("orientation", "north"), str)
+                or base.get("orientation", "north") not in {"north", "east", "south", "west"}):
+            return None, False
+        geometry = shelter.get("geometry")
+        missing = shelter.get("missing_blocks")
+        maximum = sum(cell.stage in {"lower_walls", "upper_walls", "roof"} for cell in SHELTER_5X5_SPEC.cells)
+        if (not isinstance(geometry, dict) or geometry.get("floor_verified") is not True or geometry.get("exit_verified") is not True
+                or shelter.get("hazards") != [] or shelter.get("occupied_blueprint_cells") != []
+                or type(missing) is not int or not 0 <= missing <= maximum):
+            return None, False
+        counts = obs["counts"]
+        door = shelter.get("door") or {}
+        if not isinstance(door, dict):
+            return None, False
+        needs_door = (door.get("frame_verified") is not True
+                      and not any(counts.get(name, 0) for name in DailySurvivalSkills.DOORS))
+        tables = self.daily._safe_rows(obs, {"crafting_table"}, context=context)
+        table_planks = 4 if needs_door and not counts.get("crafting_table", 0) and not tables else 0
+        wall_materials = sum(counts.get(name, 0) for name in SHELTER_BUILDING_BLOCKS - set(PLANK_NAMES))
+        wall_demand = max(0, missing - wall_materials)
+        plank_demand = wall_demand + (6 if needs_door else 0) + table_planks
+        woods = [wood for wood in WOOD_SPECIES if wood + "_door" in DailySurvivalSkills.DOORS]
+        wood_supply = {wood: counts.get(wood + "_planks", 0)
+            + 4 * sum(counts.get(name, 0) for name in self._wood_inputs(wood)) for wood in woods}
+        total_supply = sum(wood_supply.values())
+        building_woods = {wood for wood in woods if wood + "_planks" in SHELTER_BUILDING_BLOCKS}
+        wall_supply = sum(wood_supply[wood] for wood in building_woods)
+        visible = {row["name"] for row in self.rules._blocks(obs)}
+        # Reserve one craftable door species; mixed plank totals cannot meet it.
+        door_woods = sorted(woods, key=lambda wood: (wood_supply[wood],
+            bool(set(self._wood_inputs(wood)) & visible)), reverse=True)
+        door_short = needs_door and wood_supply[door_woods[0]] < 6
+        if not door_short and total_supply >= plank_demand and wall_supply >= wall_demand:
+            return None, False
+        if door_short:
+            # A few held planks cannot lock the goal to an unavailable species.
+            # Each alternative still goes through the real fresh resource filter.
+            decision = next((candidate for wood in door_woods
+                if (candidate := self._gather("logs", obs, context, set(self._wood_inputs(wood))))), None)
+        else:
+            names = {name for wood in building_woods for name in self._wood_inputs(wood)} if wall_supply < wall_demand else None
+            decision = self._gather("logs", obs, context, names)
+        if decision:
+            decision = Decision(decision.name, decision.args,
+                f"Stock the current shelter deficit before returning: {plank_demand} plank-equivalents needed, "
+                f"{total_supply} held; door needs one six-plank species", decision.goal)
+        # Do not return to place the last few blocks when more stock is needed.
+        # The existing bounded local exploration handles unavailable resources.
+        return decision, True
+
     def _board_action(self, task, obs, context):
+        if task == "shelter":
+            stock, required = self._shelter_stockpile(obs, context)
+            if required:
+                return stock, False
         if task == "shelter" and not self.daily._verified(
                 (obs.get("daily_evidence") or {}).get("base_site"), obs["status"].get("dimension")):
             intent = self._data["preparation_site"]

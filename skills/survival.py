@@ -31,6 +31,9 @@ class SurvivalSkills:
     GATHERABLE = LOGS | {"stone", "cobblestone", "coal_ore", "deepslate_coal_ore"}
     PICKAXES = frozenset(tier + "_pickaxe" for tier in ("wooden", "copper", "stone", "iron", "golden", "diamond", "netherite"))
     AIR = frozenset({"air", "cave_air", "void_air"})
+    # Verified zero-collision, replaceable targets in Minecraft 1.21.11.
+    # This is deliberately separate from both traversability and solid support.
+    PLACEMENT_SPACE = AIR | {"leaf_litter", "short_grass"}
     RETREAT_PASSABLE = AIR | {"short_grass", "leaf_litter"}
     RETREAT_LEAVES = frozenset(wood + "_leaves" for wood in WOODS)
     RETREAT_TRUNKS = LOGS | frozenset(wood + "_wood" for wood in WOODS)
@@ -458,12 +461,18 @@ class SurvivalSkills:
                 raise _Failure("unsafe", "Cannot place a block in the bot's body")
             target = self._block(pos, context)
             below = self._block([pos[0], pos[1] - 1, pos[2]], context)
-            if target["name"] not in self.AIR or below["name"] not in self.SUPPORT or not self._safe_block(below):
-                raise _Failure("unsafe", "Placement needs an empty cell above safe solid support")
+            if (target["name"] not in self.PLACEMENT_SPACE or not self._safe_block(target)
+                    or below["name"] not in self.SUPPORT or not self._safe_block(below)):
+                raise _Failure("unsafe", "Placement needs a verified replaceable cell above safe solid support")
+
+        def place():
+            # Mark only the actual write, after the final status/site guard.
+            context["placement_write"] = True
+            return self.client.place_block(*pos, item=item)
 
         validate_site(initial)
         validate_site(self._approach(pos, context))
-        self._action(context, self.client.place_block, *pos, item=item)
+        self._action(context, place, _validate_status=validate_site)
         self._status(context)
         placed = self._block(pos, context)
         after, _ = self._inventory(context)
@@ -471,6 +480,7 @@ class SurvivalSkills:
         used = before.get(item, 0) - after.get(item, 0)
         if placed["name"] not in allowed or used < 1:
             raise _Failure("place_unverified", "Matching world block and item consumption were not both observed", {"pos": pos, "block": placed["name"], "used": used})
+        context["placement_verified"] = True
         return {"pos": pos, "placed": placed["name"], "used": used}
 
     def _eat_food(self, args, context):
@@ -1679,6 +1689,19 @@ class SurvivalSkills:
         except Exception as error:
             error = self._disconnection_error(error, context)
             code = getattr(error, "code", "internal_error")
+            if (context.get("placement_write") and not context.get("placement_verified")
+                    and (code in {"request_timeout", "network_error", "invalid_json", "invalid_response", "action_unconfirmed",
+                                 "cancelled", "dead", "not_ready", "dimension_changed", "interrupted", "busy",
+                                 "life_changed", "lifecycle_changed", "internal", "internal_error", "not_loaded"}
+                         or any(isinstance(evidence, dict) and evidence.get("action_state") == "unknown"
+                                for evidence in (getattr(error, "details", None), getattr(error, "data", None))))):
+                context["placement_unknown"] = True
+                data.update(executed=True, action_state="unknown", cleanup_skipped="placement_unknown",
+                            verification_error=code)
+                if code in {"cancelled", "dead", "not_ready", "dimension_changed", "interrupted", "busy",
+                            "life_changed", "lifecycle_changed", "not_loaded"}:
+                    error = _Failure("action_unconfirmed", "Placement write was interrupted before verification")
+                    code = error.code
             if (context.get("navigation_write") and context.get("write_sent") and not context.get("navigation_verified")
                     and code in {"request_timeout", "network_error", "invalid_json", "invalid_response", "action_unconfirmed", "dig_unconfirmed", "retreat_budget_exhausted",
                                  "cancelled", "dead", "not_ready", "dimension_changed", "interrupted", "busy",
@@ -1712,6 +1735,7 @@ class SurvivalSkills:
                             api_details=context["disconnection_details"])
             if (context["acted"] and code != "busy" and not context.get("cleanup_attempted")
                     and not context.get("disconnected_unknown") and not context.get("navigation_unknown")
+                    and not context.get("placement_unknown")
                     and not context.get("navigation_observe_only")):
                 try:
                     self.client.stop()

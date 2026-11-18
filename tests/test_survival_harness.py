@@ -212,6 +212,29 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(self.skills.execute.call_count, 1)
         self.assertIsNone(harness.journal.state["pending"])
 
+    def test_unknown_placement_preserves_pending_without_skill_or_harness_stop(self):
+        from skills.survival import SurvivalSkills
+        from test_survival_skills import World
+
+        world = World()
+        world.base_url, world.username = "http://local/api/v1", "HarnessBot"
+        world.counts["crafting_table"] = 1
+        def lost_response(item, pos):
+            raise APIError("network_error", "Placement acknowledgement unavailable")
+        world.place_effect = lost_response
+        self.client, self.skills = world, SurvivalSkills(world)
+        self.planner.choose.return_value = Decision("place_item", {
+            "pos": [2, 64, 0], "item": "crafting_table"}, "Deploy held workstation", "crafting_table")
+        harness = self.harness()
+        harness.request_step()
+        result = self.finish(harness)
+        self.assertEqual(result.data.get("cleanup_skipped"), "placement_unknown")
+        self.assertTrue(harness.paused)
+        self.assertIsNotNone(harness.journal.state["pending"])
+        for _ in range(3):
+            harness.tick()
+        self.assertEqual([row[0] for row in world.writes()], ["place"])
+
     def test_reconciled_dig_evidence_clears_pending_without_pause(self):
         self.skills.execute.return_value = SkillResult(True, "Verified after delayed acknowledgement", {
             "recovered_from": "dig_unconfirmed", "block_removed": True, "gained": {"oak_log": 1}})
@@ -724,7 +747,7 @@ class ObservationTests(unittest.TestCase):
             self.assertNotIn((x + 0.5, 109, z + 0.5), stands)
             self.assertNotIn((x, 109, z), places)
 
-    def test_passable_litter_and_grass_are_standing_but_not_placement_cells(self):
+    def test_verified_replaceable_litter_and_grass_are_standing_and_placement_cells(self):
         client = self.client(blocks={
             (5, 109, -6): {"name": "short_grass"},
             (3, 109, -6): {"name": "leaf_litter"},
@@ -734,7 +757,7 @@ class ObservationTests(unittest.TestCase):
         places = {tuple(row["pos"]) for row in result["placement_candidates"]}
         for x in (3, 5):
             self.assertIn((x + 0.5, 109, -5.5), stands)
-            self.assertNotIn((x, 109, -6), places)
+            self.assertIn((x, 109, -6), places)
 
     def test_candidate_scan_checks_one_level_above_and_below_with_bounded_reads(self):
         client = self.client(ground_y=None, blocks={
