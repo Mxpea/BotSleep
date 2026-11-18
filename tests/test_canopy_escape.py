@@ -281,6 +281,25 @@ class ObservedCanopyEscapeTests(unittest.TestCase):
         self.assertEqual([row[0] for row in world.writes()], ["move_to"] * 11)
         self.assertEqual(fixture["blocks"]["2,121,7"]["name"], "oak_leaves")
 
+    def test_clear_canopy_descent_allows_leaf_distance_property_update(self):
+        world = terrain([(0, 70, 0, "oak_leaves"), (1, 69, 0, "oak_leaves")])
+        world.set_block([0, 69, 0], "oak_leaves", properties={"waterlogged": False, "distance": 3})
+        world.set_block([1, 68, 0], "oak_leaves", properties={"waterlogged": False, "distance": 4})
+        world.set_block([1, 69, 0], "oak_leaves", properties={"waterlogged": False, "distance": 3},
+                        diggable=True, harvest_tool_ok=True, can_see=True)
+        orig_dig = world.dig
+
+        def dig_with_distance_update(*args, **kwargs):
+            res = orig_dig(*args, **kwargs)
+            world.set_block([0, 69, 0], "oak_leaves", properties={"waterlogged": False, "distance": 5})
+            world.set_block([1, 68, 0], "oak_leaves", properties={"waterlogged": False, "distance": 6})
+            return res
+
+        world.dig = dig_with_distance_update
+        result = DailySurvivalSkills(world).execute("canopy_escape", {})
+        self.assertTrue(result.success, result)
+        self.assertEqual(result.data.get("operation"), "clear_foliage")
+
 
 if __name__ == "__main__":
     unittest.main()

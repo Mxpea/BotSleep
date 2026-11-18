@@ -603,6 +603,15 @@ class SurvivalSkills:
         def supported(block):
             return block is not None and self._safe_block(block) and (block["name"] in self.SUPPORT | self.RETREAT_TRUNKS or dry_leaf(block))
 
+        def same_support(a, b):
+            if not supported(a) or not isinstance(b, dict):
+                return False
+            if a.get("name") != b.get("name"):
+                return False
+            pa = a.get("properties") if isinstance(a.get("properties"), dict) else {}
+            pb = b.get("properties") if isinstance(b.get("properties"), dict) else {}
+            return pa.get("waterlogged") == pb.get("waterlogged")
+
         def source_contact(cell, point=None):
             # Include the API's rounding interval: never remove a leaf that
             # might currently support any part of the player's footprint.
@@ -664,7 +673,7 @@ class SurvivalSkills:
             fresh_source = read((start[0], start[1] - 1, start[2]))
             checked = corridor(cell)
             block = read(leaf)
-            if (fresh_source != source or checked is None or set(checked[1]) != set(leaves)
+            if (not same_support(fresh_source, source) or checked is None or set(checked[1]) != set(leaves)
                     or not dry_leaf(block) or block.get("can_dig", block.get("harvest_tool_ok")) is not True
                     or any((read(key) is None or not self._safe_block(read(key))) for key in neighbors)):
                 return None
@@ -712,8 +721,8 @@ class SurvivalSkills:
             remaining = read(leaf)
             after_source = read((start[0], start[1] - 1, start[2]))
             after_support = read((cell[0], cell[1] - 1, cell[2]))
-            if (remaining is None or remaining["name"] not in self.AIR or after_source != source
-                    or not supported(after_support) or after_support != support_before):
+            if (remaining is None or remaining["name"] not in self.AIR or not same_support(after_source, source)
+                    or not same_support(after_support, support_before)):
                 raise _Failure("action_unconfirmed", "Leaf removal and both unchanged supports were not confirmed")
             context["navigation_verified"] = context["daily_verified"] = True
             outcome.update(plant_removed=True, action_state="verified", evacuation_stage="relay",
