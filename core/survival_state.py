@@ -37,10 +37,11 @@ class ObservationCollector:
                      (2, 0), (0, 2), (-2, 0), (0, -2))
     PASSABLE = SurvivalSkills.AIR | {"short_grass", "leaf_litter"}
 
-    def __init__(self, client, radius=24, include_terrain=False):
+    def __init__(self, client, radius=24, include_terrain=False, *, include_footing=False):
         self.client = client
         self.radius = radius
         self.include_terrain = include_terrain
+        self.include_footing = include_footing
 
     @staticmethod
     def _check_cancel(cancel_event):
@@ -60,6 +61,23 @@ class ObservationCollector:
     def _cell(pos):
         # Ignore tiny floating-point jitter at exact block boundaries.
         return tuple(math.floor(value + 0.0001) for value in pos)
+
+    def _collect_footing(self, observation, cancel_event):
+        origin = self._position(observation["status"])
+        x, y, z = self._cell(origin)
+        pos = [x, y - 1, z]
+        self._check_cancel(cancel_event)
+        reply = self.client.get_block(pos, timeout_seconds=2)
+        self._check_cancel(cancel_event)
+        block = reply.get("result") if isinstance(reply, dict) and reply.get("ok") is True else None
+        if (not isinstance(block, dict) or not isinstance(block.get("name"), str) or not block["name"]
+                or block.get("properties") is not None and not isinstance(block["properties"], dict)
+                or "pos" in block and self._position(block) != pos):
+            raise APIError("invalid_response", "Footing block evidence is malformed")
+        observation["footing_origin"] = origin
+        observation["footing"] = {"pos": pos, "name": block["name"],
+            "properties": copy.deepcopy(block.get("properties") or {}),
+            "fresh": True, "verified": True, "source": "api_verified"}
 
     def collect_safety(self, cancel_event=None, *, force=False, threat_radius=8):
         """A bounded status/entities snapshot, never fresh inventory or terrain.
@@ -298,6 +316,8 @@ class ObservationCollector:
         self._check_cancel(cancel_event)
         # State may change while the scans are in flight; planning uses this last
         # status and each skill independently rechecks before any mutation.
+        if self.include_footing and status.get("on_ground") is True and "busy" in status:
+            self._collect_footing(observation, cancel_event)
         final_status = self.client.get_status()["result"]
         self._check_cancel(cancel_event)
         if not isinstance(final_status, dict):

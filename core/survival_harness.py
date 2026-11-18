@@ -86,7 +86,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
         self.phase = "idle"
         self.latest_status = None
         self.skills = skills or SurvivalSkills(client)
-        self.collector = collector or ObservationCollector(client, settings["scan_radius"], include_terrain=self.uses_llm)
+        self.collector = collector or ObservationCollector(client, settings["scan_radius"],
+            include_terrain=self.uses_llm, include_footing=not self.daily)
         if self.daily:
             from agent.daily_survival import DailySurvivalGoals
             from core.daily_observation import DailyObservationCollector
@@ -213,6 +214,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
     def _mandatory_safety(self, observation):
         """Only safety decisions may override the model, never its resource plan."""
         decision = self._safety_rules.choose(observation, self.context)
+        if not self.daily:
+            decision = self._starter_canopy_decision(observation, decision)
         decision = self._retreat_decision(observation, decision)
         if self.daily_policy:
             decision = self.daily_policy.choose(observation, decision, self.daily_board, context=self.context)
@@ -539,6 +542,29 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                 raise LLMError(code, "Local safety or pause superseded model planning; response will be drained")
         return worker.take(observation)
 
+    def _starter_recovery(self, observation):
+        """Try one deterministic starter step after the model repeats a known failure."""
+        if (self.journal.state.get("pending") or self._model_worker.pending
+                or observation.get("fresh") is not True or observation.get("stale") is True
+                or observation.get("observation_scope", "full") != "full"
+                or observation.get("inventory_fresh") is False or observation.get("terrain_fresh") is False):
+            return None
+        active_failures = getattr(self.planner, "active_failed_decisions", None)
+        if not callable(active_failures):
+            return None
+        blocked = set(self.context.get("blocked_targets", []))
+        blocked.update(self._target(decision) for decision in active_failures(observation))
+        for block in self._safety_rules._blocks(observation):
+            if block.get("can_see") is not True or block.get("diggable") is not True:
+                # Keep terrain and hazard evidence intact. Only exclude targets.
+                if block["name"] in SurvivalSkills.GATHERABLE:
+                    blocked.add(self._safety_rules._key(block["pos"]))
+        decision = self._safety_rules.choose(observation, {**self.context, "blocked_targets": sorted(blocked)})
+        if (decision.name in {"gather_block", "craft_item", "place_item", "goal_complete"}
+                and self._target(decision) not in blocked and not self._unsafe_destination(decision, observation)):
+            return decision
+        return None
+
     def _daily_result(self, decision, result, observation):
         if not self.daily:
             return
@@ -624,6 +650,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
         observation = None
         self._task_child = False
         self._task_safety = False
+        starter_recovery = False
         try:
             self._phase("observing")
             observation = self._observe()
@@ -679,13 +706,18 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                         return decision, SkillResult(True, decision.reason, {"waiting": True, "model_blocked": self._model_blocked}), observation
                     self._phase("thinking")
                     before_life = self._life_marker(observation)
-                    decision = self._model_decision(observation)
+                    try:
+                        decision = self._model_decision(observation)
+                    except LLMError as err:
+                        if self.daily or err.code != "llm_repeated_failure":
+                            raise
+                        starter_recovery = True
                     if decision is None:
                         decision = Decision("wait", {"seconds": 1}, "Previous model request is draining; local safety remains active", "observe")
                         if self._cancel.is_set():
                             return decision, SkillResult(False, "Planning cancelled; no action sent", {"executed": False}, "cancelled"), observation
                         return decision, SkillResult(True, decision.reason, {"waiting": True, "model_pending": True}), observation
-                    self._model_feedback = True
+                    self._model_feedback = not starter_recovery
                     if self._cancel.is_set():
                         return decision, SkillResult(False, "Paused while the model was planning; no action sent", error_code="cancelled"), observation
                     # A slow model must not act on pre-death inventory or an old
@@ -702,6 +734,14 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                     if self._life_marker(observation) != before_life:
                         return decision, SkillResult(False, "Life or dimension changed during model planning; replan",
                                                      {"executed": False}, "safety_changed"), observation
+                    if starter_recovery:
+                        alternative = self._starter_recovery(observation)
+                        if alternative is None:
+                            return decision, SkillResult(False,
+                                "Repeated starter proposal and no verified alternative; paused",
+                                {"executed": False}, "llm_repeated_failure"), observation
+                        decision = alternative
+                        self._record("INFO", "STARTER_RECOVERY", {"decision": asdict(decision)})
                     unsafe_target = self._unsafe_destination(decision, observation)
                     if self.daily_policy:
                         unsafe_target = unsafe_target or self.daily_policy.validate(decision, observation, context=self.context)
@@ -721,6 +761,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                         decision = Decision("wait", {"seconds": 5}, "No verified daily action is currently available", "observe")
                 else:
                     decision = self.planner.choose(observation, self.context)
+                    decision = self._starter_canopy_decision(observation, decision)
                     decision = self._retreat_decision(observation, decision)
             if (self._task_active() and not self._task_child and decision.name != "run_survival_task"
                     and decision.goal in {"safety", "recover", "observe", "food", "food_recovery", "sleep"}):
@@ -733,7 +774,9 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
             self._safety_baseline = copy.deepcopy(observation["status"])
             self._record("INFO", "DECISION", {"decision": asdict(decision), "status": observation["status"],
                                                "counts": observation["counts"], "milestones": self.context["milestones"],
-                                               "source": "task" if self._task_child else "model" if self._model_feedback else "manual" if manual else "safety" if self.uses_llm else "rules"})
+                                               "source": ("starter_recovery" if starter_recovery else "task" if self._task_child
+                                                          else "model" if self._model_feedback else "manual" if manual
+                                                          else "safety" if self.uses_llm else "rules")})
             task_result = self._competition_tool(decision, observation)
             if task_result is not None:
                 return decision, task_result, observation
@@ -765,7 +808,9 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                 result = runner.execute(decision.name, decision.args, cancel_event=self._cancel, **options)
             if not isinstance(result, SkillResult):
                 raise TypeError("Skill returned an invalid result")
-            if (self._model_feedback or self.daily) and not self._cancel.is_set() and not _uncertain_result(result):
+            if ((self._model_feedback or self.daily or decision.name == "canopy_escape"
+                    or result.error_code == "retreat_interrupted")
+                    and not self._cancel.is_set() and not _uncertain_result(result)):
                 try:
                     observation = self._observe(safety_only=decision.name in {"retreat_from", "fight_hostile"})
                     self.latest_status = observation["status"]
@@ -1016,7 +1061,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                 if self.daily and model_uncertain:
                     self._model_blocked = result.error_code
                     self._record("WARN", "MODEL_BLOCKED_SAFETY_ACTIVE", {"code": result.error_code})
-                if (uncertain_action or fatal_model_error
+                starter_blocked = not self.daily and result.error_code == "llm_repeated_failure"
+                if (uncertain_action or fatal_model_error or starter_blocked
                     or result.error_code in FATAL | {"death_limit", "internal", "internal_error", "llm_invalid_config", "llm_record_error", "llm_missing_feedback", "llm_request_uncertain", "llm_gate_corrupt"}
                     or (not retreat_replan and not local_replan and not combat_replan and not task_replan and not transient_model_error
                         and self.failures >= self.settings["max_consecutive_failures"])):

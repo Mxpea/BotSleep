@@ -91,6 +91,34 @@ class LandingRecoveryTests(unittest.TestCase):
         self.assertEqual(result.data["cleanup_skipped"], "navigation_unknown")
         self.assertEqual([row[0] for row in self.world.writes()], ["move_to"])
 
+    def test_hurt_interruption_replans_only_from_verified_settled_position(self):
+        for cause, changes, expected in (
+            ("hurt", {}, "retreat_interrupted"),
+            ("hurt", {"on_ground": False}, "action_unconfirmed"),
+            ("hurt", {"last_death": {"t": 1}}, "action_unconfirmed"),
+            ("hurt", {"busy": {"name": "move_to"}}, "action_unconfirmed"),
+            (None, {}, "action_unconfirmed"),
+        ):
+            with self.subTest(cause=cause, changes=changes):
+                self.world = World()
+
+                def move(pos, kwargs):
+                    self.world.status.update(health=19, **changes)
+                    raise APIError("interrupted", "Move did not finish", 200, {"cause": cause})
+
+                self.world.move_effect = move
+                result = SurvivalSkills(self.world).execute("retreat_from", {"pos": [-3, 64, .5]})
+                self.assertFalse(result.success, result)
+                self.assertEqual(result.error_code, expected)
+                self.assertEqual(result.data["api_details"]["cause"], cause)
+                self.assertEqual([row[0] for row in self.world.writes()], ["move_to"])
+                if expected == "retreat_interrupted":
+                    self.assertTrue(result.data["candidate_failed"])
+                    self.assertTrue(result.data["landing_settled"])
+                    self.assertEqual(result.data["pos"], self.world.status["pos"])
+                else:
+                    self.assertEqual(result.data["action_state"], "unknown")
+
     def test_injured_verified_landing_is_known_and_requests_fresh_safety(self):
         for skill, args in (("canopy_escape", {}), ("retreat_from", {"pos": [-3, 70, .5]})):
             with self.subTest(skill=skill):

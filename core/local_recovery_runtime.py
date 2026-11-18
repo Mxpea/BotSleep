@@ -4,7 +4,53 @@ import math
 import time
 
 from agent.survival_planner import Decision
+from core.domain import LOG_NAMES, cell_coords, parse_pos
 from skills.survival import SurvivalSkills
+
+
+TREE_SUPPORTS = frozenset(LOG_NAMES) | {name[:-4] + "_wood" for name in LOG_NAMES}
+
+
+def verified_footing(observation):
+    """Accept support only while its freshly read origin still matches."""
+    if (observation.get("scope") in {"safety", "partial"}
+            or observation.get("observation_scope") == "safety" or observation.get("partial") is True):
+        return None
+    status, footing = observation["status"], observation.get("footing")
+    source = parse_pos(observation.get("footing_origin"))
+    origin = parse_pos(status.get("pos"))
+    if (not isinstance(footing, dict) or footing.get("fresh") is not True
+            or footing.get("verified") is not True or footing.get("source") != "api_verified"
+            or not isinstance(footing.get("name"), str) or not isinstance(footing.get("properties"), dict)
+            or source is None or origin is None or cell_coords(source) != cell_coords(origin) or math.dist(source, origin) > .2):
+        return None
+    pos = parse_pos(footing.get("pos"))
+    x, y, z = cell_coords(origin)
+    return footing if pos == [x, y - 1, z] and SurvivalSkills._safe_block(footing) else None
+
+def has_canopy_support(observation, context=None):
+    """A trunk encountered during the same evacuation is not safe ground.
+
+    Logs alone cannot establish a canopy: ordinary placed wooden support
+    must not initiate an escape without existing current-life recovery.
+    """
+    footing = verified_footing(observation)
+    props = (footing or {}).get("properties")
+    if footing is None:
+        return False
+    if footing.get("name") in SurvivalSkills.RETREAT_LEAVES:
+        return isinstance(props, dict) and (props.get("waterlogged") is False or props.get("waterlogged") == "false")
+    if footing.get("name") not in TREE_SUPPORTS:
+        return False
+    state = (context or {}).get("canopy_recovery")
+    status = observation["status"]
+    if (not isinstance(state, dict) or state.get("dimension") != status.get("dimension")
+            or "life" not in state or state["life"] != status.get("last_death")
+            or parse_pos(state.get("origin")) is None or state.get("unknown") is True
+            or state.get("retreat_complete") is True or state.get("evacuation_stage") == "ground"):
+        return False
+    steps = state.get("steps")
+    return state.get("evacuating") is True or type(steps) is int and steps > 0
 
 
 class LocalRecoveryRuntime:
@@ -26,22 +72,13 @@ class LocalRecoveryRuntime:
         return state
 
     def _prepare_local_recovery(self, observation):
-        if not self.daily:
-            return
         status = observation["status"]
         if self._safety_rules._pos(status.get("pos")) is None:
             return
-        food = self._recovery_state("food_recovery", observation)
         canopy = self.context.get("canopy_recovery")
         if (isinstance(canopy, dict)
                 and canopy.get("life_generation", 0) != self.context.get("life_generation", 0)):
             self.context.pop("canopy_recovery", None)
-        # Older checkpoints marked night-time waiting as exhausted food search.
-        # Only a bounded search or a current daylight evaluation can authorize
-        # the limited model turn; a saved wait is not that evidence.
-        if (food.get("needs_ai") is True and food["steps"] < 8
-                and food.get("daylight_search_evaluated") is not True):
-            food.update(needs_ai=False, reason="reobserve_local_food_options")
         footing = observation.get("footing")
         if isinstance(footing, dict) and observation.get("fresh") is True:
             current = {"origin": list(status["pos"]), "support": copy.deepcopy(footing)}
@@ -49,22 +86,21 @@ class LocalRecoveryRuntime:
                 self.context["local_footing"] = current
                 self._record("INFO", "LOCAL_FOOTING", current)
         retreat = self.context.get("retreat_recovery") or {}
-        verified_footing = self.daily_policy._footing(observation)
+        support_block = verified_footing(observation)
         nearest = status.get("nearest_hostile") or {}
         nearby = (isinstance(nearest, dict) and self._safety_rules._number(nearest.get("dist"))
                   and nearest["dist"] <= self._safety_rules._threat_distance(nearest.get("name")))
         stable_full = (observation.get("fresh") is True and observation.get("stale") is not True
-            and not self.daily_policy._partial(observation)
             and observation.get("inventory_fresh") is not False and observation.get("terrain_fresh") is not False
             and status.get("ready") is True and status.get("alive") is True and status.get("on_ground") is True
             and not status.get("busy") and not any(status.get(key) for key in
                 ("in_water", "in_lava", "on_fire", "submerged", "in_vehicle", "is_sleeping")))
-        if (stable_full and retreat.get("evacuating") is True and verified_footing is not None
+        if (stable_full and retreat.get("evacuating") is True and support_block is not None
                 and len(observation.get("entities") or []) < 40 and not nearby
                 and not self._safety_rules._dangerous_hostiles(observation, status["pos"])):
             # A departed enemy must not force an endless directional retreat.
             # Fresh footing decides whether terrain recovery still remains.
-            support = verified_footing["name"]
+            support = support_block["name"]
             if support in SurvivalSkills.RETREAT_LEAVES | SurvivalSkills.RETREAT_TRUNKS:
                 canopy = self._recovery_state("canopy_recovery", observation)
                 canopy.update(evacuating=True, reason="threat_cleared_continue_terrain_recovery")
@@ -79,6 +115,15 @@ class LocalRecoveryRuntime:
                 self.context.pop("combat_retreat", None)
                 self._record("INFO", "RETREAT_THREAT_CLEARED", {"mode": mode, "pos": list(status["pos"]),
                     "support": support, "fresh": True})
+        if not self.daily:
+            return
+        food = self._recovery_state("food_recovery", observation)
+        # Older checkpoints marked night-time waiting as exhausted food search.
+        # Only a bounded search or a current daylight evaluation can authorize
+        # the limited model turn; a saved wait is not that evidence.
+        if (food.get("needs_ai") is True and food["steps"] < 8
+                and food.get("daylight_search_evaluated") is not True):
+            food.update(needs_ai=False, reason="reobserve_local_food_options")
         if (type(status.get("food")) in (int, float) and status["food"] >= 18
                 or type(status.get("health")) in (int, float)
                 and status["health"] > self.settings["low_health_threshold"]):
@@ -87,8 +132,23 @@ class LocalRecoveryRuntime:
             self.context.pop("cautious_bootstrap", None)
             self.context.pop("cautious_bootstrap_basis", None)
 
+    def _starter_canopy_decision(self, observation, decision):
+        if decision.name in {"retreat_from", "auto_sleep", "eat_food"} or decision.goal in {
+                "observe", "recover", "food", "safety"}:
+            return decision
+        status = observation["status"]
+        if (observation.get("fresh") is True and observation.get("stale") is not True
+                and observation.get("terrain_fresh") is not False and observation.get("inventory_fresh") is not False
+                and status.get("on_ground") is True and "busy" in status and not status.get("busy")
+                and not any(status.get(key) for key in ("in_water", "in_vehicle", "is_sleeping"))
+                and len(observation.get("entities") or []) < 40
+                and has_canopy_support(observation, self.context)):
+            escape = Decision("canopy_escape", {}, "Leave the canopy by a verified step", "safety")
+            return self._local_recovery_decision(escape, observation)
+        return decision
+
     def _local_recovery_decision(self, decision, observation):
-        if decision is None or not self.daily:
+        if decision is None:
             return decision
         if decision.name == "canopy_escape":
             state = self._recovery_state("canopy_recovery", observation)
@@ -112,7 +172,7 @@ class LocalRecoveryRuntime:
                     "Canopy escape has no verified new step; preserve recovery evidence and reobserve",
                     "safety")
             state.pop("retry_after", None)
-        if (self.context.get("survival_constraints") or {}).get("scenario") == "food_recovery_blocked":
+        if self.daily and (self.context.get("survival_constraints") or {}).get("scenario") == "food_recovery_blocked":
             state = self._recovery_state("food_recovery", observation)
             status = observation["status"]
             if not status.get("is_day") or status.get("thundering") or status.get("time_of_day", 24000) >= 11000:
@@ -151,10 +211,10 @@ class LocalRecoveryRuntime:
                 "excluded_targets": excluded[-8:], "threat_radius": self.settings["threat_radius"]}
 
     def _local_recovery_result(self, decision, result, observation, *, uncertain=False):
-        if observation is None or not self.daily:
+        if observation is None:
             return False
         canopy = decision.name == "canopy_escape"
-        forage = decision.goal == "food_recovery" and decision.name == "position_for_task"
+        forage = self.daily and decision.goal == "food_recovery" and decision.name == "position_for_task"
         if not canopy and not forage:
             return False
         key = "canopy_recovery" if canopy else "food_recovery"

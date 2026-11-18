@@ -11,6 +11,7 @@ from collections.abc import Mapping
 
 from agent.survival_planner import Decision, SurvivalPlanner, RANGED_HOSTILES
 from core.domain import FOOD_POINTS, LOG_NAMES, PLANK_NAMES, cell_coords, extract_blocks, parse_pos
+from core.local_recovery_runtime import TREE_SUPPORTS, has_canopy_support, verified_footing
 from skills.daily_survival import DailySurvivalSkills
 from skills.combat import combat_options
 
@@ -19,7 +20,6 @@ CROP_OUTPUT = {"wheat": (7, "wheat"), "carrots": (7, "carrot"), "potatoes": (7, 
 FOOD_ACTIONS = frozenset({"harvest_crop", "take_items", "inspect_container", "craft_item", "smelt_collect", "collect_drops", "eat_food", "wait"})
 HAZARDS = DailySurvivalSkills.HAZARDS
 BOOTSTRAP_ITEMS = frozenset(PLANK_NAMES) | {"stick", "crafting_table", "wooden_pickaxe", "wooden_sword", "wooden_axe"}
-TREE_SUPPORTS = frozenset(LOG_NAMES) | {name[:-4] + "_wood" for name in LOG_NAMES}
 
 
 class DailySafetyPolicy:
@@ -119,45 +119,8 @@ class DailySafetyPolicy:
     def _night(self, status):
         return not status["is_day"] or status["thundering"] or status["time_of_day"] >= 11000
 
-    def _footing(self, observation):
-        """Accept support only while its freshly read origin still matches."""
-        if self._partial(observation):
-            return None
-        status, footing = observation["status"], observation.get("footing")
-        source = self._point(observation.get("footing_origin"))
-        origin = status["pos"]
-        if (not isinstance(footing, dict) or footing.get("fresh") is not True
-                or footing.get("verified") is not True or footing.get("source") != "api_verified"
-                or not isinstance(footing.get("name"), str) or not isinstance(footing.get("properties"), dict)
-                or source is None or self._cell(source) != self._cell(origin) or math.dist(source, origin) > .2):
-            return None
-        pos = self._point(footing.get("pos"))
-        x, y, z = self._cell(origin)
-        return footing if pos == [x, y - 1, z] and DailySurvivalSkills._safe_block(footing) else None
-
-    def _canopy(self, observation, context=None):
-        """A trunk encountered during the same evacuation is not safe ground.
-
-        Logs alone cannot establish a canopy: ordinary placed wooden support
-        must not initiate an escape without existing current-life recovery.
-        """
-        footing = self._footing(observation)
-        props = (footing or {}).get("properties")
-        if footing is None:
-            return False
-        if footing.get("name") in DailySurvivalSkills.RETREAT_LEAVES:
-            return isinstance(props, dict) and (props.get("waterlogged") is False or props.get("waterlogged") == "false")
-        if footing.get("name") not in TREE_SUPPORTS:
-            return False
-        state = (context or {}).get("canopy_recovery")
-        status = observation["status"]
-        if (not isinstance(state, dict) or state.get("dimension") != status.get("dimension")
-                or "life" not in state or state["life"] != status.get("last_death")
-                or self._point(state.get("origin")) is None or state.get("unknown") is True
-                or state.get("retreat_complete") is True or state.get("evacuation_stage") == "ground"):
-            return False
-        steps = state.get("steps")
-        return state.get("evacuating") is True or type(steps) is int and steps > 0
+    _footing = staticmethod(verified_footing)
+    _canopy = staticmethod(has_canopy_support)
 
     def _canopy_decision(self):
         return Decision("canopy_escape", {}, "Current support remains part of the canopy evacuation; take one checked escape step and observe again", "safety")

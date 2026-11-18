@@ -449,13 +449,7 @@ class DailyObservationCollector(ObservationCollector):
             return observation
         if "busy" not in status or status["busy"] is not None and status["busy"] is not False:
             raise APIError("observation_changed", "Backend idle state is unknown")
-        feet = self._cell(status["pos"])
-        support_pos = [feet[0], feet[1] - 1, feet[2]]
-        support = self._read(support_pos, cancel_event)
-        observation["footing_origin"] = list(status["pos"])
-        observation["footing"] = {"pos": support_pos, "name": support["name"],
-            "properties": copy.deepcopy(support.get("properties") or {}),
-            "fresh": True, "verified": True, "source": "api_verified"}
+        self._collect_footing(observation, cancel_event)
         for types in (("iron_ore", "deepslate_iron_ore", "chest", "barrel", "smoker", "blast_furnace"),
                       ("wheat", "carrots", "potatoes", "beetroots", "farmland", "grass_block", "dirt")):
             self._check_cancel(cancel_event)

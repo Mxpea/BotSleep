@@ -1192,6 +1192,18 @@ class SurvivalSkills:
         except Exception as error:
             outcome["executed"] = context["acted"]
             outcome["candidate_failed"] = getattr(error, "code", "") in {"path_not_found", "stalled", "out_of_reach"}
+            details = getattr(error, "details", None)
+            interruption = getattr(error, "data", {})
+            hurt = ((isinstance(error, APIError) and error.status_code == 200
+                     and isinstance(details, dict) and details.get("cause") == "hurt")
+                    or isinstance(error, _Failure) and interruption.get("interrupted_by") == "hurt")
+            if not escaping and context.get("write_sent") and getattr(error, "code", "") == "interrupted" and hurt:
+                cache.clear()
+                observed = self._verify_interrupted_retreat(context, before, feet, safe_cell)
+                if observed is not None:
+                    raise _Failure("retreat_interrupted", "Retreat stopped by damage; replan from verified footing",
+                                   evidence(pos=observed["pos"], landing_settled=True, candidate_failed=True,
+                                       safety_changed="health_lost", api_details=details or {"cause": "hurt"})) from None
             raise
         after = self._settle_navigation(context, before, target, outcome)
         horizontal_after = math.hypot(after["pos"][0] - threat[0], after["pos"][2] - threat[2])
@@ -1225,6 +1237,34 @@ class SurvivalSkills:
                         distance_before=origin_distance, distance_after=math.dist(after["pos"], threat),
                         planned_path=planned_path, path_following_verified=False,
                         path_caveat="Candidate terrain was checked; the backend may choose a different route.")
+
+    def _verify_interrupted_retreat(self, context, before, feet, safe_cell):
+        """Confirm a stopped movement's endpoint without repeating or stopping it again."""
+        deadline = time.monotonic() + 1.5
+        context.update(navigation_settle_deadline=deadline, navigation_observe_only=True)
+
+        def stable(status):
+            return (status.get("last_death") == before.get("last_death")
+                    and status.get("on_ground") is True and status.get("jumping") is not True
+                    and "busy" in status and status["busy"] in (None, False)
+                    and not any(status.get(key) for key in ("in_water", "in_lava", "on_fire", "submerged")))
+
+        try:
+            observed = self._status(context)
+            if (not stable(observed) or observed["health"] >= before["health"]
+                    or not safe_cell(feet(observed["pos"]), temporary_leaves=True)):
+                return None
+            final = self._status(context)
+            if (stable(final) and time.monotonic() <= deadline
+                    and final["health"] == observed["health"]
+                    and feet(final["pos"]) == feet(observed["pos"])
+                    and math.dist(final["pos"], observed["pos"]) <= .2):
+                return final
+        except (APIError, _Failure):
+            return None
+        finally:
+            context.pop("navigation_settle_deadline", None)
+        return None
 
     def _cautious_guard(self, context, status):
         """Trusted local emergency bootstrap: no backend pickup/table travel."""
@@ -1329,6 +1369,11 @@ class SurvivalSkills:
         except Exception as error:
             error = self._disconnection_error(error, context)
             code = getattr(error, "code", "internal_error")
+            interrupted_details = getattr(error, "details", None)
+            if code == "interrupted" and isinstance(interrupted_details, dict) and interrupted_details:
+                data["api_details"] = interrupted_details
+            if code == "interrupted" and getattr(error, "data", {}).get("interrupted_by"):
+                data["interrupted_by"] = error.data["interrupted_by"]
             if (context.get("navigation_write") and context.get("write_sent") and not context.get("navigation_verified")
                     and code in {"request_timeout", "network_error", "invalid_json", "invalid_response", "action_unconfirmed", "dig_unconfirmed", "retreat_budget_exhausted",
                                  "cancelled", "dead", "not_ready", "dimension_changed", "interrupted", "busy",

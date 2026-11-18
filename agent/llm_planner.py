@@ -411,6 +411,11 @@ If that goal tool is unavailable, use only the currently advertised tools.
                 return False
         return not (moved or changed_cell) and all(before.get(key) == after.get(key) for key in ("dimension", "last_death", "counts", "target", "target_properties", "windows", "entity", "shelter"))
 
+    def active_failed_decisions(self, observation):
+        """Return failed proposals whose relevant game evidence is unchanged."""
+        return [copy.deepcopy(failure["decision"]) for failure in self._failed_actions.values()
+                if self._unchanged_failure(failure, observation, failure["decision"])]
+
     @staticmethod
     def _signature(decision):
         # Adjusting range/count or inserting a successful wait is not progress.
