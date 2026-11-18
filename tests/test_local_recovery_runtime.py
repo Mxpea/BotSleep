@@ -463,6 +463,21 @@ class LocalRecoveryRuntimeTests(unittest.TestCase):
         self.assertEqual(brain.requests, [])
         self.assertFalse(any(row[0] in {"move", "dig", "craft", "place", "stop"} for row in self.world.calls))
 
+    def test_revisited_canopy_cell_refreshes_tail_of_visited_history_to_prevent_pingpong(self):
+        from skills import SkillResult
+        harness, _ = self.make_harness()
+        obs = {
+            "fresh": True,
+            "status": {"pos": [1.5, 70.0, 0.5], "health": 20, "food": 20, "dimension": "overworld"},
+        }
+        state = harness._recovery_state("canopy_recovery", obs)
+        state["visited"] = [[1, 70, 0]] + [[i, 70, 0] for i in range(10, 22)]
+        res = SkillResult(True, "Moved", {"pos": [1.5, 70.0, 0.5], "evacuation_stage": "relay"})
+        harness._local_recovery_result(Decision("canopy_escape", {}, "Step", "safety"), res, obs)
+        opts = harness._canopy_options(obs)
+        self.assertEqual(opts["recent_targets"][-1], [1, 70, 0])
+        self.assertEqual(len(opts["recent_targets"]), 8)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -95,7 +95,7 @@ class LocalRecoveryRuntime:
             origin = observation["status"]["pos"]
             previous = state.get("search_origin")
             unchanged = previous is not None and math.dist(origin, previous) < .2
-            if state["steps"] >= 64:
+            if state["steps"] >= 128:
                 if not state.get("exhausted"):
                     state.update(exhausted=True, reason="canopy_step_budget_exhausted")
                     self._record("WARN", "CANOPY_RECOVERY_EXHAUSTED", {"recovery": copy.deepcopy(state)})
@@ -171,8 +171,7 @@ class LocalRecoveryRuntime:
             pos = self._safety_rules._pos(observation["status"].get("pos"))
             if pos and observation.get("fresh") is True:
                 cell = [math.floor(value + .0001) for value in pos]
-                if cell not in state["visited"]:
-                    state["visited"] = (state["visited"] + [cell])[-32:]
+                state["visited"] = ([row for row in state["visited"] if row != cell] + [cell])[-32:]
             if canopy:
                 state["evacuating"] = result.data.get("evacuation_stage") != "ground"
                 if not state["evacuating"]:
