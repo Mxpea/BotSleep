@@ -773,6 +773,7 @@ class MiningWorkflowTests(unittest.TestCase):
         self.assertNotEqual(str(world.blocks.get(tuple(esc["pos"]), {}).get("name") or "air"), "water")
 
     def test_find_mine_sites_supports_pale_moss_ground_and_prefers_open_sky_over_canopy(self):
+        import math
         world = WorkflowMineWorld(bot_pos=(0.5, 64.0, 0.5))
         for dx in range(-6, 12):
             for dz in range(-6, 12):
