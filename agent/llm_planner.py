@@ -127,16 +127,21 @@ prerequisites. Waiting/no-op does not erase a failure. Respect active target coo
 All models share one serialized request slot. Provider uncertainty blocks new calls.
 There is no final goal_complete in daily mode: maintain reserves and facilities,
 inspect changes, eat and sleep when appropriate, and wait briefly when nothing safe
-needs doing. For progression toward iron/diamond gear, use run_survival_task cleanly
-(starter_tools -> iron_tools or craft(iron_pickaxe) -> gather(resource="diamond")
--> craft(diamond_pickaxe/diamond_sword)); when coal, raw_iron or diamond is absent
-on the surface and the required pickaxe is ready, run_survival_task dispatches a
-bounded surface-to-deep mining expedition with guaranteed surface return.
-Do not call craft(furnace) when a furnace is already in inventory; iron_tools,
-smelt(iron_ingot) and craft(iron_pickaxe) deploy held furnaces automatically.
-When iron_ingot >= 3 and iron_pickaxe < 2 (needed before diamond mining), call
-craft(item="iron_pickaxe") rather than smelting more iron_ingot; once an iron_pickaxe
-is ready, prioritize gather(resource="diamond") over optional fuel_reserve/logs/base_site hints.
+needs doing. Organize progression around stage gates where you re-evaluate after each milestone:
+1) Spawn/early scouting: when newly spawned or lacking wood/structures (e.g., desert) and
+context.last_scout_report is absent, prefer ONE run_survival_task(task="scout") to scan forward
+~200 blocks for villages, chests, crafting tables, oasis/border trees or surface caves.
+If scout finds nothing or stops to save stamina, decisively stop scouting and proceed locally
+(starter_tools, desert dead_bush sticks, or surface/shaft stone mining).
+2) Iron decision gate: once raw_iron, iron_ingot, iron_pickaxe or iron_tools completes, inspect
+current iron_ingot, armor slots, offhand, food and reserves to decide the next goal yourself:
+choose among run_survival_task(task="iron_armor") (crafts+equips iron armor), iron_tools,
+craft(iron_pickaxe), smelting more iron, or run_survival_task(task="gather", resource="diamond")
+when ready (diamond mining needs iron_pickaxe >= 2 or diamond_pickaxe). Do NOT craft a furnace
+when one is already held; iron_tools, smelt(iron_ingot) and craft(iron_pickaxe) deploy held furnaces.
+3) Diamond gate: after gathering diamond, decide whether to craft diamond_pickaxe/diamond_sword
+or reinforce armor/food. When coal, raw_iron or diamond is absent on the surface and the required
+pickaxe is ready, run_survival_task launches bounded deep mining with surface return.
 Partial results never mean an entire task is complete.
 Return one native tool call, not simulated calls inside text.
 """
@@ -262,7 +267,7 @@ If that goal tool is unavailable, use only the currently advertised tools.
         status = observation.get("status") or {}
         status_keys = ("ready", "alive", "busy", "gamemode", "dimension", "pos", "health", "food", "is_day",
                        "time_of_day", "thundering", "on_ground", "is_sleeping", "in_vehicle", "in_water", "in_lava",
-                       "on_fire", "submerged", "oxygen", "last_death", "nearest_hostile")
+                       "on_fire", "submerged", "oxygen", "offhand", "last_death", "nearest_hostile")
         inventory_unknown = observation.get("inventory_fresh") is False or observation.get("observation_scope") == "safety"
         snapshot = {"status": {key: status[key] for key in status_keys if key in status},
                     "counts": None if inventory_unknown else observation.get("counts") or {}}
@@ -306,8 +311,9 @@ If that goal tool is unavailable, use only the currently advertised tools.
 
             for row in sorted(rows, key=accessibility):
                 name = row.get("name", "")
-                group = ("logs" if name.endswith("_log") else "minerals" if name in {
-                    "stone", "cobblestone", "coal_ore", "deepslate_coal_ore", "iron_ore", "deepslate_iron_ore"} else "stations" if name in {
+                group = ("logs" if name.endswith("_log") or name == "dead_bush" else "minerals" if name in {
+                    "stone", "cobblestone", "coal_ore", "deepslate_coal_ore", "iron_ore", "deepslate_iron_ore",
+                    "diamond_ore", "deepslate_diamond_ore"} else "stations" if name in {
                     "crafting_table", "furnace", "smoker", "blast_furnace", "chest", "barrel"} or name.endswith("_bed")
                     else "food" if name in {"wheat", "carrots", "potatoes", "beetroots", "farmland", "short_grass", "tall_grass"}
                     else "foliage" if name.endswith("_leaves") or name == "vine" else "hazards")
@@ -317,8 +323,10 @@ If that goal tool is unavailable, use only the currently advertised tools.
             # Keep a nearby occluded resource and its blocker visible to the
             # model. Far resources with unknown visibility must not crowd out
             # the local resource that clearing one leaf could unlock.
-            for group, matches in (("logs", lambda name: name.endswith("_log")),
-                                   ("minerals", lambda name: name in {"stone", "cobblestone", "coal_ore", "deepslate_coal_ore", "iron_ore", "deepslate_iron_ore"})):
+            for group, matches in (("logs", lambda name: name.endswith("_log") or name == "dead_bush"),
+                                   ("minerals", lambda name: name in {
+                                       "stone", "cobblestone", "coal_ore", "deepslate_coal_ore",
+                                       "iron_ore", "deepslate_iron_ore", "diamond_ore", "deepslate_diamond_ore"})):
                 close = sorted((row for row in rows if matches(row.get("name", ""))
                                 and row.get("can_see") is False and distance(row) <= 4.5), key=distance)[:2]
                 bucket = groups.setdefault(group, [])
@@ -552,6 +560,8 @@ If that goal tool is unavailable, use only the currently advertised tools.
             "craft": common,
             "starter_tools": common,
             "iron_tools": common | {"gather_resource", "inspect_container", "smelt_start", "smelt_collect"},
+            "iron_armor": (common - {"clear_foliage"}) | {"gather_resource", "inspect_container", "smelt_start", "smelt_collect", "equip_armor"},
+            "scout": {"move_to", "position_for_task", "gather_block", "clear_foliage"},
             "smelt": common | {"gather_resource", "inspect_container", "smelt_start", "smelt_collect"},
             "food": {"move_to", "position_for_task", "harvest_crop", "hunt_animal", "collect_drops",
                      "inspect_container", "take_items", "smelt_collect", "craft_item"},

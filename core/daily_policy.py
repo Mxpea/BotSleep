@@ -33,6 +33,8 @@ class DailySafetyPolicy:
         self.low_health = self.rules.low_health
         self.threat_radius = self.rules.threat_radius
         self.food_threshold = self.rules.food_threshold
+        raw_policy = settings.get("sleep_policy", "strict") if isinstance(settings, Mapping) else "strict"
+        self.sleep_policy = raw_policy if raw_policy in {"opportunistic", "strict"} else "strict"
 
     @staticmethod
     def _rows(value):
@@ -118,6 +120,17 @@ class DailySafetyPolicy:
 
     def _night(self, status):
         return not status["is_day"] or status["thundering"] or status["time_of_day"] >= 11000
+
+    def _strict_night_block(self, observation, status):
+        """Gate on night/thunder strictly unless sleep_policy='opportunistic' allows working."""
+        if self.sleep_policy != "opportunistic":
+            return self._night(status)
+        if not status["is_day"] or status["time_of_day"] >= 11000:
+            shelter = self._shelter(observation)
+            # Opportunistic policy only sleeps or waits in shelter when a nearby verified bed, short shelter route, or verified inside stance exists.
+            return bool(self._bed(observation) or self._return_home(observation)
+                        or (isinstance(shelter, dict) and shelter.get("inside") is True))
+        return False
 
     def _footing(self, observation):
         """Accept support only while its freshly read origin still matches."""
@@ -527,7 +540,7 @@ class DailySafetyPolicy:
                     reason = search.reason if search else "Food recovery is blocked; food below 18 cannot regenerate health and no fresh safe search step remains"
                     if self._partial(observation):
                         scenario, reason = "food_observation_required", "A complete fresh food and ground observation is required; partial safety data cannot prove search exhaustion"
-            elif self._night(status):
+            elif self._strict_night_block(observation, status):
                 scenario, allowed, radius, model = "shelter_time", ["wait", "auto_sleep", "move_to", "set_door"], 4, False
                 reason = "Dusk/night permits verified sleep or separately verified door and short shelter-route steps"
             elif status["food"] <= 6:
@@ -573,7 +586,7 @@ class DailySafetyPolicy:
                     return search
             return self._wait("Food recovery is blocked: food is below 18 and no currently verified safe food is available; waiting cannot regenerate health"
                               if status["food"] < 18 else "Observe natural regeneration without hunting or gathering", "recover")
-        if self._night(status):
+        if self._strict_night_block(observation, status):
             home = self._return_home(observation)
             if home:
                 return home
@@ -621,7 +634,7 @@ class DailySafetyPolicy:
             if self._bootstrap_valid(decision, observation, context):
                 return None
             return "low_health_food_only"
-        if self._night(status):
+        if self._strict_night_block(observation, status):
             home = self._return_home(observation)
             if home is not None:
                 return None if decision.name == home.name and decision.args == home.args else "night_requires_verified_sleep_or_shelter_route"

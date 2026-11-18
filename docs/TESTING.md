@@ -1,6 +1,18 @@
 # 配置、客户端、生存、赛事与监控验证
 
-最近复核：2026-11-17（Asia/Shanghai），`develop-tianya/ai-iron-diamond-loop`（基于 `origin/main 9018f76`）。
+最近复核：2026-11-18（Asia/Shanghai），`develop-tianya/ai-iron-diamond-loop`（最新未提交本地验证）。
+
+## 装备副手、树冠/夜雨解锁、沙漠取木、200 格前向侦察与阶段决策回归（2026-11-18）
+
+围绕和平模式开局体验、沙漠适应性、装备穿戴与大模型阶段接管完成了下列实现与离线验证：
+- **装备与副手管理**：新增 `skills/equipment.py`（`EquipmentSkill`，与 `ContainerSkill` 同层 `WorkflowGuard` + `SkillResult` + 断线 `unknown` 契约），统一管理 `head`/`torso`/`legs`/`feet`/`off-hand`/`hand`（含 API `armor.chest` ↔ `torso` 映射与最佳防具/盾牌自动穿戴），`iron_tools`/`iron_armor` 内部直接联动 `equip_loadout`。
+- **树冠脱困、夜/暴雨解锁与沙漠支撑**：`core/config.py` 与 `config.example.yaml` 默认启用 `survival.sleep_policy: "opportunistic"`，`core/daily_policy.py` 与 `core/autonomous_tasks.py` 不再因白天雷暴或无床夜晚硬阻塞生产工作（仅在已有近床/安全庇护所内或 `sleep_policy="strict"` 时阻塞）。`skills/survival.py` 扩展 `sand`/`sandstone`/`terracotta`/`gravel` 等自然地形支撑，将 `dead_bush` 加入 `GATHERABLE`（空手采集可零掉落完成并优先用于沙漠凑木棍），并放宽健康状态下高树冠（`-12 <= dy <= 2`）、3 格安全落差与同层树叶开路。
+- **200 格前向低耗侦察与 Stage-Gate 决策**：新增 `skills/scouting.py`（`SurfaceScoutSkill`）在不改动 `mc-agent-api`（`find_blocks radius<=64`）的前提下从出生点单向推进多航点（覆盖 ~200 格跨度），发现结构/绿洲原木立即早停、无果或体力下降果断放弃；更新 `agent/llm_planner.py` 快照与 `DAILY_SYSTEM_PROMPT`，在 `scout` 结束及铁阶段完成后交还大模型自行决断做铁甲还是找钻石。
+- **离线验证与边界**：全部改动完成后最终完整回归结果为：**1453 项 / 67.987 秒：1443 通过、10 项跳过（2 项 `test_cave_matrix` 与 3 项 `test_speedrun_portal` 实服专用跳过，5 项 `test_stronghold.EngineTests` 因未安装 ninjabrain JAR 跳过），`OK (skipped=10)`**，命令为 `$env:BOTSLEEP_RUN_LIVE_TESTS='0'; .\.venv\Scripts\python.exe -B -m unittest discover -s tests -v`。`compileall -q main.py agent core skills debug integrations`、`main.py --config config.example.yaml --check-config` 及 `git diff --check` 均通过；相邻 `mc-agent-api` 零改动。因调整 `sand` 至 `SurvivalSkills.SUPPORT`，同步将 `tests/test_survival_skills.py` 中“拒绝非支撑地面”用例中的替代方块由 `"sand"` 更新为 `"glass"`（上方落沙危险检测保持不变）。当前尚无新的实服开局（树顶/沙漠/完整铁甲+钻石）复测结果。
+
+---
+
+历史复核：2026-11-17（Asia/Shanghai），`develop-tianya/ai-iron-diamond-loop`（commit `e76597b`，基于 `origin/main 9018f76`）。
 
 ## AI 自主铁套/钻石闭环与矿井优化回归（2026-11-17）
 

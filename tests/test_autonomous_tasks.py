@@ -788,6 +788,48 @@ class AutonomousTaskTests(unittest.TestCase):
         self.assertEqual(decision.name, "gather_block")
         self.assertEqual(decision.args["pos"], [3, 65, 0])
 
+    def test_desert_dead_bush_yields_sticks_and_opportunistic_sleep_allows_night_work(self):
+        from skills.survival import SurvivalSkills
+        self.assertIn("sand", SurvivalSkills.SUPPORT)
+        self.assertIn("sandstone", SurvivalSkills.SUPPORT)
+        self.assertIn("dead_bush", SurvivalSkills.GATHERABLE)
+        obs = world({})
+        obs["status"].update(is_day=False, time_of_day=14000, thundering=True)
+        obs["blocks"] = [
+            {"name": "dead_bush", "pos": [2, 64, 0], "can_see": True, "can_dig": True},
+            {"name": "crafting_table", "pos": [1, 64, 0], "can_see": True},
+        ]
+        # No logs or planks in desert: craft stick harvests nearby dead_bush directly.
+        obs["counts"] = {}
+        controller = AutonomousTaskController({"autonomy": {"enabled": True}, "sleep_policy": "opportunistic"})
+        controller.start({"task": "craft", "item": "stick", "count": 2}, obs)
+        decision = controller.next_action(obs)
+        self.assertEqual((decision.name, decision.args["expected_name"]), ("gather_block", "dead_bush"))
+
+    def test_iron_armor_crafts_and_equips_and_scout_completes_in_one_pass(self):
+        obs = world({"iron_chestplate": 1, "iron_helmet": 1, "iron_leggings": 1, "iron_boots": 1, "shield": 1})
+        controller = self.start({"task": "iron_armor"}, obs=obs)
+        step = controller.next_action(obs)
+        self.assertEqual((step.name, step.goal), ("equip_armor", "equip_loadout"))
+        obs["armor"] = {
+            "head": {"name": "iron_helmet", "count": 1},
+            "chest": {"name": "iron_chestplate", "count": 1},
+            "legs": {"name": "iron_leggings", "count": 1},
+            "feet": {"name": "iron_boots", "count": 1},
+        }
+        obs["status"]["offhand"] = {"name": "shield", "count": 1}
+        controller.record_result(step, SkillResult(True, "Equipped", {"executed": True}), obs)
+        self.assertTrue(controller.confirm_completion(obs))
+        self.assertEqual(controller.snapshot()["status"], "completed")
+
+        scout_obs = world({})
+        scout_ctrl = self.start({"task": "scout"}, obs=scout_obs)
+        s_step = scout_ctrl.next_action(scout_obs)
+        self.assertEqual((s_step.name, s_step.goal), ("move_to", "scout_surface"))
+        scout_ctrl.record_result(s_step, SkillResult(True, "Scout done", {"aborted_empty": True}), scout_obs)
+        self.assertTrue(scout_ctrl.confirm_completion(scout_obs))
+        self.assertEqual(scout_ctrl.snapshot()["status"], "completed")
+
 
 if __name__ == "__main__":
     unittest.main()

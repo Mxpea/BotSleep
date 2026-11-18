@@ -427,6 +427,8 @@ class DailySurvivalSkills(SurvivalSkills):
         return hunt_animal(self, args, context)
 
     def _equip_armor(self, args, context):
+        from .equipment import INVENTORY_ARMOR_KEYS, read_worn_slot_item
+
         item, slot = self._item(args["item"]), args["slot"]
         self._prepare(context)
         if not isinstance(slot, str) or item not in self.ARMOR.get(slot, ()):
@@ -435,7 +437,14 @@ class DailySurvivalSkills(SurvivalSkills):
         self._daily_action(context, self.client.equip, item, slot=slot)
         self._prepare(context)
         inv = self._result(self.client.inventory())
-        armor = inv.get("armor", {}).get("chest" if slot == "torso" else slot)
+        armor = read_worn_slot_item(inv, slot)
+        if not armor:
+            armor_map = inv.get("armor") if isinstance(inv.get("armor"), dict) else {}
+            for key in INVENTORY_ARMOR_KEYS.get(slot, (slot,)):
+                candidate = armor_map.get(key)
+                if isinstance(candidate, dict):
+                    armor = candidate
+                    break
         if not isinstance(armor, dict) or armor.get("name") != item:
             raise _Failure("equip_unverified", "The requested armor was not observed in its armor slot")
         return self._verified(context, item=item, slot=slot, equipped=armor)

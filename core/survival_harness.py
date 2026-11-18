@@ -773,6 +773,10 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                     options["cautious"] = True
                 if self._task_child and decision.goal == "deep_mine":
                     result = self._run_task_deep_mine(decision, observation)
+                elif self._task_child and decision.goal == "scout_surface":
+                    result = self._run_task_scout(decision, observation)
+                elif self._task_child and decision.goal == "equip_loadout":
+                    result = self._run_task_equip_loadout(decision, observation)
                 else:
                     runner = resolve_skill_runner(self, decision.name)
                     result = runner.execute(decision.name, decision.args, cancel_event=self._cancel, **options)
@@ -890,7 +894,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
             status.get("dimension") != baseline.get("dimension")
             or status.get("last_death") != baseline.get("last_death")
             or status.get("health", 0) < baseline.get("health", 20))
-        deep_mine_active = decision is not None and decision.goal == "deep_mine"
+        deep_mine_active = decision is not None and decision.goal in {"deep_mine", "scout_surface"}
         danger = (not status.get("alive") or status.get("in_lava") or status.get("on_fire")
                   or status.get("submerged") or (status.get("in_water") and not deep_mine_active)
                   or status.get("health", 20) <= self.settings["low_health_threshold"] and not (food_turn or local_recovery_turn)

@@ -720,6 +720,21 @@ class DailyPolicyTests(unittest.TestCase):
         self.assertFalse(limits["route_evidence_is_actual_trajectory"])
         self.assertEqual(limits["shelter_spawn_safety"], "unknown")
 
+    def test_opportunistic_sleep_policy_allows_thunder_and_night_work_without_bed_still_sleeps_near_bed(self):
+        opp = DailySafetyPolicy({"sleep_policy": "opportunistic"})
+        thunder_day = observed(is_day=True, thundering=True, time_of_day=3000)
+        self.assertIsNone(opp.choose(thunder_day, self.baseline))
+        self.assertIsNone(opp.validate(action("gather_block", pos=[2, 64, 0], expected_name="oak_log"), thunder_day))
+        self.assertTrue(opp.constraints(thunder_day)["model_allowed"])
+
+        night_no_bed = observed(is_day=False, time_of_day=14000)
+        self.assertIsNone(opp.choose(night_no_bed, self.baseline))
+        self.assertIsNone(opp.validate(action("gather_block", pos=[2, 64, 0], expected_name="oak_log"), night_no_bed))
+
+        night_with_bed = observed(is_day=False, time_of_day=14000)
+        night_with_bed["blocks"] = [{"name": "white_bed", "pos": [2, 64, 0], "properties": {"occupied": False}}]
+        self.assertEqual(opp.choose(night_with_bed, self.baseline).name, "auto_sleep")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -10,7 +10,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from agent.brain import LLMError
-from agent.survival_planner import Decision, LOG_NAMES
+from agent.survival_planner import Decision, LOG_NAMES, PLANK_NAMES
 from skills import SkillResult
 
 
@@ -241,6 +241,40 @@ class AutonomyRuntime:
         data.setdefault("executed", True)
         return SkillResult(bool(res.success), str(res.message), data, res.error_code)
 
+    def _run_task_scout(self, decision, observation):
+        from core.memory import MemoryEngine
+        from skills.scouting import SurfaceScoutSkill
+
+        state_root = Path(str(self.settings.get("state_dir") or "runtime/survival"))
+        memory = MemoryEngine(str(state_root / "scout_memory"))
+        counts = (observation.get("counts") or {}) if isinstance(observation, dict) else {}
+        prefer_wood = sum(counts.get(n, 0) for n in (*LOG_NAMES, *PLANK_NAMES)) == 0
+        raw_r = decision.args.get("scan_radius", 48) if isinstance(decision.args, dict) else 48
+        scan_r = max(48, min(64, int(raw_r))) if isinstance(raw_r, int) and raw_r >= 32 else 48
+        res = SurfaceScoutSkill(self.client, memory=memory).execute(
+            scan_radius=scan_r,
+            hop_distance=55.0,
+            max_hops=3,
+            prefer_wood=prefer_wood,
+            cancel_event=getattr(self, "_cancel", None),
+        )
+        data = dict(res.data or {}) if isinstance(res.data, dict) else {}
+        if res.success:
+            self.context["last_scout_report"] = copy.deepcopy(data)
+        return SkillResult(bool(res.success), str(res.message), data, res.error_code)
+
+    def _run_task_equip_loadout(self, decision, observation):
+        from skills.equipment import EquipmentSkill
+
+        prefer_offhand = (decision.args.get("prefer_offhand", "shield") if isinstance(decision.args, dict) else "shield")
+        res = EquipmentSkill(self.client).execute(
+            "auto_equip_best",
+            prefer_offhand=prefer_offhand,
+            cancel_event=getattr(self, "_cancel", None),
+        )
+        data = dict(res.data or {}) if isinstance(res.data, dict) else {}
+        return SkillResult(bool(res.success), str(res.message), data, res.error_code)
+
     def _task_next(self, observation):
         if not self._task_active():
             return None
@@ -308,6 +342,8 @@ class AutonomyRuntime:
             return
         data = {"task_execution": snapshot, "completed": status == "completed",
                 "executed": bool(snapshot.get("steps", 0)), "partial": status != "completed"}
+        if snapshot.get("task") == "scout" and isinstance(self.context.get("last_scout_report"), dict):
+            data["scout_report"] = copy.deepcopy(self.context["last_scout_report"])
         code = None if status == "completed" else "action_unconfirmed" if status == "unknown" else "task_paused" if paused else "task_needs_ai"
         if status == "unknown":
             data.update(action_state="unknown", cleanup_skipped="task_unknown")

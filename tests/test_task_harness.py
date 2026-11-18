@@ -763,6 +763,27 @@ class TaskHarnessTests(unittest.TestCase):
         self.assertIn(("granite", 324), dropped)
         self.assertIn(("cobblestone", 576), dropped)
 
+    def test_scout_task_routes_to_surface_scout_and_reports_findings_to_llm(self):
+        def fake_scout(scout_self, **kwargs):
+            return SkillResult(True, "Scout found village", {
+                "executed": True,
+                "estimated_reach": 112.0,
+                "early_stop_reason": "structure_or_village_found",
+                "aborted_empty": False,
+                "found_structures": [{"name": "chest", "pos": [60, 64, 0]}],
+            })
+
+        harness, brain = self.harness(response("run_survival_task", {"task": "scout"}, "scout_goal"))
+        with patch("skills.scouting.SurfaceScoutSkill.execute", new=fake_scout):
+            self.cycle(harness)
+            self.until(harness, lambda: harness.snapshot()["task_execution"]["status"] == "completed")
+        feedback = self.feedback(harness.planner)
+        self.assertEqual(len(feedback), 1)
+        payload = json.loads(feedback[0]["content"])
+        self.assertTrue(payload["result"]["success"])
+        self.assertEqual(payload["result"]["data"]["scout_report"]["found_structures"][0]["name"], "chest")
+        self.assertEqual(len(brain.requests), 1)
+
 
 if __name__=="__main__":
     unittest.main()
