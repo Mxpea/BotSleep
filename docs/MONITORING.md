@@ -58,3 +58,12 @@
 可靠性规则建议先“告警、不自动改动作”：Heartbeat stale、advancement evidence stale、模型槽 uncertain、游戏 pending、checkpoint 写入失败应分别显示不同等级与处置；连续无进度只能提示检查目标前置/重复动作，不能仅凭时长宣判 attention collapse。确认误报率后再加策略性自动暂停/compact；无论如何监控 API 始终只读，不调用动作、不清锁、不正常化未知值。
 
 只有 `/`、`GET /api/state`、`GET /api/events?since=N`，没有控制、write、admin、解除锁端点。页面不触发游戏读取、动作重放或模型自动重试，也不实现自动 compact。只读监控和离线测试无法证明连续 8 小时可靠性，仍需独立长时实服验证。
+
+## Gradio 开发者网页控制台（`--web-view`）
+
+`debug/web_console.py` 与 `debug/web_backend.py` 在保留上述 `18930` 纯只读监控不动的前提下，提供面向开发的四页签 Gradio 控制台（默认 `http://127.0.0.1:18940`），通过 `python main.py --web-view` 或 `python -m debug.web_console` 启动：
+
+- **宿主与只读降级**：同作用域空闲时获取 `SurvivalJournal.instance_lock()` 并后台托管 `SurvivalHarness` / `SleepController`；若同作用域已有外部进程持锁，则自动降级为 `readonly_attach` 只读附加模式，读取检查点、`episodes.jsonl`、`VoxelWorld3D` 及本地 `18930` 监控接口，不抢占锁或登录游戏。
+- **3D 灰模可视化（`debug/scene_3d.py`）**：默认消费当前观测与 `VoxelWorld3D` 记忆渲染 Three.js 灰模（含 Y 轴剖切、实体/轨迹/前沿图层、离线 2D 降级画布）；仅在点击“局部 3D 采样”时有界调用 `get_block` 补全周围网格。
+- **安全门禁与手动控制**：聊天发送与急停（`/stop`）随时可用；普通移动、转向与底层技能触发默认要求 AI 已暂停且不存在 `pending` 或 `model_gate == uncertain`，可通过“开发者强制接管”开关显式覆盖并记录审计事件。
+- **代码调用栈与参数热写**：通过 `sys._current_frames()` 采样工作线程实时 Python 堆栈；第 4 页签通过 `core.config.validate_supplied_config` 校验后原子写回 `config.yaml`（保留磁盘原有密码与 `api_key` 不回显），并支持基础阈值热生效与结构字段变更后的热重启提示。

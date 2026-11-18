@@ -27,6 +27,12 @@ def parse_args(argv=None):
     parser.add_argument("--resume", action="store_true", help="Explicitly resume survival from fresh observations; never replay a saved action")
     parser.add_argument("--acknowledge-model-idle", action="store_true", help="Clear model transport uncertainty ONLY after confirming the provider has no running request")
     parser.add_argument("--check-config", action="store_true", help="Validate configuration without connecting")
+    parser.add_argument("--web-view", action="store_true", help="Launch the Gradio 3D & AI developer web console")
+    parser.add_argument("--web-host", default="127.0.0.1", help="Bind host for --web-view (default: 127.0.0.1)")
+    parser.add_argument("--web-port", type=int, default=18940, help="Port for --web-view (default: 18940)")
+    parser.add_argument("--web-paused", action="store_true", help="Connect in paused state when launching --web-view")
+    parser.add_argument("--web-no-connect", action="store_true", help="Start --web-view without connecting to mc-agent-api yet")
+    parser.add_argument("--web-inbrowser", action="store_true", help="Open browser automatically when launching --web-view")
     return parser.parse_args(argv)
 
 
@@ -61,6 +67,32 @@ def main(argv=None) -> int:
     if args.check_config:
         print("Configuration valid.")
         return 0
+    if getattr(args, "web_view", False):
+        from debug.web_console import launch_web_console
+        overrides = {}
+        if args.mode:
+            overrides.setdefault("agent", {})["mode"] = args.mode
+        if args.objective:
+            overrides.setdefault("survival", {})["objective"] = args.objective
+        if args.keep_connected:
+            overrides.setdefault("mc_api", {})["keep_session_on_exit"] = True
+        if args.max_steps is not None:
+            if config["survival"]["objective"] == "competition":
+                overrides.setdefault("survival", {}).setdefault("competition", {})["max_steps"] = args.max_steps
+            else:
+                overrides.setdefault("survival", {})["max_steps"] = args.max_steps
+        return launch_web_console(
+            config_path=args.config,
+            username=args.username,
+            config_overrides=overrides or None,
+            host=args.web_host,
+            port=args.web_port,
+            start_paused=args.web_paused,
+            auto_connect=not args.web_no_connect,
+            resume=args.resume,
+            acknowledge_model_idle=args.acknowledge_model_idle,
+            inbrowser=args.web_inbrowser,
+        )
 
     recorder = None
     monitor = None

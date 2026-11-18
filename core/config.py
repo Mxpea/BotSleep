@@ -386,6 +386,40 @@ def _validate(config: Dict[str, Any], config_dir: Path) -> None:
             raise ConfigError("mining.home_thresholds.min_pickaxe_durability_ratio must be between 0 and 1")
 
 
+def validate_supplied_config(
+    supplied: Any,
+    config_dir: Union[str, os.PathLike],
+    *,
+    environ: Optional[Mapping[str, str]] = None,
+    username: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Merge, apply environment overrides, and validate an already-parsed config mapping."""
+    base_dir = Path(config_dir).expanduser().resolve()
+    supplied_map = {} if supplied is None else _mapping(supplied, "configuration")
+    config = _merge(DEFAULTS, supplied_map)
+    # Reject malformed sections before applying overrides, so overrides cannot
+    # silently replace an invalid YAML structure or fail with a TypeError.
+    for section in DEFAULTS:
+        _mapping(config[section], section)
+
+    environment = os.environ if environ is None else environ
+    for variable, section, key in (
+        ("MC_AGENT_API", "mc_api", "base_url"),
+        ("MC_AGENT_USER", "agent", "name"),
+        ("MC_AGENT_PASSWORD", "agent", "password"),
+        ("BOTSLEEP_LLM_API_KEY", "llm", "api_key"),
+        ("BOTSLEEP_LLM_BASE_URL", "llm", "base_url"),
+        ("BOTSLEEP_LLM_MODEL", "llm", "model"),
+    ):
+        if variable in environment:
+            config[section][key] = environment[variable]
+    if username is not None:
+        config["agent"]["name"] = username
+
+    _validate(config, base_dir)
+    return config
+
+
 def load_config(
     path: Union[str, os.PathLike],
     *,
@@ -410,26 +444,4 @@ def load_config(
     except (OSError, ValueError, TypeError, RuntimeError):
         raise ConfigError("Configuration file could not be read") from None
 
-    supplied = {} if supplied is None else _mapping(supplied, "configuration")
-    config = _merge(DEFAULTS, supplied)
-    # Reject malformed sections before applying overrides, so overrides cannot
-    # silently replace an invalid YAML structure or fail with a TypeError.
-    for section in DEFAULTS:
-        _mapping(config[section], section)
-
-    environment = os.environ if environ is None else environ
-    for variable, section, key in (
-        ("MC_AGENT_API", "mc_api", "base_url"),
-        ("MC_AGENT_USER", "agent", "name"),
-        ("MC_AGENT_PASSWORD", "agent", "password"),
-        ("BOTSLEEP_LLM_API_KEY", "llm", "api_key"),
-        ("BOTSLEEP_LLM_BASE_URL", "llm", "base_url"),
-        ("BOTSLEEP_LLM_MODEL", "llm", "model"),
-    ):
-        if variable in environment:
-            config[section][key] = environment[variable]
-    if username is not None:
-        config["agent"]["name"] = username
-
-    _validate(config, config_path.parent)
-    return config
+    return validate_supplied_config(supplied, config_path.parent, environ=environ, username=username)
