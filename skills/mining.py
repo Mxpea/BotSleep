@@ -1150,8 +1150,14 @@ class MineShaftSkill(BaseSkill):
                 break
             above_name = str(self._cached_read(ctx, [world[0], world[1] + 1, world[2]]).get("name") or "air")
             aim_at(ctx, world, relative=False)
-            # Preserve iron/diamond pickaxe durability on soft upper stone when a stone pickaxe is available.
-            tool_prio = self.SOFT_ROCK_TOOL_PRIORITY if bname in self.SOFT_TERRAIN_BLOCKS else None
+            # Preserve iron/diamond pickaxe durability on soft upper stone unless descending for deep diamonds.
+            target_map = ctx.extra.get("targets") if isinstance(ctx.extra, dict) else None
+            use_soft_prio = bname in self.SOFT_TERRAIN_BLOCKS and not (
+                isinstance(target_map, Mapping)
+                and "diamond" in target_map
+                and bname in {"stone", "cobblestone", "andesite", "diorite", "granite", "tuff"}
+            )
+            tool_prio = self.SOFT_ROCK_TOOL_PRIORITY if use_soft_prio else None
             res = dig_block(ctx, world, relative=False, allowed_blocks=allowed, collect=False, tool_priority=tool_prio)
             self._invalidate_cache(ctx, world)
             if not res.get("skipped"):
@@ -2817,7 +2823,7 @@ class MineShaftSkill(BaseSkill):
             trail_guard = WorkflowGuard(
                 self.client,
                 cancel_event=cancel_event,
-                timeout_seconds=min(60.0, max(20.0, float(timeout_seconds) * 0.6)),
+                timeout_seconds=min(150.0, max(20.0, float(timeout_seconds) * 0.6)),
                 max_reads=15000,
                 allow_damage=True,
                 critical_health=1.0,
@@ -2849,7 +2855,7 @@ class MineShaftSkill(BaseSkill):
             allow_bridge=True,
             allow_drop=True,
             max_steps=96,
-            timeout_seconds=min(60.0, max(20.0, float(timeout_seconds) * 0.55)),
+            timeout_seconds=min(120.0, max(20.0, float(timeout_seconds) * 0.55)),
         )
         _raise_if_unknown(nav)
         raw2 = self.client.get_status()

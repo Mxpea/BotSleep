@@ -802,6 +802,31 @@ class MiningWorkflowTests(unittest.TestCase):
         self.assertFalse(res.success)
         self.assertEqual(res.error_code, "unreachable_mine_site")
 
+    def test_diamond_expedition_equips_iron_pickaxe_on_stone_and_tuff_instead_of_stone_pickaxe(self):
+        from skills.action_workflow import WorkflowContext, WorkflowGuard
+
+        world = WorkflowMineWorld(bot_pos=(0.5, 64.0, 0.5))
+        world.items = {"stone_pickaxe": 1, "iron_pickaxe": 1}
+        world.blocks[(1, 64, 0)] = {"name": "tuff", "diggable": True, "properties": {}}
+        equipped = []
+        orig_equip = world.equip
+
+        def spy_equip(item=None, slot="hand", **kwargs):
+            equipped.append(item)
+            return orig_equip(item=item, slot=slot, **kwargs)
+
+        world.equip = spy_equip
+        guard = WorkflowGuard(world, timeout_seconds=15.0)
+        ctx = WorkflowContext(
+            guard=guard,
+            spec=MineShaftSkill._hub_only_spec(4, include_workstations=False),
+            origin=[0, 64, 0],
+            orientation="south",
+            extra={"block_cache": {}, "targets": {"diamond": {"count": 3}}},
+        )
+        MineShaftSkill(world, memory=Mock())._dig_cell_safely(ctx, (1, 64, 0), relative=False)
+        self.assertEqual(equipped, ["iron_pickaxe"])
+
 
 if __name__ == "__main__":
     unittest.main()

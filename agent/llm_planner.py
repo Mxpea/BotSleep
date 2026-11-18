@@ -136,13 +136,14 @@ raw_iron, furnace, and iron_tools. When context.operator_goal asks for iron/diam
 stone_pickaxe >= 1 with status.food >= 16, IGNORE optional daily_tasks (food_reserve, shelter,
 bed, base_site, storage, fuel_reserve, wood_reserve, maintain): do NOT waste steps smelting
 charcoal (for fuel_reserve or iron) or crafting copper_ingot — wooden planks/logs already smelt iron
-and mining finds coal. Call run_survival_task(task="gather", resource="raw_iron", count=12) IMMEDIATELY.
+and mining finds coal. Call run_survival_task(task="gather", resource="raw_iron", count=16) IMMEDIATELY.
 2) Iron decision gate: once raw_iron, iron_ingot, iron_pickaxe or iron_tools completes, inspect
 current iron_ingot, armor slots, offhand, food and reserves to decide the next goal yourself, STILL
 ignoring optional daily_tasks (fuel_reserve, shelter, wood_reserve, bed, maintain):
-Choose directly among smelt(iron_ingot), run_survival_task(task="iron_armor") (crafts+equips iron armor),
-run_survival_task(task="iron_tools"), craft(iron_pickaxe), or run_survival_task(task="gather",
-resource="diamond", count=3) (automatically prepares a 2nd iron_pickaxe and mines Y=-54 diamonds).
+When chasing diamond_pickaxe/nether_portal fast, smelt your raw_iron into iron_ingot, craft ONLY
+what you still need (iron_pickaxe + bucket, keeping >= 4 extra ingots for a 2nd iron_pickaxe +
+flint_and_steel instead of spending all iron on iron_tools or armor first unless requested), and
+call run_survival_task(task="gather", resource="diamond", count=3) IMMEDIATELY (automatically prepares a 2nd iron_pickaxe and mines Y=-54 diamonds).
 NEVER call craft(furnace) if inventory already holds >= 1 furnace (even if not yet placed in world);
 NEVER call craft(stone_pickaxe/wooden_pickaxe/stone_axe/stone_sword) again if you already own >= 1,
 and defer crafting stone_axe until after raw_iron unless wood gathering fails. To smelt iron_ingot
