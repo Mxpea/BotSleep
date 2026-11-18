@@ -133,8 +133,9 @@ class CompetitionRuntimeTests(unittest.TestCase):
         feedback = [json.loads(row["content"]) for row in messages if row["role"] == "tool"]
         self.assertTrue(feedback and feedback[-1]["result"]["success"])
         ctx = json.loads([row["content"] for row in messages if row["role"] == "user"][-1])["context"]["competition"]
-        self.assertGreater(len(ctx["tasks"]), 100, "all goals must survive prompt list limits")
-        self.assertIn("selectable_goal_ids", ctx)
+        self.assertLessEqual(len(ctx["tasks"]), 8, "only currently selectable choices go to the model")
+        self.assertEqual(ctx["selectable_goal_ids"], [row["id"] for row in ctx["tasks"]])
+        self.assertEqual(len(runner.competition.snapshot()["tasks"]), 125)
         self.assertEqual(ctx["catalog_assessment"]["total"], 120)
         self.assertTrue(ctx["catalog_assessment"]["complete"])
         restored, restored_brain = self.harness()
@@ -295,24 +296,15 @@ class CompetitionRuntimeTests(unittest.TestCase):
         self.skills.execute.assert_not_called()
         self.client.logout.assert_called_once()
 
-    def test_full_catalogue_prompt_fits_competition_request_budget(self):
-        from core.competition_rules import scoring_catalog
+    def test_staged_prompt_fits_competition_request_budget(self):
         from core.competition_tasks import CompetitionTasks
         planner = LLMSurvivalPlanner({"enabled": True}, self.settings, brain=Brain(response("wait")))
         manager = CompetitionTasks({"max_seconds": 28800})
-        snapshot = manager.snapshot()
-        context = {"competition": {"phase": snapshot["phase"], "active_goal_id": None,
-            "progress_card": snapshot["progress_card"], "score": snapshot["score"],
-            "remaining_seconds": snapshot["remaining_seconds"],
-            "advancements": snapshot["advancements"],
-            "selectable_goal_ids": [row["id"] for row in snapshot["tasks"] if row["selectable"]],
-            "catalog_assessment": {key: snapshot["catalog_assessment"][key]
-                                   for key in ("checked", "total", "known_count", "complete")},
-            "task_columns": ["id", "title", "difficulty", "points", "eligibility", "availability", "completion"],
-            "tasks": [[row.get(key) for key in ("id", "title", "difficulty", "points", "eligibility", "availability", "completion")]
-                      for row in snapshot["tasks"]]}}
+        manager.update(self.obs, self.client.advancements())
+        context = {"competition": manager.model_view()}
         compact = planner._compact_value(context)
-        self.assertEqual(len(compact["competition"]["tasks"]), 125)
+        self.assertIn(GOAL, compact["competition"]["selectable_goal_ids"])
+        self.assertLessEqual(len(compact["competition"]["tasks"]), 8)
         message = {"role": "user", "content": json.dumps({"observation": self.obs,
             "progress": planner.progress(self.obs), "context": compact}, ensure_ascii=False)}
         self.assertLessEqual(planner._request_bytes([{"role": "system", "content": planner.system_prompt}, message]),

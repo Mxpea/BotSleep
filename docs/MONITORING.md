@@ -2,6 +2,8 @@
 
 启用 `debug.monitor.enabled: true` 后访问本机 `http://127.0.0.1:18930`（默认）。监控只消费运行时已发布事件，不读游戏/API、配置或日志，不启动模型请求。网页每 0.5 秒 GET 本机状态和事件；连接重试仅刷新监控数据，不是模型或游戏动作重试。
 
+补看文件可单独运行 `python -B -m debug.monitor_tail --log-dir logs --port 18931`。它只读本地日志、仅绑定回环地址，不读取配置、不连接游戏或模型。补读页面显示历史时间，不据此判断机器人在线、模型槽空闲或状态新鲜。
+
 赛事通过 `COMPETITION_TASKS data.board` 发布整板，`HEARTBEAT` / `AGENT_STATE data.competition` 可补充同一快照（也兼容 `{board: snapshot}`）。监控状态保存于 `competition.board`，不改变 `daily.board`、日常任务评估或记忆语义。`objective: competition` 时显示赛事面板；现有 `AGENT_PHASE` 继续表示运行阶段。
 
 页面显示 selection/active/completed、`active_goal_id`、进度卡、规则版本、原始分、已完成数量、全目录检测/明确状态计数及 difficulty counts，并保留完整规则 ID。资格 `scored/pending/excluded` 分别表示可计分/待条件确认/不计分；可用性 `ready/needs_prerequisites/unsupported/unknown` 单独展示，评估 `completed/not_completed/unknown` 表示已完成/未完成/未确认。blocked 和其他未知值保留原文。缺失字段显示未确认，`normalized: null` 不换算为零，不根据分值、可用性或进度推算完成；可展开查看已发布的 completion 证据、last_exit、message 和原始快照。
