@@ -394,6 +394,21 @@ class SurvivalTaskPlannerTests(unittest.TestCase):
         self.assertEqual(json.loads(feedback[0]["content"])["result"], asdict(result))
         self.assertNotIn("last_result", current["context"])
 
+    def test_goal_mode_filters_uncallable_atomic_action_hints_and_preserves_scout_report(self):
+        planner, brain = self.planner(response("run_survival_task", {"task": "scout"}))
+        obs = observation()
+        ctx = {
+            "last_scout_report": {"aborted_empty": True, "estimated_reach": 195.0},
+            "action_hints": [
+                {"name": "place_item", "args": {"item": "furnace", "pos": [1, 64, 1]}, "goal": "furnace"},
+                {"name": "eat_food", "args": {"item": "bread"}, "goal": "food"},
+            ],
+        }
+        planner.choose(obs, ctx)
+        sent = json.loads(brain.requests[-1]["messages"][-1]["content"])["context"]
+        self.assertEqual(sent["last_scout_report"]["estimated_reach"], 195.0)
+        self.assertEqual([h["name"] for h in sent["action_hints"]], ["eat_food"])
+
 
 if __name__ == "__main__":
     unittest.main()

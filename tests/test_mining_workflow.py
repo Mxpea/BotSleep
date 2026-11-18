@@ -671,6 +671,28 @@ class MiningWorkflowTests(unittest.TestCase):
         # Should abort after 2 consecutive stalled segments instead of iterating all ~28 segments.
         self.assertLessEqual(len(stalled_targets), 12)
 
+    def test_deep_fishbone_backtracks_up_staircase_and_jogs_sideways_past_water_pocket(self):
+        world = WorkflowMineWorld(bot_pos=(0.5, 64.0, 0.5), surface_y=64)
+        world.inventory_counts = {"iron_pickaxe": 2, "cobblestone": 64, "torch": 16}
+        # Block descent around south hub exit at Y=57..56 with water pocket across straight & neighbors
+        for x in range(-2, 3):
+            for z in range(11, 18):
+                world.blocks[(x, 56, z)] = {"name": "water", "diggable": False}
+                world.blocks[(x, 55, z)] = {"name": "water", "diggable": False}
+        res = MineShaftSkill(world, memory=Mock()).build_mine_shaft(
+            origin=[0, 64, 0],
+            orientation="south",
+            target_y=52,
+            place_workstation=False,
+            return_to_surface=True,
+            max_trunk_steps=2,
+            rib_length=2,
+            timeout_seconds=45.0,
+        )
+        # Bypass should descend past the water pocket at Y=56..55 without getting stuck spinning at one coordinate.
+        self.assertTrue(res.success, res)
+        self.assertLessEqual(res.data["mining_progress"]["deep_pos"][1], 53)
+
 
 if __name__ == "__main__":
     unittest.main()

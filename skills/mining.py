@@ -1987,6 +1987,7 @@ class MineShaftSkill(BaseSkill):
             stair_timed_out = False
             if band_y is not None and cur_foot[1] > int(band_y):
                 turns_left = 24
+                backtracks_left = 3
                 step_counter = 0
                 visited_turns: Set[Tuple[Tuple[int, int, int], Tuple[int, int, int]]] = set()
                 while cur_foot[1] > int(band_y) and turns_left > 0:
@@ -2082,12 +2083,9 @@ class MineShaftSkill(BaseSkill):
                             # Jog flat (dy=0) across underwater rivers / cave seams until floor+subfloor ahead is hazard-free
                             for _pad in range(8):
                                 p_foot = [cur_foot[0] + cand[0], cur_foot[1], cur_foot[2] + cand[2]]
-                                p_head2 = [p_foot[0], p_foot[1] + 2, p_foot[2]]
                                 p_head = [p_foot[0], p_foot[1] + 1, p_foot[2]]
                                 p_floor = [p_foot[0], p_foot[1] - 1, p_foot[2]]
                                 try:
-                                    if _pad == 0:
-                                        dug += self._dig_cell_safely(ctx, tuple(p_head2), collect=False, relative=False)
                                     dug += self._dig_cell_safely(ctx, tuple(p_head), collect=False, relative=False)
                                     p_patch = self._ensure_floor_cell(ctx, p_floor, relative=False)
                                     patched += p_patch
@@ -2113,7 +2111,35 @@ class MineShaftSkill(BaseSkill):
                                 moved_any = True
                                 break
                         if not moved_any:
-                            fwd = ordered[0]
+                            if backtracks_left > 0 and len(trail) >= 4:
+                                backtracks_left -= 1
+                                retreat_steps = min(4, len(trail) - 1)
+                                back_slice = trail[-retreat_steps:]
+                                trail = trail[: len(trail) - retreat_steps + 1]
+                                for b_cell in reversed(back_slice[:-1]):
+                                    stand_cell(ctx, b_cell, tolerance=0.95)
+                                cur_foot = list(trail[-1])
+                                perp_dirs = [(-fwd[2], 0, fwd[0]), (fwd[2], 0, -fwd[0])]
+                                perp_dirs.sort(key=lambda c: -_rock_heading_score(c))
+                                jogged = False
+                                for perp in perp_dirs:
+                                    for _j in range(5):
+                                        jf = [cur_foot[0] + perp[0], cur_foot[1], cur_foot[2] + perp[2]]
+                                        try:
+                                            dug += self._dig_cell_safely(ctx, (jf[0], jf[1] + 1, jf[2]), collect=False, relative=False)
+                                            patched += self._ensure_floor_cell(ctx, (jf[0], jf[1] - 1, jf[2]), relative=False)
+                                            dug += self._dig_cell_safely(ctx, tuple(jf), collect=False, relative=False)
+                                            stand_cell(ctx, jf, tolerance=0.95)
+                                            cur_foot = list(jf)
+                                            trail.append(list(cur_foot))
+                                            jogged = True
+                                        except WorkflowStepError:
+                                            break
+                                    if jogged:
+                                        fwd = perp
+                                        break
+                                continue
+                            break
                         stand_cell(ctx, cur_foot, tolerance=0.95)
                         continue
 
