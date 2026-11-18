@@ -126,6 +126,18 @@ class SurfaceScoutSkillTests(unittest.TestCase):
         self.assertEqual(res.data["action_state"], "unknown")
         self.assertTrue(res.data["executed"])
 
+    def test_ignores_nearby_player_workstations_within_16_blocks_of_origin(self):
+        world = SimScoutWorld(pos=(0.5, 64.0, 0.5))
+        world.world_blocks = [
+            {"name": "crafting_table", "pos": [2, 64, 1]},
+            {"name": "furnace", "pos": [2, 65, 1]},
+        ]
+        res = SurfaceScoutSkill(world).execute(scan_radius=48, hop_distance=55.0, max_hops=3)
+        self.assertTrue(res.success, res)
+        self.assertEqual(res.data["hops_completed"], 3)
+        self.assertEqual(res.data["early_stop_reason"], "completed_forward_span")
+        self.assertEqual(res.data["found_structures"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

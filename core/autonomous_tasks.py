@@ -445,7 +445,8 @@ class AutonomousTaskController:
                 spare_iron = self._craft("iron_pickaxe", 1, obs, context)
                 if spare_iron is not None:
                     return spare_iron
-            if (resource == "raw_iron" and stone_plus < 3
+            if (resource in {"raw_iron", "coal"}
+                    and stone_plus < (3 if resource == "raw_iron" else 2)
                     and counts.get("cobblestone", 0) >= 3
                     and (counts.get("stick", 0) >= 2 or any(counts.get(n, 0) >= 1 for n in PLANK_NAMES))):
                 spare = self._craft("stone_pickaxe", 1, obs, context)

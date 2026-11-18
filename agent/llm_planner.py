@@ -131,8 +131,10 @@ needs doing. Organize progression around stage gates where you re-evaluate after
 1) Spawn/early scouting: when newly spawned or lacking wood/structures (e.g., desert) and
 context.last_scout_report is absent, prefer ONE run_survival_task(task="scout") to scan forward
 ~200 blocks for villages, chests, crafting tables, oasis/border trees or surface caves.
-If scout finds nothing or stops to save stamina, decisively stop scouting and proceed locally
-(starter_tools, desert dead_bush sticks, or surface/shaft stone mining).
+Once context.last_scout_report exists, NEVER call scout again; proceed with starter_tools,
+furnace, raw_iron, and iron_tools. Once stone_pickaxe + furnace exist (and health/food are OK),
+do NOT stall on failed shelter/maintenance/charcoal loops; immediately run
+run_survival_task(task="gather", resource="raw_iron", count=8) -> run_survival_task(task="iron_tools").
 2) Iron decision gate: once raw_iron, iron_ingot, iron_pickaxe or iron_tools completes, inspect
 current iron_ingot, armor slots, offhand, food and reserves to decide the next goal yourself:
 Choose among run_survival_task(task="iron_armor") (crafts+equips iron armor), iron_tools,
@@ -209,6 +211,7 @@ If that goal tool is unavailable, use only the currently advertised tools.
         self._failed_actions = {}
         self._undelivered_result = False
         self._task_repair_uses = {}
+        self._scout_calls = 0
 
     @staticmethod
     def _limit(settings, key, default, minimum, maximum):
@@ -647,8 +650,14 @@ If that goal tool is unavailable, use only the currently advertised tools.
             normal.update(self._repair_actions(task, observation))
             return ([tool for tool in self.tool_definitions if tool["function"]["name"] in normal],
                     {"mode": "atomic_repair", "atomic_repair_remaining": remaining}, task_id)
-        return ([tool for tool in self.tool_definitions if tool["function"]["name"] in normal],
-                {"mode": mode, "atomic_repair_remaining": 0}, None)
+        tools = copy.deepcopy([tool for tool in self.tool_definitions if tool["function"]["name"] in normal])
+        if self._scout_calls >= 1 and isinstance(context.get("last_scout_report"), dict):
+            for tool in tools:
+                if tool["function"]["name"] == "run_survival_task":
+                    task_prop = tool["function"]["parameters"]["properties"].get("task")
+                    if isinstance(task_prop, dict) and isinstance(task_prop.get("enum"), list) and "scout" in task_prop["enum"]:
+                        task_prop["enum"] = [name for name in task_prop["enum"] if name != "scout"]
+        return (tools, {"mode": mode, "atomic_repair_remaining": 0}, None)
 
     def _decision(self, message, observation, context, allowed_names=None, allowed_schemas=None):
         calls = message.get("tool_calls")
@@ -932,6 +941,8 @@ If that goal tool is unavailable, use only the currently advertised tools.
         self._append_turn(turn)
         self._undelivered_result = True
         self._pending = None
+        if decision.name == "run_survival_task" and (decision.args or {}).get("task") == "scout" and payload.get("success") is True:
+            self._scout_calls += 1
         signature = self._signature(decision)
         data = payload.get("data") or {}
         no_motion = decision.name == "move_to" and (data.get("moved") is False or data.get("already_in_range") is True)

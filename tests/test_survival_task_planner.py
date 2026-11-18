@@ -409,6 +409,18 @@ class SurvivalTaskPlannerTests(unittest.TestCase):
         self.assertEqual(sent["last_scout_report"]["estimated_reach"], 195.0)
         self.assertEqual([h["name"] for h in sent["action_hints"]], ["eat_food"])
 
+    def test_scout_removed_from_goal_catalog_after_scout_completes_once(self):
+        planner, brain = self.planner(
+            response("run_survival_task", {"task": "scout"}),
+            response("run_survival_task", {"task": "gather", "resource": "raw_iron", "count": 8}),
+        )
+        obs = observation()
+        d1 = planner.choose(obs, {})
+        planner.observe_result(d1, SkillResult(True, "Scout completed", {"scout_report": {"estimated_reach": 195.0}}), obs)
+        planner.choose(obs, {"last_scout_report": {"estimated_reach": 195.0}})
+        second_tools = {t["function"]["name"]: t for t in brain.requests[-1]["tools"]}
+        self.assertNotIn("scout", second_tools["run_survival_task"]["function"]["parameters"]["properties"]["task"]["enum"])
+
 
 if __name__ == "__main__":
     unittest.main()

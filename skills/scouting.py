@@ -115,7 +115,7 @@ class SurfaceScoutSkill(BaseSkill):
 
             cur_st = st0
             cur_pos = list(origin)
-            self._scan_checkpoint(guard, cur_pos, dim, scan_r, findings)
+            self._scan_checkpoint(guard, cur_pos, dim, scan_r, findings, origin=origin)
 
             if self._should_stop_early(findings, prefer_wood=prefer_wood):
                 early_stop_reason = self._discovery_reason(findings)
@@ -148,7 +148,7 @@ class SurfaceScoutSkill(BaseSkill):
                     cur_st = guard.check_status(require_safe=False)
                     cur_pos = parse_pos(cur_st.get("pos")) or cur_pos
                     waypoints.append([round(cur_pos[0], 2), round(cur_pos[1], 2), round(cur_pos[2], 2)])
-                    self._scan_checkpoint(guard, cur_pos, dim, scan_r, findings)
+                    self._scan_checkpoint(guard, cur_pos, dim, scan_r, findings, origin=origin)
                     if self._should_stop_early(findings, prefer_wood=prefer_wood):
                         early_stop_reason = self._discovery_reason(findings)
                         break
@@ -224,9 +224,11 @@ class SurfaceScoutSkill(BaseSkill):
         dim: str,
         scan_r: int,
         findings: Dict[str, Dict[Tuple[int, int, int], Dict[str, Any]]],
+        *,
+        origin: Optional[Sequence[float]] = None,
     ) -> None:
-        self._query_blocks(guard, STRUCTURE_AND_ORE_TYPES, scan_r, findings, cur_pos, dim)
-        self._query_blocks(guard, WOOD_FOOD_STICK_TYPES, scan_r, findings, cur_pos, dim)
+        self._query_blocks(guard, STRUCTURE_AND_ORE_TYPES, scan_r, findings, cur_pos, dim, origin=origin)
+        self._query_blocks(guard, WOOD_FOOD_STICK_TYPES, scan_r, findings, cur_pos, dim, origin=origin)
         try:
             entities = guard.read(self.client.get_entities, radius=scan_r, timeout_seconds=guard.remaining_timeout(5.0))
         except WorkflowStepError:
@@ -252,6 +254,8 @@ class SurfaceScoutSkill(BaseSkill):
         findings: Dict[str, Dict[Tuple[int, int, int], Dict[str, Any]]],
         cur_pos: Sequence[float],
         dim: str,
+        *,
+        origin: Optional[Sequence[float]] = None,
     ) -> None:
         rows: List[Dict[str, Any]] = []
         if callable(getattr(self.client, "find_blocks", None)):
@@ -266,6 +270,7 @@ class SurfaceScoutSkill(BaseSkill):
                 rows = []
         if not isinstance(rows, list):
             return
+        local_workstations = frozenset({"crafting_table", "furnace", *BED_NAMES})
         for row in rows:
             if not isinstance(row, dict):
                 continue
@@ -276,6 +281,8 @@ class SurfaceScoutSkill(BaseSkill):
             key = (int(math.floor(pos[0])), int(math.floor(pos[1])), int(math.floor(pos[2])))
             entry = {"name": name, "pos": key_list(key)}
             if name in STRUCTURE_BLOCK_TYPES:
+                if origin is not None and name in local_workstations and math.hypot(key[0] - origin[0], key[2] - origin[2]) <= 16.0:
+                    continue
                 findings["structures"][key] = entry
                 if self.memory is not None and name in {"chest", "barrel", "furnace", "blast_furnace", "smoker", "crafting_table", *BED_NAMES}:
                     category = "container" if name in {"chest", "barrel"} else "bed" if name in BED_NAMES else "crafting"
