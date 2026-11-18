@@ -132,9 +132,10 @@ needs doing. Organize progression around stage gates where you re-evaluate after
 context.last_scout_report is absent, prefer ONE run_survival_task(task="scout") to scan forward
 ~200 blocks for villages, chests, crafting tables, oasis/border trees or surface caves.
 Once context.last_scout_report exists, NEVER call scout again; proceed with starter_tools,
-furnace, raw_iron, and iron_tools. Once stone_pickaxe + furnace exist (and health/food are OK),
-do NOT stall on failed shelter/maintenance/charcoal loops; immediately run
-run_survival_task(task="gather", resource="raw_iron", count=8) -> run_survival_task(task="iron_tools").
+furnace, raw_iron, and iron_tools. When context.operator_goal asks for iron/diamond gear and
+stone_pickaxe >= 1 with status.food >= 16, IGNORE optional daily_tasks (food_reserve, shelter,
+bed, base_site, storage, fuel_reserve, maintain): call run_survival_task(task="gather",
+resource="raw_iron", count=8) immediately instead of looping food/charcoal/shelter retries.
 2) Iron decision gate: once raw_iron, iron_ingot, iron_pickaxe or iron_tools completes, inspect
 current iron_ingot, armor slots, offhand, food and reserves to decide the next goal yourself:
 Choose among run_survival_task(task="iron_armor") (crafts+equips iron armor), iron_tools,
@@ -751,6 +752,9 @@ If that goal tool is unavailable, use only the currently advertised tools.
                 raise LLMError("llm_unsafe_action", "Bucket collection requires an existing empty bucket and a currently observed matching source")
         if name == "hunt_with_lava" and counts.get("lava_bucket", 0) < 1:
             raise LLMError("llm_unsafe_action", "Contained lava hunting requires an existing lava bucket")
+        if ((name == "craft_item" and args.get("item") == "furnace")
+                or (name == "run_survival_task" and args.get("task") == "craft" and args.get("item") == "furnace")) and counts.get("furnace", 0) >= 1:
+            raise LLMError("llm_no_progress", "Inventory already holds >= 1 furnace; do not craft another furnace or use craft_item to place it. Proceed with gather(raw_iron), iron_tools, or smelt(iron_ingot).")
         decision = Decision(name, args, reason, goal)
         failure = self._failed_actions.get(self._signature(decision))
         if failure and self._unchanged_failure(failure, observation, decision):

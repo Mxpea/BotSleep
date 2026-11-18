@@ -421,6 +421,16 @@ class SurvivalTaskPlannerTests(unittest.TestCase):
         second_tools = {t["function"]["name"]: t for t in brain.requests[-1]["tools"]}
         self.assertNotIn("scout", second_tools["run_survival_task"]["function"]["parameters"]["properties"]["task"]["enum"])
 
+    def test_duplicate_furnace_craft_rejected_when_furnace_already_held(self):
+        planner, brain = self.planner(
+            response("run_survival_task", {"task": "craft", "item": "furnace", "count": 1}),
+            response("run_survival_task", {"task": "gather", "resource": "raw_iron", "count": 8}),
+        )
+        planner.max_repair_attempts = 1
+        decision = planner.choose(observation({"furnace": 1, "stone_pickaxe": 1, "cobblestone": 16}), {})
+        self.assertEqual((decision.name, decision.args["resource"]), ("run_survival_task", "raw_iron"))
+        self.assertEqual(len(brain.requests), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
