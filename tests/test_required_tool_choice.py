@@ -2,6 +2,7 @@
 
 import copy
 import unittest
+from contextlib import ExitStack
 from unittest.mock import Mock, patch
 
 import requests
@@ -12,8 +13,10 @@ from agent.tools import TOOL_DEFINITIONS
 
 class RequiredToolChoiceTests(unittest.TestCase):
     def setUp(self):
-        self.post = self.enterContext(patch("agent.brain.requests.post"))
-        self.session_factory = self.enterContext(patch("agent.brain.requests.Session"))
+        patches = ExitStack()
+        self.addCleanup(patches.close)
+        self.post = patches.enter_context(patch("agent.brain.requests.post"))
+        self.session_factory = patches.enter_context(patch("agent.brain.requests.Session"))
         self.completion = {"model": "returned-model", "choices": [{"message": {
             "role": "assistant", "content": None, "tool_calls": [{
                 "id": "call_next", "type": "function", "function": {

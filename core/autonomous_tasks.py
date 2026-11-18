@@ -15,6 +15,7 @@ from agent.daily_survival import DAILY_SKILLS, DailySurvivalGoals
 from agent.survival_planner import Decision, LOG_NAMES, PLANK_NAMES, SAFE_FOOD, WOOD_SPECIES
 from core.daily_policy import DailySafetyPolicy
 from core.skill_registry import internal_skills_for_objective
+from core.route_foliage_recovery import choose_route_foliage, cleared_route_targets, position_foliage_hint
 from core.structure_spec import SHELTER_5X5_SPEC, SHELTER_BUILDING_BLOCKS
 from skills.daily_survival import DailySurvivalSkills
 
@@ -43,6 +44,7 @@ UNKNOWN = frozenset({"request_timeout", "network_error", "invalid_json", "invali
                      "dig_unconfirmed", "action_unconfirmed", "internal", "internal_error"})
 PATH_FAILURES = frozenset({"stalled", "no_path", "path_not_found", "out_of_reach", "out_of_range",
                            "move_unverified", "target_occluded", "visibility_unknown", "unsafe_target"})
+GATHER_NAVIGATION_FAILURES = frozenset({"stalled", "no_path", "path_not_found", "move_unverified"})
 TASK_ROWS = {"food": "food_reserve", "farm": "food_production", "maintenance": "maintain"}
 RESOURCE_NAMES = {"logs": frozenset(LOG_NAMES), "cobblestone": frozenset({"stone", "cobblestone"}),
                   "coal": frozenset({"coal_ore", "deepslate_coal_ore"}),
@@ -393,21 +395,29 @@ class AutonomousTaskController:
         cautious = context.get("_bounded_bootstrap") is True
         if cautious and resource != "logs":
             return None
+        origin = obs["status"]["pos"]
+        failures = self._gather_navigation_hints(obs)
+        needs_stance = any(tuple(map(math.floor, row["origin"])) == tuple(map(math.floor, origin))
+                           and math.dist(row["origin"], origin) <= .5 for row in failures)
         drops = None if cautious else self._drop(set(names or LOG_NAMES) if resource == "logs" else {resource}, obs, context)
-        if drops:
+        if drops and not needs_stance:
             return drops
         if resource != "logs":
             required = "stone_pickaxe" if resource == "raw_iron" else "wooden_pickaxe"
             minimum = ("stone", "iron", "diamond", "netherite") if resource == "raw_iron" else ("wooden", "stone", "iron", "diamond", "netherite")
             if not any(counts.get(tier + "_pickaxe", 0) for tier in minimum):
                 return self._craft(required, 1, obs, context)
-        origin = obs["status"]["pos"]
         blocks = self.rules._blocks(obs)
         blocked, hostiles = self.rules._blocked(context), self.rules._hostiles(obs, origin)
         blocked_occlusion = {key for key, code in self._data["blocked_codes"].items()
                              if code in {"target_occluded", "visibility_unknown"}}
+        blocked_columns = {tuple(row["target"][i] for i in (0, 2)) for row in failures
+                           if row["expected_name"] in LOG_NAMES}
         candidates = [row for row in blocks if row["name"] in (names or RESOURCE_NAMES[resource])
                       and math.dist(origin, row["pos"]) <= self._data["args"]["radius"]
+                      and (not needs_stance or math.dist(origin, row["pos"]) <= 4
+                           and row.get("can_see") is True and row.get("can_dig") is True)
+                      and (row["name"] not in LOG_NAMES or tuple(row["pos"][i] for i in (0, 2)) not in blocked_columns)
                       and (not cautious or row.get("can_see") is True and row.get("can_dig") is True
                            and math.dist(origin, row["pos"]) <= 3)
                       and self.rules._safe_target(row, origin, blocks, blocked - blocked_occlusion, hostiles, observation=obs)]
@@ -421,6 +431,41 @@ class AutonomousTaskController:
             if alternative["name"] == "clear_foliage" or (row.get("can_see") is not False and self.rules._key(row["pos"]) not in blocked):
                 return self._row_decision(alternative)
         return None
+
+    def _gather_navigation_hints(self, obs):
+        """Short-lived failed approaches are exclusions, never new route proof."""
+        status, now = obs["status"], time.time()
+        hints = []
+        for recent in self._data["recent_results"][-8:]:
+            hint = recent.get("gather_navigation") if isinstance(recent, dict) else None
+            if (not isinstance(hint, dict) or not _finite(hint.get("expires_at"))
+                    or not now < hint["expires_at"] <= now + 30
+                    or hint.get("dimension") != status.get("dimension")
+                    or hint.get("life") != self._life(status)
+                    or self.rules._pos(hint.get("origin")) is None or self.rules._pos(hint.get("target")) is None
+                    or not isinstance(hint.get("expected_name"), str)
+                    or hint.get("expected_name") not in set().union(*RESOURCE_NAMES.values())):
+                continue
+            hints.append(hint)
+        return hints
+
+    def _remember_gather_navigation(self, recent, decision, result, observation):
+        data = result.data if isinstance(result.data, dict) else {}
+        target = self.rules._pos(decision.args.get("pos"))
+        origin = self.rules._pos(data.get("pos_before"))
+        if (decision.name not in {"gather_block", "gather_resource"} or result.success is not False
+                or result.error_code not in GATHER_NAVIGATION_FAILURES
+                or data.get("action_state") == "unknown" or data.get("block_removed") is True or data.get("gained")
+                or target is None or origin is None or math.dist(origin, target) <= 4
+                or not self._fresh(observation)):
+            return
+        status = observation["status"]
+        if (status.get("busy") not in (None, False) or status.get("dimension") != self._data["dimension"]
+                or self._life(status) != self._data["life"]):
+            return
+        recent["gather_navigation"] = {"origin": list(status["pos"]), "target": target,
+            "expected_name": decision.args.get("expected_name"), "dimension": status["dimension"],
+            "life": self._life(status), "expires_at": time.time() + 30}
 
     def _obtain(self, item, needed, obs, context, depth):
         counts = obs["counts"]
@@ -599,6 +644,8 @@ class AutonomousTaskController:
             return None
         blocked = self.rules._blocked(context)
         hostiles = self.rules._hostiles(obs, origin)
+        gather_recovery = any(tuple(map(math.floor, row["origin"])) == tuple(map(math.floor, origin))
+                              and math.dist(row["origin"], origin) <= .5 for row in self._gather_navigation_hints(obs))
         candidates = []
         for row in self.daily._rows(obs.get("safe_stand_candidates"))[:8]:
             pos = self.rules._pos(row.get("pos"))
@@ -607,7 +654,7 @@ class AutonomousTaskController:
             key = self.rules._key(pos)
             distance = math.dist(origin, pos)
             enough_movement = (distance > .4 and tuple(map(math.floor, pos)) != tuple(map(math.floor, origin))
-                               if self._data["task"] == "shelter" else distance >= 1)
+                               if self._data["task"] == "shelter" or gather_recovery else distance >= 1)
             if (key in blocked or key in self._data["visited"]
                     or self._data["task"] == "shelter" and key in context.get("shelter_visited_stances", [])
                     or not enough_movement or distance > 3
@@ -922,7 +969,10 @@ class AutonomousTaskController:
         if self._data["local_failures"] >= self.limits["max_local_failures"] or self._data["no_progress"] >= self.limits["max_no_progress_steps"]:
             self._escalate("bounded_local_recovery_exhausted")
             return None
-        if task == "gather":
+        recovery = choose_route_foliage(self._data["recent_results"], obs, local, self.daily, task)
+        if recovery is not None:
+            decision = recovery
+        elif task == "gather":
             decision = self._gather(args["resource"], obs, local)
         elif task == "craft":
             decision = self._craft(args["item"], self._data["progress"]["target"] - self._quantity(obs), obs, local)
@@ -1031,6 +1081,16 @@ class AutonomousTaskController:
         if code in {"dead", "lifecycle_changed", "life_changed", "dimension_changed"}:
             self._escalate("life_or_dimension_changed")
             return
+        hint = position_foliage_hint(decision, result, observation)
+        if hint is not None:
+            recent["route_foliage"] = hint
+        for target in cleared_route_targets(self._data["recent_results"], decision, result, observation):
+            key = self.rules._key(target)
+            if self._data["blocked_codes"].get(key) == "unsafe_route":
+                self._data["blocked"].pop(key, None)
+                self._data["blocked_codes"].pop(key, None)
+                self._data["visited"] = [old for old in self._data["visited"] if old != key]
+        self._remember_gather_navigation(recent, decision, result, observation)
         intent = self._data["preparation_site"]
         preparation_rejected = (intent is not None and decision.name == "plan_shelter_preparation"
             and result.success is False and code == "unsafe_site" and data.get("executed") is False
