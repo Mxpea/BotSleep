@@ -29,7 +29,7 @@ DEFAULTS: Dict[str, Any] = {
         "objective": "starter",
         "intent": "survival",
         "operator_goal": "",
-        "autonomy": {"enabled": True, "max_steps": 128, "max_seconds": 600,
+        "autonomy": {"enabled": True, "local_opening": False, "max_steps": 128, "max_seconds": 600,
                      "max_local_failures": 4, "max_no_progress_steps": 8, "max_explore_steps": 8},
         "competition": {"eligibility_overrides": {}, "defer_seconds": 300,
                         "advancement_poll_seconds": 5, "max_seconds": 28800, "max_steps": 100000},
@@ -232,6 +232,7 @@ def _validate(config: Dict[str, Any], config_dir: Path) -> None:
     if set(autonomy) - set(DEFAULTS["survival"]["autonomy"]):
         raise ConfigError("survival.autonomy contains unsupported options")
     _boolean(autonomy["enabled"], "survival.autonomy.enabled")
+    _boolean(autonomy["local_opening"], "survival.autonomy.local_opening")
     for key, minimum, maximum in (("max_steps", 1, 2048), ("max_local_failures", 1, 32),
                                  ("max_no_progress_steps", 1, 128), ("max_explore_steps", 0, 64)):
         if type(autonomy[key]) is not int or not minimum <= autonomy[key] <= maximum:

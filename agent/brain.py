@@ -106,7 +106,8 @@ class OpenAIBrain:
         }
         if tools:
             payload["tools"] = tools
-            payload["tool_choice"] = "auto"
+            payload["tool_choice"] = "required"
+            payload["parallel_tool_calls"] = False
 
         url = self.base_url if self.base_url.endswith("/chat/completions") else f"{self.base_url}/chat/completions"
         try:

@@ -602,7 +602,8 @@ class BrainTransportTests(unittest.TestCase):
         args, kwargs = post.call_args
         self.assertEqual(args[0], "https://example.invalid/v1/chat/completions")
         self.assertFalse(kwargs["json"]["stream"])
-        self.assertEqual(kwargs["json"]["tool_choice"], "auto")
+        self.assertEqual(kwargs["json"]["tool_choice"], "required")
+        self.assertIs(kwargs["json"]["parallel_tool_calls"], False)
         self.assertEqual(kwargs["timeout"], 7)
         self.assertFalse(kwargs["allow_redirects"])
         self.assertNotIn("verify", kwargs)

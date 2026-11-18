@@ -98,13 +98,15 @@
 
 | 工具 | 参数 | 语义 |
 |---|---|---|
-| `select_task(goal_id)` | 规则 ID | 仅选择 scored、未确认且当前 availability 为 ready/needs_prerequisites 的目标；进入单活动任务阶段。 |
+| `select_task(goal_id)` | 规则 ID | 仅选择 scored、未确认、未冷却且当前观察已解锁的 ready/needs_prerequisites 目标；进入单活动任务阶段。 |
 | `update_progress(summary)` | 简短进度文本 | 只改进度卡，不是完成证据。 |
 | `finish_task(reason)` | 原因 | 要求 fresh 的活动目标检查；只有服务端 advancement 显示 completed 且规则 eligibility 为 scored 才加分，然后回到选择。 |
 | `force_exit_task(reason)` | 原因 | 结束当前目标并 cooldown，回到选择；不清游戏 pending 或模型 uncertain。 |
 | `end_competition(reason)` | 原因 | 只在 selection 且 fresh 全目录检测后进入 terminal；未知目标留 unknown、不计分。 |
 
 工具定义见 `agent/tools.py`，状态由 `core/competition_tasks.py` 保存至 scoped journal。`competition` 目录共 40 个工具（35 个日常工具 + 5 个生命周期工具）；规则目录 125 项，8 个 scored 目标有当前行动计划。新增怪物猎人只在当前战斗门禁允许攻击时提供下一步；击中或实体消失不是 advancement 完成证据。
+
+`CompetitionTasks.model_view()` 是每轮模型输入：选择阶段只列 `selectable_goal_ids` 与对应简表；执行阶段以 `active_goal` 展开条件、所缺资源、下一步和退出条件。`snapshot()` 保留全目录计分与监控信息，不作为模型候选列表发送；精简投影不改变终态需要的全目录检测。
 
 ## 5. 程序入口草案
 
