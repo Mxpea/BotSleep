@@ -830,6 +830,30 @@ class AutonomousTaskTests(unittest.TestCase):
         self.assertTrue(scout_ctrl.confirm_completion(scout_obs))
         self.assertEqual(scout_ctrl.snapshot()["status"], "completed")
 
+    def test_nether_portal_gathers_water_and_flint_and_steel_then_builds_portal(self):
+        obs = world({"bucket": 1, "iron_ingot": 1, "flint": 1, "cobblestone": 16, "iron_pickaxe": 1})
+        obs["blocks"] = [
+            {"name": "water", "pos": [2, 63, 0], "can_see": True},
+            {"name": "crafting_table", "pos": [1, 64, 0], "can_see": True},
+        ]
+        ctrl = self.start({"task": "nether_portal"}, obs=obs)
+        step1 = ctrl.next_action(obs)
+        self.assertEqual((step1.name, step1.args["expected_name"]), ("collect_liquid", "water"))
+        obs["counts"].pop("bucket", None)
+        obs["counts"]["water_bucket"] = 1
+        ctrl.record_result(step1, SkillResult(True, "Water filled", {"executed": True}), obs)
+
+        step2 = ctrl.next_action(obs)
+        self.assertEqual((step2.name, step2.args["item"]), ("craft_item", "flint_and_steel"))
+        obs["counts"]["flint_and_steel"] = 1
+        ctrl.record_result(step2, SkillResult(True, "Crafted flint_and_steel", {"executed": True}), obs)
+
+        step3 = ctrl.next_action(obs)
+        self.assertEqual((step3.name, step3.goal), ("move_to", "nether_portal"))
+        ctrl.record_result(step3, SkillResult(True, "Portal active", {"portal_active": True, "portal_skill": True}), obs)
+        self.assertTrue(ctrl.confirm_completion(obs))
+        self.assertEqual(ctrl.snapshot()["status"], "completed")
+
 
 if __name__ == "__main__":
     unittest.main()

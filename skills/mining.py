@@ -2883,6 +2883,26 @@ class MineShaftSkill(BaseSkill):
                         continue
                     if esc.get("escaped"):
                         break
+        if esc.get("escaped"):
+            ep_hi = parse_pos(esc.get("pos"))
+            if ep_hi is not None and ep_hi[1] > float(sy) + 2.0:
+                try:
+                    settle = cave_nav.navigate_with_ops(
+                        [sx, sy, sz],
+                        allow_pillar=False,
+                        allow_dig=True,
+                        allow_bridge=True,
+                        allow_drop=True,
+                        max_steps=16,
+                        timeout_seconds=18.0,
+                    )
+                    _raise_if_unknown(settle)
+                    if settle.success:
+                        esc["pos"] = list(settle.data.get("pos") or [sx, sy, sz])
+                except WorkflowUncertainError:
+                    raise
+                except Exception:
+                    pass
         if not esc.get("escaped"):
             try:
                 raw_fin = self.client.get_status()
@@ -2945,7 +2965,8 @@ class MineShaftSkill(BaseSkill):
         stop_reason = "bands_exhausted"
 
         if prefer_caves_first and parsed_targets:
-            cave_t = min(120.0, float(band_timeout_seconds) * 0.5, max(45.0, float(total_timeout_seconds) * 0.25))
+            cave_cap = float((cave_policy or {}).get("explore_timeout_seconds", 120.0))
+            cave_t = min(cave_cap, 120.0, float(band_timeout_seconds) * 0.5, max(25.0, float(total_timeout_seconds) * 0.25))
             cave_skill = CaveExploreSkill(self.client, memory=self.memory)
             cave_res = cave_skill.discover_and_explore_caves(
                 origin=start_surface,

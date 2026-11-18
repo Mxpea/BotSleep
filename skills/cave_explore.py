@@ -1274,7 +1274,7 @@ class CaveExploreSkill(BaseSkill):
             if not any(str(read_blk((sx, sy + ky, sz)).get("name") or "air") in rock_roof_blocks for ky in range(2, 8)):
                 continue
             rep = probe_cavity([sx, sy, sz], [sx, sy, sz], read_blk, limits={"max_probe_cells": 90, "horizontal_radius": 8, "vertical_span": 6}, block_cache=active_world.block_cache)
-            if rep.get("lava_found") or rep.get("spawner_found") or int(rep.get("water_count", 0)) >= 3:
+            if rep.get("lava_found") or rep.get("spawner_found") or int(rep.get("water_count", 0)) >= 1:
                 continue
             if int(rep.get("air_count", 0)) < 10:
                 continue

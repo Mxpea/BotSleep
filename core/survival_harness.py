@@ -777,6 +777,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                     result = self._run_task_scout(decision, observation)
                 elif self._task_child and decision.goal == "equip_loadout":
                     result = self._run_task_equip_loadout(decision, observation)
+                elif self._task_child and decision.goal == "nether_portal" and decision.name == "move_to":
+                    result = self._run_task_nether_portal(decision, observation)
                 else:
                     runner = resolve_skill_runner(self, decision.name)
                     result = runner.execute(decision.name, decision.args, cancel_event=self._cancel, **options)

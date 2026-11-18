@@ -21,7 +21,7 @@ def _tool(name, description, properties, required=()):
 
 _ITEM = {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$", "maxLength": 64}
 SURVIVAL_TASK_NAMES = ("gather", "craft", "smelt", "food", "starter_tools", "iron_tools", "iron_armor", "scout",
-                       "shelter", "bed", "storage", "farm", "recover_drops", "maintenance")
+                       "nether_portal", "shelter", "bed", "storage", "farm", "recover_drops", "maintenance")
 SURVIVAL_TASK_RESOURCES = ("logs", "cobblestone", "coal", "raw_iron", "diamond")
 
 TOOL_DEFINITIONS = [

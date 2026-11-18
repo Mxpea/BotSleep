@@ -784,6 +784,29 @@ class TaskHarnessTests(unittest.TestCase):
         self.assertEqual(payload["result"]["data"]["scout_report"]["found_structures"][0]["name"], "chest")
         self.assertEqual(len(brain.requests), 1)
 
+    def test_nether_portal_task_routes_to_speedrun_skill_with_lava_search_and_completes(self):
+        self.world.counts = {"water_bucket": 1, "flint_and_steel": 1, "cobblestone": 16, "iron_pickaxe": 1}
+        calls = []
+
+        def fake_build_portal(portal_self, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return SkillResult(False, "No pool within 36 blocks", {"executed": False}, "no_portal_site_found")
+            return SkillResult(True, "Portal ignited", {"executed": True, "portal_active": True, "structure_verified": True})
+
+        harness, brain = self.harness(response("run_survival_task", {"task": "nether_portal"}, "portal_goal"))
+        with patch("skills.portal_speedrun.NetherPortalSpeedrunSkill.build_portal", new=fake_build_portal), \
+             patch.object(harness.client, "find_blocks", return_value=[{"name": "lava", "pos": [25, 63, 0]}]), \
+             patch("skills.survival.SurvivalSkills.execute", return_value=SkillResult(True, "Moved", {"executed": True})):
+            self.cycle(harness)
+            self.until(harness, lambda: harness.snapshot()["task_execution"]["status"] == "completed")
+        self.assertEqual(len(calls), 2)
+        feedback = self.feedback(harness.planner)
+        payload = json.loads(feedback[0]["content"])
+        self.assertTrue(payload["result"]["success"])
+        self.assertEqual(harness.snapshot()["task_execution"]["progress"]["current"], 1)
+        self.assertEqual(len(brain.requests), 1)
+
 
 if __name__=="__main__":
     unittest.main()

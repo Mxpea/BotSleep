@@ -980,6 +980,10 @@ def escape_to_surface(
         return True
 
     def _is_on_surface(cx: int, cy: int, cz: int) -> bool:
+        feet_b = str(ctx.read_block((cx, cy, cz)).get("name") or "air")
+        floor_b = str(ctx.read_block((cx, cy - 1, cz)).get("name") or "air")
+        if feet_b in HAZARDS or floor_b in {"lava", "flowing_lava", "fire", "soul_fire", "magma_block"}:
+            return False
         if not _col_open_sky(cx, cy, cz):
             return False
         # Confirm we have climbed out of any pit/shaft: at least 2 adjacent horizontal columns also open to sky
@@ -1042,10 +1046,24 @@ def escape_to_surface(
             continue
 
         # Check overhead block (cy+2) and above-ceiling liquid hazard (cy+3)
+        lethal_hazards = {"lava", "flowing_lava", "fire", "soul_fire", "magma_block"}
+        water_blocks = {"water", "flowing_water"}
         head2 = (cx, cy + 2, cz)
         above_top_name = str(ctx.read_block((cx, cy + 3, cz)).get("name") or "air")
         head2_name = str(ctx.read_block(head2).get("name") or "air")
-        if head2_name in HAZARDS or above_top_name in HAZARDS or (head2_name not in replaceable and head2_name not in allowed_dig):
+        feet_name = str(ctx.read_block((cx, cy, cz)).get("name") or "air")
+        head1_name = str(ctx.read_block((cx, cy + 1, cz)).get("name") or "air")
+        has_lethal = head2_name in lethal_hazards or above_top_name in lethal_hazards
+        in_water_state = bool(
+            st.get("in_water") or st.get("submerged") or feet_name in water_blocks or head1_name in water_blocks
+        )
+        if (
+            has_lethal
+            or head2_name in HAZARDS
+            or above_top_name in HAZARDS
+            or feet_name in HAZARDS
+            or (head2_name not in replaceable and head2_name not in allowed_dig)
+        ):
             # Shift sideways onto an adjacent walkable tile with clear ceiling
             shifted = False
             for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
@@ -1069,9 +1087,32 @@ def escape_to_surface(
                             pass
                 if shifted:
                     break
-            if not shifted:
+            if shifted:
+                continue
+            water_only_escape = (
+                not has_lethal
+                and (in_water_state or head2_name in water_blocks or above_top_name in water_blocks)
+                and (head2_name in replaceable or head2_name in water_blocks or head2_name in allowed_dig)
+            )
+            if not water_only_escape:
                 break
-            continue
+            # Underwater / flooded cave escape: swim straight up through open water or breach rock under water.
+            if head2_name in water_blocks or (in_water_state and head2_name in replaceable):
+                try:
+                    visited_shifts.add((cx, cy, cz))
+                    stand_cell(ctx, (cx, cy + 1, cz), tolerance=0.65)
+                    ascended += 1
+                    continue
+                except WorkflowStepError:
+                    pass
+        elif in_water_state and not has_lethal and head2_name in replaceable:
+            try:
+                visited_shifts.add((cx, cy, cz))
+                stand_cell(ctx, (cx, cy + 1, cz), tolerance=0.65)
+                ascended += 1
+                continue
+            except WorkflowStepError:
+                pass
 
         if head2_name not in replaceable:
             dig_block(ctx, head2, relative=False, allowed_blocks=allowed_dig, collect=True)
@@ -1113,7 +1154,7 @@ def escape_to_surface(
                 allowed_headroom_blocks=allowed_dig,
             )
         except WorkflowStepError as exc:
-            if exc.code not in {"occupied", "place_failed", "blocked_by_self", "dig_failed", "hazard_detected"}:
+            if exc.code not in {"occupied", "target_obstructed", "place_failed", "blocked_by_self", "dig_failed", "hazard_detected"}:
                 raise
             shifted = False
             for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):

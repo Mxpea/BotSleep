@@ -20,7 +20,7 @@ from skills.equipment import ARMOR_SLOTS, SLOT_SUFFIX, armor_rank, read_worn_slo
 
 
 TASKS = frozenset({"gather", "craft", "smelt", "food", "starter_tools", "iron_tools", "iron_armor", "scout",
-                  "shelter", "bed", "storage", "farm", "recover_drops", "maintenance"})
+                  "nether_portal", "shelter", "bed", "storage", "farm", "recover_drops", "maintenance"})
 IRON_ARMOR_ORDER = ("iron_chestplate", "iron_leggings", "iron_helmet", "iron_boots")
 RESOURCES = frozenset({"logs", "cobblestone", "coal", "raw_iron", "diamond"})
 SMELT_ITEMS = frozenset(DailySurvivalSkills.SMELTABLE.values())
@@ -29,6 +29,7 @@ RECIPES = {
     "furnace": ({"cobblestone": 8}, 1), "chest": ({"planks": 8}, 1),
     "torch": ({"coal": 1, "stick": 1}, 4), "bread": ({"wheat": 3}, 1),
     "shield": ({"planks": 6, "iron_ingot": 1}, 1), "bucket": ({"iron_ingot": 3}, 1),
+    "flint_and_steel": ({"iron_ingot": 1, "flint": 1}, 1),
     **{f"{tier}_{tool}": ({material: quantity, "stick": sticks}, 1)
        for tier, material in (("wooden", "planks"), ("stone", "cobblestone"), ("iron", "iron_ingot"), ("diamond", "diamond"))
        for tool, quantity, sticks in (("pickaxe", 3, 2), ("axe", 3, 2), ("sword", 2, 1), ("hoe", 2, 2))},
@@ -90,6 +91,7 @@ class AutonomousTaskController:
                       "local_failures": 0, "no_progress": 0, "explore_steps": 0,
                       "deep_mine_ores": [], "pending_deep_mine": None,
                       "scout_completed": False, "loadout_equipped": False,
+                      "portal_built": False, "portal_attempted": False,
                       "pending_digest": None, "baseline": 0, "sequence": 0, "life_generation": 0}
         if saved is not None:
             self._restore(saved)
@@ -233,6 +235,7 @@ class AutonomousTaskController:
         args = self._data["args"]
         return args.get("resource", args.get("item", "food_items" if args["task"] == "food"
                         else "pieces" if args["task"] == "iron_armor"
+                        else "portal" if args["task"] == "nether_portal"
                         else "scan" if args["task"] == "scout" else "goal"))
 
     @staticmethod
@@ -253,6 +256,10 @@ class AutonomousTaskController:
         args = self._data["args"]
         if args["task"] == "gather":
             return sum(counts.get(n, 0) for n in LOG_NAMES) if args["resource"] == "logs" else counts.get(args["resource"], 0)
+        if args["task"] == "nether_portal":
+            return 1 if (self._data.get("portal_built") or any(
+                b.get("name") == "nether_portal" for b in (observation.get("blocks") or []) if isinstance(b, dict)
+            )) else 0
         if args["task"] in {"craft", "smelt"}:
             return counts.get(args["item"], 0)
         if args["task"] == "food":
@@ -388,6 +395,50 @@ class AutonomousTaskController:
             return self._craft(piece, 1, obs, context)
         return None
 
+    def _nether_portal(self, obs, context):
+        counts = obs["counts"]
+        origin = obs["status"]["pos"]
+        if any(b.get("name") == "nether_portal" for b in (obs.get("blocks") or []) if isinstance(b, dict)):
+            self._data["portal_built"] = True
+            return None
+        if counts.get("water_bucket", 0) < 1:
+            if counts.get("bucket", 0) < 1:
+                return self._craft("bucket", 1, obs, context)
+            waters = [row for row in self.daily._safe_rows(obs, {"water"}, context=context)]
+            waters.sort(key=lambda r: math.dist(origin, r["pos"]))
+            if waters:
+                target_w = waters[0]
+                if math.dist(origin, target_w["pos"]) <= 4.5:
+                    return self._decision("collect_liquid", {"pos": list(target_w["pos"]), "expected_name": "water"},
+                                          "Fill bucket with water for Nether Portal speedrun casting")
+                return Decision("move_to", {"pos": list(target_w["pos"]), "range": 3},
+                                "Move within reach of water source to fill bucket", "nether_portal")
+        if counts.get("flint_and_steel", 0) < 1:
+            if counts.get("flint", 0) < 1:
+                gravels = [row for row in self.daily._safe_rows(obs, {"gravel"}, context=context) if row.get("can_dig") is not False]
+                gravels.sort(key=lambda r: math.dist(origin, r["pos"]))
+                if gravels:
+                    return self._decision("gather_block", {"pos": list(gravels[0]["pos"]), "expected_name": "gravel"},
+                                          "Dig gravel for flint to craft flint_and_steel")
+                if counts.get("gravel", 0) >= 1:
+                    for cand in self.daily._rows(obs.get("placement_candidates"))[:6]:
+                        cpos = self.rules._pos(cand.get("pos"))
+                        if cpos is not None and 1.0 <= math.dist(origin, cpos) <= 4.0:
+                            step = self._decision("place_item", {"item": "gravel", "pos": list(cpos)},
+                                                  "Place carried gravel so it can be mined for flint")
+                            if self.safety_policy.validate(step, obs, context) is None:
+                                return step
+            return self._craft("flint_and_steel", 1, obs, context)
+        scaffold_total = sum(counts.get(name, 0) for name in ("cobblestone", "stone", "cobbled_deepslate", "dirt"))
+        if scaffold_total < 10:
+            return self._gather("cobblestone", obs, context)
+        if not any(counts.get(t + "_pickaxe", 0) for t in ("wooden", "stone", "iron", "diamond", "netherite")):
+            return self._craft("stone_pickaxe", 1, obs, context)
+        if not self._data.get("portal_attempted"):
+            return Decision("move_to", {"pos": list(origin), "range": 4},
+                            "Locate lava pool or obsidian site and build/ignite Nether Portal", "nether_portal")
+        return None
+
     def _gather(self, resource, obs, context, names=None):
         counts = obs["counts"]
         cautious = context.get("_bounded_bootstrap") is True
@@ -458,7 +509,7 @@ class AutonomousTaskController:
             if resource not in self._data.get("deep_mine_ores", []):
                 needed = (max(1, self._data["progress"]["target"] - self._quantity(obs))
                           if self._data["task"] == "gather" and self._data["args"].get("resource") == resource
-                          else 3 if resource == "diamond" else 12 if resource == "cobblestone" else 7 if resource == "raw_iron" else 4)
+                          else 3 if resource == "diamond" else 12 if resource in {"cobblestone", "raw_iron"} else 4)
                 return self._deep_mine_decision(resource, obs, count=needed)
         return None
 
@@ -711,6 +762,9 @@ class AutonomousTaskController:
                 and (self._data.get("args") or {}).get("resource") == "diamond"
                 and "max_seconds" not in (self.settings.get("autonomy") or {})):
             return max(base, 900.0)
+        if (self._data.get("task") == "nether_portal"
+                and "max_seconds" not in (self.settings.get("autonomy") or {})):
+            return max(base, 600.0)
         return base
 
     def next_action(self, observation, context=None):
@@ -787,13 +841,15 @@ class AutonomousTaskController:
             decision = self._scout(obs, local)
         elif task == "iron_armor":
             decision = self._iron_armor(obs, local)
+        elif task == "nether_portal":
+            decision = self._nether_portal(obs, local)
         else:
             decision, complete = self._board_action(task, obs, local)
             if complete:
                 self._data["progress"]["current"] = 1
                 self._set("completed", "Fresh task evidence verifies the selected goal")
                 return None
-        if decision and decision.goal not in {"deep_mine", "scout_logs", "scout_surface", "equip_loadout"} and (
+        if decision and decision.goal not in {"deep_mine", "scout_logs", "scout_surface", "equip_loadout", "nether_portal"} and (
                 decision.goal == "explore" or decision.name == "move_to" and decision.args.get("pos") not in
                 [b["pos"] for b in self.rules._blocks(obs)] + [row.get("pos") for row in self.daily._rows(obs.get("entities"))]):
             decision = None  # Replace blind radial exploration with checked local geometry.
@@ -811,7 +867,7 @@ class AutonomousTaskController:
         if decision.args.get("pos") is not None and self.rules._key(decision.args["pos"]) in self.rules._blocked(local):
             self._escalate("selected_target_is_cooling_down")
             return None
-        if (decision.goal != "scout_surface" and decision.name == "move_to"
+        if (decision.goal not in {"scout_surface", "nether_portal"} and decision.name == "move_to"
                 and math.dist(origin, decision.args["pos"]) <= decision.args.get("range", 2) + .5):
             decision = self._explore(obs, local)
             if decision is None:
@@ -852,6 +908,11 @@ class AutonomousTaskController:
         elif task == "scout":
             complete = bool(self._data.get("scout_completed"))
             current = int(complete)
+        elif task == "nether_portal":
+            complete = bool(self._data.get("portal_built")) or any(
+                b.get("name") == "nether_portal" for b in (observation.get("blocks") or []) if isinstance(b, dict)
+            )
+            current = int(complete)
         elif task == "iron_armor":
             current = self._iron_armor_count(observation)
             all_worn = all(
@@ -887,6 +948,11 @@ class AutonomousTaskController:
                 self._data["deep_mine_ores"] = (self._data["deep_mine_ores"] + [res_key])[-8:]
         elif decision.goal == "scout_surface" and result.success is True:
             self._data["scout_completed"] = True
+        elif decision.goal == "nether_portal" and decision.name == "move_to":
+            if result.success is True and (data.get("portal_active") is True or data.get("structure_verified") is True):
+                self._data["portal_built"] = True
+            elif data.get("portal_skill") is True:
+                self._data["portal_attempted"] = True
         elif decision.goal == "equip_loadout":
             self._data["loadout_equipped"] = True
         elif decision.name == "craft_item" and result.success is True:

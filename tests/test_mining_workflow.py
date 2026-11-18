@@ -750,6 +750,28 @@ class MiningWorkflowTests(unittest.TestCase):
         self.assertEqual(res.data["phases"][0]["error_code"], "timeout")
         self.assertEqual(res.data["phases"][1]["stop_reason"], "target_reached")
 
+    def test_escape_to_surface_swims_upward_when_submerged_in_water(self):
+        from skills.action_workflow import WorkflowContext, WorkflowGuard, escape_to_surface
+
+        world = WorkflowMineWorld(bot_pos=(0.5, 62.0, 0.5), surface_y=64)
+        world.items = {"cobblestone": 16}
+        world.status["in_water"] = True
+        world.status["submerged"] = True
+        # Seal lateral moves at Y=62 so dry sideways shift cannot run, leaving water above up to Y=64 and open air at Y>=65
+        for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            world.blocks[(dx, 62, dz)] = {"name": "stone", "diggable": True}
+            world.blocks[(dx, 63, dz)] = {"name": "stone", "diggable": True}
+        world.blocks[(0, 62, 0)] = {"name": "water", "diggable": False}
+        world.blocks[(0, 63, 0)] = {"name": "water", "diggable": False}
+        world.blocks[(0, 64, 0)] = {"name": "water", "diggable": False}
+
+        guard = WorkflowGuard(world, timeout_seconds=15.0, allow_damage=True)
+        ctx = WorkflowContext(guard=guard, spec=MineShaftSkill._hub_only_spec(4, include_workstations=False), origin=[0, 64, 0], orientation="south")
+        esc = escape_to_surface(ctx, max_ascend=8)
+        self.assertTrue(esc["escaped"], esc)
+        self.assertGreaterEqual(esc["pos"][1], 64)
+        self.assertNotEqual(str(world.blocks.get(tuple(esc["pos"]), {}).get("name") or "air"), "water")
+
 
 if __name__ == "__main__":
     unittest.main()

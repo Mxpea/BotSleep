@@ -109,7 +109,7 @@ class AutonomyRuntime:
 
     _MINING_CLUTTER_KEEP = (
         ("granite", 0), ("diorite", 0), ("andesite", 0), ("cobbled_deepslate", 0),
-        ("tuff", 0), ("gravel", 0), ("flint", 0), ("leaf_litter", 0),
+        ("tuff", 0), ("gravel", 0), ("flint", 2), ("leaf_litter", 0),
         ("red_mushroom", 0), ("brown_mushroom", 0), ("rotten_flesh", 0),
         ("raw_copper", 0), ("sand", 0), ("dirt", 0), ("cobblestone", 64),
     )
@@ -160,7 +160,7 @@ class AutonomyRuntime:
             targets = {"coal": {"count": count, "min_tool": "wooden_pickaxe"}}
         else:
             targets = {
-                "iron": {"count": max(count, 7), "min_tool": "stone_pickaxe"},
+                "iron": {"count": max(count, 12), "min_tool": "stone_pickaxe"},
             }
         # Never abort a resource expedition solely because the player lacks torches or scaffold blocks yet.
         deep_home_thresholds = {
@@ -227,15 +227,15 @@ class AutonomyRuntime:
 
         res = miner.mine_targets_from_surface(
             targets=targets,
-            cave_policy={"explore_timeout_seconds": 65.0},
+            cave_policy={"explore_timeout_seconds": 35.0},
             home_thresholds=deep_home_thresholds,
             prefer_caves_first=(resource in {"raw_iron", "coal"}),
-            cave_search_radius=24,
-            max_caves=2,
+            cave_search_radius=20,
+            max_caves=1,
             place_workstation=False,
-            rib_length=8 if resource == "diamond" else 6,
-            rib_spacing=4,
-            max_trunk_steps=20 if resource == "diamond" else 16 if resource == "raw_iron" else 10,
+            rib_length=10 if resource == "diamond" else 8 if resource == "raw_iron" else 6,
+            rib_spacing=3 if resource == "diamond" else 4,
+            max_trunk_steps=28 if resource == "diamond" else 18 if resource == "raw_iron" else 10,
             band_timeout_seconds=band_t,
             total_timeout_seconds=total_t,
             cancel_event=getattr(self, "_cancel", None),
@@ -277,6 +277,53 @@ class AutonomyRuntime:
             cancel_event=getattr(self, "_cancel", None),
         )
         data = dict(res.data or {}) if isinstance(res.data, dict) else {}
+        return SkillResult(bool(res.success), str(res.message), data, res.error_code)
+
+    def _run_task_nether_portal(self, decision, observation):
+        from skills.portal_speedrun import NetherPortalSpeedrunSkill
+
+        skill = NetherPortalSpeedrunSkill(self.client)
+        res = skill.build_portal(
+            timeout_seconds=210.0,
+            allow_damage=True,
+            cancel_event=getattr(self, "_cancel", None),
+        )
+        data = dict(res.data or {}) if isinstance(res.data, dict) else {}
+        if not res.success and res.error_code == "no_portal_site_found":
+            # Scan wider radius (up to 64 blocks) for lava pools, approach once, and retry cleanly.
+            find_fn = getattr(self.client, "find_blocks", None) or getattr(self.client, "get_blocks", None)
+            origin = ((observation.get("status") or {}).get("pos") if isinstance(observation, dict) else None)
+            if callable(find_fn) and isinstance(origin, (list, tuple)) and len(origin) == 3:
+                try:
+                    rows = find_fn(types=["lava"], radius=64, limit=32) or []
+                    pts = [
+                        row.get("pos")
+                        for row in rows
+                        if isinstance(row, dict) and isinstance(row.get("pos"), (list, tuple)) and len(row.get("pos")) == 3
+                    ]
+                    if pts:
+                        nearest = min(pts, key=lambda p: math.dist(origin, p))
+                        if math.dist(origin, nearest) > 12.0:
+                            from skills.survival import SurvivalSkills
+                            mv = SurvivalSkills(self.client).execute(
+                                "move_to",
+                                {"pos": [int(nearest[0]), int(nearest[1]) + 1, int(nearest[2])], "range": 5},
+                                cancel_event=getattr(self, "_cancel", None),
+                            )
+                            if (isinstance(mv.data, dict) and mv.data.get("action_state") == "unknown") or mv.error_code == "action_unconfirmed":
+                                return mv
+                            res = skill.build_portal(
+                                timeout_seconds=180.0,
+                                allow_damage=True,
+                                cancel_event=getattr(self, "_cancel", None),
+                            )
+                            data = dict(res.data or {}) if isinstance(res.data, dict) else {}
+                except Exception:
+                    pass
+        data["portal_skill"] = True
+        data.setdefault("executed", bool(res.success or data.get("writes", 0) > 0))
+        if res.success:
+            data.setdefault("portal_active", True)
         return SkillResult(bool(res.success), str(res.message), data, res.error_code)
 
     def _task_next(self, observation):

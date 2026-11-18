@@ -146,11 +146,14 @@ resource="diamond", count=3) (automatically prepares a 2nd iron_pickaxe and mine
 NEVER call craft(furnace) if inventory already holds >= 1 furnace (even if not yet placed in world);
 NEVER call craft(stone_pickaxe/wooden_pickaxe/stone_axe/stone_sword) again if you already own >= 1,
 and defer crafting stone_axe until after raw_iron unless wood gathering fails. To mine iron ore
-and deploy your held furnace automatically, call run_survival_task(task="gather", resource="raw_iron", count=8)
+and deploy your held furnace automatically, call run_survival_task(task="gather", resource="raw_iron", count=12)
 or run_survival_task(task="iron_tools") (smelt(iron_ingot) also auto-places a held furnace).
-3) Diamond gate: after gathering diamond, decide whether to craft diamond_pickaxe/diamond_sword
-or reinforce armor/food. When coal, raw_iron or diamond is absent on the surface and the required
-pickaxe is ready, run_survival_task launches bounded deep mining with surface return.
+3) Diamond & Nether Portal gates: after gathering diamond, craft diamond_pickaxe (and optionally
+diamond_sword or iron_armor if needed). Once diamond milestone completes and operator_goal asks
+for a Nether Portal, call run_survival_task(task="nether_portal") (prepares flint_and_steel,
+water_bucket, and casts+ignites a 4x5 Nether Portal near a lava pool). When coal, raw_iron or diamond
+is absent on the surface and the required pickaxe is ready, run_survival_task launches bounded deep
+mining with surface return.
 Partial results never mean an entire task is complete.
 Return one native tool call, not simulated calls inside text.
 """
@@ -215,6 +218,7 @@ If that goal tool is unavailable, use only the currently advertised tools.
         self._undelivered_result = False
         self._task_repair_uses = {}
         self._scout_calls = 0
+        self._world_mutation_nonce = 0
 
     @staticmethod
     def _limit(settings, key, default, minimum, maximum):
@@ -415,7 +419,8 @@ If that goal tool is unavailable, use only the currently advertised tools.
                     "hostile_near_target": bool(target_pos) and any(math.dist(target_pos, point) <= self.rules.threat_radius for _, point in hostiles),
                     **{key: copy.deepcopy(status.get(key)) for key in (
                     "health", "food", "ready", "alive", "thundering", "on_ground", "in_water", "in_lava", "on_fire", "submerged")}},
-                "shelter": copy.deepcopy(observation.get("shelter")) if "shelter" in decision.name else None}
+                "shelter": copy.deepcopy(observation.get("shelter")) if "shelter" in decision.name else None,
+                "world_mutation": self._world_mutation_nonce}
 
     def _unchanged_failure(self, failure, observation, decision):
         before, after = failure["state"], self._failure_state(observation, decision)
@@ -437,7 +442,7 @@ If that goal tool is unavailable, use only the currently advertised tools.
                                and old_visibility["blocker"] != new_visibility["blocker"])
             if visibility_changed or blocker_changed:
                 return False
-        return not (moved or changed_cell) and all(before.get(key) == after.get(key) for key in ("dimension", "last_death", "counts", "target", "target_properties", "windows", "entity", "shelter"))
+        return not (moved or changed_cell) and all(before.get(key) == after.get(key) for key in ("dimension", "last_death", "counts", "target", "target_properties", "windows", "entity", "shelter", "world_mutation"))
 
     @staticmethod
     def _signature(decision):
@@ -572,6 +577,7 @@ If that goal tool is unavailable, use only the currently advertised tools.
             "iron_tools": common | {"gather_resource", "inspect_container", "smelt_start", "smelt_collect"},
             "iron_armor": (common - {"clear_foliage"}) | {"gather_resource", "inspect_container", "smelt_start", "smelt_collect", "equip_armor"},
             "scout": {"move_to", "position_for_task", "gather_block", "clear_foliage"},
+            "nether_portal": common | {"collect_liquid", "gather_resource", "move_to"},
             "smelt": common | {"gather_resource", "inspect_container", "smelt_start", "smelt_collect"},
             "food": {"move_to", "position_for_task", "harvest_crop", "hunt_animal", "collect_drops",
                      "inspect_container", "take_items", "smelt_collect", "craft_item"},
@@ -949,6 +955,9 @@ If that goal tool is unavailable, use only the currently advertised tools.
         self._pending = None
         if decision.name == "run_survival_task" and (decision.args or {}).get("task") == "scout" and payload.get("success") is True:
             self._scout_calls += 1
+        if payload.get("success") is True and decision.name in {
+                "clear_foliage", "gather_block", "place_item", "harvest_crop", "build_shelter_step", "canopy_escape"}:
+            self._world_mutation_nonce += 1
         signature = self._signature(decision)
         data = payload.get("data") or {}
         no_motion = decision.name == "move_to" and (data.get("moved") is False or data.get("already_in_range") is True)
