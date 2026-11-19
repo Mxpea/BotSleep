@@ -281,6 +281,59 @@ class ObservedCanopyEscapeTests(unittest.TestCase):
         self.assertEqual([row[0] for row in world.writes()], ["move_to"] * 11)
         self.assertEqual(fixture["blocks"]["2,121,7"]["name"], "oak_leaves")
 
+    def test_clear_canopy_descent_allows_leaf_distance_property_update(self):
+        world = terrain([(0, 70, 0, "oak_leaves"), (1, 69, 0, "oak_leaves")])
+        world.set_block([0, 69, 0], "oak_leaves", properties={"waterlogged": False, "distance": 3})
+        world.set_block([1, 68, 0], "oak_leaves", properties={"waterlogged": False, "distance": 4})
+        world.set_block([1, 69, 0], "oak_leaves", properties={"waterlogged": False, "distance": 3},
+                        diggable=True, harvest_tool_ok=True, can_see=True)
+        orig_dig = world.dig
+
+        def dig_with_distance_update(*args, **kwargs):
+            res = orig_dig(*args, **kwargs)
+            world.set_block([0, 69, 0], "oak_leaves", properties={"waterlogged": False, "distance": 5})
+            world.set_block([1, 68, 0], "oak_leaves", properties={"waterlogged": False, "distance": 6})
+            return res
+
+        world.dig = dig_with_distance_update
+        result = DailySurvivalSkills(world).execute("canopy_escape", {})
+        self.assertTrue(result.success, result)
+        self.assertEqual(result.data.get("operation"), "clear_foliage")
+
+    def test_pale_garden_moss_floor_and_hanging_moss_complete_canopy_escape(self):
+        world = terrain([(0, 70, 0, "pale_oak_leaves"), (1, 69, 0, "pale_moss_block")])
+        world.set_block([0, 69, 0], "pale_oak_leaves", properties={"waterlogged": False})
+        world.set_block([1, 68, 0], "pale_moss_block")
+        world.set_block([1, 70, 0], "pale_hanging_moss")
+        result = DailySurvivalSkills(world).execute("canopy_escape", {})
+        self.assertTrue(result.success, result)
+        self.assertTrue(result.data["retreat_complete"])
+        self.assertEqual(result.data["evacuation_stage"], "ground")
+
+    def test_snow_layer_on_spruce_leaves_is_passable_during_canopy_escape(self):
+        world = terrain([(0, 70, 0, "spruce_leaves"), (1, 69, 0, "grass_block")])
+        world.set_block([0, 69, 0], "spruce_leaves", properties={"waterlogged": False})
+        world.set_block([0, 70, 0], "snow", properties={"layers": 1})
+        world.set_block([1, 68, 0], "grass_block")
+        result = DailySurvivalSkills(world).execute("canopy_escape", {})
+        self.assertTrue(result.success, result)
+        self.assertEqual(result.data["evacuation_stage"], "ground")
+
+    def test_canopy_escape_allows_four_block_trunk_drop_when_health_is_high(self):
+        world = World()
+        world.status.update(pos=[0.5, 73.0, 0.5], health=20, food=20, gamemode="survival")
+        world.set_block([0, 72, 0], "acacia_log")
+        world.set_block([1, 68, 0], "grass_block")
+        for x in (-1, 0, 1):
+            for z in (-1, 0, 1):
+                for y in range(69, 76):
+                    if (x, y, z) != (0, 72, 0):
+                        world.set_block([x, y, z], "air")
+        result = DailySurvivalSkills(world).execute("canopy_escape", {})
+        self.assertTrue(result.success, result)
+        self.assertEqual(result.data["evacuation_stage"], "ground")
+        self.assertEqual(result.data["target"], [1.5, 69, 0.5])
+
 
 if __name__ == "__main__":
     unittest.main()

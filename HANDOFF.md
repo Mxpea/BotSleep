@@ -1,5 +1,20 @@
 # BotSleep / Minecraft Agent Harness 交接
 
+**2026-11-19 分支合入与阶段交接（`develop-tianya/ai-iron-diamond-loop` → `main`）**：本分支在 `main 9018f76` 上完成装备/侦察/洞穴优先/浅水脱困/多炉批炼/多 Bot 并发防冻开发并合入 `origin/main (cab309d)`；冲突仅涉及 `core/autonomy_runtime.py` 与 `docs/TESTING.md`，均已整合。相邻 `mc-agent-api` 仓库保持零本地修改。
+
+- **当前已完成与已验证进展**：
+  - **开局与装备闭环**：接入 `EquipmentSkill`（护甲槽与盾牌自动穿戴，含 API `armor.chest` ↔ `torso` 映射）、`SurfaceScoutSkill`（`find_blocks` 受限条件下 200 格前向多航点低耗侦察）、非严格夜/暴雨施工兼容（`sleep_policy: "opportunistic"`）、沙漠方块支撑/`dead_bush` 凑木棍，以及高树干 `-4..-5` 格纯实体落地兜底与 `RETREAT_TRUNKS` 连续 3 次 `unsafe` 释放（已于 v4 Bot 9 实服脱困验证）。
+  - **水域自救与多 Bot 防冻**：新增 `water_escape` 非深矿河岸登岸安全原语（v3 Bot 8 8/8、v4 Bot 3 4/4 成功登岸）；`READ_RETRY_ENDPOINTS` 只读超时与 `observe` 不再写入 `unknown`；`find_cave_openings` 增加 `15s` / `600` 次只读上限；`ModelRequestGate` 默认等待提升至 `60s` 并保持全链路严格串行，配合多 Bot 独立官方 `mc-agent-api` 进程（`18901..18909`）实现无互锁并行实测。
+  - **矿洞采铁与批炼压缩**：`raw_iron`/`coal`/`diamond` 启用洞穴/含水峡谷优先（`diamond` 跳过浅层地表洞），`raw_iron >= 8` 支持洞内临时工作台/熔炉，`raw_iron` 目标下限设为 `24`、深层矿井支持换向；`agent/daily_survival.py` 与 `core/autonomous_tasks.py` 实现 2～3 炉并行与 `output >= 6` 或结束整批收取（v4 Bot 6 实测 `smelt_start=4, smelt_collect=5`，17 铁锭仅耗时 `203.3s`，较单炉/逐锭显著压缩），并修复 `scout_surface`/`nether_portal` 原点冷却误拦截与地下工作台误追远距 `scout_logs`。
+- **实服进度与未完成边界（离线 vs 实服严格区分）**：
+  - **离线全量**：整合 `origin/main` 与本次文档更新后运行 `$env:BOTSLEEP_RUN_LIVE_TESTS='0'; .\.venv\Scripts\python.exe -B -m unittest discover -s tests -q`（见 [TESTING.md](docs/TESTING.md) 顶部实测数字）。
+  - **9 Bot 并行 40 分钟多地形实服（Peaceful Leaves 1.21.11，v3 @ `062d8ef` & v4 @ `f1d9fe6`）**：两轮均达到 **`0/9` 死亡、`0/9` 内部报错、`9/9` 正常预算退出（`rc=2`）**；v3 有 `3/9` Bot（Bot 3/7/9）切入 `Y=-54` `gather(diamond)`（Bot 7 于 18.9m 内从浅洞采得 24 粗铁，Bot 9 采出 `321 cobbled_deepslate + 4 redstone + 8 lapis`），v4 Bot 6 于 `23.4m` 合出 `iron_pickaxe` 并验证批炼提速。
+  - **尚未闭环项（下一棒接手重点）**：40 分钟预算内多地形实服仍为 **`0/9` 实服获钻、`0/9` 搭建并点亮 `nether_portal`**。主要阻塞为：（1）v4 Bot 6 获 `iron_pickaxe` 后模型仍主动补 `iron_axe`/`iron_sword`/`coal`/`logs` 占用冲钻窗口，需进一步收窄铁期工具/提示词路径；（2）`mangrove_roots` 红树林根地面不可放置、`0` 木纯沙漠与水淹洞穴低氧环境下模型重复选择失效动作导致 `llm_repeated_failure`；（3）`competition` 模式与含敌难度实服全程尚待本分支合入后另行验证。
+- **下一棒优先行动建议**：
+  1. 在 `iron_pickaxe` 到手且非急需燃料/木头时强制建议或路由直入 `gather(diamond)`，缩短 23m→30m 空窗；
+  2. 为红树林根（`mangrove_roots`/`mud`）与水淹洞穴增加低风险脱困/移位候选并复核 `Y=-54`/`-58` 钻石脉覆盖；
+  3. 跑通单新档（Peaceful/Easy）实服“钻石 → 钻石镐 → 黑曜石/熔岩浇筑 `nether_portal` 点火”全闭环后再扩展 `competition` 实服回归。
+
 **2026-11-18 本地集成**：以 `main 9018f76` 为基线合入 `dev-aure 4e0a59e` 的非重复能力。树冠恢复仍走 `canopy_escape`，任务子步仍经 `AutonomousTaskController`。迁入赛事阶段投影、单工具且非并行的请求约束，以及只读日志补看。普通 `daily` 可设 `survival.autonomy.local_opening: true` 走同一任务控制器的确定性工具开局；默认关闭，不改变赛事任务选择。新增的卡树回归复用了双方共同关注的地形，没有启用第二套下降逻辑。
 
 合并提交 `2e2bdee` 及后续文档更新供 `dev-aure` 向 `main` 提交 PR。合并前的 `9018f76` 已在普通本地服从原树冠位置下至实心地面（7 次移动，Y=92→90→88，零模型请求）。合并版本离线运行 1457 项，1452 通过、5 项实服专用跳过；尚未用真实模型和赛事服务器复测合并版本。复核范围见 [TESTING.md](docs/TESTING.md)，下方记录属于历史。

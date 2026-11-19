@@ -623,6 +623,273 @@ class MiningWorkflowTests(unittest.TestCase):
         self.assertEqual(out["stop_reason"], "return_home")
         self.assertAlmostEqual(world.status["pos"][1], 5.0, delta=0.5)
 
+    def test_prepare_entry_moves_bot_off_origin_edge_before_step_1_floor_dig(self):
+        # Bot starts inside cell (0, 64, 0) but within 0.7 blocks of (0.5, 64.0, -0.5)
+        world = WorkflowMineWorld(bot_pos=(0.5, 64.0, 0.15))
+        res = MineShaftSkill(world, memory=Mock()).build_mine_shaft(
+            origin=[0, 64, 0],
+            orientation="south",
+            branch_length=4,
+            place_workstation=False,
+        )
+        self.assertTrue(res.success, res)
+
+    def test_prepare_entry_moves_elevated_bot_off_surface_entry_cell(self):
+        # Bot starts 1 block higher on top of (0, 64, -1) with solid stone at (0, 64, -1)
+        world = WorkflowMineWorld(bot_pos=(0.5, 65.0, -0.5))
+        world.blocks[(0, 64, -1)] = {"name": "stone", "properties": {}}
+        res = MineShaftSkill(world, memory=Mock()).build_mine_shaft(
+            origin=[0, 64, 0],
+            orientation="south",
+            branch_length=4,
+            place_workstation=False,
+        )
+        self.assertTrue(res.success, res)
+
+    def test_retreat_downsampled_breaks_early_after_consecutive_stalls(self):
+        from skills.action_workflow import WorkflowContext, WorkflowGuard
+
+        world = WorkflowMineWorld(bot_pos=(0.5, 10.0, 0.5), surface_y=64)
+        stalled_targets = []
+
+        def fake_move(x, y, z, **kwargs):
+            stalled_targets.append((x, y, z))
+            return {"ok": False, "error": {"code": "stalled", "message": "stuck"}}
+
+        world.move_to = fake_move
+        guard = WorkflowGuard(world, timeout_seconds=30.0)
+        ctx = WorkflowContext(
+            guard=guard,
+            spec=MineShaftSkill._hub_only_spec(4, include_workstations=False),
+            origin=[0, 64, 0],
+            orientation="south",
+            extra={"world_3d": None},
+        )
+        trail = [[0, y, 0] for y in range(64, 9, -1)]
+        with patch("skills.mining.Pathfinder3D.find_path", return_value=[]):
+            MineShaftSkill(world, memory=Mock())._retreat_downsampled(ctx, trail)
+        # Should abort after 2 consecutive stalled segments instead of iterating all ~28 segments.
+        self.assertLessEqual(len(stalled_targets), 12)
+
+    def test_deep_fishbone_backtracks_up_staircase_and_jogs_sideways_past_water_pocket(self):
+        world = WorkflowMineWorld(bot_pos=(0.5, 64.0, 0.5), surface_y=64)
+        world.inventory_counts = {"iron_pickaxe": 2, "cobblestone": 64, "torch": 16}
+        # Block descent around south hub exit at Y=57..56 with water pocket across straight & neighbors
+        for x in range(-2, 3):
+            for z in range(11, 18):
+                world.blocks[(x, 56, z)] = {"name": "water", "diggable": False}
+                world.blocks[(x, 55, z)] = {"name": "water", "diggable": False}
+        res = MineShaftSkill(world, memory=Mock()).build_mine_shaft(
+            origin=[0, 64, 0],
+            orientation="south",
+            target_y=52,
+            place_workstation=False,
+            return_to_surface=True,
+            max_trunk_steps=2,
+            rib_length=2,
+            timeout_seconds=45.0,
+        )
+        # Bypass should descend past the water pocket at Y=56..55 without getting stuck spinning at one coordinate.
+        self.assertTrue(res.success, res)
+        self.assertLessEqual(res.data["mining_progress"]["deep_pos"][1], 53)
+
+    def test_uncertain_boundary_and_discover_caves_convert_workflow_step_error_to_skill_result(self):
+        from skills import SkillResult
+        from skills.action_workflow import WorkflowStepError
+        from skills.cave_explore import CaveExploreSkill
+
+        world = WorkflowMineWorld(bot_pos=(0.5, 64.0, 0.5), surface_y=64)
+        world.inventory_counts = {"stone_pickaxe": 1, "cobblestone": 16}
+
+        with patch(
+            "skills.ore_harvester.OreHarvester.read_inventory",
+            side_effect=WorkflowStepError("timeout", "Workflow time budget exceeded", blocker_type="safety_interrupted"),
+        ):
+            cave_res = CaveExploreSkill(world, memory=Mock()).discover_and_explore_caves(origin=[0, 64, 0])
+        self.assertIsInstance(cave_res, SkillResult)
+        self.assertFalse(cave_res.success)
+        self.assertEqual(cave_res.error_code, "timeout")
+
+        with patch(
+            "skills.mining.CaveExploreSkill.discover_and_explore_caves",
+            side_effect=WorkflowStepError("timeout", "Workflow time budget exceeded", blocker_type="safety_interrupted"),
+        ):
+            mine_res = MineShaftSkill(world, memory=Mock()).mine_targets_from_surface(
+                origin=[0, 64, 0],
+                targets={"iron": {"count": 1, "min_tool": "stone_pickaxe"}},
+                prefer_caves_first=True,
+                place_workstation=False,
+            )
+        self.assertIsInstance(mine_res, SkillResult)
+        self.assertFalse(mine_res.success)
+        self.assertEqual(mine_res.error_code, "timeout")
+        self.assertFalse(mine_res.data.get("executed"))
+
+    def test_mine_targets_from_surface_falls_through_to_shaft_when_cave_phase_times_out(self):
+        from skills import SkillResult
+
+        world = WorkflowMineWorld(bot_pos=(0.5, 64.0, 0.5), surface_y=64)
+        world.inventory_counts = {"stone_pickaxe": 1, "cobblestone": 16}
+        shaft_calls = []
+
+        def fake_build(miner_self, *args, **kwargs):
+            shaft_calls.append(kwargs.get("target_ys"))
+            return SkillResult(True, "Shaft done", data={"stop_reason": "target_reached", "mining_progress": {"deep_trail": []}})
+
+        with patch(
+            "skills.mining.CaveExploreSkill.discover_and_explore_caves",
+            return_value=SkillResult(False, "Cave-first expedition interrupted (timeout)", error_code="timeout", data={"stop_reason": "timeout", "harvested": {}}),
+        ), patch("skills.mining.MineShaftSkill.build_mine_shaft", new=fake_build):
+            res = MineShaftSkill(world, memory=Mock()).mine_targets_from_surface(
+                origin=[0, 64, 0],
+                targets={"iron": {"count": 4, "min_tool": "stone_pickaxe"}},
+                prefer_caves_first=True,
+                place_workstation=False,
+            )
+        self.assertEqual(len(shaft_calls), 1)
+        self.assertEqual(res.data["phases"][0]["error_code"], "timeout")
+        self.assertEqual(res.data["phases"][1]["stop_reason"], "target_reached")
+
+    def test_escape_to_surface_swims_upward_when_submerged_in_water(self):
+        from skills.action_workflow import WorkflowContext, WorkflowGuard, escape_to_surface
+
+        world = WorkflowMineWorld(bot_pos=(0.5, 62.0, 0.5), surface_y=64)
+        world.items = {"cobblestone": 16}
+        world.status["in_water"] = True
+        world.status["submerged"] = True
+        # Seal lateral moves at Y=62 so dry sideways shift cannot run, leaving water above up to Y=64 and open air at Y>=65
+        for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            world.blocks[(dx, 62, dz)] = {"name": "stone", "diggable": True}
+            world.blocks[(dx, 63, dz)] = {"name": "stone", "diggable": True}
+        world.blocks[(0, 62, 0)] = {"name": "water", "diggable": False}
+        world.blocks[(0, 63, 0)] = {"name": "water", "diggable": False}
+        world.blocks[(0, 64, 0)] = {"name": "water", "diggable": False}
+
+        guard = WorkflowGuard(world, timeout_seconds=15.0, allow_damage=True)
+        ctx = WorkflowContext(guard=guard, spec=MineShaftSkill._hub_only_spec(4, include_workstations=False), origin=[0, 64, 0], orientation="south")
+        esc = escape_to_surface(ctx, max_ascend=8)
+        self.assertTrue(esc["escaped"], esc)
+        self.assertGreaterEqual(esc["pos"][1], 64)
+        self.assertNotEqual(str(world.blocks.get(tuple(esc["pos"]), {}).get("name") or "air"), "water")
+
+    def test_find_mine_sites_supports_pale_moss_ground_and_prefers_open_sky_over_canopy(self):
+        import math
+        world = WorkflowMineWorld(bot_pos=(0.5, 64.0, 0.5))
+        for dx in range(-6, 12):
+            for dz in range(-6, 12):
+                world.blocks[(dx, 63, dz)] = {"name": "pale_moss_block", "properties": {}}
+        # Put pale_oak_leaves canopy directly above nearby origin [0, 64, 0] and its neighbors.
+        for dx in range(-2, 3):
+            for dz in range(-2, 3):
+                world.blocks[(dx, 66, dz)] = {"name": "pale_oak_leaves", "properties": {}}
+        sites = MineShaftSkill(world, memory=Mock()).find_mine_sites(radius=9, max_results=3)
+        self.assertTrue(sites)
+        se = sites[0]["surface_entry"]
+        overhead = world.blocks.get((math.floor(se[0]), math.floor(se[1]) + 2, math.floor(se[2])), {})
+        self.assertNotEqual(overhead.get("name"), "pale_oak_leaves")
+
+    def test_build_mine_shaft_aborts_cleanly_when_no_candidate_surface_entry_is_reachable(self):
+        from skills import SkillResult
+        world = WorkflowMineWorld(bot_pos=(0.5, 64.0, 0.5))
+        skill = MineShaftSkill(world, memory=Mock())
+        with patch.object(skill, "find_mine_sites", return_value=[
+            {"origin": [10, 64, 0], "orientation": "south", "surface_entry": [10.5, 64.0, -0.5], "score": 1.0, "distance": 10.0},
+        ]), patch("skills.mining.CaveExploreSkill") as nav_factory, patch("skills.mining.ActionWorkflowRunner") as runner:
+            nav_factory.return_value.navigate_with_ops.return_value = SkillResult(False, "stalled", {"executed": True}, "stalled")
+            world.bot_pos = (10.5, 67.0, -0.5)
+            res = skill.build_mine_shaft(origin=None, radius=12, place_workstation=False)
+            runner.assert_not_called()
+        self.assertFalse(res.success)
+        self.assertEqual(res.error_code, "unreachable_mine_site")
+
+    def test_diamond_expedition_equips_iron_pickaxe_on_stone_and_tuff_instead_of_stone_pickaxe(self):
+        from skills.action_workflow import WorkflowContext, WorkflowGuard
+
+        world = WorkflowMineWorld(bot_pos=(0.5, 64.0, 0.5))
+        world.items = {"stone_pickaxe": 1, "iron_pickaxe": 1}
+        world.blocks[(1, 64, 0)] = {"name": "tuff", "diggable": True, "properties": {}}
+        equipped = []
+        orig_equip = world.equip
+
+        def spy_equip(item=None, slot="hand", **kwargs):
+            equipped.append(item)
+            return orig_equip(item=item, slot=slot, **kwargs)
+
+        world.equip = spy_equip
+        guard = WorkflowGuard(world, timeout_seconds=15.0)
+        ctx = WorkflowContext(
+            guard=guard,
+            spec=MineShaftSkill._hub_only_spec(4, include_workstations=False),
+            origin=[0, 64, 0],
+            orientation="south",
+            extra={"block_cache": {}, "targets": {"diamond": {"count": 3}}},
+        )
+        MineShaftSkill(world, memory=Mock())._dig_cell_safely(ctx, (1, 64, 0), relative=False)
+        self.assertEqual(equipped, ["iron_pickaxe"])
+
+    def test_preferred_shaft_orientations_rotates_away_from_previously_dug_sector(self):
+        import json
+        import tempfile
+        from core.memory import MemoryEngine
+
+        world = WorkflowMineWorld(bot_pos=(0.5, 64.0, 0.5))
+        with tempfile.TemporaryDirectory() as tmp:
+            mem = MemoryEngine(tmp)
+            with open(mem.episodes_file, "a", encoding="utf-8") as fh:
+                fh.write(json.dumps({
+                    "event_type": "mine_shaft",
+                    "details": {"origin": [2, 64, 2], "orientation": "north"},
+                }) + "\n")
+            skill = MineShaftSkill(world, memory=mem)
+            rot = skill._preferred_shaft_orientations([0, 64, 0])
+        self.assertIsNotNone(rot)
+        self.assertNotEqual(rot[0], "north")
+
+    def test_find_cave_openings_accepts_water_ravine_when_entry_ledge_is_dry(self):
+        from skills.cave_explore import CaveExploreSkill
+
+        world = WorkflowMineWorld(bot_pos=(0.5, 64.0, 0.5))
+        # Carve an open cave/ravine at x=4..10, y=58..61, z=-2..3 with rock roof above y=62
+        # and shallow water pool along the bottom y=58 while dry stone ledge sits at (4, 59, 0).
+        for x in range(4, 11):
+            for y in range(58, 62):
+                for z in range(-2, 4):
+                    world.blocks[(x, y, z)] = {"name": "air", "diggable": False, "properties": {}}
+            for z in range(-2, 4):
+                world.blocks[(x, 62, z)] = {"name": "stone", "diggable": True, "properties": {}}
+                world.blocks[(x, 57, z)] = {"name": "stone", "diggable": True, "properties": {}}
+        world.blocks[(4, 58, 0)] = {"name": "stone", "diggable": True, "properties": {}}
+        world.blocks[(6, 58, 1)] = {"name": "water", "diggable": False, "properties": {"level": "0"}}
+        world.blocks[(7, 58, 1)] = {"name": "water", "diggable": False, "properties": {"level": "0"}}
+        openings = CaveExploreSkill(world, memory=Mock()).find_cave_openings(
+            origin=[0, 59, 0],
+            search_radius=12,
+            max_candidates=2,
+        )
+        self.assertTrue(openings)
+        self.assertGreaterEqual(openings[0]["report"].get("water_count", 0), 1)
+
+    def test_find_cave_openings_honors_max_reads_cap(self):
+        from skills.cave_explore import CaveExploreSkill
+
+        world = WorkflowMineWorld(bot_pos=(0.5, 64.0, 0.5))
+        read_calls = [0]
+        orig_get_block = world.get_block
+
+        def spy_get_block(x, y, z):
+            read_calls[0] += 1
+            return orig_get_block(x, y, z)
+
+        world.get_block = spy_get_block
+        openings = CaveExploreSkill(world, memory=Mock()).find_cave_openings(
+            origin=[0, 59, 0],
+            search_radius=24,
+            max_candidates=2,
+            max_reads=65,
+        )
+        self.assertEqual(openings, [])
+        self.assertLessEqual(read_calls[0], 65)
+
 
 if __name__ == "__main__":
     unittest.main()

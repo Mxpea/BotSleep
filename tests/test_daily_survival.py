@@ -628,6 +628,58 @@ class DailyGoalsTests(unittest.TestCase):
         planner = DailySurvivalGoals({"daily": {"food_reserve": float("nan"), "wood_reserve": -3, "fuel_reserve": 10000}})
         self.assertEqual(planner.targets, {"food_reserve": 8, "wood_reserve": 1, "fuel_reserve": 64, "maintenance_interval_seconds": 30})
 
+    def test_food_and_wood_reserves_deprioritized_when_well_fed_during_progression(self):
+        obs = observation({"stone_pickaxe": 1, "oak_log": 4}, food=20, health=20)
+        board = self.goals.build(obs)
+        food_row = next(r for r in board["tasks"] if r["id"] == "food_reserve")
+        wood_row = next(r for r in board["tasks"] if r["id"] == "wood_reserve")
+        self.assertEqual(food_row["priority"], 35)
+        self.assertEqual(wood_row["priority"], 30)
+        self.assertNotEqual(board["active_task_id"], "food_reserve")
+        obs["status"]["food"] = 12
+        hungry_board = self.goals.build(obs)
+        hungry_food = next(r for r in hungry_board["tasks"] if r["id"] == "food_reserve")
+        self.assertEqual(hungry_food["priority"], 95)
+
+    def test_held_furnace_does_not_hijack_active_task_when_well_fed(self):
+        obs = observation({"stone_pickaxe": 1, "stone_axe": 1, "stone_sword": 1, "furnace": 1}, food=20, health=20)
+        board = self.goals.build(obs, context={"autonomy_llm_mode": True})
+        furnace_row = next(r for r in board["tasks"] if r["id"] == "furnace")
+        self.assertEqual(furnace_row["priority"], 40)
+        self.assertNotEqual(board["active_task_id"], "furnace")
+
+    def test_smelt_loads_idle_second_furnace_before_waiting_on_burning_furnace(self):
+        obs = observation(
+            {"raw_iron": 12, "coal": 3},
+            [block("furnace", [2, 64, 0]), block("furnace", [3, 64, 0])],
+        )
+        obs["furnaces"] = [
+            verified([2, 64, 0], input={"name": "raw_iron", "count": 8}, output={}, burning=True),
+            verified([3, 64, 0], input={}, fuel={}, output={}, burning=False),
+        ]
+        ctx = {"smelting_jobs": [{"pos": [2, 64, 0], "dimension": "overworld", "expected_output": "iron_ingot"}]}
+        action = self.task(obs, "iron_tools", context=ctx)["next_action"]
+        self.assertEqual(action["name"], "smelt_start")
+        self.assertEqual(action["args"]["pos"], [3, 64, 0])
+
+    def test_smelt_defers_small_collect_while_actively_burning_and_collects_at_six_or_done(self):
+        ctx = {"smelting_jobs": [{"pos": [2, 64, 0], "dimension": "overworld", "expected_output": "iron_ingot"}]}
+        active = observation({"coal": 2}, [block("furnace", [2, 64, 0])])
+        active["furnaces"] = [
+            verified([2, 64, 0], input={"name": "raw_iron", "count": 6}, output={"name": "iron_ingot", "count": 2}, burning=True)
+        ]
+        wait_act = self.goals._smelt({"iron_ingot"}, active, active["counts"], "iron_tools", ctx)
+        self.assertEqual((wait_act["name"], wait_act["args"]["seconds"]), ("wait", 10))
+        batch_ready = copy.deepcopy(active)
+        batch_ready["furnaces"][0]["output"]["count"] = 6
+        collect_six = self.goals._smelt({"iron_ingot"}, batch_ready, batch_ready["counts"], "iron_tools", ctx)
+        self.assertEqual((collect_six["name"], collect_six["args"]["count"]), ("smelt_collect", 6))
+        done_obs = copy.deepcopy(active)
+        done_obs["furnaces"][0]["input"] = {"name": None, "count": 0}
+        done_obs["furnaces"][0]["burning"] = False
+        collect_done = self.goals._smelt({"iron_ingot"}, done_obs, done_obs["counts"], "iron_tools", ctx)
+        self.assertEqual((collect_done["name"], collect_done["args"]["count"]), ("smelt_collect", 2))
+
 
 if __name__ == "__main__":
     unittest.main()

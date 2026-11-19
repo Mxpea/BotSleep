@@ -241,6 +241,8 @@ class DailySurvivalGoals:
         dimension = observation["status"].get("dimension")
         origin = observation["status"]["pos"]
         hostiles = self.rules._hostiles(observation, origin)
+        wait_action = None
+        defer_collect = None
         for row in self._rows(observation.get("furnaces"))[:8]:
             if (not self._verified(row, dimension) or math.dist(row["pos"], origin) > 16
                     or self.rules._key(row["pos"]) in self.rules._blocked(context or {})
@@ -248,8 +250,14 @@ class DailySurvivalGoals:
                 continue
             output = row.get("output") or {}
             if output.get("name") in outputs and type(output.get("count")) is int and output["count"] > 0:
-                return self._action("smelt_collect", {"pos": row["pos"], "item": output["name"],
+                input_count = (row.get("input") or {}).get("count", 0)
+                still_active = bool(self._burning(row)) and type(input_count) is int and input_count > 0
+                collect_action = self._action("smelt_collect", {"pos": row["pos"], "item": output["name"],
                     "count": min(16, output["count"])}, "Collect a currently observed furnace output", goal)
+                if not still_active or output["count"] >= 6:
+                    return collect_action
+                if defer_collect is None:
+                    defer_collect = collect_action
         for row in self._safe_rows(observation, {"furnace"}, context=context):
             # Opening the furnace is a separate verified step. Never refill a
             # remembered/start-only job without inspecting its current slots.
@@ -262,7 +270,9 @@ class DailySurvivalGoals:
                 return self._action("inspect_container", {"pos": row["pos"]},
                                     "Reinspect a pending furnace job; the old start result is not output evidence", goal)
             if pending_job and checked is not None and ((checked.get("input") or {}).get("count", 0) or self._burning(checked)):
-                return self._action("wait", {"seconds": 5}, "The inspected furnace is still processing; reobserve later", goal)
+                if wait_action is None:
+                    wait_action = self._action("wait", {"seconds": 10}, "The inspected furnace is still processing; reobserve later", goal)
+                continue
             inputs = [item for item, output in COOKING.items() if output in outputs and counts.get(item, 0) > 0]
             fuel = next((item for item in ("coal", "charcoal") if counts.get(item, 0) > 0), None)
             if fuel is None:
@@ -277,7 +287,7 @@ class DailySurvivalGoals:
             count = min(16, counts[inputs[0]], math.floor(counts[fuel] * capacity))
             return self._action("smelt_start", {"pos": row["pos"], "input_item": inputs[0], "count": count,
                 "fuel_item": fuel, "fuel_count": math.ceil(count / capacity)}, "Start smelting; completion still requires verified output", goal)
-        return None
+        return wait_action or defer_collect
 
     def _food_action(self, observation, counts, context):
         stored = self._take_supplies(observation, counts, SAFE_FOOD, self.targets["food_reserve"], "food_reserve", context)
@@ -494,14 +504,26 @@ class DailySurvivalGoals:
         task("recover_drops", 100, context.get("death_count", 0) == 0, action=drops,
              reason="No currently visible safe drop; do not replay a route to the death location", waiting=True)
 
+        well_fed = (
+            fresh
+            and self.rules._number(status.get("food")) and status.get("food", 0) >= 16
+            and self.rules._number(status.get("health")) and status.get("health", 0) >= 16
+        )
+        has_iron_kit = (
+            fresh
+            and all(any(counts.get(tier + "_" + k, 0) for tier in ("iron", "diamond", "netherite")) for k in TOOL_KINDS)
+            and any(counts.get(item, 0) for item in ("bucket", "water_bucket", "lava_bucket"))
+        )
+        expedition_focus = bool(well_fed and not has_iron_kit)
+
         food = sum(counts.get(name, 0) for name in SAFE_FOOD)
-        task("food_reserve", 95, food >= self.targets["food_reserve"],
+        task("food_reserve", 35 if expedition_focus else 95, food >= self.targets["food_reserve"],
              missing=[{"food_items": max(0, self.targets["food_reserve"] - food)}],
              action=self._food_action(observation, counts, context), proof={"food_items": food},
              reason="No safe mature crop/passive animal or ready cooking input is currently available")
 
         wood = sum(counts.get(name, 0) for name in LOG_NAMES) + sum(counts.get(name, 0) for name in PLANK_NAMES) // 4
-        task("wood_reserve", 65, wood >= self.targets["wood_reserve"],
+        task("wood_reserve", 30 if (expedition_focus and wood >= 2) else 65, wood >= self.targets["wood_reserve"],
              missing=[{"log_equivalents": max(0, self.targets["wood_reserve"] - wood)}],
              action=self._gather(LOG_NAMES, observation, context, "wood_reserve"), proof={"log_equivalents": wood})
 
@@ -525,7 +547,9 @@ class DailySurvivalGoals:
                           else self._action(furnace_prerequisite.name, furnace_prerequisite.args,
                                             furnace_prerequisite.reason, "furnace")
                           if furnace_prerequisite.name not in {"wait", "goal_complete"} else None)
-        task("furnace", 84, bool(furnaces), missing=["deployed_furnace"] if not furnaces else [], action=furnace_action,
+        llm_autonomy = bool(context.get("autonomy_llm_mode") is True)
+        defer_held_furnace = bool(llm_autonomy and expedition_focus and counts.get("furnace", 0) >= 1)
+        task("furnace", 40 if defer_held_furnace else 84, bool(furnaces), missing=["deployed_furnace"] if not furnaces else [], action=furnace_action,
              proof={"positions": [row["pos"] for row in furnaces[:4]]}, reason="Need eight cobblestone or a verified placement candidate")
 
         fuel = counts.get("coal", 0) + counts.get("charcoal", 0)
@@ -710,7 +734,14 @@ class DailySurvivalGoals:
                                  "Reobserve food, tools and the base; maintenance is continuous", "maintain") if maintenance_ready else None,
              depends_on=sorted(required), reason="Daily prerequisites remain unmet", waiting=maintenance_ready)
         ready = sorted((row for row in tasks if row["status"] in {"ready", "running"}), key=lambda row: (-row["priority"], TASK_IDS.index(row["id"])))
-        active = ready[0]["id"] if ready else None
+        if expedition_focus and ready:
+            skip_focus = {"food_reserve", "wood_reserve", "fuel_reserve", "food_production"}
+            if defer_held_furnace:
+                skip_focus.add("furnace")
+            non_reserve = [row for row in ready if row["id"] not in skip_focus]
+            active = (non_reserve[0] if non_reserve else ready[0])["id"]
+        else:
+            active = ready[0]["id"] if ready else None
         candidates = [copy.deepcopy(row) for row in self._rows(memory.get("places"))
                       if row.get("dimension") == dimension and self._pos(row.get("pos")) is not None][:8]
         for row in candidates:

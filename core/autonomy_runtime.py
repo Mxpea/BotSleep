@@ -5,10 +5,12 @@ of game writes. Each child uses the ordinary harness journal and skill checks.
 """
 
 import copy
+import math
 from dataclasses import asdict
+from pathlib import Path
 
 from agent.brain import LLMError
-from agent.survival_planner import Decision
+from agent.survival_planner import Decision, LOG_NAMES, PLANK_NAMES
 from core.model_gate import ModelGateError
 from skills import SkillResult
 
@@ -101,10 +103,300 @@ class AutonomyRuntime:
             "accepted": True, "completed": False, "executed": False,
             "task_id": self._task_snapshot().get("task_id")})
 
+    def _remote_log_waypoint(self, observation, blocked=None):
+        status = observation.get("status") if isinstance(observation, dict) else {}
+        origin = status.get("pos") if isinstance(status, dict) else None
+        if not isinstance(origin, (list, tuple)) or len(origin) != 3:
+            return None
+        blocked_keys = set(blocked) if isinstance(blocked, dict) else set()
+        blocked_xz = set()
+        for bkey in blocked_keys:
+            parts = str(bkey).split(",")
+            if len(parts) == 3:
+                try:
+                    blocked_xz.add((int(parts[0]), int(parts[2])))
+                except ValueError:
+                    pass
+        blocks = observation.get("blocks") or []
+        for row in blocks:
+            if not isinstance(row, dict) or row.get("name") not in LOG_NAMES:
+                continue
+            rpos = row.get("pos")
+            if not isinstance(rpos, (list, tuple)) or len(rpos) != 3:
+                continue
+            if abs(float(rpos[1]) - float(origin[1])) > 3.1:
+                continue
+            if (math.floor(rpos[0]), math.floor(rpos[2])) in blocked_xz:
+                continue
+            return None
+        try:
+            rows = self.client.get_blocks(radius=128, types=sorted(LOG_NAMES), limit=24)
+        except Exception:
+            return None
+        if not isinstance(rows, list) or not rows:
+            return None
+        candidates = [
+            r.get("pos")
+            for r in rows
+            if isinstance(r, dict)
+            and isinstance(r.get("pos"), list)
+            and len(r["pos"]) == 3
+            and (math.floor(r["pos"][0]), math.floor(r["pos"][2])) not in blocked_xz
+        ]
+        if not candidates:
+            return None
+        best = min(
+            candidates,
+            key=lambda p: (0 if abs(float(p[1]) - float(origin[1])) <= 4.0 else 1, math.dist(origin, p)),
+        )
+        dist = math.dist(origin, best)
+        if dist <= 24.0:
+            if abs(float(best[0]) - float(origin[0])) + abs(float(best[2]) - float(origin[2])) <= 4.0:
+                return None
+            return [float(best[0]), float(best[1]), float(best[2])]
+        scale = 24.0 / dist
+        return [
+            round(float(origin[0]) + (float(best[0]) - float(origin[0])) * scale, 1),
+            round(float(origin[1]) + (float(best[1]) - float(origin[1])) * scale, 1),
+            round(float(origin[2]) + (float(best[2]) - float(origin[2])) * scale, 1),
+        ]
+
+    _MINING_CLUTTER_KEEP = (
+        ("granite", 0), ("diorite", 0), ("andesite", 0), ("cobbled_deepslate", 0),
+        ("tuff", 0), ("gravel", 8), ("flint", 4), ("leaf_litter", 0),
+        ("red_mushroom", 0), ("brown_mushroom", 0), ("rotten_flesh", 0),
+        ("raw_copper", 0), ("sand", 0), ("dirt", 0), ("cobblestone", 64),
+    )
+
+    def _discard_mining_clutter(self, status_pos=None):
+        drop_fn = getattr(self.client, "drop", None)
+        if not callable(drop_fn):
+            return
+        try:
+            inv_raw = self.client.inventory()
+            items = (inv_raw.get("result") if isinstance(inv_raw, dict) and isinstance(inv_raw.get("result"), dict) else inv_raw).get("items", [])
+        except Exception:
+            return
+        counts = {}
+        for row in items:
+            if isinstance(row, dict) and isinstance(row.get("name"), str) and isinstance(row.get("count"), int):
+                counts[row["name"]] = counts.get(row["name"], 0) + int(row["count"])
+        from core.mining_targets import estimate_empty_main_slots
+        if len(items) < 22 and estimate_empty_main_slots(items) > 12:
+            return
+        # Turn slightly away from digging face if look_at is available so tossed clutter lands clear.
+        look_fn = getattr(self.client, "look_at", None)
+        if callable(look_fn) and isinstance(status_pos, (list, tuple)) and len(status_pos) >= 3:
+            try:
+                look_fn(float(status_pos[0]) - 3.0, float(status_pos[1]) + 1.5, float(status_pos[2]) - 3.0)
+            except Exception:
+                pass
+        for name, keep in self._MINING_CLUTTER_KEEP:
+            if name == "dirt" and counts.get("cobblestone", 0) < 32:
+                continue
+            excess = int(counts.get(name, 0)) - int(keep)
+            if excess > 0:
+                try:
+                    drop_fn(name, excess)
+                except Exception:
+                    break
+
+    def _run_task_deep_mine(self, decision, observation):
+        from core.memory import MemoryEngine
+        from skills.mining import MineShaftSkill
+
+        spec = (self.task_controller.state().get("pending_deep_mine") if self.task_controller else None) or {}
+        resource = str(spec.get("resource") or "raw_iron")
+        count = max(1, min(32, int(spec.get("count", 4))))
+        if resource == "diamond":
+            targets = {"diamond": {"count": count, "min_tool": "iron_pickaxe"}}
+        elif resource == "coal":
+            targets = {"coal": {"count": count, "min_tool": "wooden_pickaxe"}}
+        else:
+            targets = {
+                "iron": {"count": max(count, 24), "min_tool": "stone_pickaxe"},
+            }
+        # Never abort a resource expedition solely because the player lacks torches or scaffold blocks yet.
+        deep_home_thresholds = {
+            "min_torches": 0,
+            "min_blocks": 0,
+            "min_empty_slots": 0,
+        }
+        status_pos = (observation.get("status") or {}).get("pos") if isinstance(observation, dict) else None
+        self._discard_mining_clutter(status_pos=status_pos)
+
+        remaining = 1200.0 if resource == "diamond" else 780.0 if resource == "raw_iron" else 540.0
+        if hasattr(self, "_remaining_budget"):
+            try:
+                remaining = max(60.0, float(self._remaining_budget().get("remaining_seconds", remaining)) - 30.0)
+            except Exception:
+                pass
+        total_t = min(1140.0 if resource == "diamond" else 750.0 if resource == "raw_iron" else 540.0, max(90.0, remaining))
+        band_t = min(960.0 if resource == "diamond" else 640.0 if resource == "raw_iron" else 460.0, max(75.0, total_t * 0.85))
+
+        state_root = Path(str(self.settings.get("state_dir") or "runtime/survival"))
+        memory = MemoryEngine(str(state_root / "deep_mine_memory"))
+        miner = MineShaftSkill(self.client, memory=memory)
+        if resource == "cobblestone":
+            pos = ((observation.get("status") or {}).get("pos") if isinstance(observation, dict) else None) or [0, 64, 0]
+            start_surface = [int(math.floor(float(pos[0]))), int(math.floor(float(pos[1]))), int(math.floor(float(pos[2])))]
+            # Reach real stone beneath topsoil hills while staying shallow enough for wooden pickaxes and quick return.
+            target_y = max(36, start_surface[1] - 11)
+            counts_fn = getattr(self.client, "get_inventory_counts", None)
+            before_c = dict((counts_fn() if callable(counts_fn) else getattr(self.client, "counts", None)) or {})
+            res = miner.build_mine_shaft(
+                origin=None,
+                radius=24,
+                branch_length=4,
+                place_workstation=False,
+                return_to_surface=True,
+                target_y=target_y,
+                mining_mode="single",
+                rib_length=3,
+                max_trunk_steps=6,
+                home_thresholds=deep_home_thresholds,
+                cancel_event=getattr(self, "_cancel", None),
+                timeout_seconds=210.0,
+                allow_damage=True,
+            )
+            data = dict(res.data or {}) if isinstance(res.data, dict) else {}
+            data.setdefault("executed", True)
+            if data.get("action_state") == "unknown" or res.error_code == "action_unconfirmed":
+                return SkillResult(False, str(res.message), data, res.error_code)
+            retreat_trail = ((data.get("mining_progress") or {}).get("deep_trail")) or []
+            surface_anchor = data.get("surface_entry") or data.get("origin") or start_surface
+            surface_chk = miner._ensure_returned_to_surface(
+                surface_anchor,
+                retreat_trail=retreat_trail,
+                cancel_event=getattr(self, "_cancel", None),
+            )
+            data["surface_return"] = surface_chk
+            after_c = dict((counts_fn() if callable(counts_fn) else getattr(self.client, "counts", None)) or {})
+            gained_cobble = max(0, int(after_c.get("cobblestone", 0)) - int(before_c.get("cobblestone", 0)))
+            if gained_cobble > 0:
+                data.setdefault("gained", {})["cobblestone"] = gained_cobble
+            ok = bool(gained_cobble > 0 and surface_chk.get("on_surface", True))
+            err = res.error_code if not ok else None
+            if not ok and err is None and gained_cobble <= 0:
+                err = "no_cobblestone_found"
+            return SkillResult(ok, str(res.message), data, err)
+
+        res = miner.mine_targets_from_surface(
+            targets=targets,
+            cave_policy={"explore_timeout_seconds": 220.0, "allow_tall_cave_subgraph": True},
+            home_thresholds=deep_home_thresholds,
+            prefer_caves_first=(resource in {"raw_iron", "coal"}),
+            cave_search_radius=40,
+            max_caves=3,
+            place_workstation=False,
+            rib_length=12 if resource in {"diamond", "raw_iron"} else 6,
+            rib_spacing=3 if resource in {"diamond", "raw_iron"} else 4,
+            max_trunk_steps=36 if resource == "diamond" else 28 if resource == "raw_iron" else 10,
+            band_timeout_seconds=band_t,
+            total_timeout_seconds=total_t,
+            cancel_event=getattr(self, "_cancel", None),
+            allow_damage=True,
+        )
+        data = dict(res.data or {}) if isinstance(res.data, dict) else {}
+        data.setdefault("executed", True)
+        return SkillResult(bool(res.success), str(res.message), data, res.error_code)
+
+    def _run_task_scout(self, decision, observation):
+        from core.memory import MemoryEngine
+        from skills.scouting import SurfaceScoutSkill
+
+        state_root = Path(str(self.settings.get("state_dir") or "runtime/survival"))
+        memory = MemoryEngine(str(state_root / "scout_memory"))
+        counts = (observation.get("counts") or {}) if isinstance(observation, dict) else {}
+        prefer_wood = sum(counts.get(n, 0) for n in (*LOG_NAMES, *PLANK_NAMES)) == 0
+        raw_r = decision.args.get("scan_radius", 48) if isinstance(decision.args, dict) else 48
+        scan_r = max(48, min(64, int(raw_r))) if isinstance(raw_r, int) and raw_r >= 32 else 48
+        attempt = int(self.context.get("scout_attempts", 0))
+        self.context["scout_attempts"] = attempt + 1
+        res = SurfaceScoutSkill(self.client, memory=memory).execute(
+            scan_radius=scan_r,
+            hop_distance=55.0,
+            max_hops=3,
+            prefer_wood=prefer_wood,
+            attempt=attempt,
+            cancel_event=getattr(self, "_cancel", None),
+        )
+        data = dict(res.data or {}) if isinstance(res.data, dict) else {}
+        if res.success:
+            self.context["last_scout_report"] = copy.deepcopy(data)
+        return SkillResult(bool(res.success), str(res.message), data, res.error_code)
+
+    def _run_task_equip_loadout(self, decision, observation):
+        from skills.equipment import EquipmentSkill
+
+        prefer_offhand = (decision.args.get("prefer_offhand", "shield") if isinstance(decision.args, dict) else "shield")
+        res = EquipmentSkill(self.client).execute(
+            "auto_equip_best",
+            prefer_offhand=prefer_offhand,
+            cancel_event=getattr(self, "_cancel", None),
+        )
+        data = dict(res.data or {}) if isinstance(res.data, dict) else {}
+        return SkillResult(bool(res.success), str(res.message), data, res.error_code)
+
+    def _run_task_nether_portal(self, decision, observation):
+        from skills.portal_speedrun import NetherPortalSpeedrunSkill
+
+        skill = NetherPortalSpeedrunSkill(self.client)
+        res = skill.build_portal(
+            timeout_seconds=210.0,
+            allow_damage=True,
+            cancel_event=getattr(self, "_cancel", None),
+        )
+        data = dict(res.data or {}) if isinstance(res.data, dict) else {}
+        if not res.success and res.error_code == "no_portal_site_found":
+            # Scan wider radius (up to 64 blocks) for lava pools, approach once, and retry cleanly.
+            find_fn = getattr(self.client, "find_blocks", None) or getattr(self.client, "get_blocks", None)
+            origin = ((observation.get("status") or {}).get("pos") if isinstance(observation, dict) else None)
+            if callable(find_fn) and isinstance(origin, (list, tuple)) and len(origin) == 3:
+                try:
+                    rows = find_fn(types=["lava"], radius=64, limit=32) or []
+                    pts = [
+                        row.get("pos")
+                        for row in rows
+                        if isinstance(row, dict) and isinstance(row.get("pos"), (list, tuple)) and len(row.get("pos")) == 3
+                    ]
+                    if pts:
+                        nearest = min(pts, key=lambda p: math.dist(origin, p))
+                        if math.dist(origin, nearest) > 12.0:
+                            from skills.survival import SurvivalSkills
+                            mv = SurvivalSkills(self.client).execute(
+                                "move_to",
+                                {"pos": [int(nearest[0]), int(nearest[1]) + 1, int(nearest[2])], "range": 5},
+                                cancel_event=getattr(self, "_cancel", None),
+                            )
+                            if (isinstance(mv.data, dict) and mv.data.get("action_state") == "unknown") or mv.error_code == "action_unconfirmed":
+                                return mv
+                            res = skill.build_portal(
+                                timeout_seconds=180.0,
+                                allow_damage=True,
+                                cancel_event=getattr(self, "_cancel", None),
+                            )
+                            data = dict(res.data or {}) if isinstance(res.data, dict) else {}
+                except Exception:
+                    pass
+        data["portal_skill"] = True
+        data.setdefault("executed", bool(res.success or data.get("writes", 0) > 0))
+        if res.success:
+            data.setdefault("portal_active", True)
+        return SkillResult(bool(res.success), str(res.message), data, res.error_code)
+
     def _task_next(self, observation):
         if not self._task_active():
             return None
-        decision = self.task_controller.next_action(observation, self.context)
+        task_ctx = dict(self.context)
+        task_ctx["deep_mining_enabled"] = not bool(self.settings.get("disable_deep_mining", False))
+        remote_log = self._remote_log_waypoint(
+            observation,
+            blocked=self.task_controller._data.get("blocked") if self.task_controller else None,
+        )
+        if remote_log is not None:
+            task_ctx["remote_log_target"] = remote_log
+        decision = self.task_controller.next_action(observation, task_ctx)
         if decision is None:
             status = self._task_snapshot().get("status")
             event = {"completed": "TASK_COMPLETED", "needs_ai": "TASK_NEEDS_AI",
@@ -163,6 +455,8 @@ class AutonomyRuntime:
             return
         data = {"task_execution": snapshot, "completed": status == "completed",
                 "executed": bool(snapshot.get("steps", 0)), "partial": status != "completed"}
+        if snapshot.get("task") == "scout" and isinstance(self.context.get("last_scout_report"), dict):
+            data["scout_report"] = copy.deepcopy(self.context["last_scout_report"])
         code = None if status == "completed" else "action_unconfirmed" if status == "unknown" else "task_paused" if paused else "task_needs_ai"
         if status == "unknown":
             data.update(action_state="unknown", cleanup_skipped="task_unknown")

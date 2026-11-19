@@ -264,7 +264,7 @@ class SurvivalTaskPlannerTests(unittest.TestCase):
             {"task": "craft", "item": "stick", "resource": "logs"},
             {"task": "smelt", "item": "iron_ingot", "resource": "raw_iron"},
             {"task": "food", "item": "bread"}, {"task": "maintenance", "resource": "coal"},
-            {"task": "gather", "resource": "diamond"}, {"task": "craft", "item": "../secret"},
+            {"task": "gather", "resource": "obsidian"}, {"task": "craft", "item": "../secret"},
             {"task": "farm", "pos": [1, 64, 1]}, {"task": "bed", "actions": [{"name": "teleport"}]},
             {"task": "food", "count": True}, {"task": "food", "count": 0}, {"task": "food", "count": 65},
             {"task": "food", "radius": 3}, {"task": "food", "radius": 65}, {"task": "food", "radius": 4.5}]
@@ -393,6 +393,60 @@ class SurvivalTaskPlannerTests(unittest.TestCase):
         self.assertEqual(feedback[0]["tool_call_id"], "call_1")
         self.assertEqual(json.loads(feedback[0]["content"])["result"], asdict(result))
         self.assertNotIn("last_result", current["context"])
+
+    def test_goal_mode_filters_uncallable_atomic_action_hints_and_preserves_scout_report(self):
+        planner, brain = self.planner(response("run_survival_task", {"task": "scout"}))
+        obs = observation()
+        ctx = {
+            "last_scout_report": {"aborted_empty": True, "estimated_reach": 195.0},
+            "action_hints": [
+                {"name": "place_item", "args": {"item": "furnace", "pos": [1, 64, 1]}, "goal": "furnace"},
+                {"name": "eat_food", "args": {"item": "bread"}, "goal": "food"},
+            ],
+        }
+        planner.choose(obs, ctx)
+        sent = json.loads(brain.requests[-1]["messages"][-1]["content"])["context"]
+        self.assertEqual(sent["last_scout_report"]["estimated_reach"], 195.0)
+        self.assertEqual([h["name"] for h in sent["action_hints"]], ["eat_food"])
+
+    def test_scout_removed_from_goal_catalog_after_scout_completes_once(self):
+        planner, brain = self.planner(
+            response("run_survival_task", {"task": "scout"}),
+            response("run_survival_task", {"task": "gather", "resource": "raw_iron", "count": 8}),
+        )
+        obs = observation()
+        d1 = planner.choose(obs, {})
+        planner.observe_result(d1, SkillResult(True, "Scout completed", {"scout_report": {"estimated_reach": 195.0}}), obs)
+        planner.choose(obs, {"last_scout_report": {"estimated_reach": 195.0}})
+        second_tools = {t["function"]["name"]: t for t in brain.requests[-1]["tools"]}
+        self.assertNotIn("scout", second_tools["run_survival_task"]["function"]["parameters"]["properties"]["task"]["enum"])
+
+    def test_duplicate_furnace_craft_rejected_when_furnace_already_held(self):
+        planner, brain = self.planner(
+            response("run_survival_task", {"task": "craft", "item": "furnace", "count": 1}),
+            response("run_survival_task", {"task": "gather", "resource": "raw_iron", "count": 8}),
+        )
+        planner.max_repair_attempts = 1
+        decision = planner.choose(observation({"furnace": 1, "stone_pickaxe": 1, "cobblestone": 16}), {})
+        self.assertEqual((decision.name, decision.args["resource"]), ("run_survival_task", "raw_iron"))
+        self.assertEqual(len(brain.requests), 2)
+
+    def test_successful_clear_foliage_resets_repeated_failure_for_retry(self):
+        planner, _ = self.planner(
+            response("run_survival_task", {"task": "craft", "item": "stone_pickaxe", "count": 1}),
+            response("clear_foliage", {"pos": [1, 65, 0], "expected_name": "oak_leaves"}),
+            response("run_survival_task", {"task": "craft", "item": "stone_pickaxe", "count": 1}),
+        )
+        obs = observation({"cobblestone": 8, "stick": 2})
+        obs["blocks"] = [{"name": "oak_leaves", "pos": [1, 65, 0], "can_see": True}]
+        d1 = planner.choose(obs, {})
+        planner.observe_result(d1, SkillResult(False, "Placement blocked", {"task_execution": {"task_id": "t1", "task": "craft", "status": "needs_ai"}}, "task_needs_ai"), obs)
+        d2 = planner.choose(obs, {"task_execution": {"task_id": "t1", "task": "craft", "status": "needs_ai"}})
+        self.assertEqual(d2.name, "clear_foliage")
+        obs2 = observation({"cobblestone": 8, "stick": 2})
+        planner.observe_result(d2, SkillResult(True, "Cleared", {"executed": True}), obs2)
+        d3 = planner.choose(obs2, {})
+        self.assertEqual((d3.name, d3.args["item"]), ("run_survival_task", "stone_pickaxe"))
 
 
 if __name__ == "__main__":

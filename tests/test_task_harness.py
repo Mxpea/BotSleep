@@ -15,6 +15,7 @@ from core.client import APIError
 from core.config import DEFAULTS
 from core.block_geometry import trace_block_visibility
 from core.survival_harness import SurvivalHarness
+from skills import SkillResult
 from test_daily_runtime import RuntimeDailyWorld
 from test_daily_skills import envelope
 from test_llm_planner import Brain, response
@@ -726,6 +727,150 @@ class TaskHarnessTests(unittest.TestCase):
         self.assertEqual(len(brain.requests), 1)
         self.assertEqual(len([call for call in self.world.calls if call[0] == "dig"]), 1)
         self.assertFalse([call for call in self.world.calls if call[0] == "stop"])
+
+    def test_deep_mine_dispatches_mineshaft_skill_and_completes_diamond_goal(self):
+        self.world.counts["iron_pickaxe"] = 2
+        seen_targets = []
+
+        def fake_mine(miner_self, *, targets=None, **kwargs):
+            seen_targets.append(copy.deepcopy(targets))
+            self.world.counts["diamond"] = self.world.counts.get("diamond", 0) + 2
+            return SkillResult(True, "Mined 2 diamond", {
+                "executed": True, "gained": {"diamond": 2}, "surface_returned": True})
+
+        harness, brain = self.harness(response("run_survival_task", {
+            "task": "gather", "resource": "diamond", "count": 2}, "diamond_goal"))
+        with patch("skills.mining.MineShaftSkill.mine_targets_from_surface", new=fake_mine):
+            self.cycle(harness)
+            self.until(harness, lambda: harness.snapshot()["task_execution"]["status"] == "completed")
+        self.assertEqual(len(seen_targets), 1)
+        self.assertIn("diamond", seen_targets[0])
+        feedback = self.feedback(harness.planner)
+        self.assertEqual(len(feedback), 1)
+        self.assertTrue(json.loads(feedback[0]["content"])["result"]["success"])
+        self.assertEqual(len(brain.requests), 1)
+
+    def test_deep_mine_unknown_action_state_stops_harness_without_retry(self):
+        self.world.counts["iron_pickaxe"] = 2
+        calls = []
+
+        def fake_unknown(miner_self, *, targets=None, **kwargs):
+            calls.append(copy.deepcopy(targets))
+            return SkillResult(False, "Connection dropped mid-dig", {
+                "executed": True, "action_state": "unknown"}, "action_unconfirmed")
+
+        harness, _ = self.harness(response("run_survival_task", {
+            "task": "gather", "resource": "diamond", "count": 1}, "diamond_unknown"))
+        with patch("skills.mining.MineShaftSkill.mine_targets_from_surface", new=fake_unknown):
+            self.cycle(harness)
+            self.until(harness, lambda: harness.snapshot()["task_execution"]["status"] == "unknown")
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(harness.paused)
+        self.assertIsNotNone(harness.journal.state.get("pending"))
+
+    def test_remote_log_waypoint_steers_toward_distant_tree(self):
+        harness, _ = self.harness(response("wait", {"seconds": 1}))
+        obs = {"status": {"pos": [0.5, 64.0, 0.5]}, "blocks": []}
+        with patch.object(harness.client, "get_blocks", return_value=[{"name": "oak_log", "pos": [50, 64, 0]}]):
+            wp = harness._remote_log_waypoint(obs)
+        self.assertIsNotNone(wp)
+        self.assertGreater(wp[0], 20.0)
+
+    def test_discard_mining_clutter_drops_excess_junk_when_crowded(self):
+        harness, _ = self.harness(response("wait", {"seconds": 1}))
+        dropped = []
+        harness.client.drop = lambda item, count=None: dropped.append((item, count))
+        harness.client.counts = {"cobblestone": 640, "granite": 324}
+        harness.client.inventory = lambda timeout_seconds=None: {
+            "ok": True,
+            "result": {
+                "items": [{"name": "cobblestone", "count": 64, "slot": i} for i in range(10)]
+                + [{"name": "granite", "count": 18, "slot": 10 + i} for i in range(18)]
+            },
+        }
+        harness._discard_mining_clutter(status_pos=[0.5, 64.0, 0.5])
+        self.assertIn(("granite", 324), dropped)
+        self.assertIn(("cobblestone", 576), dropped)
+
+    def test_scout_task_routes_to_surface_scout_and_reports_findings_to_llm(self):
+        def fake_scout(scout_self, **kwargs):
+            return SkillResult(True, "Scout found village", {
+                "executed": True,
+                "estimated_reach": 112.0,
+                "early_stop_reason": "structure_or_village_found",
+                "aborted_empty": False,
+                "found_structures": [{"name": "chest", "pos": [60, 64, 0]}],
+            })
+
+        harness, brain = self.harness(response("run_survival_task", {"task": "scout"}, "scout_goal"))
+        with patch("skills.scouting.SurfaceScoutSkill.execute", new=fake_scout):
+            self.cycle(harness)
+            self.until(harness, lambda: harness.snapshot()["task_execution"]["status"] == "completed")
+        feedback = self.feedback(harness.planner)
+        self.assertEqual(len(feedback), 1)
+        payload = json.loads(feedback[0]["content"])
+        self.assertTrue(payload["result"]["success"])
+        self.assertEqual(payload["result"]["data"]["scout_report"]["found_structures"][0]["name"], "chest")
+        self.assertEqual(len(brain.requests), 1)
+
+    def test_nether_portal_task_routes_to_speedrun_skill_with_lava_search_and_completes(self):
+        self.world.counts = {"water_bucket": 1, "flint_and_steel": 1, "cobblestone": 16, "iron_pickaxe": 1}
+        calls = []
+
+        def fake_build_portal(portal_self, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return SkillResult(False, "No pool within 36 blocks", {"executed": False}, "no_portal_site_found")
+            return SkillResult(True, "Portal ignited", {"executed": True, "portal_active": True, "structure_verified": True})
+
+        harness, brain = self.harness(response("run_survival_task", {"task": "nether_portal"}, "portal_goal"))
+        with patch("skills.portal_speedrun.NetherPortalSpeedrunSkill.build_portal", new=fake_build_portal), \
+             patch.object(harness.client, "find_blocks", return_value=[{"name": "lava", "pos": [25, 63, 0]}]), \
+             patch("skills.survival.SurvivalSkills.execute", return_value=SkillResult(True, "Moved", {"executed": True})):
+            self.cycle(harness)
+            self.until(harness, lambda: harness.snapshot()["task_execution"]["status"] == "completed")
+        self.assertEqual(len(calls), 2)
+        feedback = self.feedback(harness.planner)
+        payload = json.loads(feedback[0]["content"])
+        self.assertTrue(payload["result"]["success"])
+        self.assertEqual(harness.snapshot()["task_execution"]["progress"]["current"], 1)
+        self.assertEqual(len(brain.requests), 1)
+
+    def test_cobblestone_deep_mine_passes_origin_none_to_auto_select_clean_site(self):
+        self.world.counts = {"wooden_pickaxe": 1}
+        calls = []
+
+        def fake_build(mine_self, **kwargs):
+            calls.append(kwargs)
+            self.world.counts["cobblestone"] = 12
+            return SkillResult(True, "Mined cobblestone", {"executed": True, "surface_entry": [4, 64, 0]})
+
+        harness, brain = self.harness(response("run_survival_task", {"task": "gather", "resource": "cobblestone", "count": 8}, "cobble"))
+        with patch("skills.mining.MineShaftSkill.build_mine_shaft", new=fake_build), \
+             patch("skills.mining.MineShaftSkill._ensure_returned_to_surface", return_value={"on_surface": True, "pos": [4, 64, 0], "escaped": False}):
+            self.cycle(harness)
+            self.until(harness, lambda: harness.snapshot()["task_execution"]["status"] == "completed")
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(calls[0]["origin"])
+        self.assertEqual(calls[0]["radius"], 24)
+        self.assertEqual(len(brain.requests), 1)
+
+    def test_diamond_deep_mine_skips_surface_caves_and_keeps_deep_subgraph(self):
+        self.world.counts = {"iron_pickaxe": 2}
+        calls = []
+
+        def fake_mine(mine_self, **kwargs):
+            calls.append(kwargs)
+            self.world.counts["diamond"] = 3
+            return SkillResult(True, "Mined diamond", {"executed": True, "stop_reason": "target_reached"})
+
+        harness, _ = self.harness(response("run_survival_task", {"task": "gather", "resource": "diamond", "count": 3}, "diamond"))
+        with patch("skills.mining.MineShaftSkill.mine_targets_from_surface", new=fake_mine):
+            self.cycle(harness)
+            self.until(harness, lambda: harness.snapshot()["task_execution"]["status"] == "completed")
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(calls[0]["prefer_caves_first"])
+        self.assertTrue(calls[0]["cave_policy"]["allow_tall_cave_subgraph"])
 
 
 if __name__=="__main__":

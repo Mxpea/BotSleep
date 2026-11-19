@@ -1,6 +1,6 @@
 # BotSleep 架构与实现状态
 
-更新：2026-11-17。本页描述 main 与 develop-tianya/shelter-workflow 合并后的运行路径，包含自主目标、战斗与本地恢复，以及结构工作流、3D 世界记忆和独立分层采矿。模型绑定与独立能力分开列出；验证结果见 [TESTING.md](TESTING.md)，不以历史实服记录代替本次合并验收。
+更新：2026-11-19。本页描述整合 `main` 与 `develop-tianya/ai-iron-diamond-loop` 后的运行路径，包含自主目标、战斗、浅水/树冠本地恢复、洞穴优先采铁与批炼、200 格前向侦察与装备管理，以及结构工作流、3D 世界记忆和独立分层采矿。模型绑定与独立能力分开列出；验证结果见 [TESTING.md](TESTING.md)，交接边界与进度见 [HANDOFF.md](../HANDOFF.md)。
 
 ## 1. 当前入口与运行模式
 
@@ -60,7 +60,7 @@ flowchart TD
 | `skills/world_navigator.py`、`skills/ore_harvester.py`、`skills/cave_explore.py` | 统一 3D 导航/微掘/疾跑合并/4 级有界撤退执行器、矿脉踩捡收割器与可持久化多分支洞穴探索（未绑定模型目录） |
 | `core/structure_spec.py` | 标准结构蓝图（庇护所/矿井坐标变换、安全选址与结构验收）与挖掘/危险/可替代方块常量 |
 | `skills/exploration.py` | 可开关后台雷达，约每秒读取状态，默认位移 6 格后扫描；不是寻路或导航执行器 |
-| `skills/daily_survival.py` | 日常生存技能库（作物、狩猎、铁矿、装备、熔炼、储物、床门、5x5 庇护所） |
+| `skills/daily_survival.py`、`skills/equipment.py`、`skills/scouting.py` | 日常生存技能库（作物、狩猎、铁矿、熔炼、储物、床门、5x5 庇护所）、装备与副手穿戴（`EquipmentSkill`）及 200 格前向航点侦察（`SurfaceScoutSkill`） |
 | `skills/combat.py` | `fight_hostile` 短步近战/远程/撤退；按交战预算复查伤害与击杀，安全解除本技能持有的盾姿态 |
 | `skills/buckets.py` | `collect_liquid` 与受限 `hunt_with_lava`；核验源方块、桶转移、源回收和实际库存收益 |
 | `core/survival_playbook.py` | 按 `survival.intent` 生成 survival/speedrun 阶段建议、前置、已绑定动作及未实现缺口 |
@@ -73,9 +73,9 @@ flowchart TD
 | `core/model_worker.py`、`core/model_gate.py` | 慢模型异步等待；同服务/凭据作用域的本机线程与进程门禁；未知请求持久化锁定 |
 | `core/survival_state.py` | 有界观察、跨进程文件锁与原子检查点，按 API/账号/world_id 隔离并提供单实例 `instance_lock()`；pending 不自动重放 |
 | `scripts/botctl.py` | 离线只读运维工具，检查生存实例锁、`pending` 意图及 `ModelRequestGate` 状态（`status` / `check-ready-to-replace`） |
-| `agent/daily_survival.py` | 根据当前证据生成日常任务板、依赖、缺口和建议；competition 中仅作生存辅助，不是计分来源 |
-| `core/daily_observation.py`、`core/daily_policy.py` | 日常证据采集、安全情境和模型放行条件；未知资源不当成可执行目标 |
-| `skills/survival.py`、`skills/daily_survival.py` 等 | 采集、制作、移动、撤退、农业、熔炼、住所、容器等执行及后验验证 |
+| `agent/daily_survival.py` | 根据当前证据生成日常任务板、依赖、缺口、多炉批炼动作及建议；competition 中仅作生存辅助，不是计分来源 |
+| `core/daily_observation.py`、`core/daily_policy.py` | 日常证据采集、安全情境、树冠/浅水触发（`canopy_escape` / `water_escape`）与模型放行条件；未知资源不当成可执行目标 |
+| `skills/survival.py`、`skills/daily_survival.py` 等 | 采集、制作、移动、撤退、树冠/浅水脱离（含 `water_escape`）、农业、熔炼、住所、容器等执行及后验验证 |
 | `core/survival_memory.py` | 有界 SQLite 事件、地点和失败策略记忆；召回候选仍须重新观察 |
 | `debug/` | 白名单聊天调试、脱敏日志、本机只读监控；不是人工比赛控制方案 |
 | `integrations/ninjabrain/` | 独立末影之眼采样和官方计算核心；未绑定 starter/daily 模型目录 |

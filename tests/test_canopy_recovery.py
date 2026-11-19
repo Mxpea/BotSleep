@@ -353,6 +353,15 @@ class ObservedClearingTests(unittest.TestCase):
         self.assertEqual([row[0] for row in world.writes()], ["dig", "move_to"])
         self.assertTrue(all(result.data["terrain_search"]["block_reads"] <= 256 for result in (first, second)))
 
+    def test_healthy_tall_tree_allows_verified_three_block_drop_onto_solid_ground(self):
+        world = terrain([(0, 74, 0, "oak_leaves"), (1, 71, 0, "dirt")])
+        world.status["health"] = 20
+        result = SurvivalSkills(world).execute("canopy_escape", {})
+        self.assertTrue(result.success, result)
+        self.assertEqual(result.data["target"], [1.5, 71, 0.5])
+        self.assertTrue(result.data["retreat_complete"])
+        self.assertEqual(result.data["evacuation_stage"], "ground")
+
 
 if __name__ == "__main__":
     unittest.main()
