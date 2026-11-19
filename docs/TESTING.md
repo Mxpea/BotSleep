@@ -1,6 +1,45 @@
 # 配置、客户端、生存、赛事与监控验证
 
-最近复核：2026-11-18（Asia/Shanghai），`develop-tianya/ai-iron-diamond-loop`（已提交节点 `db6dbb1`、`28417cf`、`01f22a4`、`8c35c51`、`4eee47e` 及本次文档同步）。
+最近复核：2026-11-19（Asia/Shanghai），`develop-tianya/ai-iron-diamond-loop`（已提交节点 `aedae0b`、`92afc02`、`6093ad9` 及本次文档同步）。
+
+## 9 Bot 并行多地形实服压测与洞穴优先回归（2026-11-19）
+
+本轮围绕“矿洞/含水峡谷优先 + 洞内冶炼、24～32+ 粗铁批量采炼、石器耐久保护、饱食降级抢占、跨进程串行模型门禁、多 Bot 只读超时/扫描止冻”完成实现，并于同一 Peaceful 世界开展 **9 个独立进程并行实测**：
+
+- **实现与止冻修复摘要（`aedae0b`、`92afc02`、`6093ad9`）**：
+  - **矿洞/含水峡谷优先与洞内营地**：`skills/cave_explore.py`、`skills/mining.py` 与 `core/autonomy_runtime.py` 对 `raw_iron`/`coal`/`diamond` 启用洞穴优先阶段（`explore_timeout_seconds: 220.0`、`cave_search_radius=40`、`max_caves=3`），支持水底峡谷在落脚处干燥时入洞、采满 `raw_iron >= 8` 时洞内临时放置工作台/熔炉并把 `iron_ingot` 计入 `raw_iron` 配额，同时将 `raw_iron` 默认采集目标下限提升至 `24`、深层矿井换向采矿；`find_cave_openings` 增加硬超时 `timeout_seconds=15.0`、`max_reads=600`、取消信号检查及径向近优先+地下层优先偏移扫描，避免单洞扫描阻塞。
+  - **石器耐久保护与优先级调整**：`agent/llm_planner.py` 延后 `iron_pickaxe` 制作至成批烧铁之后，以规避上游 `mc-agent-api` `/dig` 自动换用背包内高阶镐导致的提前磨损（不修改 `mc-agent-api` 源码）；`agent/daily_survival.py` 在 `food >= 16 && health >= 16` 时下调 `food_reserve`（95 → 35）与 `wood_reserve`（木 ≥ 2 时 65 → 30）抢占并优先输出非储备任务，`core/autonomous_tasks.py` 为狩猎追击增加 2 次失败快速放弃，减少追羊烤肉死循环；自主模型模式下背包已持有 `furnace` 时不再将 `"furnace"` 推上 `active_task_id`，并允许 0 木/无工具且周边无树时重新向不同方向 `scout`（`skills/scouting.py` 旋转航向）。
+  - **水域容忍与多 Bot 防锁死**：`core/survival_harness.py` 与 `skills/action_workflow.py` 容忍短时入水（`deep_mine`/`scout_surface` 中 `oxygen > 12`、工作流守卫 `oxygen > 10` 自动上浮）；`core/client.py` 对 `READ_RETRY_ENDPOINTS` 超时不再附加 `action_state="unknown"`，`core/survival_harness.py` 对 `observe` 决策不标记 `uncertain`，避免只读超时引发永久挂起；`agent/brain.py` 将多 Bot 共享 `ModelRequestGate` 等待窗口默认设为 `60.0` 秒（保持全链路严格串行不并发请求模型）；多 Bot 实测为每个 Bot 启动独立官方 `mc-agent-api` 进程（端口 `18901..18909`）以消除单 Node 进程事件循环阻塞。
+
+### 离线回归与静态检查（`6093ad9` 基线）
+
+- Python 3.13.7 离线全套（`$env:BOTSLEEP_RUN_LIVE_TESTS='0'; .\.venv\Scripts\python.exe -B -m unittest discover -s tests -q`）：在 `commit 6093ad9` 实跑 **1481 项 / 73.563 秒：1471 通过、10 项跳过（2 项 `test_cave_matrix` 与 3 项 `test_speedrun_portal` 实服专用跳过，5 项 `test_stronghold.EngineTests` 因未安装 ninjabrain JAR 跳过），`OK (skipped=10)`**。
+- `compileall -q core skills agent integrations tests scripts main.py`、`main.py --config config.example.yaml --check-config`、`git diff --check` 均通过；相邻 `mc-agent-api` 工作区保持零本地修改。
+
+### 9 Bot 并行多地形实服压测（`multi_20261119_v2`，commit `6093ad9`）
+
+- **测试环境**：本地 Leaves 1.21.11（`difficulty=peaceful`）、9 个独立官方 `mc-agent-api` 实例（端口 `18901..18909`）、共享本地串行 `ModelRequestGate`、真实模型（日志 `response.model` 实测为 `qwen3.6-35b-a3b`）、单 Bot 预算 40 分钟（`max_runtime_seconds=2400` / `max_steps=768`）；`SleepBot1`～`SleepBot9` 分布于同一世界 9 处不同出生区（最小水平间距 `1969.1` 格，9/9 均为正常超时/步数耗尽退出 `rc=2`，无进程崩溃、无 `v1` 只读超时锁死与 `get_block` 扫描卡死）。
+
+| Bot | 出生点（虚构世界分区） | 步数 / 死亡 | 峰值资源与阶段里程碑（相对开局秒数） | 终态关键库存与观察现象 |
+| --- | --- | --- | --- | --- |
+| **Bot 1** | `[21.5, 85.0, 1.5]` | 150 / 0 | `logs 37s` → `wooden_pickaxe 291s` → `stone_pickaxe 413s` → `furnace 611s` → `24 raw_iron 1759s` → `24 iron_ingot 2114s` → `bucket 2133s` → `shield 2171s` → `iron_pickaxe 2220s` → `iron_axe 2251s` → `iron_sword 2305s` | 余 `12 iron_ingot` + `2 stone_pickaxe` + 6 原木；两次 `surface_caves` 仅见火把/泥土，`Y=16` 矿井采满 24 粗铁后回地面单炉冶炼 |
+| **Bot 2** | `[2002.5, 68.0, 15.5]` | 69 / 0 | `logs 113s` → `wooden_pickaxe 277s` → `stone_pickaxe 424s` → `furnace 569s` → `12 raw_iron 1481s` → `12 iron_ingot 1586s` → `shield 1814s` → `bucket 1849s` | 余 `2 iron_ingot` + `3 stone_pickaxe`；首次 `Y=16` 矿井耗时耗尽预算获 12 粗铁，二轮矿井采得铜矿未及补铁 |
+| **Bot 3** | `[-2021.5, 74.0, -18.5]` | 189 / 0 | `logs 47s` → `wooden_pickaxe 345s` → `stone_pickaxe 368s` → `furnace 640s` | `0 iron`；`Y=16` 矿井返程带回 `136 cobblestone`，后续陡坡采木累计 `path_not_found: 53`、`out_of_reach: 27` |
+| **Bot 4** | `[-0.5, 63.0, 1970.5]` | 768 / 0 | `logs 100s`（1 原木） | `0 iron`；约 `05:59:41` 落入 `Y=62` 河岸水域 `[17.5, 62.0, 1984.6]`，`in_water=True` 无深矿外自救路由，循环 `wait(1)` 765 步至步数耗尽 |
+| **Bot 5** | `[-7.5, 73.0, -2028.5]` | 131 / 0 | `logs 56s` → `wooden_pickaxe 158s` → `stone_pickaxe 361s` → `furnace 421s` → `11 raw_iron 1568s` → `7 iron_ingot 2313s` | 余 `7 iron_ingot + 4 raw_iron`（炉内续炼中）+ `61 raw_copper`；砍树出现 `stalled: 42` 及服务端 `moved wrongly` 告警 |
+| **Bot 6** | `[3981.5, 70.0, 27.8]` | 768 / 0 | `logs 68s`（7 原木） | `0 iron`；约 `06:03:06` 落入 `Y=62` 河岸水域 `[4010.0, 62.0, 29.9]`，循环 `wait(1)` 716 步至步数耗尽 |
+| **Bot 7** | `[2008.5, 63.0, -2026.5]` | 105 / 0 | `logs 246s` → `wooden_pickaxe 503s` → `stone_pickaxe 610s` | `15 coal + 2 raw_iron`；3 处浅洞探查 `target_reached`（含 7 煤）未见大铁脉，二轮矿井刚采 `2 raw_iron` 触达总预算 |
+| **Bot 8** | `[-2028.5, 66.0, 2013.5]` | 122 / 0 | `logs 25s` → `wooden_pickaxe 131s` → `stone_pickaxe 263s` → `24 raw_iron 1167s` → `24 iron_ingot 1505s` → `bucket 1535s` → `shield 1586s` → `iron_pickaxe 1612s` → `3 iron_pickaxe + iron_axe + iron_sword 1814s` → `1839s` 切入 `gather(diamond, 3)` | 终态余 `6 iron_ingot`；该区复用了同一持久化世界中残留工作台/熔炉（`[-1989, 70, 1991]` / `[-1989, 69, 1995]`）；浅洞得 `2 raw_iron` + `Y=16` 矿井 22 粗铁，30m39s 后下探 `Y=-54` 采出 `148 cobbled_deepslate + 101 cobblestone + 4 raw_iron`，40m 超时前尚未见钻石 |
+| **Bot 9** | `[-1987.5, 74.0, -1987.5]` | 141 / 1 | `logs 271s` → `wooden_pickaxe 399s` → `stone_pickaxe 591s` | `0 iron`；开局步入深水于 `Y=48` 溺亡，回世界出生点完成石器后触发 `llm_repeated_failure` 6 次 |
+
+- **实服边界与暴露的 3 项主要瓶颈**：
+  1. **非深矿河岸/浅水自救缺失（3/9 Bot 受阻）**：`Bot 4`、`Bot 6` 与 `Bot 9` 在地表落水（`in_water=True`）时，因非 `deep_mine` 上下文缺乏主动上浮＋向岸边实体方块登岸的脱离原语，导致原地 `wait(1)` 耗尽步数或溺亡。
+  2. **40 分钟内 `0/9` 获钻，速度受串行烧铁与副工具回合拖累**：9/9 均未在 40 分钟内采集到 `diamond` 或进入 `nether_portal` 闭环；且在 600 次只读预算的浅洞扫描下本轮 `surface_caves` 最高仅见 2 粗铁（Bot 8），未在洞内触发 `raw_iron >= 8` 临时营地，主铁源仍依赖 `Y=16` 矿井。单熔炉冶炼 24 铁耗约 `326–343s`、逐轮合成 `stone_axe`/`stone_sword`/`iron_axe`/`iron_sword` 额外消耗模型与采集轮次（如 `Bot 8` 在 `stone_axe`/`stone_sword` 区间 `263s→566s` 与 `iron_axe`/`iron_sword` 区间 `1612s→1781s` 合计耗时 `472s`，近 7.9 分钟），是 `Bot 1` / `Bot 8` 压缩冲钻时间的关键空间。
+  3. **陡坡/稀疏林地寻路卡滞**：`Bot 3` 在陡峭地形砍树累计 `path_not_found: 53`、`out_of_reach: 27`，`Bot 5` 出现 `stalled: 42`。
+
+---
+
+历史复核：2026-11-18（Asia/Shanghai），`develop-tianya/ai-iron-diamond-loop`（已提交节点 `db6dbb1`、`28417cf`、`01f22a4`、`8c35c51`、`4eee47e`）。
 
 ## 和平模式全新存档实服闭环调测（2026-11-18，Run 1～Run 6）
 
