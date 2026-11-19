@@ -120,6 +120,36 @@ class LocalRecoveryRuntimeTests(unittest.TestCase):
         self.assertEqual(len([call for call in self.world.calls if call[0] == "move"]), 3)
         self.assertEqual(brain.requests, [])
 
+    def test_aure_body_clear_tree_reaches_ground_using_only_main_recovery(self):
+        self.world.status.update(pos=[.5, 92, .5], health=20, food=20)
+        for x in range(-6, 7):
+            for z in range(-4, 5):
+                self.world.block([x, 87, z], "grass_block")
+        for pos in ([0, 91, 0], [-1, 91, 0], [-1, 90, 0], [-2, 90, 0], [-2, 89, 0]):
+            self.world.block(pos, "birch_leaves", properties={"waterlogged": False},
+                             can_see=True, diggable=True, harvest_tool_ok=True)
+
+        def clear(pos, collect=True):
+            self.assertIs(collect, False)
+            self.assertEqual(self.world.blocks[tuple(pos)]["name"], "birch_leaves")
+            self.world.block(pos, "air")
+            return fixtures.envelope({"dug": True})
+
+        with patch.object(self.world, "dig", side_effect=clear):
+            harness, brain = self.make_harness()
+            for _ in range(8):
+                result = self.cycle(harness)
+                self.assertTrue(result.success, result)
+                self.assertEqual(self.last_decision(harness)["name"], "canopy_escape")
+                self.assertIsNone(harness.journal.state["pending"])
+                if result.data.get("retreat_complete"):
+                    break
+        self.assertTrue(result.data["retreat_complete"])
+        self.assertEqual(self.world.status["pos"][1], 88)
+        self.assertEqual(self.world.blocks[(0, 91, 0)]["name"], "birch_leaves")
+        self.assertNotIn("canopy_recovery", harness.context)
+        self.assertEqual(brain.requests, [])
+
     def test_restarted_canopy_recovery_reobserves_next_step_instead_of_replaying_arrival(self):
         self.canopy()
         harness, brain = self.make_harness()

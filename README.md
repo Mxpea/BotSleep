@@ -70,6 +70,8 @@ daily/competition 默认启用 `survival.autonomy.enabled`。正常任务规划�
 
 默认每个目标最多 128 个子步骤、600 秒，4 次连续本地失败、8 次无进展或 8 次局部探索达到边界后交回明确报告；全局步骤、时长和死亡预算仍生效。近敌、吃饭、睡眠等本地应急可以挂起原目标，安全后重新观察再规划；未知写入保留 pending，禁止自动重放。关闭 autonomy 后恢复原有单工具模式。常用配方子集不等于独立配方目录的全部覆盖，12 类任务也不代表均已通过普通地图实服验收。契约、配置与限制见 [目标程序](docs/AUTONOMOUS_TASKS.md)。
 
+普通 `daily` 可显式设 `survival.autonomy.local_opening: true`：没有自定义目标且新鲜观察支持工具开局时，harness 用同一任务控制器先启动 `starter_tools`，不需要模型先选；默认关闭，不适用于赛事。树冠脱困由同一主循环的 `canopy_escape` 负责，未落至实心地面时只记中继，不把树干或叶片上的落脚当作脱困完成。
+
 ### 模型实际可调用的工具
 
 完整注册目录由 `agent/tools.py` 的 `tools_for_objective()` 选择，执行由 `core/survival_harness.py` 及对应技能分派：starter 为 9 项，daily 为 35 项，competition 为 40 项（35 个日常工具 + 5 个赛事生命周期工具）。这不是每次模型请求都能看到的工具数量：autonomy 启用时按正常目标/原子修复阶段过滤。关闭 autonomy 后移除目标工具并保留完整原子模式，daily/competition 对应 34/39 项。
@@ -96,6 +98,8 @@ daily/competition 默认启用 `survival.autonomy.enabled`。正常任务规划�
 
 Harness 每次只维护一个活动目标。当前 8 个明确计分目标有有限行动计划，其余可计分项虽能评估和展示，但标为 unsupported、不可选择。怪物猎人的可执行机会须经过战斗门禁；单击或实体消失均不计分。`finish_task` 需 fresh advancement 检测，正常 `end_competition` 需 fresh 全目录检测；未知可记为 unknown，但不能加分。终态持久化后，重启不再调用模型。离线覆盖不能称为完整比赛验收，详见 [赛事接口与限制](docs/HARNESS_INTERFACES.md)。
 
+全目录保留在本地计分和监控。模型在任务选择阶段只收到当前证据解锁的简化候选，选中后仅展开活动目标，不重复注入 125 项规则表。
+
 ## 模型、恢复与监控
 
 模型规划需同时设置 `agent.mode: survival` 与 `llm.enabled: true`，配置支持原生工具调用的 OpenAI 兼容服务。下面是 `config.yaml` 对应字段的节选，请修改已有节点：
@@ -119,6 +123,8 @@ debug:
 ```
 
 所有模型请求经过 `core/model_gate.py`，单 worker 与跨进程门禁禁止并发请求。传输超时或连接中断会留下持久化未知状态，不自动重试、不擅自清锁，也不能靠重启绕过；明确 HTTP 失败才可有界退避，模型错误不回退为规则采集。只有确认服务端请求已结束，才可使用 `--acknowledge-model-idle`。`llm.model` 只是请求路由；实际模型只采用 `response.model`，缺失显示“未确认”，服务自报标识也不证明底层型号。
+
+有原生工具的请求使用 `tool_choice: required` 和 `parallel_tool_calls: false`，客户端仍验证响应恰好一个合法调用。服务拒绝这些字段时不会自动降级。已落盘日志可用 `python -B -m debug.monitor_tail --log-dir logs --port 18931` 只读补看；日志时间不代表实时在线状态。
 
 `survival.intent` 默认 `survival`，也可显式选 `speedrun`。`SurvivalPlaybook` 只从已有观察生成有界阶段、前置、风险和候选动作，不另开模型或游戏请求，不改变 `objective`。下界探索、交易、要塞/末地执行等缺少主流程适配的后段保持 unsupported/blocked，不能将知识流程当作已实现的全程速通。
 

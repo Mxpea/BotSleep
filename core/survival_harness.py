@@ -529,19 +529,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
             # entire daily-production catalogue or its unrelated top-3 hints.
             model_context.pop("daily_tasks", None)
             model_context.pop("action_hints", None)
-            board = self.competition.snapshot()
-            model_context["competition"] = {key: board.get(key) for key in (
-                "phase", "active_goal_id", "progress_card", "score", "stale", "remaining_seconds", "last_exit", "advancements", "assessment_complete")}
-            active = next((row for row in board.get("tasks", []) if row.get("id") == board.get("active_goal_id")), None)
-            model_context["competition"]["active_goal"] = ({key: active.get(key) for key in (
-                "id", "title", "points", "stage", "missing", "next_steps", "reason", "required_skills")} if active else None)
-            model_context["competition"]["selectable_goal_ids"] = [row["id"] for row in board["tasks"] if row["selectable"]]
-            model_context["competition"]["catalog_assessment"] = {
-                key: board["catalog_assessment"][key] for key in ("checked", "total", "known_count", "complete")}
-            model_context["competition"]["task_columns"] = ["id", "title", "difficulty", "points", "eligibility", "availability", "completion"]
-            model_context["competition"]["tasks"] = [[row.get(key) for key in (
-                "id", "title", "difficulty", "points", "eligibility", "availability", "completion")]
-                for row in board.get("tasks", [])]
+            model_context["competition"] = self.competition.model_view()
         stats = self.context.get("autonomy_stats", {})
         stats["model_planning_rounds"] = stats.get("model_planning_rounds", 0) + 1
         worker.start(observation, model_context)
@@ -684,6 +672,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                     self._record("WARN", "SAFETY_OVERRIDE", {"decision": asdict(safety), "status": observation["status"]})
                 elif self._task_active():
                     decision = self._task_next(observation)
+                elif (opening := self._local_opening(observation)) is not None:
+                    decision = opening
                 else:
                     if self._model_blocked:
                         decision = Decision("wait", {"seconds": 5}, "Model request outcome is uncertain; local safety remains active", "observe")

@@ -101,10 +101,35 @@ class CompetitionTasksTests(unittest.TestCase):
         pending = next(row["id"] for row in CATALOG if row["eligibility"] == "pending")
         excluded = next(row["id"] for row in CATALOG if row["eligibility"] == "excluded")
         self.assertEqual(self.task(snap, sleep)["availability"], "needs_prerequisites")
+        self.assertEqual(self.manager.select(sleep)["error_code"], "goal_unavailable")
+        self.update(obs({}, [{"name": "white_bed", "pos": [1, 64, 1]}]))
         self.assertTrue(self.manager.select(sleep)["success"])
         self.assertFalse(self.manager.select(pending)["success"])
         self.assertFalse(self.manager.select(excluded)["success"])
         self.assertEqual(self.manager.snapshot()["phase"], "active")
+
+    def test_model_view_unlocks_by_evidence_and_keeps_full_scoring_board(self):
+        stone = "minecraft:story/mine_stone"
+        upgrade = "minecraft:story/upgrade_tools"
+        iron = "minecraft:story/smelt_iron"
+        self.update()
+        start = self.manager.model_view()
+        self.assertEqual(start["stage"], "bootstrap")
+        self.assertEqual(start["selectable_goal_ids"], [stone])
+        self.assertEqual(set(start["tasks"][0]), {"id", "title", "points", "availability"})
+        self.assertIsNone(start["active_goal"])
+        self.assertEqual(self.manager.select(upgrade)["error_code"], "goal_unavailable")
+        self.update(obs({"wooden_pickaxe": 1}))
+        choices = self.manager.model_view()
+        self.assertIn(upgrade, choices["selectable_goal_ids"])
+        self.assertNotIn(iron, choices["selectable_goal_ids"])
+        self.assertTrue(self.manager.select(upgrade)["success"])
+        active = self.manager.model_view()
+        self.assertEqual(active["tasks"], [])
+        self.assertEqual(active["active_goal"]["id"], upgrade)
+        self.assertIn("next_steps", active["active_goal"])
+        self.assertIn("condition", active["active_goal"])
+        self.assertEqual(len(self.manager.snapshot()["tasks"]), 125)
 
     def test_sleep_planner_has_real_stages_and_capability_gate(self):
         goal = "minecraft:adventure/sleep_in_bed"

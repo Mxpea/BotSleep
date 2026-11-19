@@ -8,7 +8,7 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from agent.llm_planner import LLMSurvivalPlanner
 from core.client import APIError
@@ -224,6 +224,35 @@ class TaskHarnessTests(unittest.TestCase):
         self.assertEqual(result["data"]["task_execution"]["progress"], {"current":6,"target":6,"unit":"logs"})
         self.assertEqual(harness.snapshot()["task_execution"]["steps"], 4)
         self.assertIsNone(harness.journal.state["pending"])
+
+    def test_opt_in_local_opening_uses_existing_controller_without_model_feedback(self):
+        self.settings["autonomy"]["local_opening"] = True
+        self.world.counts.update(cobblestone=8, stick=6, wooden_pickaxe=1)
+        self.world.block([2, 64, 0], "crafting_table")
+        harness, brain = self.harness()
+        self.assertTrue(self.cycle(harness).data["accepted"])
+        self.assertEqual(harness.snapshot()["task_execution"]["task"], "starter_tools")
+        self.until(harness, lambda: harness.snapshot()["task_execution"]["status"] == "completed")
+        for name in ("stone_pickaxe", "stone_axe", "stone_sword"):
+            self.assertGreaterEqual(self.world.counts.get(name, 0), 1)
+        self.assertEqual(brain.requests, [])
+        self.assertEqual(self.feedback(harness.planner), [])
+        self.assertIsNone(harness.journal.state["pending"])
+
+    def test_local_opening_does_not_bypass_model_gate_or_pending(self):
+        self.settings["autonomy"]["local_opening"] = True
+        self.world.counts.update(cobblestone=8, stick=6, wooden_pickaxe=1)
+        self.world.block([2, 64, 0], "crafting_table")
+        harness, brain = self.harness()
+        obs = harness.collector.collect()
+        harness._prepare_context(obs)
+        self.assertIsNotNone(harness._local_opening(obs))
+        brain.request_gate = Mock()
+        brain.request_gate.snapshot.return_value = {"state": "uncertain"}
+        self.assertIsNone(harness._local_opening(obs))
+        brain.request_gate.snapshot.return_value = {"state": "idle"}
+        harness._checkpoint(pending={"decision": {"name": "gather_block"}})
+        self.assertIsNone(harness._local_opening(obs))
 
     def test_known_path_failure_switches_target_without_model_or_global_failure_reset(self):
         positions=self.logs(2, far=True)

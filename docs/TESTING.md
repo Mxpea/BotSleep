@@ -1,6 +1,6 @@
 # 配置、客户端、生存、赛事与监控验证
 
-最近复核：2026-11-19（Asia/Shanghai），`develop-tianya/ai-iron-diamond-loop`（已提交节点 `aedae0b`、`92afc02`、`6093ad9`、`e742dd4`、`e338ea7`、`062d8ef`、`f1d9fe6` 及本次文档同步）。
+最近复核：2026-11-19（Asia/Shanghai），`develop-tianya/ai-iron-diamond-loop`（合入 `origin/main cab309d` 并包含本分支提交 `e76597b`～`46bae7e` 及本次文档交接更新）。
 
 ## 浅水脱困、多炉批炼与树冠/侦察阻塞修复回归（`e338ea7`、`062d8ef`、`f1d9fe6`）
 
@@ -15,9 +15,9 @@
   - **`scout`/`nether_portal` 原点冷却豁免与地下工作台防跑偏**：`core/autonomous_tasks.py` 豁免 `scout_surface` / `nether_portal` 占位 `origin` 坐标的 `blocked` 校验（修复海岸开局首次 `scout` 即报错 `selected_target_is_cooling_down`）；地下合成若近处已有被阻塞工作台则不再触发远距 `scout_logs`。
   - **高树干 4～5 格安全落差与树干僵局释放**：`skills/survival.py` 的 `canopy_escape` 在常规 `0..-3` 与清叶/中继均无解且 `health >= 16` 时启用 `-4..-5` 格纯实体地面脱困兜底；`core/local_recovery_runtime.py` 在同一 `RETREAT_TRUNKS` 木干位置连续 3 次返回 `unsafe` 时自动释放树冠锁定交回模型寻路。
 
-### 离线回归与静态检查（`f1d9fe6` 及本次文档同步基线）
+### 离线回归与静态检查（合入 `origin/main cab309d` + `f1d9fe6` 及本次文档交接基线）
 
-- Python 3.13.7 离线全套（`$env:BOTSLEEP_RUN_LIVE_TESTS='0'; .\.venv\Scripts\python.exe -B -m unittest discover -s tests -q`）：在 `f1d9fe6` 实跑 **1498 项 / 68.013 秒：1488 通过、10 项跳过（2 项 `test_cave_matrix` 与 3 项 `test_speedrun_portal` 实服专用跳过，5 项 `test_stronghold.EngineTests` 因未安装 ninjabrain JAR 跳过），`OK (skipped=10)`**（本次仅补充 `docs/TESTING.md` 后复跑核验）。
+- Python 3.13.7 离线全套（`$env:BOTSLEEP_RUN_LIVE_TESTS='0'; .\.venv\Scripts\python.exe -B -m unittest discover -s tests -q`）：在合入 `origin/main cab309d` 后实跑 **1530 项 / 68.763 秒：1520 通过、10 项跳过（2 项 `test_cave_matrix` 与 3 项 `test_speedrun_portal` 实服专用跳过，5 项 `test_stronghold.EngineTests` 因未安装 ninjabrain JAR 跳过），`OK (skipped=10)`**（仅改文档后将在最终提交前复跑核验）。
 - `compileall -q core skills agent scripts tests`、`main.py --check-config`、`git diff --check` 均通过；相邻 `mc-agent-api` 保持零本地修改。
 
 ### 干净世界 9 Bot 并行压测对比（`multi_20261119_v3` @ `062d8ef` & `multi_20261119_v4` @ `f1d9fe6`）
@@ -130,18 +130,18 @@
 - **背包与熔炼修复**：`core/client.py` 封装 `/drop`，`core/autonomy_runtime.py` 在深矿前或背包满时主动丢弃花岗岩、闪长岩、安山岩、深板岩圆石、凝灰岩、沙砾、粗铜、多余圆石等杂物（仅附近已有箱子时入箱）；`skills/daily_survival.py` 修复高 2 格熔炉观察距离与 `inspected_furnace` 单步交接，避免反复 `inspect_container`。
 - **矿井安全与溶洞防卡死**：`skills/mining.py` 对矿井入口 `_wf_prepare_entry` 与阶梯前移增加精确站位与脚下实心核验、`corridor_only` 跳过冗余工作站开挖、`_wf_deep_fishbone` 增加溶洞多向岩石优先级转向与 24 次转向预算，以及 `_retreat_downsampled` 连续 2 次卡滞即提前交由 3D 寻路返程。
 
-### 离线回归与静态检查
+- **离线回归（`e76597b` 基线）**：**1440 项 / 67.756 秒：1430 通过、10 项跳过**，静态检查全通过；相邻 `mc-agent-api` 工作区零改动。
+- **实服阶段验证与未闭环阻塞说明**：Run 4（`iron_pickaxe ~17.2m`）、Run 7（`iron_pickaxe ~25m` 有效 21–22m 随后 `8 iron_ingot`）、Run 10 / Run 12（下探至 `Y=-5` 并安全返回地表 `[-125.7, 63, 412.5]`）；后因本地 MC 服务端离线未在本节点运行整程铁甲/采钻基准，当时标注未完待续。
 
-全部 Python 改动完成后的最终完整回归结果为：**1440 项 / 67.756 秒：1430 通过、10 项跳过（2 项 `test_cave_matrix` 与 3 项 `test_speedrun_portal` 实服专用跳过，5 项 `test_stronghold.EngineTests` 因未安装 ninjabrain JAR 跳过），`OK (skipped=10)`**，命令为 `$env:BOTSLEEP_RUN_LIVE_TESTS='0'; .\.venv\Scripts\python.exe -B -m unittest discover -s tests -v`。`compileall -q main.py agent core skills debug integrations`、`main.py --config config.example.yaml --check-config` 及 `git diff --check` 均通过；相邻 `mc-agent-api` 工作区零改动。
+---
 
-### 实服阶段验证与未闭环阻塞说明
+## main 与 dev-aure 本地集成（2026-11-18）
 
-使用本地 Minecraft 服务端（`127.0.0.1:25565`）、官方 `mc-agent-api` 与远端 LLM 对新存档进行多轮实测，确认到以下阶段表现：
-- **Run 4**：空手开局依次完成 `wooden_pickaxe`（约 1.9m）→ `stone_pickaxe`（约 6.6m）→ `furnace`（约 7.8m）→ `6 raw_iron + 4 coal`（约 14.5m）→ `iron_pickaxe`（约 17.2m）。
-- **Run 7**：空手开局完成 `wooden_pickaxe`（约 2.5m）→ `28 cobblestone`（67.84s）→ `stone_pickaxe`（约 4.3m）→ `furnace`（约 8.0m）→ `4 raw_iron`（约 17.4m，含约 3m 雷雨等待）→ `iron_pickaxe`（总耗时约 25m / 有效约 21–22m），随后到达 `Y=16` 再采 `7 raw_iron + 5 coal` 并冶炼出 `8 iron_ingot`。
-- **Run 10 / Run 12**：完成 `smelt` 铁锭、`iron_tools`（`iron_axe`/`iron_sword`/`shield`/`bucket`）、放置箱子存物后携带铁镐沿矿井下探至深板岩层（Run 10 下至 `Y=-5` 并安全返回地表 `[-125.7, 63, 412.5]`；Run 12 下至 `Y=2.0`）。
+基线为 `main 9018f76` 与 `dev-aure 4e0a59e`。沿用主线 `canopy_escape` 和自主任务控制器，不保留并行下降或调度实现。选择性迁入赛事候选投影、单工具请求约束、只读日志补看；可选本地开局复用同一 `starter_tools` 任务入口。
 
-**阻塞与未完成项**：在后续实测与最终“新存档完整铁套 + `Y=-54` 采钻闭环”基准测试前，本地 Minecraft 服务端与 RCON（`127.0.0.1:25565` / `25575`）离线停止响应，导致最终改版后的新档全程实服基准与实服采钻验收未能运行。因此当前版本**未宣称已实服跑通整套铁甲/钻石提取全闭环**，需在重启 MC 服务端后于独立测试存档复测。
+Windows / Python 3.12.10，禁用实服用例后运行 `py -3.12 -X utf8 -B -m unittest discover -s tests -v`：**1457 项，1452 通过、5 项实服专用跳过，191.625 秒**。合成卡树场景沿主线恢复落到 Y=88、未请求模型、无残留 pending。赛事全目录仍用于本地评估；模型已验证只收到阶段候选或活动任务详情。示例配置及本地既有配置均通过 `--check-config`。
+
+合并前主线 `9018f76` 曾在本地真实服务器从 Y=92 经 7 次移动下到 Y=88 草方块，生命/饥饿维持 20，未请求模型；该测试与此次合并后的离线回归是两次独立验证。合并版本未请求真实模型或重跑实服。
 
 ---
 
