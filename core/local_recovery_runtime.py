@@ -213,6 +213,7 @@ class LocalRecoveryRuntime:
                     state["excluded_until"] = dict(list(state["excluded_until"].items())[-16:])
                 state["visited"] = ([row for row in state["visited"] if row != cell] + [cell])[-32:]
             if canopy:
+                state["stalled_unsafe"] = 0
                 state["evacuating"] = result.data.get("evacuation_stage") != "ground"
                 if not state["evacuating"]:
                     self._record("INFO", "CANOPY_ESCAPE_COMPLETED", {"result": copy.deepcopy(result.data), "steps": state["steps"]})
@@ -224,8 +225,22 @@ class LocalRecoveryRuntime:
                 cell = self._safety_rules._key(target)
                 state["excluded_until"][cell] = time.time() + self.settings["target_cooldown_seconds"]
                 state["excluded_until"] = dict(list(state["excluded_until"].items())[-16:])
-            state["search_origin"] = list(observation["status"]["pos"])
+            previous_origin = state.get("search_origin")
+            current_pos = observation["status"]["pos"]
+            unchanged = previous_origin is not None and math.dist(current_pos, previous_origin) < 0.2
+            state["search_origin"] = list(current_pos)
             state["retry_after"] = time.time() + 15
+            if canopy and result.error_code == "unsafe":
+                state["stalled_unsafe"] = int(state.get("stalled_unsafe", 0)) + 1 if unchanged else 1
+                footing = self.daily_policy._footing(observation)
+                if (state["stalled_unsafe"] >= 3 and isinstance(footing, dict)
+                        and footing.get("name") in SurvivalSkills.RETREAT_TRUNKS):
+                    state.update(evacuating=False, evacuation_stage="ground", reason="trunk_stalled_fallback")
+                    self._record("INFO", "CANOPY_TRUNK_RELEASED", {"recovery": copy.deepcopy(state), "footing": copy.deepcopy(footing)})
+                    self.context.pop(key, None)
+                    return True
+            elif canopy:
+                state["stalled_unsafe"] = 0
         if forage and state["steps"] >= 8:
             state.update(needs_ai=True, reason="bounded_food_search_exhausted")
         self._record("INFO" if result.success else "WARN", "CANOPY_RECOVERY" if canopy else "FOOD_RECOVERY",

@@ -1169,7 +1169,7 @@ class SurvivalSkills:
             source["state"] = "edge_entry_verified" if entries else "no_verified_edge_entry"
             return entries
 
-        def terrain_fallback():
+        def terrain_fallback(allow_deep_drop=False):
             search.update(used=True, termination="no_safe_destination")
             entries = starting_entries()
             if not entries:
@@ -1211,7 +1211,11 @@ class SurvivalSkills:
                 tolerance = 0.5 if len(path) == 1 else 1e-9
                 ordered = directions if escaping else sorted(directions, key=lambda delta: threat_score(
                     [current[0] + delta[0] + .5, current[1], current[2] + delta[1] + .5]), reverse=True)
-                step_ys = (0, -1, -2, -3, 1) if (escaping and before["health"] > 10) else (0, -1, -2, 1)
+                step_ys = (
+                    (0, -1, -2, -3, -4, -5, 1)
+                    if allow_deep_drop
+                    else ((0, -1, -2, -3, 1) if (escaping and before["health"] > 10) else (0, -1, -2, 1))
+                )
                 min_dy = -12 if escaping else -6
                 for sx, sz in ordered:
                     for step_y in step_ys:
@@ -1235,7 +1239,7 @@ class SurvivalSkills:
                             search["termination"] = "node_budget"
                             return None, None
                         support = safe_cell(cell, temporary_leaves=True)
-                        if not support:
+                        if not support or (allow_deep_drop and step_y < -3 and support not in self.SUPPORT - self.RETREAT_TRUNKS):
                             continue
                         if not clear_transition(current, cell):
                             continue
@@ -1315,6 +1319,16 @@ class SurvivalSkills:
                 # Insufficient proof budget authorizes no dig. A separately
                 # verified non-destructive relay may still be available.
                 search["clearing_skipped"] = "read_budget"
+        if (escaping and target is None and planned_path is None and not relay_candidates
+                and self._number(before.get("health", 0), "health", 0, 1024) >= 16):
+            try:
+                final_target, planned_path = terrain_fallback(allow_deep_drop=True)
+                if planned_path:
+                    target = planned_path[1]
+            except _Failure as error:
+                if error.code != "retreat_budget_exhausted":
+                    raise
+                search["termination"] = "read_budget"
         if target is None and relay_candidates:
             def relay_score(row):
                 first = row[3][1]

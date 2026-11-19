@@ -319,6 +319,21 @@ class ObservedCanopyEscapeTests(unittest.TestCase):
         self.assertTrue(result.success, result)
         self.assertEqual(result.data["evacuation_stage"], "ground")
 
+    def test_canopy_escape_allows_four_block_trunk_drop_when_health_is_high(self):
+        world = World()
+        world.status.update(pos=[0.5, 73.0, 0.5], health=20, food=20, gamemode="survival")
+        world.set_block([0, 72, 0], "acacia_log")
+        world.set_block([1, 68, 0], "grass_block")
+        for x in (-1, 0, 1):
+            for z in (-1, 0, 1):
+                for y in range(69, 76):
+                    if (x, y, z) != (0, 72, 0):
+                        world.set_block([x, y, z], "air")
+        result = DailySurvivalSkills(world).execute("canopy_escape", {})
+        self.assertTrue(result.success, result)
+        self.assertEqual(result.data["evacuation_stage"], "ground")
+        self.assertEqual(result.data["target"], [1.5, 69, 0.5])
+
 
 if __name__ == "__main__":
     unittest.main()

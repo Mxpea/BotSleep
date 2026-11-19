@@ -241,6 +241,8 @@ class DailySurvivalGoals:
         dimension = observation["status"].get("dimension")
         origin = observation["status"]["pos"]
         hostiles = self.rules._hostiles(observation, origin)
+        wait_action = None
+        defer_collect = None
         for row in self._rows(observation.get("furnaces"))[:8]:
             if (not self._verified(row, dimension) or math.dist(row["pos"], origin) > 16
                     or self.rules._key(row["pos"]) in self.rules._blocked(context or {})
@@ -248,9 +250,14 @@ class DailySurvivalGoals:
                 continue
             output = row.get("output") or {}
             if output.get("name") in outputs and type(output.get("count")) is int and output["count"] > 0:
-                return self._action("smelt_collect", {"pos": row["pos"], "item": output["name"],
+                input_count = (row.get("input") or {}).get("count", 0)
+                still_active = bool(self._burning(row)) and type(input_count) is int and input_count > 0
+                collect_action = self._action("smelt_collect", {"pos": row["pos"], "item": output["name"],
                     "count": min(16, output["count"])}, "Collect a currently observed furnace output", goal)
-        wait_action = None
+                if not still_active or output["count"] >= 6:
+                    return collect_action
+                if defer_collect is None:
+                    defer_collect = collect_action
         for row in self._safe_rows(observation, {"furnace"}, context=context):
             # Opening the furnace is a separate verified step. Never refill a
             # remembered/start-only job without inspecting its current slots.
@@ -264,7 +271,7 @@ class DailySurvivalGoals:
                                     "Reinspect a pending furnace job; the old start result is not output evidence", goal)
             if pending_job and checked is not None and ((checked.get("input") or {}).get("count", 0) or self._burning(checked)):
                 if wait_action is None:
-                    wait_action = self._action("wait", {"seconds": 5}, "The inspected furnace is still processing; reobserve later", goal)
+                    wait_action = self._action("wait", {"seconds": 10}, "The inspected furnace is still processing; reobserve later", goal)
                 continue
             inputs = [item for item, output in COOKING.items() if output in outputs and counts.get(item, 0) > 0]
             fuel = next((item for item in ("coal", "charcoal") if counts.get(item, 0) > 0), None)
@@ -280,7 +287,7 @@ class DailySurvivalGoals:
             count = min(16, counts[inputs[0]], math.floor(counts[fuel] * capacity))
             return self._action("smelt_start", {"pos": row["pos"], "input_item": inputs[0], "count": count,
                 "fuel_item": fuel, "fuel_count": math.ceil(count / capacity)}, "Start smelting; completion still requires verified output", goal)
-        return wait_action
+        return wait_action or defer_collect
 
     def _food_action(self, observation, counts, context):
         stored = self._take_supplies(observation, counts, SAFE_FOOD, self.targets["food_reserve"], "food_reserve", context)

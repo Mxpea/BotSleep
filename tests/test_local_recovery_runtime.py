@@ -502,6 +502,29 @@ class LocalRecoveryRuntimeTests(unittest.TestCase):
         harness._prepare_local_recovery(dry_obs)
         self.assertNotIn("water_recovery", harness.context)
 
+    def test_canopy_recovery_releases_stalled_solid_trunk_after_three_unsafe_retries(self):
+        from skills import SkillResult
+        harness, _ = self.make_harness()
+        obs = {
+            "fresh": True,
+            "inventory_fresh": True,
+            "terrain_fresh": True,
+            "footing_origin": [2021.6, 73.0, -19.5],
+            "footing": {"pos": [2021, 72, -20], "name": "acacia_log", "properties": {}, "fresh": True, "verified": True, "source": "api_verified"},
+            "status": {"pos": [2021.6, 73.0, -19.5], "health": 20, "food": 20, "dimension": "overworld",
+                       "in_water": False, "submerged": False, "on_ground": True, "ready": True, "alive": True},
+            "blocks": [{"pos": [2021, 72, -20], "name": "acacia_log", "fresh": True, "verified": True}],
+        }
+        res = SkillResult(False, "No safe retreat destination", {}, "unsafe")
+        decision = Decision("canopy_escape", {}, "Step", "safety")
+        harness._local_recovery_result(decision, res, obs)
+        self.assertIn("canopy_recovery", harness.context)
+        harness._local_recovery_result(decision, res, obs)
+        self.assertIn("canopy_recovery", harness.context)
+        released = harness._local_recovery_result(decision, res, obs)
+        self.assertTrue(released)
+        self.assertNotIn("canopy_recovery", harness.context)
+
 
 if __name__ == "__main__":
     unittest.main()

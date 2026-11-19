@@ -662,6 +662,24 @@ class DailyGoalsTests(unittest.TestCase):
         self.assertEqual(action["name"], "smelt_start")
         self.assertEqual(action["args"]["pos"], [3, 64, 0])
 
+    def test_smelt_defers_small_collect_while_actively_burning_and_collects_at_six_or_done(self):
+        ctx = {"smelting_jobs": [{"pos": [2, 64, 0], "dimension": "overworld", "expected_output": "iron_ingot"}]}
+        active = observation({"coal": 2}, [block("furnace", [2, 64, 0])])
+        active["furnaces"] = [
+            verified([2, 64, 0], input={"name": "raw_iron", "count": 6}, output={"name": "iron_ingot", "count": 2}, burning=True)
+        ]
+        wait_act = self.goals._smelt({"iron_ingot"}, active, active["counts"], "iron_tools", ctx)
+        self.assertEqual((wait_act["name"], wait_act["args"]["seconds"]), ("wait", 10))
+        batch_ready = copy.deepcopy(active)
+        batch_ready["furnaces"][0]["output"]["count"] = 6
+        collect_six = self.goals._smelt({"iron_ingot"}, batch_ready, batch_ready["counts"], "iron_tools", ctx)
+        self.assertEqual((collect_six["name"], collect_six["args"]["count"]), ("smelt_collect", 6))
+        done_obs = copy.deepcopy(active)
+        done_obs["furnaces"][0]["input"] = {"name": None, "count": 0}
+        done_obs["furnaces"][0]["burning"] = False
+        collect_done = self.goals._smelt({"iron_ingot"}, done_obs, done_obs["counts"], "iron_tools", ctx)
+        self.assertEqual((collect_done["name"], collect_done["args"]["count"]), ("smelt_collect", 2))
+
 
 if __name__ == "__main__":
     unittest.main()

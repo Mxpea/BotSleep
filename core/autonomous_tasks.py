@@ -609,6 +609,8 @@ class AutonomousTaskController:
             workspace = self.rules._workspace(obs, context)
             if workspace:
                 if workspace.goal == "explore":
+                    if any(b["name"] == "crafting_table" for b in self.rules._blocks(obs)):
+                        return None
                     return self._gather("logs", obs, context) or workspace
                 return self._resource_child(workspace, obs, context) if workspace.name != "wait" else None
         return self._decision("craft_item", {"item": item, "count": min(64, needed, output)}, "Craft one available recipe and verify the new inventory")
@@ -654,8 +656,9 @@ class AutonomousTaskController:
         if item == "iron_ingot" and counts.get("raw_iron", 0) >= 8:
             existing_furnaces = self.daily._safe_rows(obs, {"furnace"}, context=context)
             desired_furnaces = 3 if counts.get("raw_iron", 0) >= 16 else 2
-            has_fuel = any(counts.get(f, 0) >= 1 for f in ("coal", "charcoal")) or sum(
-                counts.get(n, 0) for n in PLANK_NAMES
+            has_fuel = any(counts.get(f, 0) >= 1 for f in ("coal", "charcoal")) or (
+                sum(counts.get(n, 0) for n in PLANK_NAMES)
+                + 4 * sum(counts.get(n, 0) for n in LOG_NAMES)
             ) >= 6
             if (len(existing_furnaces) < desired_furnaces and has_fuel
                     and (counts.get("furnace", 0) >= 1 or counts.get("cobblestone", 0) >= 8)):
@@ -693,10 +696,10 @@ class AutonomousTaskController:
                         return self._decision("harvest_crop", {"pos": row["pos"], "expected_name": "potatoes"}, "Acquire potatoes for the selected cooked output")
             return self._drop(set(inputs), obs, context)
         if not any(counts.get(fuel, 0) for fuel in {"coal", "charcoal", *PLANK_NAMES}):
-            return self._obtain("planks", 2, obs, context, depth + 1)
+            return self._obtain("planks", 8 if counts.get("raw_iron", 0) >= 8 else 2, obs, context, depth + 1)
         dim = obs["status"].get("dimension")
         if any(self.daily._verified(row, dim) and self.daily._burning(row) for row in self.daily._rows(smelt_obs.get("furnaces"))):
-            return self._decision("wait", {"seconds": 5}, "Wait for residual furnace burn to finish before loading next batch")
+            return self._decision("wait", {"seconds": 10}, "Wait for residual furnace burn to finish before loading next batch")
         return None
 
     def _hunt(self, names, obs, context):
@@ -919,7 +922,9 @@ class AutonomousTaskController:
         if decision.name not in local["capabilities"] or decision.name in {"gather_materials", "build_shelter_batch", "goal_complete"}:
             self._escalate("unsupported_atomic_child")
             return None
-        if decision.args.get("pos") is not None and self.rules._key(decision.args["pos"]) in self.rules._blocked(local):
+        if (decision.goal not in {"scout_surface", "nether_portal"}
+                and decision.args.get("pos") is not None
+                and self.rules._key(decision.args["pos"]) in self.rules._blocked(local)):
             self._escalate("selected_target_is_cooling_down")
             return None
         if (decision.goal not in {"scout_surface", "nether_portal"} and decision.name == "move_to"

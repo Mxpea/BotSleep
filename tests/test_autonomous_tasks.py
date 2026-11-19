@@ -938,6 +938,36 @@ class AutonomousTaskTests(unittest.TestCase):
         self.assertIsNotNone(step2)
         self.assertEqual((step2.name, step2.goal), ("move_to", "scout_logs"))
 
+    def test_smelt_places_extra_furnace_when_only_logs_held_as_fuel(self):
+        obs = world({"raw_iron": 16, "oak_log": 3, "furnace": 1})
+        obs["blocks"].append({"name": "furnace", "pos": [1, 64, 0], "can_see": True})
+        obs["furnaces"] = [{
+            "pos": [1, 64, 0], "name": "furnace", "dimension": "overworld",
+            "fresh": True, "verified": True, "source": "inspect_container",
+            "input": {"name": "raw_iron", "count": 8}, "fuel": {"name": "oak_planks", "count": 4},
+            "output": {"name": None, "count": 0}, "burning": True,
+        }]
+        obs["placement_candidates"] = [{"pos": [2, 64, 0], "support": "grass_block"}]
+        ctrl = self.start({"task": "smelt", "item": "iron_ingot", "count": 24}, obs=obs)
+        step = ctrl.next_action(obs, {"smelting_jobs": [{"pos": [1, 64, 0], "dimension": "overworld", "expected_output": "iron_ingot"}]})
+        self.assertIsNotNone(step)
+        self.assertEqual((step.name, step.args["item"], step.args["pos"]), ("place_item", "furnace", [2, 64, 0]))
+
+    def test_scout_does_not_escalate_cooling_down_when_origin_cell_blocked(self):
+        obs = world({})
+        ctrl = self.start({"task": "scout", "count": 8}, obs=obs)
+        step = ctrl.next_action(obs, {"blocked_targets": {"0,64,0": 9999999999.0}})
+        self.assertIsNotNone(step)
+        self.assertEqual((step.name, step.goal), ("move_to", "scout_surface"))
+
+    def test_craft_does_not_chase_remote_logs_when_existing_table_is_blocked(self):
+        obs = world({"cobblestone": 8})
+        obs["blocks"] = [{"name": "crafting_table", "pos": [2, 67, 0], "can_see": False}]
+        ctrl = self.start({"task": "craft", "item": "furnace", "count": 1}, obs=obs)
+        step = ctrl.next_action(obs, {"blocked_targets": {"2,67,0": 9999999999.0}, "remote_log_target": [24, 64, 0]})
+        self.assertIsNone(step)
+        self.assertEqual(ctrl.snapshot()["status"], "needs_ai")
+
 
 if __name__ == "__main__":
     unittest.main()
