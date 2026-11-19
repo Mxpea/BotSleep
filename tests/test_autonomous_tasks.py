@@ -914,7 +914,7 @@ class AutonomousTaskTests(unittest.TestCase):
         self.assertEqual((step.name, step.args["item"], step.args["pos"]), ("place_item", "furnace", [2, 64, 0]))
 
     def test_raw_iron_mines_visible_surface_stone_for_spare_pickaxes_when_cobble_spent(self):
-        obs = world({"stone_pickaxe": 1, "stick": 4, "oak_planks": 4})
+        obs = world({"stone_pickaxe": 1, "oak_log": 2})
         obs["blocks"] = [
             {"name": "stone", "pos": [2, 64, 0], "can_see": True, "can_dig": True},
             {"name": "crafting_table", "pos": [1, 64, 0], "can_see": True},

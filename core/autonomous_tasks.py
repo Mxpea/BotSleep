@@ -522,7 +522,7 @@ class AutonomousTaskController:
                          or any(row["name"] in {"stone", "cobblestone"}
                                 and math.dist(origin, row["pos"]) <= self._data["args"]["radius"]
                                 for row in blocks))
-                    and (counts.get("stick", 0) >= 2 or any(counts.get(n, 0) >= 1 for n in PLANK_NAMES | LOG_NAMES))):
+                    and (counts.get("stick", 0) >= 2 or any(counts.get(n, 0) >= 1 for n in (*PLANK_NAMES, *LOG_NAMES)))):
                 spare = self._craft("stone_pickaxe", 1, obs, context)
                 if spare is not None:
                     return spare

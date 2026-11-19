@@ -310,6 +310,15 @@ class ObservedCanopyEscapeTests(unittest.TestCase):
         self.assertTrue(result.data["retreat_complete"])
         self.assertEqual(result.data["evacuation_stage"], "ground")
 
+    def test_snow_layer_on_spruce_leaves_is_passable_during_canopy_escape(self):
+        world = terrain([(0, 70, 0, "spruce_leaves"), (1, 69, 0, "grass_block")])
+        world.set_block([0, 69, 0], "spruce_leaves", properties={"waterlogged": False})
+        world.set_block([0, 70, 0], "snow", properties={"layers": 1})
+        world.set_block([1, 68, 0], "grass_block")
+        result = DailySurvivalSkills(world).execute("canopy_escape", {})
+        self.assertTrue(result.success, result)
+        self.assertEqual(result.data["evacuation_stage"], "ground")
+
 
 if __name__ == "__main__":
     unittest.main()

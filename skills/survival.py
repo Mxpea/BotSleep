@@ -34,7 +34,7 @@ class SurvivalSkills:
     RETREAT_PASSABLE = AIR | {
         "short_grass", "tall_grass", "fern", "large_fern", "leaf_litter",
         "vine", "glow_lichen", "hanging_roots", "moss_carpet", "pale_moss_carpet",
-        "pale_hanging_moss", "eyeblossom", "open_eyeblossom", "closed_eyeblossom",
+        "pale_hanging_moss", "eyeblossom", "open_eyeblossom", "closed_eyeblossom", "snow",
     }
     RETREAT_LEAVES = frozenset(wood + "_leaves" for wood in WOODS)
     RETREAT_TRUNKS = LOGS | frozenset(wood + "_wood" for wood in WOODS)
