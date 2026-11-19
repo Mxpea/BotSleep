@@ -845,6 +845,30 @@ class MiningWorkflowTests(unittest.TestCase):
         self.assertIsNotNone(rot)
         self.assertNotEqual(rot[0], "north")
 
+    def test_find_cave_openings_accepts_water_ravine_when_entry_ledge_is_dry(self):
+        from skills.cave_explore import CaveExploreSkill
+
+        world = WorkflowMineWorld(bot_pos=(0.5, 64.0, 0.5))
+        # Carve an open cave/ravine at x=4..10, y=58..61, z=-2..3 with rock roof above y=62
+        # and shallow water pool along the bottom y=58 while dry stone ledge sits at (4, 59, 0).
+        for x in range(4, 11):
+            for y in range(58, 62):
+                for z in range(-2, 4):
+                    world.blocks[(x, y, z)] = {"name": "air", "diggable": False, "properties": {}}
+            for z in range(-2, 4):
+                world.blocks[(x, 62, z)] = {"name": "stone", "diggable": True, "properties": {}}
+                world.blocks[(x, 57, z)] = {"name": "stone", "diggable": True, "properties": {}}
+        world.blocks[(4, 58, 0)] = {"name": "stone", "diggable": True, "properties": {}}
+        world.blocks[(6, 58, 1)] = {"name": "water", "diggable": False, "properties": {"level": "0"}}
+        world.blocks[(7, 58, 1)] = {"name": "water", "diggable": False, "properties": {"level": "0"}}
+        openings = CaveExploreSkill(world, memory=Mock()).find_cave_openings(
+            origin=[0, 59, 0],
+            search_radius=12,
+            max_candidates=2,
+        )
+        self.assertTrue(openings)
+        self.assertGreaterEqual(openings[0]["report"].get("water_count", 0), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

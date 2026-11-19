@@ -628,6 +628,19 @@ class DailyGoalsTests(unittest.TestCase):
         planner = DailySurvivalGoals({"daily": {"food_reserve": float("nan"), "wood_reserve": -3, "fuel_reserve": 10000}})
         self.assertEqual(planner.targets, {"food_reserve": 8, "wood_reserve": 1, "fuel_reserve": 64, "maintenance_interval_seconds": 30})
 
+    def test_food_and_wood_reserves_deprioritized_when_well_fed_during_progression(self):
+        obs = observation({"stone_pickaxe": 1, "oak_log": 4}, food=20, health=20)
+        board = self.goals.build(obs)
+        food_row = next(r for r in board["tasks"] if r["id"] == "food_reserve")
+        wood_row = next(r for r in board["tasks"] if r["id"] == "wood_reserve")
+        self.assertEqual(food_row["priority"], 35)
+        self.assertEqual(wood_row["priority"], 30)
+        self.assertNotEqual(board["active_task_id"], "food_reserve")
+        obs["status"]["food"] = 12
+        hungry_board = self.goals.build(obs)
+        hungry_food = next(r for r in hungry_board["tasks"] if r["id"] == "food_reserve")
+        self.assertEqual(hungry_food["priority"], 95)
+
 
 if __name__ == "__main__":
     unittest.main()

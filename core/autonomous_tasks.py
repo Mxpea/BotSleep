@@ -676,7 +676,16 @@ class AutonomousTaskController:
             return self._decision("hunt_animal", {"entity_id": row["id"], "expected_name": row["name"]}, "Hunt only the species needed for this goal")
         return None
 
+    def _recent_hunt_failures(self):
+        return sum(
+            1 for row in self._data.get("recent_results", [])[-4:]
+            if isinstance(row, dict) and not row.get("success") and row.get("name") in {"hunt_animal", "move_to"}
+        )
+
     def _food(self, obs, context):
+        status = obs.get("status") or {}
+        if status.get("food", 0) >= 16 and status.get("health", 0) >= 16 and self._recent_hunt_failures() >= 2:
+            return None
         decision = self.daily._food_action(obs, obs["counts"], context)
         if decision:
             return self._row_decision(decision)
@@ -863,7 +872,7 @@ class AutonomousTaskController:
                 decision.goal == "explore" or decision.name == "move_to" and decision.args.get("pos") not in
                 [b["pos"] for b in self.rules._blocks(obs)] + [row.get("pos") for row in self.daily._rows(obs.get("entities"))]):
             decision = None  # Replace blind radial exploration with checked local geometry.
-        if decision is None:
+        if decision is None and not (task == "food" and status.get("food", 0) >= 16 and status.get("health", 0) >= 16 and self._recent_hunt_failures() >= 2):
             decision = self._explore(obs, local)
         if decision is None:
             self._escalate("no_safe_local_action_or_unavailable_prerequisite")

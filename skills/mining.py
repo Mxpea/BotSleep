@@ -3022,8 +3022,8 @@ class MineShaftSkill(BaseSkill):
         stop_reason = "bands_exhausted"
 
         if prefer_caves_first and parsed_targets:
-            cave_cap = float((cave_policy or {}).get("explore_timeout_seconds", 120.0))
-            cave_t = min(cave_cap, 120.0, float(band_timeout_seconds) * 0.5, max(25.0, float(total_timeout_seconds) * 0.25))
+            cave_cap = float((cave_policy or {}).get("explore_timeout_seconds", 220.0))
+            cave_t = min(cave_cap, 240.0, float(band_timeout_seconds) * 0.65, max(45.0, float(total_timeout_seconds) * 0.45))
             cave_skill = CaveExploreSkill(self.client, memory=self.memory)
             cave_res = cave_skill.discover_and_explore_caves(
                 origin=start_surface,

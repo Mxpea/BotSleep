@@ -897,8 +897,15 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
             or status.get("last_death") != baseline.get("last_death")
             or status.get("health", 0) < baseline.get("health", 20))
         deep_mine_active = decision is not None and decision.goal in {"deep_mine", "scout_surface"}
+        submerged_danger = bool(
+            status.get("submerged")
+            and (
+                not deep_mine_active
+                or (isinstance(status.get("oxygen"), (int, float)) and float(status.get("oxygen", 20)) <= 12)
+            )
+        )
         danger = (not status.get("alive") or status.get("in_lava") or status.get("on_fire")
-                  or status.get("submerged") or (status.get("in_water") and not deep_mine_active)
+                  or submerged_danger or (status.get("in_water") and not deep_mine_active)
                   or status.get("health", 20) <= self.settings["low_health_threshold"] and not (food_turn or local_recovery_turn)
                   or combat_changed
                   or (not combat_action and isinstance(hostile.get("dist"), (int, float))

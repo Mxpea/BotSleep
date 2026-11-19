@@ -293,6 +293,21 @@ class WorkflowGuard:
                     blocker_type="safety_interrupted",
                     suggested_recovery="retreat_from_hazard",
                 )
+            if status.get("submerged"):
+                oxy = status.get("oxygen")
+                if isinstance(oxy, (int, float)) and not isinstance(oxy, bool) and float(oxy) <= 10.0:
+                    raise WorkflowStepError(
+                        "unsafe_state",
+                        f"Bot submerged with low oxygen ({oxy})",
+                        blocker_type="safety_interrupted",
+                        suggested_recovery="swim_to_surface",
+                    )
+                if not self.jumping:
+                    try:
+                        self.client.posture(sneak=self.sneaking, jump=True)
+                        self.jumping = True
+                    except Exception:
+                        pass
         return status
 
     def set_sneak(self, enabled: bool) -> None:

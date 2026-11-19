@@ -137,17 +137,17 @@ stone_pickaxe >= 1 with status.food >= 16 and status.health >= 16, IGNORE option
 (food_reserve, food_production, shelter, bed, base_site, storage, fuel_reserve, wood_reserve,
 maintain) EVEN AFTER a task escalation/failure: do NOT hunt animals, cook food, farm, chop
 extra wood reserves, or smelt charcoal (wooden planks/logs already smelt iron and mining finds
-coal). Call run_survival_task(task="gather", resource="raw_iron", count=12) IMMEDIATELY, and do
-NOT craft any iron_pickaxe until total raw_iron + iron_ingot >= 9.
-2) Iron decision gate: once raw_iron, iron_ingot, iron_pickaxe or iron_tools completes, inspect
-current iron_ingot, iron_pickaxe, armor slots, offhand, food and reserves to decide the next goal
+coal). Call run_survival_task(task="gather", resource="raw_iron", count=24) IMMEDIATELY (it
+prefers natural caves/water ravines and sets up an in-cave furnace camp to smelt iron, using
+branch mining only as fallback). Do NOT craft any iron_pickaxe yet during cave/raw_iron mining
+so server dig uses cheap stone_pickaxe instead of wasting iron durability on stone.
+2) Iron decision gate: once raw_iron, iron_ingot, or iron_tools completes, inspect current
+iron_ingot, iron_pickaxe, armor slots, offhand, food and reserves to decide the next goal
 yourself, STILL ignoring optional daily_tasks (food_reserve, shelter, wood_reserve, bed, maintain)
 while status.food >= 16 and status.health >= 16:
-When chasing diamond_pickaxe/nether_portal fast, smelt ALL raw_iron into iron_ingot first, then
-craft bucket (3) + 2-3 iron_pickaxe (6-9 ingots; never craft bucket alone and launch another raw_iron
-trip while holding an iron_pickaxe because server dig wears iron_pickaxe on stone). Once you hold
->= 1 iron_pickaxe (plus any extra iron_pickaxe/bucket you can craft now), call
-run_survival_task(task="gather", resource="diamond", count=3) IMMEDIATELY.
+Smelt remaining raw_iron into iron_ingot first, craft bucket (3) + shield (1) (and run
+run_survival_task(task="iron_armor") if you hold >= 32 iron_ingot for full armor + diamond tools).
+Only craft 2-3 iron_pickaxe right BEFORE calling run_survival_task(task="gather", resource="diamond", count=3).
 NEVER call craft(furnace) if inventory already holds >= 1 furnace (even if not yet placed in world);
 NEVER call craft(stone_pickaxe/wooden_pickaxe/stone_axe/stone_sword) again if you already own >= 1,
 and defer crafting stone_axe until after raw_iron unless wood gathering fails. To smelt iron_ingot

@@ -160,7 +160,7 @@ class AutonomyRuntime:
             targets = {"coal": {"count": count, "min_tool": "wooden_pickaxe"}}
         else:
             targets = {
-                "iron": {"count": max(count, 12), "min_tool": "stone_pickaxe"},
+                "iron": {"count": max(count, 24), "min_tool": "stone_pickaxe"},
             }
         # Never abort a resource expedition solely because the player lacks torches or scaffold blocks yet.
         deep_home_thresholds = {
@@ -171,14 +171,14 @@ class AutonomyRuntime:
         status_pos = (observation.get("status") or {}).get("pos") if isinstance(observation, dict) else None
         self._discard_mining_clutter(status_pos=status_pos)
 
-        remaining = 1200.0 if resource == "diamond" else 660.0 if resource == "raw_iron" else 540.0
+        remaining = 1200.0 if resource == "diamond" else 780.0 if resource == "raw_iron" else 540.0
         if hasattr(self, "_remaining_budget"):
             try:
                 remaining = max(60.0, float(self._remaining_budget().get("remaining_seconds", remaining)) - 30.0)
             except Exception:
                 pass
-        total_t = min(1140.0 if resource == "diamond" else 640.0 if resource == "raw_iron" else 540.0, max(90.0, remaining))
-        band_t = min(960.0 if resource == "diamond" else 560.0 if resource == "raw_iron" else 460.0, max(75.0, total_t * 0.85))
+        total_t = min(1140.0 if resource == "diamond" else 750.0 if resource == "raw_iron" else 540.0, max(90.0, remaining))
+        band_t = min(960.0 if resource == "diamond" else 640.0 if resource == "raw_iron" else 460.0, max(75.0, total_t * 0.85))
 
         state_root = Path(str(self.settings.get("state_dir") or "runtime/survival"))
         memory = MemoryEngine(str(state_root / "deep_mine_memory"))
@@ -229,11 +229,11 @@ class AutonomyRuntime:
 
         res = miner.mine_targets_from_surface(
             targets=targets,
-            cave_policy={"explore_timeout_seconds": 35.0},
+            cave_policy={"explore_timeout_seconds": 220.0},
             home_thresholds=deep_home_thresholds,
-            prefer_caves_first=(resource == "coal"),
-            cave_search_radius=20,
-            max_caves=1,
+            prefer_caves_first=(resource in {"raw_iron", "coal", "diamond"}),
+            cave_search_radius=40,
+            max_caves=3,
             place_workstation=False,
             rib_length=12 if resource in {"diamond", "raw_iron"} else 6,
             rib_spacing=3 if resource in {"diamond", "raw_iron"} else 4,

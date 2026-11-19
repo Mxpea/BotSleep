@@ -494,14 +494,26 @@ class DailySurvivalGoals:
         task("recover_drops", 100, context.get("death_count", 0) == 0, action=drops,
              reason="No currently visible safe drop; do not replay a route to the death location", waiting=True)
 
+        well_fed = (
+            fresh
+            and self.rules._number(status.get("food")) and status.get("food", 0) >= 16
+            and self.rules._number(status.get("health")) and status.get("health", 0) >= 16
+        )
+        has_iron_kit = (
+            fresh
+            and all(any(counts.get(tier + "_" + k, 0) for tier in ("iron", "diamond", "netherite")) for k in TOOL_KINDS)
+            and any(counts.get(item, 0) for item in ("bucket", "water_bucket", "lava_bucket"))
+        )
+        expedition_focus = bool(well_fed and not has_iron_kit)
+
         food = sum(counts.get(name, 0) for name in SAFE_FOOD)
-        task("food_reserve", 95, food >= self.targets["food_reserve"],
+        task("food_reserve", 35 if expedition_focus else 95, food >= self.targets["food_reserve"],
              missing=[{"food_items": max(0, self.targets["food_reserve"] - food)}],
              action=self._food_action(observation, counts, context), proof={"food_items": food},
              reason="No safe mature crop/passive animal or ready cooking input is currently available")
 
         wood = sum(counts.get(name, 0) for name in LOG_NAMES) + sum(counts.get(name, 0) for name in PLANK_NAMES) // 4
-        task("wood_reserve", 65, wood >= self.targets["wood_reserve"],
+        task("wood_reserve", 30 if (expedition_focus and wood >= 2) else 65, wood >= self.targets["wood_reserve"],
              missing=[{"log_equivalents": max(0, self.targets["wood_reserve"] - wood)}],
              action=self._gather(LOG_NAMES, observation, context, "wood_reserve"), proof={"log_equivalents": wood})
 
@@ -710,7 +722,11 @@ class DailySurvivalGoals:
                                  "Reobserve food, tools and the base; maintenance is continuous", "maintain") if maintenance_ready else None,
              depends_on=sorted(required), reason="Daily prerequisites remain unmet", waiting=maintenance_ready)
         ready = sorted((row for row in tasks if row["status"] in {"ready", "running"}), key=lambda row: (-row["priority"], TASK_IDS.index(row["id"])))
-        active = ready[0]["id"] if ready else None
+        if expedition_focus and ready:
+            non_reserve = [row for row in ready if row["id"] not in {"food_reserve", "wood_reserve", "fuel_reserve", "food_production"}]
+            active = (non_reserve[0] if non_reserve else ready[0])["id"]
+        else:
+            active = ready[0]["id"] if ready else None
         candidates = [copy.deepcopy(row) for row in self._rows(memory.get("places"))
                       if row.get("dimension") == dimension and self._pos(row.get("pos")) is not None][:8]
         for row in candidates:
