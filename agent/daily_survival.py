@@ -250,6 +250,7 @@ class DailySurvivalGoals:
             if output.get("name") in outputs and type(output.get("count")) is int and output["count"] > 0:
                 return self._action("smelt_collect", {"pos": row["pos"], "item": output["name"],
                     "count": min(16, output["count"])}, "Collect a currently observed furnace output", goal)
+        wait_action = None
         for row in self._safe_rows(observation, {"furnace"}, context=context):
             # Opening the furnace is a separate verified step. Never refill a
             # remembered/start-only job without inspecting its current slots.
@@ -262,7 +263,9 @@ class DailySurvivalGoals:
                 return self._action("inspect_container", {"pos": row["pos"]},
                                     "Reinspect a pending furnace job; the old start result is not output evidence", goal)
             if pending_job and checked is not None and ((checked.get("input") or {}).get("count", 0) or self._burning(checked)):
-                return self._action("wait", {"seconds": 5}, "The inspected furnace is still processing; reobserve later", goal)
+                if wait_action is None:
+                    wait_action = self._action("wait", {"seconds": 5}, "The inspected furnace is still processing; reobserve later", goal)
+                continue
             inputs = [item for item, output in COOKING.items() if output in outputs and counts.get(item, 0) > 0]
             fuel = next((item for item in ("coal", "charcoal") if counts.get(item, 0) > 0), None)
             if fuel is None:
@@ -277,7 +280,7 @@ class DailySurvivalGoals:
             count = min(16, counts[inputs[0]], math.floor(counts[fuel] * capacity))
             return self._action("smelt_start", {"pos": row["pos"], "input_item": inputs[0], "count": count,
                 "fuel_item": fuel, "fuel_count": math.ceil(count / capacity)}, "Start smelting; completion still requires verified output", goal)
-        return None
+        return wait_action
 
     def _food_action(self, observation, counts, context):
         stored = self._take_supplies(observation, counts, SAFE_FOOD, self.targets["food_reserve"], "food_reserve", context)

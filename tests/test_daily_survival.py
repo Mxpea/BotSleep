@@ -648,6 +648,20 @@ class DailyGoalsTests(unittest.TestCase):
         self.assertEqual(furnace_row["priority"], 40)
         self.assertNotEqual(board["active_task_id"], "furnace")
 
+    def test_smelt_loads_idle_second_furnace_before_waiting_on_burning_furnace(self):
+        obs = observation(
+            {"raw_iron": 12, "coal": 3},
+            [block("furnace", [2, 64, 0]), block("furnace", [3, 64, 0])],
+        )
+        obs["furnaces"] = [
+            verified([2, 64, 0], input={"name": "raw_iron", "count": 8}, output={}, burning=True),
+            verified([3, 64, 0], input={}, fuel={}, output={}, burning=False),
+        ]
+        ctx = {"smelting_jobs": [{"pos": [2, 64, 0], "dimension": "overworld", "expected_output": "iron_ingot"}]}
+        action = self.task(obs, "iron_tools", context=ctx)["next_action"]
+        self.assertEqual(action["name"], "smelt_start")
+        self.assertEqual(action["args"]["pos"], [3, 64, 0])
+
 
 if __name__ == "__main__":
     unittest.main()

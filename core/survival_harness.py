@@ -457,7 +457,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
         names = {"select_task", "update_progress", "finish_task", "force_exit_task", "end_competition"}
         if decision.name not in names:
             if self.competition.snapshot().get("active_goal_id") is None and decision.name not in {
-                "wait", "retreat_from", "canopy_escape", "eat_food", "auto_sleep", "fight_hostile"}:
+                "wait", "retreat_from", "canopy_escape", "water_escape", "eat_food", "auto_sleep", "fight_hostile"}:
                 return SkillResult(False, "Select a scored goal before production actions", {"executed": False}, "task_selection_required")
             return None
         status = observation.get("status", {})
@@ -860,7 +860,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
         self._next_monitor = time.monotonic() + max(1, self.settings["poll_interval_seconds"])
         decision = self._active_decision
         planning = self.phase == "thinking" and self._model_worker is not None and self._model_worker.pending
-        if (decision is None and not planning) or (decision is not None and decision.name in ("retreat_from", "canopy_escape", "eat_food", "auto_sleep")):
+        if (decision is None and not planning) or (decision is not None and decision.name in ("retreat_from", "canopy_escape", "water_escape", "eat_food", "auto_sleep")):
             return
         try:
             status = self.client.get_status()["result"]
@@ -1023,6 +1023,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                     self._record("WARN", "COMBAT_RECOVERY_SCHEDULED", {
                         "code": result.error_code, "entity_id": decision.args["entity_id"], "retry_seconds": delay})
                 elif task_replan:
+                    delay = 0
+                elif decision.name == "water_escape" and local_replan:
                     delay = 0
                 elif retreat_replan or local_replan:
                     delay = RETREAT_WAIT_SECONDS

@@ -36,6 +36,13 @@ class LocalRecoveryRuntime:
         if (isinstance(canopy, dict)
                 and canopy.get("life_generation", 0) != self.context.get("life_generation", 0)):
             self.context.pop("canopy_recovery", None)
+        water = self.context.get("water_recovery")
+        if (isinstance(water, dict)
+                and (water.get("life_generation", 0) != self.context.get("life_generation", 0)
+                     or water.get("life") != status.get("last_death")
+                     or (status.get("in_water") is False and status.get("submerged") is False
+                         and status.get("on_ground") is True and observation.get("fresh") is True))):
+            self.context.pop("water_recovery", None)
         # Older checkpoints marked night-time waiting as exhausted food search.
         # Only a bounded search or a current daylight evaluation can authorize
         # the limited model turn; a saved wait is not that evidence.
@@ -155,6 +162,33 @@ class LocalRecoveryRuntime:
     def _local_recovery_result(self, decision, result, observation, *, uncertain=False):
         if observation is None or not self.daily:
             return False
+        if decision.name == "water_escape":
+            state = self._recovery_state("water_recovery", observation)
+            state["steps"] += 1
+            state["reason"] = result.error_code or result.message
+            if uncertain:
+                state["unknown"] = True
+                self._record("WARN", "LOCAL_RECOVERY_UNKNOWN", {"kind": "water_recovery", "recovery": copy.deepcopy(state)})
+                return False
+            state.pop("unknown", None)
+            if result.success:
+                self._record("INFO", "WATER_ESCAPE_COMPLETED", {"result": copy.deepcopy(result.data), "steps": state["steps"]})
+                self.context.pop("water_recovery", None)
+                return True
+            if result.data.get("progress_made") is True:
+                state["stalled_steps"] = 0
+                state.pop("retry_after", None)
+            else:
+                stalled = int(state.get("stalled_steps", 0)) + 1
+                state["stalled_steps"] = stalled
+                if stalled >= 4:
+                    state["retry_after"] = time.time() + 15
+                    state["stalled_steps"] = 0
+            if state["steps"] >= 24:
+                state.update(exhausted=True, reason="water_escape_budget_exhausted")
+                self._record("WARN", "WATER_ESCAPE_EXHAUSTED", {"recovery": copy.deepcopy(state)})
+            return result.error_code not in {"unauthorized", "invalid_credentials", "death_limit", "dead",
+                "internal", "internal_error", "cancelled", "life_changed", "dimension_changed"}
         canopy = decision.name == "canopy_escape"
         forage = decision.goal == "food_recovery" and decision.name == "position_for_task"
         if not canopy and not forage:

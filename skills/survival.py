@@ -69,8 +69,9 @@ class SurvivalSkills:
         "eat_food": ({"item"}, {"item"}),
         "move_to": ({"pos", "range"}, {"pos"}),
         "retreat_from": ({"pos", "distance"}, {"pos"}),
-        # Internal safety action; deliberately absent from the model catalog.
+        # Internal safety actions; deliberately absent from the model catalog.
         "canopy_escape": (set(), set()),
+        "water_escape": (set(), set()),
     }
 
     def __init__(self, client):
@@ -543,6 +544,166 @@ class SurvivalSkills:
         recovery = context.setdefault("recovery_context", {})
         recovery["purpose"] = "canopy_escape"
         return self._retreat_from({"pos": [0, 0, 0], "distance": 8}, context)
+
+    def _water_escape(self, args, context):
+        before = self._status(context)
+        self._overworld(before)
+        if before.get("in_lava") or before.get("on_fire"):
+            raise _Failure("unsafe", "Cannot run water escape while in lava or fire")
+        is_dry = lambda st: not st.get("in_water") and not st.get("submerged")
+        if is_dry(before):
+            return {"pos": before["pos"], "escaped_water": True, "stage": "already_dry", "progress_made": True}
+
+        fatal_or_unknown = {
+            "request_timeout", "network_error", "invalid_json", "invalid_response",
+            "action_unconfirmed", "dig_unconfirmed", "not_connected",
+            "cancelled", "dead", "not_ready", "dimension_changed", "interrupted",
+            "busy", "life_changed", "lifecycle_changed", "unsafe_state",
+        }
+        cur = before
+
+        def swim_step(**kw):
+            nonlocal cur
+            if not callable(getattr(self.client, "control", None)):
+                return False
+            context["navigation_write"] = True
+            context["navigation_verified"] = False
+            try:
+                self._action(context, self.client.control, **kw)
+            except (APIError, _Failure) as exc:
+                if getattr(exc, "code", None) in fatal_or_unknown:
+                    raise
+                return False
+            cur = self._status(context)
+            return True
+
+        # Phase 1: swim straight up if submerged or losing air, as long as overhead is safe.
+        up_pulses = 0
+        while (cur.get("submerged") or cur.get("oxygen", 20) < 16) and up_pulses < 3:
+            fx = math.floor(cur["pos"][0] + 1e-4)
+            fy = math.floor(cur["pos"][1] + 1e-4)
+            fz = math.floor(cur["pos"][2] + 1e-4)
+            head2 = self._block([fx, fy + 2, fz], context)
+            if head2["name"] in (self.HAZARDS - {"water"}) or head2["name"] not in (self.RETREAT_PASSABLE | {"water", "flowing_water"}):
+                break
+            if not swim_step(jump=True, ms=700, wait=True):
+                break
+            up_pulses += 1
+            if is_dry(cur):
+                context["navigation_verified"] = True
+                return {"pos": cur["pos"], "escaped_water": True, "stage": "surfaced_dry", "progress_made": True}
+
+        # Phase 2: locate nearest verified dry shoreline support cell (direct ring + wider find_blocks).
+        cx = math.floor(cur["pos"][0] + 1e-4)
+        cy = math.floor(cur["pos"][1] + 1e-4)
+        cz = math.floor(cur["pos"][2] + 1e-4)
+        shore_supports = []
+        seen_cells = set()
+
+        def _valid_dry_landing(bx, by, bz):
+            key = (bx, by, bz)
+            if key in seen_cells or (bx == cx and bz == cz):
+                return None
+            seen_cells.add(key)
+            try:
+                floor_blk = self._block([bx, by, bz], context)
+                if (floor_blk["name"] not in self.SUPPORT or not self._safe_block(floor_blk)
+                        or (floor_blk.get("properties") or {}).get("waterlogged") in (True, "true")):
+                    return None
+                feet_blk = self._block([bx, by + 1, bz], context)
+                head_blk = self._block([bx, by + 2, bz], context)
+                if (feet_blk["name"] not in self.RETREAT_PASSABLE or not self._safe_block(feet_blk)
+                        or head_blk["name"] not in self.RETREAT_PASSABLE or not self._safe_block(head_blk)):
+                    return None
+                return [bx, by + 1, bz]
+            except (APIError, _Failure) as exc:
+                if getattr(exc, "code", None) in fatal_or_unknown:
+                    raise
+                return None
+
+        for dx, dz in ((-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1),
+                       (-2, 0), (2, 0), (0, -2), (0, 2)):
+            for dy in (0, -1, 1):
+                landing = _valid_dry_landing(cx + dx, cy + dy, cz + dz)
+                if landing is not None:
+                    shore_supports.append(landing)
+
+        if not shore_supports and callable(getattr(self.client, "get_blocks", None)):
+            try:
+                rows = self.client.get_blocks(
+                    radius=20,
+                    types=["grass_block", "dirt", "sand", "stone", "gravel", "mud", "sandstone", "cobblestone"],
+                    limit=48,
+                )
+            except (APIError, _Failure) as exc:
+                if getattr(exc, "code", None) in fatal_or_unknown:
+                    raise
+                rows = []
+            raw_candidates = []
+            for row in rows if isinstance(rows, list) else ():
+                pos = row.get("pos") if isinstance(row, dict) else None
+                if isinstance(pos, (list, tuple)) and len(pos) == 3 and abs(int(pos[1]) - cy) <= 3:
+                    raw_candidates.append([int(pos[0]), int(pos[1]), int(pos[2])])
+            raw_candidates.sort(key=lambda p: (abs(p[1] - cy), math.hypot(p[0] + 0.5 - cur["pos"][0], p[2] + 0.5 - cur["pos"][2])))
+            for bx, by, bz in raw_candidates[:16]:
+                landing = _valid_dry_landing(bx, by, bz)
+                if landing is not None:
+                    shore_supports.append(landing)
+                    if len(shore_supports) >= 4:
+                        break
+
+        shore_supports.sort(key=lambda p: (0 if p[1] <= cy + 1 else 1, math.hypot(p[0] + 0.5 - cur["pos"][0], p[2] + 0.5 - cur["pos"][2])))
+        for tx, ty, tz in shore_supports[:3]:
+            dist = math.hypot(tx + 0.5 - cur["pos"][0], tz + 0.5 - cur["pos"][2])
+            if dist <= 16.0:
+                context["navigation_write"] = True
+                context["navigation_verified"] = False
+                try:
+                    self._action(context, self.client.move_to, tx + 0.5, ty, tz + 0.5, range=0.5, timeout_ms=6500)
+                except (APIError, _Failure) as exc:
+                    if getattr(exc, "code", None) in fatal_or_unknown:
+                        raise
+                cur = self._status(context)
+                if is_dry(cur):
+                    context["navigation_verified"] = True
+                    return {"pos": cur["pos"], "target": [tx, ty, tz], "escaped_water": True, "stage": "shore_move", "progress_made": True}
+            # Direct bank lip swim-hop when Mineflayer move_to stalls at shoreline edge
+            if math.hypot(tx + 0.5 - cur["pos"][0], tz + 0.5 - cur["pos"][2]) <= 6.5:
+                yaw = math.atan2(-(tx + 0.5 - cur["pos"][0]), -(tz + 0.5 - cur["pos"][2]))
+                swim_step(forward=True, jump=True, yaw=yaw, pitch=0.0, ms=850, wait=True)
+                if is_dry(cur):
+                    context["navigation_verified"] = True
+                    return {"pos": cur["pos"], "target": [tx, ty, tz], "escaped_water": True, "stage": "shore_swim", "progress_made": True}
+                break
+
+        # Phase 3: fallback directional swim toward wider shore or cardinal headings
+        if is_dry(cur) is False and (cur["pos"] == before["pos"] or math.dist(cur["pos"], before["pos"]) < 0.8):
+            yaw = float(cur.get("yaw", 0.0) or 0.0)
+            if callable(getattr(self.client, "get_blocks", None)):
+                try:
+                    far_rows = self.client.get_blocks(radius=48, types=["grass_block", "sand", "stone", "dirt"], limit=16) or []
+                    pts = [r["pos"] for r in far_rows if isinstance(r, dict) and isinstance(r.get("pos"), (list, tuple)) and len(r["pos"]) == 3]
+                    if pts:
+                        nearest_shore = min(pts, key=lambda p: math.hypot(p[0] - cur["pos"][0], p[2] - cur["pos"][2]))
+                        yaw = math.atan2(-(nearest_shore[0] + 0.5 - cur["pos"][0]), -(nearest_shore[2] + 0.5 - cur["pos"][2]))
+                except (APIError, _Failure) as exc:
+                    if getattr(exc, "code", None) in fatal_or_unknown:
+                        raise
+            swim_step(forward=True, jump=True, yaw=yaw, pitch=0.0, ms=900, wait=True)
+            if is_dry(cur):
+                context["navigation_verified"] = True
+                return {"pos": cur["pos"], "escaped_water": True, "stage": "swim_dry", "progress_made": True}
+
+        context["navigation_verified"] = True
+        moved_h = math.hypot(cur["pos"][0] - before["pos"][0], cur["pos"][2] - before["pos"][2])
+        rose = cur["pos"][1] - before["pos"][1]
+        gained_air = cur.get("oxygen", 20) > before.get("oxygen", 20)
+        progress_made = moved_h >= 1.2 or rose >= 0.8 or gained_air
+        raise _Failure(
+            "still_in_water",
+            "Moved toward shoreline or air; still in water",
+            {"pos": cur["pos"], "progress_made": progress_made, "executed": bool(context.get("write_sent"))},
+        )
 
     def _settle_navigation(self, context, before, target, evidence):
         """Observe a transient fall after the single move; never send recovery writes."""

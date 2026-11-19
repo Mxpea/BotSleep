@@ -7,6 +7,7 @@ promise that the backend will follow that path or that a shelter is monster-proo
 
 import math
 import re
+import time
 from collections.abc import Mapping
 
 from agent.survival_planner import Decision, SurvivalPlanner, RANGED_HOSTILES
@@ -62,7 +63,7 @@ class DailySafetyPolicy:
         # Never authorize an eat action that the active daily skill rejects.
         return {name: points for name, points in FOOD_POINTS.items() if name in DailySurvivalSkills.FOODS}
 
-    def _basics(self, observation):
+    def _basics(self, observation, context=None):
         if (not isinstance(observation, dict) or observation.get("fresh") is not True
                 or observation.get("stale") is True or not isinstance(observation.get("status"), dict)):
             return "observation_required", self._wait("A fresh complete observation is required", "observe")
@@ -83,7 +84,20 @@ class DailySafetyPolicy:
                 or type(status.get("is_day")) is not bool or type(status.get("thundering")) is not bool
                 or not self.rules._number(status.get("time_of_day")) or not 0 <= status["time_of_day"] < 24000):
             return "observation_required", self._wait("Position, life, food and daytime data must be valid", "observe")
-        if any(status.get(key) for key in ("in_lava", "on_fire", "submerged", "in_water")):
+        if status.get("in_lava") or status.get("on_fire"):
+            return "environment_hazard", self._wait("No environmental rescue route is verified", "recover", 1)
+        if status.get("submerged") or status.get("in_water"):
+            water_state = (context or {}).get("water_recovery") or {}
+            cooled = bool(water_state.get("exhausted")) or (
+                type(water_state.get("retry_after")) in (int, float) and water_state["retry_after"] > time.time()
+            )
+            if status.get("in_water") and not cooled:
+                return "water_escape", Decision(
+                    "water_escape",
+                    {},
+                    "Exit water onto freshly checked dry ground or swim upward for air",
+                    "safety",
+                )
             return "environment_hazard", self._wait("No environmental rescue route is verified", "recover", 1)
         if status.get("in_vehicle"):
             return "vehicle", self._wait("Leave the vehicle before daily tasks", "recover")
@@ -235,7 +249,7 @@ class DailySafetyPolicy:
 
     def cautious_bootstrap(self, observation, context=None):
         """Shared pure gate for goal admission and each limited atomic child."""
-        _, forced = self._basics(observation)
+        _, forced = self._basics(observation, context)
         return forced is None and self._meal(observation) is None and self._bootstrap_ready(observation, context)
 
     def _bootstrap_valid(self, decision, observation, context=None):
@@ -509,7 +523,7 @@ class DailySafetyPolicy:
                    and (row.get("properties") or {}).get("occupied") not in (True, "true") for row in self._blocks(observation))
 
     def constraints(self, observation, context=None):
-        scenario, forced = self._basics(observation)
+        scenario, forced = self._basics(observation, context)
         allowed, radius, model = None, 32, forced is None
         reason = forced.reason if forced else "Normal bounded daily planning remains subject to local skill verification"
         if forced is not None:
@@ -554,7 +568,7 @@ class DailySafetyPolicy:
         return result
 
     def choose(self, observation, baseline_decision, task_board=None, context=None):
-        scenario, forced = self._basics(observation)
+        scenario, forced = self._basics(observation, context)
         if forced is not None:
             # Preserve the harness's bounded retreat search cooldown instead of
             # recreating the same unsafe route every observation.
@@ -604,13 +618,13 @@ class DailySafetyPolicy:
             return "invalid_decision"
         if decision.name == "wait":
             return None
-        scenario, forced = self._basics(observation)
+        scenario, forced = self._basics(observation, context)
         if forced is not None:
             if forced.name == "fight_hostile" and decision.name == forced.name and decision.args == forced.args:
                 return None
             if forced.name == "retreat_from" and decision.name == forced.name and self._point(decision.args.get("pos")) == forced.args["pos"]:
                 return None
-            if forced.name == "auto_sleep" and decision.name == "auto_sleep":
+            if forced.name in {"auto_sleep", "water_escape"} and decision.name == forced.name and (forced.name != "water_escape" or not decision.args):
                 return None
             return scenario
         status = observation["status"]

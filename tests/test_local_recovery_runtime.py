@@ -479,6 +479,29 @@ class LocalRecoveryRuntimeTests(unittest.TestCase):
         self.assertIn([1, 70, 0], opts["excluded_targets"])
         self.assertEqual(len(opts["recent_targets"]), 8)
 
+    def test_water_recovery_tracks_progress_and_clears_when_dry(self):
+        from skills import SkillResult
+        harness, _ = self.make_harness()
+        wet_obs = {
+            "fresh": True,
+            "status": {"pos": [1.5, 62.0, 0.5], "health": 20, "food": 20, "dimension": "overworld",
+                       "in_water": True, "submerged": False, "on_ground": False, "ready": True, "alive": True},
+        }
+        prog_res = SkillResult(False, "Swimming", {"progress_made": True}, "still_in_water")
+        replan = harness._local_recovery_result(Decision("water_escape", {}, "Swim", "safety"), prog_res, wet_obs)
+        self.assertTrue(replan)
+        self.assertEqual(harness.context["water_recovery"]["steps"], 1)
+        self.assertEqual(harness.context["water_recovery"]["stalled_steps"], 0)
+        dry_obs = {
+            "fresh": True,
+            "inventory_fresh": True,
+            "terrain_fresh": True,
+            "status": {"pos": [2.5, 63.0, 0.5], "health": 20, "food": 20, "dimension": "overworld",
+                       "in_water": False, "submerged": False, "on_ground": True, "ready": True, "alive": True, "busy": None},
+        }
+        harness._prepare_local_recovery(dry_obs)
+        self.assertNotIn("water_recovery", harness.context)
+
 
 if __name__ == "__main__":
     unittest.main()

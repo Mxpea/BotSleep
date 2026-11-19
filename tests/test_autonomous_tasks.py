@@ -898,6 +898,46 @@ class AutonomousTaskTests(unittest.TestCase):
         self.assertIsNotNone(step)
         self.assertEqual((step.name, step.args["item"]), ("craft_item", "iron_pickaxe"))
 
+    def test_smelt_places_extra_furnace_for_bulk_raw_iron_when_first_is_burning(self):
+        obs = world({"raw_iron": 16, "coal": 3, "furnace": 1})
+        obs["blocks"].append({"name": "furnace", "pos": [1, 64, 0], "can_see": True})
+        obs["furnaces"] = [{
+            "pos": [1, 64, 0], "name": "furnace", "dimension": "overworld",
+            "fresh": True, "verified": True, "source": "inspect_container",
+            "input": {"name": "raw_iron", "count": 8}, "fuel": {"name": "coal", "count": 1},
+            "output": {"name": None, "count": 0}, "burning": True,
+        }]
+        obs["placement_candidates"] = [{"pos": [2, 64, 0], "support": "grass_block"}]
+        ctrl = self.start({"task": "smelt", "item": "iron_ingot", "count": 24}, obs=obs)
+        step = ctrl.next_action(obs, {"smelting_jobs": [{"pos": [1, 64, 0], "dimension": "overworld", "expected_output": "iron_ingot"}]})
+        self.assertIsNotNone(step)
+        self.assertEqual((step.name, step.args["item"], step.args["pos"]), ("place_item", "furnace", [2, 64, 0]))
+
+    def test_raw_iron_mines_visible_surface_stone_for_spare_pickaxes_when_cobble_spent(self):
+        obs = world({"stone_pickaxe": 1, "stick": 4, "oak_planks": 4})
+        obs["blocks"] = [
+            {"name": "stone", "pos": [2, 64, 0], "can_see": True, "can_dig": True},
+            {"name": "crafting_table", "pos": [1, 64, 0], "can_see": True},
+        ]
+        ctrl = self.start({"task": "gather", "resource": "raw_iron", "count": 24}, obs=obs)
+        step = ctrl.next_action(obs, {"deep_mining_enabled": True})
+        self.assertIsNotNone(step)
+        self.assertEqual((step.name, step.args["expected_name"]), ("gather_block", "stone"))
+
+    def test_gather_logs_excludes_entire_route_failed_trunk_column_and_uses_remote_waypoint(self):
+        obs = world({})
+        obs["blocks"] = [
+            {"name": "oak_log", "pos": [4, 65, 0], "can_see": True, "can_dig": True},
+            {"name": "oak_log", "pos": [4, 66, 0], "can_see": True, "can_dig": True},
+        ]
+        ctrl = self.start({"task": "gather", "resource": "logs", "count": 4}, obs=obs)
+        step1 = ctrl.next_action(obs)
+        self.assertEqual((step1.name, step1.args["pos"]), ("gather_block", [4, 65, 0]))
+        ctrl.record_result(step1, SkillResult(False, "No path", {"target": [4, 65, 0]}, "path_not_found"), obs)
+        step2 = ctrl.next_action(obs, {"remote_log_target": [24.0, 64.0, 0.0]})
+        self.assertIsNotNone(step2)
+        self.assertEqual((step2.name, step2.goal), ("move_to", "scout_logs"))
+
 
 if __name__ == "__main__":
     unittest.main()

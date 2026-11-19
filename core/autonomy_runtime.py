@@ -74,36 +74,61 @@ class AutonomyRuntime:
             "accepted": True, "completed": False, "executed": False,
             "task_id": self._task_snapshot().get("task_id")})
 
-    def _remote_log_waypoint(self, observation):
-        blocks = observation.get("blocks") or []
-        if any(row.get("name") in LOG_NAMES for row in blocks if isinstance(row, dict)):
-            return None
+    def _remote_log_waypoint(self, observation, blocked=None):
         status = observation.get("status") if isinstance(observation, dict) else {}
         origin = status.get("pos") if isinstance(status, dict) else None
         if not isinstance(origin, (list, tuple)) or len(origin) != 3:
             return None
+        blocked_keys = set(blocked) if isinstance(blocked, dict) else set()
+        blocked_xz = set()
+        for bkey in blocked_keys:
+            parts = str(bkey).split(",")
+            if len(parts) == 3:
+                try:
+                    blocked_xz.add((int(parts[0]), int(parts[2])))
+                except ValueError:
+                    pass
+        blocks = observation.get("blocks") or []
+        for row in blocks:
+            if not isinstance(row, dict) or row.get("name") not in LOG_NAMES:
+                continue
+            rpos = row.get("pos")
+            if not isinstance(rpos, (list, tuple)) or len(rpos) != 3:
+                continue
+            if abs(float(rpos[1]) - float(origin[1])) > 3.1:
+                continue
+            if (math.floor(rpos[0]), math.floor(rpos[2])) in blocked_xz:
+                continue
+            return None
         try:
-            rows = self.client.get_blocks(radius=128, types=sorted(LOG_NAMES), limit=8)
+            rows = self.client.get_blocks(radius=128, types=sorted(LOG_NAMES), limit=24)
         except Exception:
             return None
         if not isinstance(rows, list) or not rows:
             return None
-        best = min(
-            (r.get("pos") for r in rows if isinstance(r, dict) and isinstance(r.get("pos"), list) and len(r["pos"]) == 3),
-            key=lambda p: math.dist(origin, p),
-            default=None,
-        )
-        if best is None:
+        candidates = [
+            r.get("pos")
+            for r in rows
+            if isinstance(r, dict)
+            and isinstance(r.get("pos"), list)
+            and len(r["pos"]) == 3
+            and (math.floor(r["pos"][0]), math.floor(r["pos"][2])) not in blocked_xz
+        ]
+        if not candidates:
             return None
+        best = min(
+            candidates,
+            key=lambda p: (0 if abs(float(p[1]) - float(origin[1])) <= 4.0 else 1, math.dist(origin, p)),
+        )
         dist = math.dist(origin, best)
         if dist <= 24.0:
-            return None
-        if dist <= 26.0:
-            return [float(best[0]), float(origin[1]), float(best[2])]
+            if abs(float(best[0]) - float(origin[0])) + abs(float(best[2]) - float(origin[2])) <= 4.0:
+                return None
+            return [float(best[0]), float(best[1]), float(best[2])]
         scale = 24.0 / dist
         return [
             round(float(origin[0]) + (float(best[0]) - float(origin[0])) * scale, 1),
-            float(origin[1]),
+            round(float(origin[1]) + (float(best[1]) - float(origin[1])) * scale, 1),
             round(float(origin[2]) + (float(best[2]) - float(origin[2])) * scale, 1),
         ]
 
@@ -229,9 +254,9 @@ class AutonomyRuntime:
 
         res = miner.mine_targets_from_surface(
             targets=targets,
-            cave_policy={"explore_timeout_seconds": 220.0},
+            cave_policy={"explore_timeout_seconds": 220.0, "allow_tall_cave_subgraph": True},
             home_thresholds=deep_home_thresholds,
-            prefer_caves_first=(resource in {"raw_iron", "coal", "diamond"}),
+            prefer_caves_first=(resource in {"raw_iron", "coal"}),
             cave_search_radius=40,
             max_caves=3,
             place_workstation=False,
@@ -336,7 +361,10 @@ class AutonomyRuntime:
             return None
         task_ctx = dict(self.context)
         task_ctx["deep_mining_enabled"] = not bool(self.settings.get("disable_deep_mining", False))
-        remote_log = self._remote_log_waypoint(observation)
+        remote_log = self._remote_log_waypoint(
+            observation,
+            blocked=self.task_controller._data.get("blocked") if self.task_controller else None,
+        )
         if remote_log is not None:
             task_ctx["remote_log_target"] = remote_log
         decision = self.task_controller.next_action(observation, task_ctx)

@@ -826,6 +826,23 @@ class TaskHarnessTests(unittest.TestCase):
         self.assertEqual(calls[0]["radius"], 24)
         self.assertEqual(len(brain.requests), 1)
 
+    def test_diamond_deep_mine_skips_surface_caves_and_keeps_deep_subgraph(self):
+        self.world.counts = {"iron_pickaxe": 2}
+        calls = []
+
+        def fake_mine(mine_self, **kwargs):
+            calls.append(kwargs)
+            self.world.counts["diamond"] = 3
+            return SkillResult(True, "Mined diamond", {"executed": True, "stop_reason": "target_reached"})
+
+        harness, _ = self.harness(response("run_survival_task", {"task": "gather", "resource": "diamond", "count": 3}, "diamond"))
+        with patch("skills.mining.MineShaftSkill.mine_targets_from_surface", new=fake_mine):
+            self.cycle(harness)
+            self.until(harness, lambda: harness.snapshot()["task_execution"]["status"] == "completed")
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(calls[0]["prefer_caves_first"])
+        self.assertTrue(calls[0]["cave_policy"]["allow_tall_cave_subgraph"])
+
 
 if __name__=="__main__":
     unittest.main()

@@ -735,6 +735,24 @@ class DailyPolicyTests(unittest.TestCase):
         night_with_bed["blocks"] = [{"name": "white_bed", "pos": [2, 64, 0], "properties": {"occupied": False}}]
         self.assertEqual(opp.choose(night_with_bed, self.baseline).name, "auto_sleep")
 
+    def test_in_water_chooses_water_escape_and_respects_exhausted_cooldown(self):
+        obs = observed(in_water=True, on_ground=False)
+        choice = self.policy.choose(obs, self.baseline)
+        self.assertEqual(choice.name, "water_escape")
+        self.assertEqual(self.policy.constraints(obs)["scenario"], "water_escape")
+        self.assertIsNone(self.policy.validate(Decision("water_escape", {}, "exit water", "safety"), obs))
+        self.assertEqual(
+            self.policy.validate(Decision("water_escape", {"pos": [1, 64, 0]}, "bad", "safety"), obs),
+            "water_escape",
+        )
+        # Submerged WITH in_water=True also allows water_escape (live bot state).
+        submerged_wet = observed(in_water=True, submerged=True, on_ground=False)
+        self.assertEqual(self.policy.choose(submerged_wet, self.baseline).name, "water_escape")
+        # Exhausted recovery falls back to environment_hazard wait.
+        exhausted_ctx = {"water_recovery": {"exhausted": True}}
+        self.assertEqual(self.policy.choose(obs, self.baseline, context=exhausted_ctx).name, "wait")
+        self.assertEqual(self.policy.constraints(obs, context=exhausted_ctx)["scenario"], "environment_hazard")
+
 
 if __name__ == "__main__":
     unittest.main()

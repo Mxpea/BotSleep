@@ -464,15 +464,30 @@ class AutonomousTaskController:
         blocked, hostiles = self.rules._blocked(context), self.rules._hostiles(obs, origin)
         blocked_occlusion = {key for key, code in self._data["blocked_codes"].items()
                              if code in {"target_occluded", "visibility_unknown"}}
+        route_failures = {"stalled", "no_path", "path_not_found", "out_of_reach", "out_of_range", "move_unverified", "timeout"}
+        blocked_log_xz = set()
+        if resource == "logs":
+            for bkey in blocked:
+                if self._data["blocked_codes"].get(bkey) in route_failures:
+                    parts = bkey.split(",")
+                    if len(parts) == 3:
+                        try:
+                            blocked_log_xz.add((int(parts[0]), int(parts[2])))
+                        except ValueError:
+                            pass
         candidates = [row for row in blocks if row["name"] in (names or RESOURCE_NAMES[resource])
                       and math.dist(origin, row["pos"]) <= self._data["args"]["radius"]
-                      and (resource != "logs" or abs(float(row["pos"][1]) - float(origin[1])) <= 3.1)
+                      and (resource != "logs" or (
+                          abs(float(row["pos"][1]) - float(origin[1])) <= 3.1
+                          and (math.floor(row["pos"][0]), math.floor(row["pos"][2])) not in blocked_log_xz
+                      ))
                       and (not cautious or row.get("can_see") is True and row.get("can_dig") is True
                            and math.dist(origin, row["pos"]) <= 3)
                       and self.rules._safe_target(row, origin, blocks, blocked - blocked_occlusion, hostiles, observation=obs)]
         candidates.sort(key=lambda row: (
             0 if (resource != "logs" or abs(float(row["pos"][1]) - float(origin[1])) <= 2.1) else 1,
             0 if row.get("can_see") is True else 2 if row.get("can_see") is False else 1,
+            round(abs(float(row["pos"][1]) - float(origin[1])), 1) if resource == "logs" else 0.0,
             math.dist(origin, row["pos"]),
             row["pos"],
         ))
@@ -503,8 +518,11 @@ class AutonomousTaskController:
                         return spare_iron
             if (resource in {"raw_iron", "coal"}
                     and stone_plus < (3 if resource == "raw_iron" else 2)
-                    and counts.get("cobblestone", 0) >= 3
-                    and (counts.get("stick", 0) >= 2 or any(counts.get(n, 0) >= 1 for n in PLANK_NAMES))):
+                    and (counts.get("cobblestone", 0) >= 3
+                         or any(row["name"] in {"stone", "cobblestone"}
+                                and math.dist(origin, row["pos"]) <= self._data["args"]["radius"]
+                                for row in blocks))
+                    and (counts.get("stick", 0) >= 2 or any(counts.get(n, 0) >= 1 for n in PLANK_NAMES | LOG_NAMES))):
                 spare = self._craft("stone_pickaxe", 1, obs, context)
                 if spare is not None:
                     return spare
@@ -631,6 +649,24 @@ class AutonomousTaskController:
                             for row in self.daily._rows(obs.get("furnaces")))):
             smelt_obs = {**obs, "furnaces": [*list(obs.get("furnaces") or []), inspected]}
         current = self.daily._smelt({item}, smelt_obs, counts, self._data["task"], context)
+        if current and current["name"] != "wait":
+            return self._row_decision(current)
+        if item == "iron_ingot" and counts.get("raw_iron", 0) >= 8:
+            existing_furnaces = self.daily._safe_rows(obs, {"furnace"}, context=context)
+            desired_furnaces = 3 if counts.get("raw_iron", 0) >= 16 else 2
+            has_fuel = any(counts.get(f, 0) >= 1 for f in ("coal", "charcoal")) or sum(
+                counts.get(n, 0) for n in PLANK_NAMES
+            ) >= 6
+            if (len(existing_furnaces) < desired_furnaces and has_fuel
+                    and (counts.get("furnace", 0) >= 1 or counts.get("cobblestone", 0) >= 8)):
+                if counts.get("furnace", 0) >= 1:
+                    placed = self.daily._place("furnace", obs, self._data["task"], context)
+                    if placed:
+                        return self._row_decision(placed)
+                else:
+                    crafted = self._craft("furnace", 1, obs, context, depth + 1)
+                    if crafted:
+                        return crafted
         if current:
             return self._row_decision(current)
         # A job is a place to inspect, never permission to transfer again.
@@ -1001,7 +1037,8 @@ class AutonomousTaskController:
             self._data["local_recoveries"] += 1
             target = self.rules._pos(data.get("target")) or self.rules._pos(decision.args.get("pos"))
             if target:
-                self._data["blocked"][self.rules._key(target)] = time.time() + 30
+                cooldown = 90 if code in (PATH_FAILURES | {"timeout"}) else 30
+                self._data["blocked"][self.rules._key(target)] = time.time() + cooldown
                 self._data["blocked"] = dict(list(self._data["blocked"].items())[-16:])
                 self._data["blocked_codes"][self.rules._key(target)] = code or "no_movement"
                 self._data["blocked_codes"] = {k: v for k, v in self._data["blocked_codes"].items() if k in self._data["blocked"]}
