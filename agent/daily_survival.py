@@ -537,7 +537,9 @@ class DailySurvivalGoals:
                           else self._action(furnace_prerequisite.name, furnace_prerequisite.args,
                                             furnace_prerequisite.reason, "furnace")
                           if furnace_prerequisite.name not in {"wait", "goal_complete"} else None)
-        task("furnace", 84, bool(furnaces), missing=["deployed_furnace"] if not furnaces else [], action=furnace_action,
+        llm_autonomy = bool(context.get("autonomy_llm_mode") is True)
+        defer_held_furnace = bool(llm_autonomy and expedition_focus and counts.get("furnace", 0) >= 1)
+        task("furnace", 40 if defer_held_furnace else 84, bool(furnaces), missing=["deployed_furnace"] if not furnaces else [], action=furnace_action,
              proof={"positions": [row["pos"] for row in furnaces[:4]]}, reason="Need eight cobblestone or a verified placement candidate")
 
         fuel = counts.get("coal", 0) + counts.get("charcoal", 0)
@@ -723,7 +725,10 @@ class DailySurvivalGoals:
              depends_on=sorted(required), reason="Daily prerequisites remain unmet", waiting=maintenance_ready)
         ready = sorted((row for row in tasks if row["status"] in {"ready", "running"}), key=lambda row: (-row["priority"], TASK_IDS.index(row["id"])))
         if expedition_focus and ready:
-            non_reserve = [row for row in ready if row["id"] not in {"food_reserve", "wood_reserve", "fuel_reserve", "food_production"}]
+            skip_focus = {"food_reserve", "wood_reserve", "fuel_reserve", "food_production"}
+            if defer_held_furnace:
+                skip_focus.add("furnace")
+            non_reserve = [row for row in ready if row["id"] not in skip_focus]
             active = (non_reserve[0] if non_reserve else ready[0])["id"]
         else:
             active = ready[0]["id"] if ready else None

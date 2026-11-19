@@ -398,6 +398,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
             self.memory.observe(observation)
             recalled = self.memory.recall(observation, limit=6, max_bytes=2500)
             self.context["memory"] = recalled
+            self.context["autonomy_llm_mode"] = bool(self.uses_llm and self.task_controller is not None)
             self.daily_board = self.daily_goals.build(observation, recalled, self.context)
             self.daily_board.update(fresh=True, observation_scope="full")
             self.context["daily_tasks"] = {key: self.daily_board.get(key) for key in ("phase", "active_task_id", "maintenance_ready")}
@@ -985,7 +986,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
             self.steps += 1
             self.last_result, self.last_observation = result, observation
             self.context["last_result"] = asdict(result)
-            task_replan = self._task_result(decision, result, observation, uncertain=_uncertain_result(result),
+            task_replan = self._task_result(decision, result, observation, uncertain=_uncertain_result(result) and decision.name != "observe",
                 fatal=result.error_code in FATAL | {"death_limit", "internal", "internal_error"})
             if self.paused:
                 self._finish_task_feedback(observation, paused=True)

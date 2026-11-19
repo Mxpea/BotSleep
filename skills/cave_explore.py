@@ -1325,8 +1325,14 @@ class CaveExploreSkill(BaseSkill):
         max_candidates: int = 4,
         block_cache: Optional[Dict[Tuple[int, int, int], Dict[str, Any]]] = None,
         world: Optional[VoxelWorld3D] = None,
+        timeout_seconds: float = 15.0,
+        max_reads: int = 600,
+        cancel_event: Optional[threading.Event] = None,
     ) -> List[Dict[str, Any]]:
-        """Discover nearby natural rock-roofed cave openings and accessible water ravines."""
+        """Discover nearby natural rock-roofed cave openings and accessible water ravines within hard read/time budgets."""
+        scan_deadline = time.monotonic() + max(1.0, float(timeout_seconds))
+        read_limit = max(60, int(max_reads))
+        reads = [0]
         raw_st = self.client.get_status()
         st = raw_st.get("result") if isinstance(raw_st, dict) and "result" in raw_st else raw_st
         bp = parse_pos(origin if origin is not None else (st.get("pos") if isinstance(st, dict) else None))
@@ -1335,7 +1341,15 @@ class CaveExploreSkill(BaseSkill):
         ox, oy, oz = int(math.floor(bp[0])), int(math.floor(bp[1])), int(math.floor(bp[2]))
         active_world = self._resolve_world(world=world, block_cache=block_cache, persistent_world=False)
 
+        def _budget_ok() -> bool:
+            if cancel_event is not None and cancel_event.is_set():
+                return False
+            return time.monotonic() < scan_deadline and reads[0] < read_limit
+
         def raw_read(k: Tuple[int, int, int]) -> Dict[str, Any]:
+            if not _budget_ok():
+                return {"name": "unknown", "properties": {}}
+            reads[0] += 1
             raw = self.client.get_block(k[0], k[1], k[2])
             if isinstance(raw, dict):
                 blk = raw.get("result") if isinstance(raw.get("result"), dict) else raw
@@ -1365,12 +1379,18 @@ class CaveExploreSkill(BaseSkill):
             pass
 
         step = 6
-        for dx in range(-int(search_radius), int(search_radius) + 1, step):
-            for dz in range(-int(search_radius), int(search_radius) + 1, step):
-                if dx == 0 and dz == 0:
-                    continue
-                for dy in range(-24, 10, 4):
-                    seed_coords.append((ox + dx, oy + dy, oz + dz))
+        grid_offsets = sorted(
+            (
+                (dx, dz)
+                for dx in range(-int(search_radius), int(search_radius) + 1, step)
+                for dz in range(-int(search_radius), int(search_radius) + 1, step)
+                if not (dx == 0 and dz == 0)
+            ),
+            key=lambda d: (d[0] * d[0] + d[1] * d[1], abs(d[0]) + abs(d[1])),
+        )
+        for dx, dz in grid_offsets:
+            for dy in (-4, 0, -8, -12, -16, -20, -24, 4, 8):
+                seed_coords.append((ox + dx, oy + dy, oz + dz))
 
         rock_roof_blocks = {
             "stone", "deepslate", "andesite", "diorite", "granite", "tuff",
@@ -1380,6 +1400,8 @@ class CaveExploreSkill(BaseSkill):
 
         seen_clusters: List[Tuple[int, int, int]] = []
         for sx, raw_sy, sz in seed_coords:
+            if not _budget_ok() or len(candidates) >= int(max_candidates):
+                break
             probe_foot = read_blk((sx, raw_sy, sz))
             if not is_passable(probe_foot):
                 continue
@@ -1393,7 +1415,7 @@ class CaveExploreSkill(BaseSkill):
                     break
                 if not is_passable(below):
                     break
-            if sy is None:
+            if sy is None or not _budget_ok():
                 continue
             if any(abs(sx - cx) + abs(sz - cz) < 10 and abs(sy - cy) < 8 for cx, cy, cz in seen_clusters):
                 continue
@@ -1403,12 +1425,14 @@ class CaveExploreSkill(BaseSkill):
                 continue
             if not any(str(read_blk((sx, sy + ky, sz)).get("name") or "air") in rock_roof_blocks for ky in range(2, 8)):
                 continue
-            rep = probe_cavity([sx, sy, sz], [sx, sy, sz], read_blk, limits={"max_probe_cells": 90, "horizontal_radius": 8, "vertical_span": 6}, block_cache=active_world.block_cache)
+            if not _budget_ok():
+                break
+            rep = probe_cavity([sx, sy, sz], [sx, sy, sz], read_blk, limits={"max_probe_cells": 45, "horizontal_radius": 6, "vertical_span": 5}, block_cache=active_world.block_cache)
             if rep.get("lava_found") or rep.get("spawner_found"):
                 continue
-            if int(rep.get("air_count", 0)) < 10:
+            if int(rep.get("air_count", 0)) < 10 or not _budget_ok():
                 continue
-            graph = Pathfinder3D.plan_horizon(active_world, [sx, sy, sz], read_blk, max_nodes=80, max_radius=10)
+            graph = Pathfinder3D.plan_horizon(active_world, [sx, sy, sz], read_blk, max_nodes=40, max_radius=8)
             if len(graph.get("nodes") or []) < 3:
                 continue
             seen_clusters.append((sx, sy, sz))
@@ -1423,8 +1447,6 @@ class CaveExploreSkill(BaseSkill):
                     "report": rep,
                 }
             )
-            if len(candidates) >= int(max_candidates) * 2:
-                break
 
         candidates.sort(key=lambda c: (0 if c.get("has_exposed_ore") else 1, -c["safe_nodes"], c["distance"]))
         return candidates[: int(max_candidates)]
@@ -1475,7 +1497,15 @@ class CaveExploreSkill(BaseSkill):
             if before_counts.get("torch", 0) < 4:
                 if self._try_craft_torches(ctx, before_counts):
                     before_counts, _ = OreHarvester.read_inventory(ctx)
-            openings = self.find_cave_openings(origin=origin, search_radius=search_radius, max_candidates=max_caves, world=active_world)
+            openings = self.find_cave_openings(
+                origin=origin,
+                search_radius=search_radius,
+                max_candidates=max_caves,
+                world=active_world,
+                timeout_seconds=min(15.0, max(5.0, guard.remaining_timeout(60.0) * 0.2)),
+                max_reads=600,
+                cancel_event=cancel_event,
+            )
             stop_reason = "no_caves_found" if not openings else "caves_exhausted"
 
             for op in openings:

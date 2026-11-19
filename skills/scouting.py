@@ -80,6 +80,7 @@ class SurfaceScoutSkill(BaseSkill):
         prefer_wood: bool = True,
         min_food: float = 14.0,
         max_food_drop: float = 2.0,
+        attempt: int = 0,
         timeout_seconds: float = 55.0,
         cancel_event: Optional[threading.Event] = None,
     ) -> SkillResult:
@@ -120,7 +121,7 @@ class SurfaceScoutSkill(BaseSkill):
             if self._should_stop_early(findings, prefer_wood=prefer_wood):
                 early_stop_reason = self._discovery_reason(findings)
             else:
-                headings = self._pick_headings(cur_pos)
+                headings = self._pick_headings(cur_pos, attempt=attempt)
                 heading_idx = 0
                 for hop_idx in range(hops_limit):
                     cur_st = guard.check_status(require_safe=False)
@@ -190,9 +191,9 @@ class SurfaceScoutSkill(BaseSkill):
             )
 
     @staticmethod
-    def _pick_headings(origin: Sequence[float]) -> List[Tuple[float, float]]:
+    def _pick_headings(origin: Sequence[float], *, attempt: int = 0) -> List[Tuple[float, float]]:
         # Deterministic spread across runs without circling back on origin.
-        base = (math.floor(abs(origin[0])) + math.floor(abs(origin[2]))) % 4
+        base = (math.floor(abs(origin[0])) + math.floor(abs(origin[2])) + max(0, int(attempt))) % 4
         ring = ((1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0))
         ordered = [ring[(base + offset) % 4] for offset in (0, 1, 3)]
         return ordered

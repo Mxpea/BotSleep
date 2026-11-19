@@ -641,6 +641,13 @@ class DailyGoalsTests(unittest.TestCase):
         hungry_food = next(r for r in hungry_board["tasks"] if r["id"] == "food_reserve")
         self.assertEqual(hungry_food["priority"], 95)
 
+    def test_held_furnace_does_not_hijack_active_task_when_well_fed(self):
+        obs = observation({"stone_pickaxe": 1, "stone_axe": 1, "stone_sword": 1, "furnace": 1}, food=20, health=20)
+        board = self.goals.build(obs, context={"autonomy_llm_mode": True})
+        furnace_row = next(r for r in board["tasks"] if r["id"] == "furnace")
+        self.assertEqual(furnace_row["priority"], 40)
+        self.assertNotEqual(board["active_task_id"], "furnace")
+
 
 if __name__ == "__main__":
     unittest.main()

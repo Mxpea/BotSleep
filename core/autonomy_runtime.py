@@ -257,11 +257,14 @@ class AutonomyRuntime:
         prefer_wood = sum(counts.get(n, 0) for n in (*LOG_NAMES, *PLANK_NAMES)) == 0
         raw_r = decision.args.get("scan_radius", 48) if isinstance(decision.args, dict) else 48
         scan_r = max(48, min(64, int(raw_r))) if isinstance(raw_r, int) and raw_r >= 32 else 48
+        attempt = int(self.context.get("scout_attempts", 0))
+        self.context["scout_attempts"] = attempt + 1
         res = SurfaceScoutSkill(self.client, memory=memory).execute(
             scan_radius=scan_r,
             hop_distance=55.0,
             max_hops=3,
             prefer_wood=prefer_wood,
+            attempt=attempt,
             cancel_event=getattr(self, "_cancel", None),
         )
         data = dict(res.data or {}) if isinstance(res.data, dict) else {}

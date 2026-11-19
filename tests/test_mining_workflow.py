@@ -869,6 +869,27 @@ class MiningWorkflowTests(unittest.TestCase):
         self.assertTrue(openings)
         self.assertGreaterEqual(openings[0]["report"].get("water_count", 0), 1)
 
+    def test_find_cave_openings_honors_max_reads_cap(self):
+        from skills.cave_explore import CaveExploreSkill
+
+        world = WorkflowMineWorld(bot_pos=(0.5, 64.0, 0.5))
+        read_calls = [0]
+        orig_get_block = world.get_block
+
+        def spy_get_block(x, y, z):
+            read_calls[0] += 1
+            return orig_get_block(x, y, z)
+
+        world.get_block = spy_get_block
+        openings = CaveExploreSkill(world, memory=Mock()).find_cave_openings(
+            origin=[0, 59, 0],
+            search_radius=24,
+            max_candidates=2,
+            max_reads=65,
+        )
+        self.assertEqual(openings, [])
+        self.assertLessEqual(read_calls[0], 65)
+
 
 if __name__ == "__main__":
     unittest.main()
