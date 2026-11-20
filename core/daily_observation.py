@@ -19,11 +19,12 @@ class DailyObservationCollector(ObservationCollector):
     FURNACES = {"furnace", "smoker", "blast_furnace"}
     CONTAINERS = {"chest", "barrel"}
     SEED_PLANTS = {"short_grass", "tall_grass"}
-    def __init__(self, client, radius=24, *, low_health_threshold=8, mainline=False):
-        super().__init__(client, radius, include_terrain=True)
+    def __init__(self, client, radius=24, *, low_health_threshold=8, mainline=False, campaign=False):
+        super().__init__(client, radius, include_terrain=True, terrain_summary=not campaign)
         self.context = {}
         self.low_health_threshold = low_health_threshold
         self.mainline = mainline
+        self.campaign = campaign
 
     def set_context(self, context):
         self.context = copy.deepcopy(context) if isinstance(context, dict) else {}
@@ -544,9 +545,13 @@ class DailyObservationCollector(ObservationCollector):
         observation["footing"] = {"pos": support_pos, "name": support["name"],
             "properties": copy.deepcopy(support.get("properties") or {}),
             "fresh": True, "verified": True, "source": "api_verified"}
-        for types in (("iron_ore", "deepslate_iron_ore", "diamond_ore", "deepslate_diamond_ore",
-                       "dead_bush", "chest", "barrel", "smoker", "blast_furnace"),
-                      ("wheat", "carrots", "potatoes", "beetroots", "farmland", "grass_block", "dirt")):
+        resources = [("iron_ore", "deepslate_iron_ore", "diamond_ore", "deepslate_diamond_ore",
+                      "dead_bush", "chest", "barrel", "smoker", "blast_furnace")]
+        if self.campaign:
+            resources.append(("sand",))
+        if not self.campaign:
+            resources.append(("wheat", "carrots", "potatoes", "beetroots", "farmland", "grass_block", "dirt"))
+        for types in resources:
             self._check_cancel(cancel_event)
             rows = self.client.get_blocks(radius=self.radius, types=list(types), limit=48)
             self._check_cancel(cancel_event)
@@ -555,17 +560,11 @@ class DailyObservationCollector(ObservationCollector):
             for row in rows:
                 self._block_pos(row.get("pos"))
             observation["blocks"].extend(rows)
-        self._check_cancel(cancel_event)
-        inventory = self._result(self.client.inventory())
-        self._check_cancel(cancel_event)
-        if "armor" in inventory:
-            if not isinstance(inventory["armor"], dict):
-                raise APIError("invalid_response", "Armor evidence is malformed")
-            observation["armor"] = copy.deepcopy(inventory["armor"])
         if inspect_windows:
             self._windows(observation, cancel_event)
-        self._farm(observation, cancel_event)
-        self._seed_plants(observation, cancel_event)
+        if not self.campaign:
+            self._farm(observation, cancel_event)
+            self._seed_plants(observation, cancel_event)
         self._food_neighborhoods(observation, cancel_event)
         self._local_foliage(observation, cancel_event)
         self._ground_log(observation, cancel_event)

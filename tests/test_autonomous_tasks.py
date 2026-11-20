@@ -127,6 +127,65 @@ class AutonomousTaskTests(unittest.TestCase):
         self.assertEqual(controller.snapshot()["status"], "needs_ai")
         self.assertEqual(controller.snapshot()["progress"]["current"], 0)
 
+    def test_unrelated_inventory_and_scan_changes_do_not_hide_unproductive_craft(self):
+        obs = world({"oak_planks": 4})
+        controller = self.start({"task": "craft", "item": "stick", "count": 8}, obs, max_no_progress_steps=2)
+        for i in range(2):
+            decision = controller.next_action(obs)
+            self.assertEqual(decision.args, {"item": "stick", "count": 8})
+            obs["blocks"].append({"name": "grass_block", "pos": [i + 5, 63, 0]})
+            obs["counts"]["dirt"] = i + 1
+            controller.record_result(decision, SkillResult(True, "Ack", {"gained": 8}), obs)
+        self.assertIsNone(controller.next_action(obs))
+        self.assertEqual(controller.snapshot()["status"], "needs_ai")
+        self.assertFalse(controller.snapshot()["recent_results"][-1]["made_progress"])
+
+    def test_recipe_prerequisite_withdraws_only_missing_amount_from_fresh_storage(self):
+        obs = world({"iron_ingot": 1, "stick": 2})
+        obs["blocks"] += [{"name": "crafting_table", "pos": [1, 64, 1]}]
+        obs["containers"] = [verified(name="chest", pos=[2, 64, 0],
+                                      items=[{"name": "iron_ingot", "count": 20}])]
+        controller = self.start({"task": "craft", "item": "iron_pickaxe", "count": 1}, obs)
+        action = controller.next_action(obs)
+        self.assertEqual(action.name, "take_items")
+        self.assertEqual(action.args, {"pos": [2, 64, 0], "item": "iron_ingot", "count": 2})
+        obs["counts"]["iron_ingot"] += 2
+        obs["containers"][0]["items"][0]["count"] -= 2
+        controller.record_result(action, SkillResult(True, "Transfer verified"), obs)
+        self.assertEqual(self.act().args, {"item": "iron_pickaxe", "count": 1})
+        self.assertTrue(controller.confirm_completion(obs))
+
+    def test_workbench_navigation_failure_does_not_hide_new_reachable_table(self):
+        obs = world({"cobblestone": 2, "stick": 1})
+        table = [7, 64, 0]
+        obs["blocks"].append({"name": "crafting_table", "pos": table})
+        controller = self.start({"task": "craft", "item": "stone_sword", "count": 1}, obs)
+        move = controller.next_action(obs)
+        self.assertEqual(move.name, "move_to")
+        obs["status"]["pos"] = [4.3, 64, .5]
+        controller.record_result(move, SkillResult(False, "Outside requested navigation radius",
+                                                    {"executed": True}, "move_unverified"), obs)
+        action = controller.next_action(obs)
+        self.assertEqual(action.name, "craft_item")
+        self.assertEqual(action.args["item"], "stone_sword")
+
+    def test_resource_storage_obeys_goal_radius_and_current_observation(self):
+        for pos, fresh in (([6, 64, 0], True), ([2, 64, 0], False)):
+            with self.subTest(pos=pos, fresh=fresh):
+                obs = world()
+                obs["containers"] = [dict(verified(name="chest", pos=pos,
+                                                  items=[{"name": "oak_log", "count": 20}]), fresh=fresh)]
+                controller = self.start({"task": "gather", "resource": "logs", "count": 3, "radius": 4}, obs)
+                self.assertEqual(controller.next_action(obs).name, "gather_block")
+
+    def test_plank_material_alternatives_do_not_expand_blocks_allowed_to_mine(self):
+        obs = world()
+        trunk = {"name": "oak_log", "pos": [4, 64, 0], "can_see": True}
+        obs["blocks"] = [{"name": "stripped_oak_wood", "pos": [2, 64, 0], "can_see": True}, trunk]
+        controller = self.start({"task": "craft", "item": "oak_planks", "count": 4}, obs)
+        decision = controller.next_action(obs)
+        self.assertEqual(decision.args, {"pos": trunk["pos"], "expected_name": "oak_log"})
+
     def test_only_one_child_outstanding_and_no_action_queue_is_saved(self):
         controller = self.start()
         decision = controller.next_action(self.obs)
@@ -520,6 +579,15 @@ class AutonomousTaskTests(unittest.TestCase):
         decision = controller.next_action(obs)
         self.assertEqual((decision.name, decision.args), ("craft_item", {"item": "furnace", "count": 1}))
 
+    def test_campaign_cooks_nearby_instead_of_reapproaching_an_unreachable_furnace(self):
+        obs = world({"beef": 1, "cobblestone": 8})
+        obs["blocks"].extend([{"name": "crafting_table", "pos": [1, 64, 0]},
+                              {"name": "furnace", "pos": [0, 62, 0]}])
+        controller = AutonomousTaskController({"campaign": True})
+        controller.start({"task": "food", "count": 12}, obs)
+        decision = controller.next_action(obs)
+        self.assertEqual((decision.name, decision.args), ("craft_item", {"item": "furnace", "count": 1}))
+
     def test_food_task_prepares_a_weapon_before_hunting_observed_animals(self):
         obs = world({"cobblestone": 2, "stick": 1})
         obs["blocks"].append({"name": "crafting_table", "pos": [1, 64, 0]})
@@ -527,6 +595,17 @@ class AutonomousTaskTests(unittest.TestCase):
         controller = self.start({"task": "food"}, obs)
         decision = controller.next_action(obs)
         self.assertEqual((decision.name, decision.args), ("craft_item", {"item": "stone_sword", "count": 1}))
+
+    def test_hunting_uses_checked_ground_instead_of_the_animals_exact_position(self):
+        obs = world({"stone_pickaxe": 1})
+        obs["entities"] = [{"id": 7, "name": "cow", "type": "animal", "pos": [1, 59, 0]},
+                           {"id": 8, "name": "pig", "type": "animal", "pos": [5, 64, .5]}]
+        obs["local_geometry_origin"] = obs["status"]["pos"]
+        obs["safe_stand_candidates"] = [{"pos": [1.5, 64, .5], "support": "water"},
+                                        {"pos": [1.5, 64, 1.5], "support": "grass_block"}]
+        controller = self.start({"task": "food"}, obs)
+        decision = controller.next_action(obs)
+        self.assertEqual((decision.name, decision.args), ("position_for_task", {"pos": [1.5, 64, 1.5]}))
 
     def test_occlusion_failure_can_clear_newly_observed_leaf_then_release_resource_cooldown(self):
         obs = world()
@@ -694,6 +773,15 @@ class AutonomousTaskTests(unittest.TestCase):
         )
         self.assertIsNone(controller.next_action(obs, ctx))
         self.assertEqual(controller.snapshot()["status"], "completed")
+
+    def test_campaign_iron_trip_gets_cobblestone_for_a_spare_pickaxe_first(self):
+        obs = world({"stone_pickaxe": 1, "stick": 2})
+        obs["blocks"] = [{"name": "stone", "pos": [2, 64, 0], "can_see": True}]
+        controller = AutonomousTaskController({"campaign": True})
+        controller.start({"task": "gather", "resource": "raw_iron", "count": 3}, obs)
+        action = controller.next_action(obs, {"deep_mining_enabled": True})
+        self.assertEqual((action.name, action.args), ("gather_block", {"pos": [2, 64, 0], "expected_name": "stone"}))
+        self.assertIsNone(controller.state().get("pending_deep_mine"))
 
     def test_deep_mine_unknown_result_freezes_without_replay(self):
         obs = world({"iron_pickaxe": 2})

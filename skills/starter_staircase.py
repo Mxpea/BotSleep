@@ -10,6 +10,7 @@ import math
 import time
 
 from core.block_geometry import PASS_THROUGH, trace_block_visibility
+from core.cave_probe import overhead_excavation_hazard
 from core.client import APIError
 from core.structure_spec import MINE_HAZARD_BLOCKS, SHELTER_PROTECTED_BLOCKS
 from .positioning import PositioningSkills
@@ -214,6 +215,9 @@ class StarterStaircaseSkills(PositioningSkills):
             if (self._hazard(neighbor) or name in SHELTER_PROTECTED_BLOCKS
                     or name.endswith(("_bed", "_door", "_planks"))):
                 self._blocked("The dig could disturb a hazard, furniture or a building", p, name)
+        hazard = overhead_excavation_hazard(target, read)
+        if hazard is not None:
+            self._blocked("The cut opens a channel to liquid overhead", *hazard)
 
     def _dig_site(self, origin, target, expected, home, read):
         self._guard_home(target, home)

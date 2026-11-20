@@ -39,7 +39,7 @@ class DailySurvivalSkills(SurvivalSkills):
     SMELTABLE = {"raw_iron": "iron_ingot", "iron_ore": "iron_ingot", "deepslate_iron_ore": "iron_ingot",
                  "beef": "cooked_beef", "porkchop": "cooked_porkchop", "mutton": "cooked_mutton",
                  "chicken": "cooked_chicken", "rabbit": "cooked_rabbit", "cod": "cooked_cod",
-                 "salmon": "cooked_salmon", "potato": "baked_potato",
+                 "salmon": "cooked_salmon", "potato": "baked_potato", "sand": "glass",
                  **{wood + "_log": "charcoal" for wood in SurvivalSkills.WOODS}}
     FUELS = SurvivalSkills.LOGS | SurvivalSkills.PLANKS | {"coal", "charcoal", "stick"}
     FURNACES = frozenset({"furnace", "smoker", "blast_furnace"})
@@ -60,6 +60,10 @@ class DailySurvivalSkills(SurvivalSkills):
                     "collect_drops": ("entity_id", "expected_item"),
                     "place_bed": ("pos", "item"), "place_door": ("pos", "item"),
                 }.items()}}
+
+    def __init__(self, client, *, allow_herd_hunting=False):
+        super().__init__(client)
+        self.allow_herd_hunting = allow_herd_hunting
 
     def execute(self, name, args, cancel_event=None, *, recovery_context=None, cautious=False):
         result = super().execute(name, args, cancel_event, recovery_context=recovery_context, cautious=cautious)

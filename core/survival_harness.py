@@ -8,8 +8,10 @@ import time
 from concurrent.futures import CancelledError, ThreadPoolExecutor
 from dataclasses import asdict
 
-from agent.survival_planner import Decision, SurvivalPlanner
+from agent.survival_planner import Decision, RANGED_HOSTILES, SurvivalPlanner
+from core.campaign import Campaign, dimension as campaign_dimension
 from core.client import APIError, connection_retry_delay
+from core.combat_reaction import CombatReaction
 from core.continuous_recovery import ContinuousRecovery
 from core.model_gate import ModelGateError
 from core.config import continuous_daily
@@ -24,6 +26,7 @@ from core.skill_registry import STARTER_MINING_SKILLS, destination_checked_skill
 from core.sleep_controller import SleepController
 from core.survival_state import ObservationCollector, SurvivalJournal
 from core.shelter_project import active_project, completion_observed, project_anchor, recover_project, same_site, verified_build_anchor
+from core.survival_mainline import same_goal
 from skills import SkillResult
 from skills.sleep import AutoSleepSkill
 from skills.survival import SurvivalSkills
@@ -89,6 +92,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
         self._model_blocked = None
         self._model_worker = None
         self._safety_baseline = None
+        self._combat_reaction = CombatReaction()
+        self._last_reaction_hit = None
         if self.uses_llm:
             from core.model_worker import SerialModelWorker
             self._model_worker = SerialModelWorker(self.planner)
@@ -112,10 +117,11 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
             from skills.buckets import BucketSkills
             self.daily_goals = DailySurvivalGoals(settings)
             self.daily_policy = DailySafetyPolicy(settings)
-            self.skills = skills or DailySurvivalSkills(client)
+            self.skills = skills or DailySurvivalSkills(client, allow_herd_hunting=settings.get("campaign") is True)
             self.collector = collector or DailyObservationCollector(client, settings["scan_radius"],
                 low_health_threshold=settings["low_health_threshold"],
-                mainline=mainline_enabled(settings))
+                campaign=settings.get("campaign") is True and settings.get("intent") == "speedrun",
+                mainline=mainline_enabled(settings) or (settings.get("campaign") is True and settings.get("intent") == "speedrun"))
             self.shelter_skills = ShelterSkills(client)
             self.shelter_preparation_skills = ShelterPreparationSkills(client)
             self.starter_staircase_skills = StarterStaircaseSkills(client)
@@ -130,6 +136,16 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
         self.journal = journal or SurvivalJournal(settings["state_dir"], endpoint=client.base_url,
                                                 username=client.username, world_id=settings["world_id"])
         self.context = copy.deepcopy(self.journal.state.get("context", {}))
+        self.campaign = None
+        if self.daily and settings.get("campaign") is True and settings.get("intent") == "speedrun":
+            from core.build_projection import load_projection
+            from core.memory import MemoryEngine
+            from skills.campaign import CampaignSkills
+            preset = settings.get("projection")
+            projection = load_projection(preset) if preset else None
+            self.campaign = Campaign(self.context.setdefault("campaign", {}), projection=projection)
+            self.campaign_skills = CampaignSkills(client, memory=MemoryEngine(str(self.journal.directory / "campaign")),
+                                                  projection=projection)
         self.context.setdefault("failures", {})
         self.context.setdefault("blocked_until", {})
         self.context.setdefault("explore_index", 0)
@@ -236,6 +252,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
                 "daily_tasks": self.daily_board,
                 "playbook": copy.deepcopy(self.context.get("playbook")),
                 "mainline": copy.deepcopy(self.context.get("mainline")),
+                "campaign": copy.deepcopy(self.campaign.state.get("view")) if self.campaign else None,
                 "combat": copy.deepcopy((self.last_observation or {}).get("combat")),
                 "task_execution": self._task_snapshot(),
                 "memory_summary": {key: len(value) for key, value in self.context.get("memory", {}).items() if isinstance(value, list)},
@@ -279,6 +296,62 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
         if decision.goal in {"safety", "recover", "observe", "food", "food_recovery", "sleep"}:
             return decision
         return None
+
+    def _combat_priority(self, observation, hit):
+        if hit is None or not observation.get("fresh"):
+            return None
+        status = observation["status"]
+        wait = Decision("wait", {"seconds": .15}, "Recheck the attacker and footing after taking damage", "combat_reaction")
+        if status.get("busy") or not status.get("ready") or not status.get("alive"):
+            return wait
+        if self.campaign is not None:
+            water = self.campaign.water_recovery(status)
+            if water is not None:
+                return water
+        if any(status.get(key) for key in ("in_water", "submerged", "in_lava", "on_fire", "is_sleeping", "in_vehicle")):
+            return self._mandatory_safety(observation) or wait
+        retreat = self.context.get("retreat_recovery") or {}
+        retry_after = retreat.get("retry_after", 0)
+        failed_from = self._safety_rules._pos((retreat.get("search_basis") or {}).get("pos"))
+        position = self._safety_rules._pos(status.get("pos"))
+        failed_long_route = (retry_after > time.time() and failed_from is not None and position is not None
+                             and math.dist(position, failed_from) <= 1.5)
+        defense = self._mandatory_safety(observation)
+        if failed_long_route:
+            retreat["retry_after"] = retry_after
+        if defense is not None and defense.name == "fight_hostile":
+            return defense
+        reported = hit.get("attacker") or {}
+        target = next((row for row in observation.get("entities", [])
+                       if type(reported.get("id")) is int and row.get("id") == reported["id"]
+                       and row.get("type") in {"hostile", "player"}), None)
+        if self.campaign is not None:
+            reaction = self.campaign.melee_recovery(defense or wait, observation, retreat, under_attack=True)
+            if reaction.name == "campaign_action" and (reaction.args.get("operation") == "defend_melee"
+                                                       or reaction.args.get("imminent_explosion")):
+                return reaction
+            nearest = status.get("nearest_hostile") or {}
+            if (status.get("on_ground") is True and (target is not None or nearest)
+                    and (failed_long_route or campaign_dimension(status) != "overworld"
+                         or defense is None or defense.name == "wait"
+                         or (target or nearest).get("name") in RANGED_HOSTILES)):
+                if self.campaign.state.get("escape_retry_after", 0) <= time.time():
+                    return self.campaign.action("recovery", "escape_pressure", "Break line of sight or leave the attacker",
+                                                attacker_id=(target or {}).get("id"))
+                return wait
+            if (status.get("on_ground") is True and target is None and not nearest
+                    and hit["t"] != self._last_reaction_hit):
+                return self.campaign.action("recovery", "escape_pressure", "Take a checked sidestep from an unseen attack",
+                                            attacker_id=reported.get("id"), unseen_attacker=True)
+        if status.get("on_ground") is True and campaign_dimension(status) == "overworld":
+            if defense is not None and defense.name == "retreat_from":
+                return defense
+            if target is not None and (point := self._safety_rules._pos(target.get("pos"))) is not None:
+                retreat = self._retreat_decision(observation, Decision("retreat_from", {"pos": point, "distance": 8},
+                    "Withdraw from the currently observed attacker", "safety"))
+                if retreat.name == "retreat_from":
+                    return retreat
+        return wait
 
     def _retreat_state(self, observation, threat):
         """Persist recovery evidence, never an executable route or old pending action."""
@@ -572,7 +645,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
             short = self.collector.collect_safety(self._cancel,
                 force=safety_only or recovery.get("evacuating") is True,
                 threat_radius=self._safety_rules.threat_radius)
-            if short is not None:
+            if short is not None and (not self.campaign or campaign_dimension(short["status"]) == "overworld"):
                 status = short["status"]
                 hostiles = self._safety_rules._dangerous_hostiles(short, status.get("pos"))
                 nearby = status.get("nearest_hostile") or {}
@@ -593,6 +666,19 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
                 quiet_evacuation = recovery.get("evacuating") is True and not close
                 if (safety_only or close or not needs_inventory and not quiet_evacuation
                         or not status.get("ready") or not status.get("alive") or status.get("busy")):
+                    if (self.campaign is not None and close and status.get("on_ground") is True
+                            and (status.get("offhand") or {}).get("name") == "shield"
+                            and status.get("health", 0) >= 14):
+                        try:
+                            items = self.client.inventory(timeout_seconds=.8)["result"].get("items")
+                            after = self.client.get_status(timeout_seconds=.8)["result"]
+                            if (isinstance(items, list) and self._life_marker({"status": after}) == self._life_marker(short)
+                                    and after.get("ready") and after.get("alive") and not after.get("busy")
+                                    and math.dist(after["pos"], status["pos"]) <= .3):
+                                # The combat skill still rereads the target, equipment and terrain before a write.
+                                short = {**short, "status": after, "inventory": items, "inventory_fresh": True}
+                        except APIError:
+                            pass
                     return short
         return self.collector.collect(self._cancel)
 
@@ -789,6 +875,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
                     pass  # Game observation and local survival continue.
             observation = self._observe()
             self.latest_status = observation["status"]
+            hit = self._combat_reaction.observe(self.client, observation["status"], self._safety_baseline)
             self._prepare_context(observation)
             self.context.update(self._remaining_budget())
             if self._cancel.is_set():
@@ -809,20 +896,66 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
                                        or not observation["status"].get("alive") or observation["status"].get("busy")):
                 decision = Decision("wait", {"seconds": 1}, "Manual action needs an idle, living, ready bot", "observe")
                 return decision, SkillResult(False, decision.reason, error_code="busy"), observation
-            release = self._release_defense(observation)
-            if release is not None:
-                decision, result = release
-                return decision, result, {**observation, "fresh": False} if _uncertain_result(result) else observation
-            if observation.get("observation_scope") == "safety":
+            urgent = self._combat_priority(observation, hit)
+            if urgent is None:
+                release = self._release_defense(observation)
+                if release is not None:
+                    decision, result = release
+                    return decision, result, {**observation, "fresh": False} if _uncertain_result(result) else observation
+            if urgent is not None:
                 if self._model_worker and self._model_worker.pending:
                     self._model_worker.cancel()
-                decision = self._mandatory_safety(observation)
-                if decision is None or decision.name not in {"retreat_from", "wait", "fight_hostile"}:
+                decision = urgent
+                self._last_reaction_hit = hit["t"]
+                manual = None  # No queued manual production is admitted during a confirmed attack.
+                self._record("WARN", "COMBAT_PREEMPT", {"hit": hit, "decision": asdict(decision), "source": "rules"})
+            elif observation.get("observation_scope") == "safety":
+                if self._model_worker and self._model_worker.pending:
+                    self._model_worker.cancel()
+                water = self.campaign.water_recovery(observation["status"]) if self.campaign is not None else None
+                decision = water or self._mandatory_safety(observation)
+                if water is None and self.campaign is not None:
+                    decision = self.campaign.melee_recovery(decision, observation, self.context.get("retreat_recovery"))
+                    decision = self.campaign.food_recovery(decision, observation)
+                if (water is None and (decision is None or decision.name not in {"retreat_from", "wait", "fight_hostile"})
+                        and not (decision and decision.name == "campaign_action"
+                                 and decision.args.get("operation") in {"emergency_food", "defend_melee", "escape_pressure"})):
                     decision = Decision("wait", {"seconds": 1}, "Short safety observation cannot authorize production", "observe")
                 self._record("WARN", "SAFETY_OVERRIDE", {"decision": asdict(decision), "status": observation["status"],
                     "observation_scope": "safety"})
             elif manual is not None:
                 decision = manual
+            elif self.campaign is not None:
+                overworld = campaign_dimension(observation["status"]) == "overworld"
+                decision = self.campaign.water_recovery(observation["status"])
+                if overworld and decision is None:
+                    decision = self.campaign.melee_recovery(self._mandatory_safety(observation), observation,
+                                                            self.context.get("retreat_recovery"))
+                    if decision is None or (decision.name == "wait" and decision.goal == "food_recovery"):
+                        decision = self.campaign.death_recovery(observation, self.journal) or decision
+                    decision = self.campaign.food_recovery(decision, observation)
+                    decision = decision or self.campaign.mine_recovery(observation, self.journal)
+                    decision = decision or self.campaign.night_cover(observation)
+                    if decision is None and self._task_active():
+                        goal = self.campaign.projection_action(observation)
+                        task = self._task_snapshot()
+                        if goal is not None and not same_goal(task.get("args"), goal.args):
+                            self.task_controller.stop("The selected projection supplies the next local goal", cancelled=True)
+                            self._save_task("TASK_CANCELLED")
+                        elif self.campaign.obsolete_opening_task(task, observation):
+                            self.task_controller.stop("Current equipment already meets this opening prerequisite", cancelled=True)
+                            self._save_task("TASK_CANCELLED")
+                        else:
+                            decision = self._task_next(observation)
+                if decision is None:
+                    decision = self.campaign.recover_task(self.campaign.choose(observation), self._task_snapshot(), observation)
+                if decision.name == "campaign_action" and self.continuous and self._matches_abandoned_action(decision, observation):
+                    if decision.args["operation"] in {"defend_melee", "escape_pressure", "surface_water"}:
+                        decision = self._mandatory_safety(observation) or Decision("wait", {"seconds": .25},
+                            "Reobserve without replaying the unconfirmed emergency action", "safety")
+                    else:
+                        decision = self.campaign.action(self.campaign.state["view"]["stage"], "recover_stance",
+                            "Recheck a different safe stance before planning this uncertain stage again")
             elif self.uses_llm:
                 safety = self._mandatory_safety(observation) or self._local_task_food(observation)
                 if safety is not None:
@@ -865,6 +998,10 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
                     if self._life_marker(observation) != before_life:
                         return decision, SkillResult(False, "Life or dimension changed during model planning; replan",
                                                      {"executed": False}, "safety_changed"), observation
+                    hit = self._combat_reaction.observe(self.client, observation["status"], self._safety_baseline)
+                    if self._combat_priority(observation, hit) is not None or decision.name in {"fight_hostile", "retreat_from"}:
+                        return decision, SkillResult(False, "Combat actions are selected by the local response",
+                                                     {"executed": False}, "safety_changed"), observation
                     if self.mainline_enabled and (self.context.get("mainline") or {}).get("stage") != before_chapter:
                         return decision, SkillResult(False, "Mainline chapter changed while the model was planning",
                                                      {"executed": False}, "safety_changed"), observation
@@ -890,13 +1027,16 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
                     decision = self.planner.choose(observation, self.context)
                     decision = self._retreat_decision(observation, decision)
             if (self._task_active() and not self._task_child and decision.name != "run_survival_task"
-                    and decision.goal in {"safety", "recover", "observe", "food", "food_recovery", "sleep"}):
+                    and (urgent is not None or decision.goal in {"safety", "recover", "observe", "food", "food_recovery", "sleep"})):
                 self._task_interrupt(decision.reason)
             if self.continuous and self._matches_abandoned_action(decision, observation):
                 return decision, SkillResult(False, "Previous action remains unconfirmed at this stance; choose a new action",
                                              {"executed": False}, "previous_action_unconfirmed"), observation
             if decision.name in STARTER_MINING_SKILLS and not self._task_child:
                 return decision, SkillResult(False, "Starter mining requires an active procedural goal",
+                                             {"executed": False}, "unsupported_skill"), observation
+            if decision.name == "campaign_action" and (not self.campaign or manual is not None or self._model_feedback):
+                return decision, SkillResult(False, "Campaign actions are internal to the enabled local route",
                                              {"executed": False}, "unsupported_skill"), observation
             if self._task_child:
                 rejected = self._unsafe_destination(decision, observation) or self.daily_policy.validate(decision, observation, context=self.context)
@@ -940,8 +1080,15 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
             if decision.name == "auto_sleep":
                 options = {key: value for key, value in self.sleep_settings.items() if key in SleepController.SKILL_OPTIONS}
                 result = AutoSleepSkill(self.client).execute(**options, cancel_event=self._cancel)
+            elif decision.name == "campaign_action":
+                result = self.campaign_skills.execute(decision.args, self.campaign.state, cancel_event=self._cancel)
+                self.campaign.record(decision, result)
+                self._record("INFO" if result.success else "WARN", "CAMPAIGN_STEP",
+                             {"campaign": self.campaign.state["view"], "result": asdict(result)})
             else:
                 options = {"recovery_context": self._retreat_options(observation, decision)} if decision.name == "retreat_from" else {}
+                if decision.name == "retreat_from" and self.campaign is not None:
+                    options["recovery_context"]["campaign_ground_escape"] = True
                 if decision.name == "canopy_escape":
                     options["recovery_context"] = self._canopy_options(observation)
                 if refused and decision.name in ("canopy_escape", "retreat_from"):
@@ -977,7 +1124,11 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
                             self._pending_leaf_readback = intent
                             result.data["readback_reason"] = reason
                             self._record("WARN", "FOLIAGE_RECHECK_PAUSED", {"pos": intent["pos"], "reason": reason})
-            if (self._model_feedback or self.daily) and not self._cancel.is_set() and not _uncertain_result(result):
+            verified_survey = (self.campaign is not None and self._task_child
+                and decision.name in {"plan_shelter", "plan_shelter_preparation"}
+                and result.data.get("executed") is False and result.data.get("fresh") is True)
+            if ((self._model_feedback or self.daily) and not verified_survey
+                    and not self._cancel.is_set() and not _uncertain_result(result)):
                 try:
                     observation = self._observe(safety_only=decision.name in {"retreat_from", "fight_hostile"})
                     self.latest_status = observation["status"]
@@ -1126,13 +1277,26 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
         return decision, result
 
     def _monitor(self):
-        if self._cancel.is_set() or time.monotonic() < self._next_monitor:
+        if self._cancel.is_set():
             return
-        self._next_monitor = time.monotonic() + max(1, self.settings["poll_interval_seconds"])
+        now = time.monotonic()
         decision = self._active_decision
         planning = self.phase == "thinking" and self._model_worker is not None and self._model_worker.pending
-        if (decision is None and not planning) or (decision is not None and decision.name in ("retreat_from", "canopy_escape", "eat_food", "auto_sleep")):
+        defending = (decision is not None and (decision.name in {"retreat_from", "canopy_escape", "fight_hostile"}
+                    or decision.name == "campaign_action" and decision.args.get("operation") in
+                    {"surface_water", "defend_melee", "escape_pressure"}))
+        if ((decision is None and not planning)
+                or defending and decision.name != "fight_hostile"):
             return
+        if not defending:
+            last_status = self.latest_status or self._safety_baseline or {}
+            hit = self._combat_reaction.observe(self.client, last_status)
+            if hit is not None:
+                self._interrupt_for_safety(last_status, planning, hit)
+                return
+        if now < self._next_monitor:
+            return
+        self._next_monitor = now + max(1, self.settings["poll_interval_seconds"])
         try:
             status = self.client.get_status()["result"]
             self.latest_status = status
@@ -1143,6 +1307,9 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
         # A locally permitted low-health food turn must not be cancelled just
         # because its initial health is low. Any new deterioration still wins.
         baseline = self._safety_baseline or {}
+        attack = self._combat_reaction.observe(self.client, status, baseline)
+        if decision is not None and decision.name in {"eat_food", "auto_sleep"} and not attack:
+            return
         constraints = self.context.get("survival_constraints") or {}
         food_turn = False
         if self.daily and constraints.get("scenario") == "low_health":
@@ -1164,24 +1331,34 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
             and status.get("health", 0) >= baseline.get("health", 20)
             and status.get("food", 0) >= 12 and status.get("on_ground") is True)
         combat_action = decision is not None and decision.name == "fight_hostile"
+        campaign_encounter = (decision is not None and decision.name == "campaign_action"
+                              and (decision.args.get("operation") == "loot_mob" and hostile.get("name") == decision.args.get("mob")
+                                   or decision.args.get("operation") == "dragon" and hostile.get("name") == "ender_dragon"))
+        campaign_food = (decision is not None and decision.name == "campaign_action"
+                         and decision.args.get("operation") in {"emergency_food", "recover_gear"}
+                         and status.get("health", 0) >= baseline.get("health", 20))
         combat_changed = combat_action and (
             status.get("dimension") != baseline.get("dimension")
             or status.get("last_death") != baseline.get("last_death")
             or status.get("health", 0) < baseline.get("health", 20))
         surface_expedition = self._task_child and decision is not None and decision.goal in {"deep_mine", "scout_surface"}
-        danger = (not status.get("alive") or status.get("in_lava") or status.get("on_fire")
+        hit_preempts = attack is not None and not defending
+        danger = (hit_preempts or not status.get("alive") or status.get("in_lava") or status.get("on_fire")
                   or status.get("submerged") or (status.get("in_water") and not surface_expedition)
-                  or status.get("health", 20) <= self.settings["low_health_threshold"] and not (food_turn or local_recovery_turn)
+                  or status.get("health", 20) <= self.settings["low_health_threshold"] and not (food_turn or local_recovery_turn or campaign_food)
                   or combat_changed
-                  or (not combat_action and isinstance(hostile.get("dist"), (int, float))
+                  or (not (combat_action or campaign_encounter) and isinstance(hostile.get("dist"), (int, float))
                       and hostile["dist"] <= self._safety_rules._threat_distance(hostile.get("name"))))
         if danger:
-            self._cancel.set()
-            if planning:
-                self._model_worker.cancel()
-            else:
-                self.client.stop()
-            self._record("WARN", "SAFETY_INTERRUPT", {"status": status, "model_pending": planning})
+            self._interrupt_for_safety(status, planning, attack if hit_preempts else None)
+
+    def _interrupt_for_safety(self, status, planning, hit):
+        self._cancel.set()
+        self._record("WARN", "SAFETY_INTERRUPT", {"status": status, "model_pending": planning, "combat_hit": hit})
+        if planning:
+            self._model_worker.cancel()
+        else:
+            self.client.stop()
 
     def _monitor_idle(self):
         """Read-only lifecycle checks remain active while paused or backing off."""
@@ -1194,6 +1371,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
         except APIError as error:
             self._record("WARN", "IDLE_STATUS_UNAVAILABLE", {"code": error.code})
             return
+        if not self.paused:
+            self._combat_reaction.observe(self.client, status, self.latest_status)
         self.latest_status = status
         before = (self.context.get("death_count"), self.context.get("last_dimension"))
         self._update_lifecycle(status)
@@ -1313,6 +1492,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
             combat_replan = (decision.name == "fight_hostile" and not result.success
                 and result.data.get("retreat_required") is True and not _uncertain_result(result)
                 and result.error_code not in FATAL | {"death_limit", "cancelled", "bad_args"})
+            campaign_replan = (decision.name == "campaign_action" and not result.success and not _uncertain_result(result)
+                               and result.error_code not in FATAL | {"internal", "internal_error", "cancelled", "bad_args"})
             if not result.success:
                 if combat_replan:
                     # The bounded combat step is finished and explicitly asks
@@ -1323,6 +1504,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
                         "code": result.error_code, "entity_id": decision.args["entity_id"], "retry_seconds": delay})
                 elif task_replan:
                     delay = 0
+                elif campaign_replan:
+                    delay = .25 if decision.args.get("imminent_explosion") else self.settings["retry_seconds"]
                 elif retreat_replan:
                     delay = self._retreat.wait_seconds(observation)
                 elif local_replan:
@@ -1347,7 +1530,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
                     self._record("WARN", "MODEL_BLOCKED_SAFETY_ACTIVE", {"code": result.error_code})
                 if (uncertain_action or fatal_model_error
                     or result.error_code in FATAL | {"death_limit", "internal", "internal_error", "llm_invalid_config", "llm_record_error", "llm_missing_feedback", "llm_request_uncertain", "llm_gate_corrupt"}
-                    or (not retreat_replan and not local_replan and not combat_replan and not task_replan and not transient_model_error
+                    or (not retreat_replan and not local_replan and not combat_replan and not task_replan and not campaign_replan and not transient_model_error
                         and self.failures >= self.settings["max_consecutive_failures"])):
                     self._paused = True
                     self.pause_reason = result.error_code or "repeated_failures"
@@ -1365,7 +1548,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
                 # A disconnected worker may already have executed the write.
                 # Preserve the pending result without sending more actions.
                 cleanup_prohibited = result.data.get("cleanup_skipped") in {
-                    "disconnected_unknown", "combat_unknown", "unknown_bucket", "task_unknown", "navigation_unknown", "placement_unknown", "foliage_readback"}
+                    "disconnected_unknown", "combat_unknown", "unknown_bucket", "task_unknown", "navigation_unknown", "placement_unknown", "foliage_readback", "workflow_unknown"}
                 if uncertain_action and not dig_cleanup_attempted and not cleanup_prohibited:
                     try:
                         options = {"timeout_seconds": 2.0} if result.error_code == "dig_unconfirmed" else {}
@@ -1382,7 +1565,9 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
                 else:
                     self.failures = 0
                 if decision.name == "wait":
-                    if (decision.goal == "safety" and
+                    if decision.goal == "combat_reaction":
+                        delay = min(delay, decision.args["seconds"])
+                    elif (decision.goal == "safety" and
                             (self.context.get("retreat_recovery") or {}).get("retry_after", 0) > time.time()):
                         delay = self._retreat.wait_seconds(observation)
                     else:
@@ -1436,6 +1621,10 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
                 heartbeat = self._monitor_idle()
                 if self.paused and automatic:
                     self._recheck_leaf_after_respawn(heartbeat)
+                elif automatic and time.monotonic() >= self._continuous_retry_at:
+                    hit = self._combat_reaction.observe(self.client, self.latest_status or {})
+                    if hit and hit["t"] != self._last_reaction_hit:
+                        self._next_attempt = 0.0
             if (not self.paused and automatic and time.monotonic() >= self._next_attempt
                     and (not self.continuous or time.monotonic() >= self._continuous_retry_at)):
                 self._start()

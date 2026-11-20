@@ -18,7 +18,7 @@ class ConfigError(ValueError):
 
 def continuous_daily(settings):
     return (settings.get("continuous") is True and settings.get("objective") == "daily"
-            and settings.get("intent", "survival") == "survival")
+            and (settings.get("intent", "survival") == "survival" or settings.get("campaign") is True))
 
 
 DEFAULTS: Dict[str, Any] = {
@@ -33,6 +33,8 @@ DEFAULTS: Dict[str, Any] = {
     "survival": {
         "objective": "starter",
         "intent": "survival",
+        "campaign": False,
+        "projection": "timber_house",
         "continuous": False,
         "sleep_policy": "opportunistic",
         "disable_deep_mining": False,
@@ -231,9 +233,20 @@ def _validate(config: Dict[str, Any], config_dir: Path) -> None:
     if survival["objective"] not in {"starter", "daily", "competition"}:
         raise ConfigError("survival.objective must be starter, daily or competition")
     _boolean(survival["continuous"], "survival.continuous")
+    _boolean(survival["campaign"], "survival.campaign")
+    if not isinstance(survival["projection"], str):
+        raise ConfigError("survival.projection must be a preset name or an empty string")
+    if survival["campaign"] and survival["projection"]:
+        from core.build_projection import load_projection
+        try:
+            load_projection(survival["projection"])
+        except (OSError, ValueError) as error:
+            raise ConfigError(f"Invalid survival.projection: {error}") from None
     _boolean(survival["disable_deep_mining"], "survival.disable_deep_mining")
     if not isinstance(survival["intent"], str) or survival["intent"] not in ("survival", "speedrun"):
         raise ConfigError("survival.intent must be survival or speedrun")
+    if survival["campaign"] and (survival["objective"] != "daily" or survival["intent"] != "speedrun"):
+        raise ConfigError("survival.campaign requires objective=daily and intent=speedrun")
     if not isinstance(survival["sleep_policy"], str) or survival["sleep_policy"] not in ("opportunistic", "strict"):
         raise ConfigError("survival.sleep_policy must be opportunistic or strict")
     goal = survival["operator_goal"]
@@ -248,6 +261,8 @@ def _validate(config: Dict[str, Any], config_dir: Path) -> None:
     _boolean(autonomy["mainline"], "survival.autonomy.mainline")
     if survival["objective"] == "daily" and autonomy["mainline"] and not autonomy["enabled"]:
         raise ConfigError("The daily mainline requires survival.autonomy.enabled")
+    if survival["campaign"] and not autonomy["enabled"]:
+        raise ConfigError("survival.campaign requires survival.autonomy.enabled")
     for key, minimum, maximum in (("max_steps", 1, 2048), ("max_local_failures", 1, 32),
                                  ("max_no_progress_steps", 1, 128), ("max_explore_steps", 0, 64)):
         if type(autonomy[key]) is not int or not minimum <= autonomy[key] <= maximum:

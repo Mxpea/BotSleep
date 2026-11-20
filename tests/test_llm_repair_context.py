@@ -26,9 +26,10 @@ class RepairContextTests(unittest.TestCase):
         planner, brain = self.planner(response("wait"))
         planner.choose(observation({"wooden_pickaxe": 1}), self.context(resource="cobblestone"))
         names = {tool["function"]["name"] for tool in brain.requests[0]["tools"]}
-        self.assertTrue({"run_survival_task", "wait", "eat_food", "auto_sleep", "retreat_from",
-                         "fight_hostile", "move_to", "position_for_task", "gather_block", "craft_item"} <= names)
-        self.assertFalse({"clear_foliage", "hunt_animal", "smelt_start", "place_bed", "hunt_with_lava"} & names)
+        self.assertTrue({"run_survival_task", "wait", "eat_food", "auto_sleep", "move_to",
+                         "position_for_task", "gather_block", "craft_item"} <= names)
+        self.assertFalse({"clear_foliage", "hunt_animal", "smelt_start", "place_bed", "hunt_with_lava",
+                          "retreat_from", "fight_hostile"} & names)
         self.assertLessEqual(len(names), 12)
         self.assertEqual(len(planner.tool_definitions), 35)
 

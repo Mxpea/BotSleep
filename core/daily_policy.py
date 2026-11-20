@@ -601,8 +601,10 @@ class DailySafetyPolicy:
                 search = self._food_search(observation, context)
                 if search:
                     return search
-            return self._wait("Food recovery is blocked: food is below 18 and no currently verified safe food is available; waiting cannot regenerate health"
-                              if status["food"] < 18 else "Observe natural regeneration without hunting or gathering", "recover")
+            if status["food"] < 18:
+                return self._wait("Food recovery is blocked: food is below 18 and no currently verified safe food is available; waiting cannot regenerate health",
+                                  "food_recovery")
+            return self._wait("Observe natural regeneration without hunting or gathering", "recover")
         if self._strict_night_block(observation, status):
             if (not status["is_day"] or status["thundering"]) and self._bed(observation):
                 return Decision("auto_sleep", {}, "Use a currently observed free bed through the verified sleep skill", "sleep")

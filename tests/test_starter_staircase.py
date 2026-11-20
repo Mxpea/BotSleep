@@ -242,6 +242,18 @@ class StarterStaircaseTests(unittest.TestCase):
         self.assertEqual(result.error_code, "staircase_blocked")
         self.assertEqual(self.world.writes(), [])
 
+    def test_dig_rejects_overhead_water_through_air_but_accepts_a_solid_barrier(self):
+        self.world.block([1, 68, 0], "water")
+        blocked = self.step()
+        self.assertEqual(blocked.error_code, "staircase_blocked")
+        self.assertEqual(blocked.data["blocked_cell"], [1, 68, 0])
+        self.assertEqual(self.world.writes(), [])
+
+        self.world.block([1, 67, 0], "stone")
+        safe = self.step()
+        self.assertTrue(safe.success, safe)
+        self.assertEqual(self.world.writes(), [("dig", [1, 63, 0])])
+
     def test_hostile_broken_pick_and_source_footprint_prevent_writes(self):
         self.world.entities = [{"name": "skeleton", "type": "hostile", "id": 3, "pos": [16, 64, 0]}]
         self.assertFalse(self.step().success)

@@ -292,9 +292,12 @@ class DailyGoalsTests(unittest.TestCase):
     def test_bed_wool_requires_approach_and_fresh_nearby_sheep_before_hunt(self):
         obs = observation({"stone_axe": 1})
         obs["entities"] = [{"id": 2, "name": "sheep", "pos": [6, 64, .5]}]
+        self.assertIsNone(self.task(obs, "bed")["next_action"])
+        obs["local_geometry_origin"] = obs["status"]["pos"]
+        obs["safe_stand_candidates"] = [{"pos": [2.5, 64, .5], "support": "grass_block"}]
         action = self.task(obs, "bed")["next_action"]
-        self.assertEqual(action["name"], "move_to")
-        self.assertEqual(action["args"], {"pos": [6, 64, .5], "range": 2})
+        self.assertEqual(action["name"], "position_for_task")
+        self.assertEqual(action["args"], {"pos": [2.5, 64, .5]})
         self.assertEqual(action["goal"], "bed")
         obs["entities"][0]["pos"] = [2.5, 64, .5]
         action = self.task(obs, "bed")["next_action"]

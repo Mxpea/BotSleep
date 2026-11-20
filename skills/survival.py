@@ -28,7 +28,7 @@ class SurvivalSkills:
     WOODS = ("oak", "spruce", "birch", "jungle", "acacia", "dark_oak", "mangrove", "cherry", "pale_oak")
     LOGS = frozenset(wood + "_log" for wood in WOODS)
     PLANKS = frozenset(wood + "_planks" for wood in WOODS)
-    GATHERABLE = LOGS | {"stone", "cobblestone", "coal_ore", "deepslate_coal_ore", "dead_bush"}
+    GATHERABLE = LOGS | {"stone", "cobblestone", "coal_ore", "deepslate_coal_ore", "dead_bush", "sand"}
     PICKAXES = frozenset(tier + "_pickaxe" for tier in ("wooden", "copper", "stone", "iron", "golden", "diamond", "netherite"))
     AIR = frozenset({"air", "cave_air", "void_air"})
     # Verified zero-collision, replaceable targets in Minecraft 1.21.11.
@@ -1483,10 +1483,21 @@ class SurvivalSkills:
             contact = edge_contacts[feet(target)]
             outcome["edge_drop"] = {"source_contact": [contact[0], contact[1] - 1, contact[2]],
                                     "target": target, "drop_height": 1, "landing_verified": False}
+        close_enemies = [row["name"] for row in threats if math.dist(origin, row["pos"]) <= row["radius"]]
+        run_through_hit = (recovery.get("campaign_ground_escape") is True and bool(ground_run)
+                           and before["health"] > 4 and bool(close_enemies)
+                           and all(name in {"zombie", "zombie_villager", "husk", "drowned", "spider", "cave_spider"}
+                                   for name in close_enemies)
+                           and min(math.dist(origin, row["pos"]) for row in threats) <= 3)
+        movement = {"timeout_ms": 10000}
+        if run_through_hit:
+            # A first melee hit otherwise cancels the escape while still in reach.
+            # Permit only the short, rechecked level run, then verify actual footing.
+            movement.update(timeout_ms=2000, stop_on=["death"])
+            outcome["bounded_melee_escape"] = True
         try:
             context["navigation_write"] = True
-            self._action(context, self.client.move_to, *target, range=0, timeout_ms=10000,
-                         _validate_status=validate_start)
+            self._action(context, self.client.move_to, *target, range=0, _validate_status=validate_start, **movement)
             outcome["executed"] = True
         except Exception as error:
             outcome["executed"] = context["acted"]
@@ -1674,18 +1685,21 @@ class SurvivalSkills:
                 raise _Failure("bad_args", "Missing or unsupported survival skill arguments")
             if recovery_context is not None:
                 if (name not in {"retreat_from", "canopy_escape"} or not isinstance(recovery_context, dict)
-                        or set(recovery_context) - {"excluded_targets", "evacuating", "evacuation_origin", "purpose", "recent_targets", "threat_radius"}):
+                        or set(recovery_context) - {"excluded_targets", "evacuating", "evacuation_origin", "purpose",
+                                                       "recent_targets", "threat_radius", "campaign_ground_escape"}):
                     raise _Failure("bad_args", "Unsupported retreat recovery context")
                 excluded = recovery_context.get("excluded_targets", [])
                 recent = recovery_context.get("recent_targets", [])
                 if (not isinstance(excluded, list) or len(excluded) > 8 or not isinstance(recent, list) or len(recent) > 8
                         or type(recovery_context.get("evacuating", False)) is not bool
+                        or type(recovery_context.get("campaign_ground_escape", False)) is not bool
                         or recovery_context.get("purpose", "retreat") not in {"retreat", "canopy_escape"}):
                     raise _Failure("bad_args", "Invalid retreat recovery context")
                 context["recovery_context"] = {"excluded_targets": [self._pos(pos, block=True) for pos in excluded],
                                                "evacuating": recovery_context.get("evacuating", False),
                                                "recent_targets": [self._pos(pos, block=True) for pos in recent],
                                                "purpose": recovery_context.get("purpose", "retreat"),
+                                               "campaign_ground_escape": recovery_context.get("campaign_ground_escape", False),
                                                "threat_radius": self._number(recovery_context.get("threat_radius", 8), "threat_radius", 1, 64)}
                 if "evacuation_origin" in recovery_context:
                     context["recovery_context"]["evacuation_origin"] = self._pos(recovery_context["evacuation_origin"])

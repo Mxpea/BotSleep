@@ -231,17 +231,35 @@ class ShelterSkills(SurvivalSkills):
                 )
         return result
 
-    def _scan(self, anchor, context, orientation: str = "north"):
+    def _scan(self, anchor, context, orientation: str = "north", *, reject_bad_floor=False):
         norm_orient = normalize_orientation(orientation)
         status = self._status(context)
         if math.dist(status["pos"], anchor) > 24:
             raise _Failure("out_of_range", "Shelter site is more than 24 blocks away")
         x, y, z = anchor
         cache = {}
+        if reject_bad_floor:
+            ground = self.NATURAL_GROUND | self.MATERIALS
+            floor = [(x + dx, y - 1, z + dz) for dx, dz in ((0, 0), (-2, -2), (-2, 2), (2, -2), (2, 2))]
+            floor.extend((cx, y - 1, cz) for cx in range(x - 2, x + 3) for cz in range(z - 2, z + 3)
+                         if (cx, y - 1, cz) not in floor)
+            for cell in floor:
+                block = cache[cell] = self._block(list(cell), context)
+                if block["name"] not in ground or not self._safe_block(block):
+                    final = self._status(context)
+                    if math.dist(status["pos"], final["pos"]) > 0.75:
+                        raise _Failure("observation_changed", "Bot moved while the shelter site was scanned")
+                    context["evidence"] = {"pos": list(anchor), "orientation": norm_orient,
+                        "dimension": final["dimension"], "fresh": True, "executed": False,
+                        "geometry": {"floor_verified": False}, "occupied_blueprint_cells": [],
+                        "hazards": [] if self._safe_block(block) else [list(cell)], "blocked_cell": list(cell)}
+                    raise _Failure("unsafe_site", "Shelter floor has a missing or unsafe support block")
         for cx in range(x - 2, x + 3):
             for cz in range(z - 2, z + 3):
                 for cy in range(y - 1, y + 3):
-                    cache[(cx, cy, cz)] = self._block([cx, cy, cz], context)
+                    cell = (cx, cy, cz)
+                    if cell not in cache:
+                        cache[cell] = self._block(list(cell), context)
         # The sole exit needs a loaded floor and two clear body cells outside (total = 103 block reads).
         for dy in (-1, 0, 1):
             exit_pos = tuple(transform_rel_pos((0, dy, 3), anchor, norm_orient, integer=True))
@@ -434,7 +452,7 @@ class ShelterSkills(SurvivalSkills):
             "executed": False,
         }
 
-    def _prepare(self, args, context):
+    def _prepare(self, args, context, *, reject_bad_floor=False):
         anchor = self._pos(args["pos"], block=True)
         orientation = self._normalize_orientation(args.get("orientation"))
         material = args.get("material")
@@ -442,13 +460,13 @@ class ShelterSkills(SurvivalSkills):
             raise _Failure("bad_args", "Shelter material must be an item name")
         if material is not None and material not in self.MATERIALS:
             raise _Failure("unsupported_item", "Shelter material must be a supported full solid building block")
-        cache, status = self._scan(anchor, context, orientation=orientation)
+        cache, status = self._scan(anchor, context, orientation=orientation, reject_bad_floor=reject_bad_floor)
         evidence = self._evidence(anchor, material, cache, status, orientation=orientation)
         context["evidence"] = evidence
         return anchor, orientation, material, cache, status, evidence
 
     def _plan_shelter(self, args, context):
-        anchor, _, _, cache, _, evidence = self._prepare(args, context)
+        anchor, _, _, cache, _, evidence = self._prepare(args, context, reject_bad_floor=True)
         _, y, _ = anchor
         if not evidence["geometry"]["floor_verified"] or not evidence["geometry"]["exit_verified"] or evidence["hazards"]:
             raise _Failure("unsafe_site", "Shelter needs a flat natural-type solid floor and a clear supported exit")

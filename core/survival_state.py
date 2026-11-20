@@ -37,10 +37,11 @@ class ObservationCollector:
                      (2, 0), (0, 2), (-2, 0), (0, -2))
     PASSABLE = SurvivalSkills.AIR | {"short_grass", "leaf_litter"}
 
-    def __init__(self, client, radius=24, include_terrain=False):
+    def __init__(self, client, radius=24, include_terrain=False, *, terrain_summary=True):
         self.client = client
         self.radius = radius
         self.include_terrain = include_terrain
+        self.terrain_summary = terrain_summary
 
     @staticmethod
     def _check_cancel(cancel_event):
@@ -266,7 +267,8 @@ class ObservationCollector:
         if not status.get("ready") or not status.get("alive") or status.get("busy"):
             return observation
         origin = self._position(status)
-        items = self.client.inventory()["result"].get("items")
+        inventory = self.client.inventory()["result"]
+        items = inventory.get("items")
         self._check_cancel(cancel_event)
         if not isinstance(items, list):
             raise APIError("invalid_response", "Inventory items must be a list")
@@ -276,6 +278,10 @@ class ObservationCollector:
                 raise APIError("invalid_response", "Inventory item is malformed")
             counts[item["name"]] = counts.get(item["name"], 0) + item["count"]
         observation.update(inventory=items, counts=counts)
+        if "armor" in inventory:
+            if not isinstance(inventory["armor"], dict):
+                raise APIError("invalid_response", "Armor evidence is malformed")
+            observation["armor"] = copy.deepcopy(inventory["armor"])
         # Separate resource classes so abundant stone cannot hide every bed/log.
         for names in (LOGS + BEDS + ["crafting_table", "furnace"],
                       ["stone", "cobblestone", "coal_ore", "deepslate_coal_ore"]):
@@ -286,8 +292,9 @@ class ObservationCollector:
             # A model needs ground/foliage context to choose a workspace instead
             # of repeatedly proposing unsupported cells while standing in a tree.
             # Untyped rows describe only the nearest exposed block of each type.
-            observation["terrain"] = self.client.get_blocks(radius=min(self.radius, 16), limit=64)
-            self._check_cancel(cancel_event)
+            if self.terrain_summary:
+                observation["terrain"] = self.client.get_blocks(radius=min(self.radius, 16), limit=64)
+                self._check_cancel(cancel_event)
             observation["blocks"].extend(self.client.get_blocks(radius=self.radius, types=[
                 "lava", "water", "fire", "soul_fire", "magma_block", "cactus",
                 "campfire", "soul_campfire", "powder_snow", "sweet_berry_bush"], limit=32))

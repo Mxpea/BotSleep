@@ -92,6 +92,14 @@ class DailyObservationTests(unittest.TestCase):
         self.client = DailyClient()
         self.collector = DailyObservationCollector(self.client)
 
+    def test_campaign_collect_skips_farmland_and_summary_but_keeps_stands_and_armor(self):
+        result = DailyObservationCollector(self.client, mainline=True, campaign=True).collect()
+        finds = [call[1] for call in self.client.calls if call[0] == "find"]
+        self.assertFalse(any(names is None or "farmland" in names or "short_grass" in names for names in finds))
+        self.assertEqual(self.client.calls.count(("inventory",)), 1)
+        self.assertTrue(result["safe_stand_candidates"])
+        self.assertIn("armor", result)
+
     def collect(self, obs=None, cancel=None):
         obs = observation() if obs is None else obs
         with patch.object(ObservationCollector, "collect", return_value=copy.deepcopy(obs)):

@@ -37,6 +37,32 @@ class GroundRetreatTests(unittest.TestCase):
             self.assertGreaterEqual(world.calls.count(("get_block", (x, 63, 0))), 2)
         self.assertLessEqual(result.data["terrain_search"]["block_reads"], 256)
 
+    def test_campaign_finishes_a_checked_level_escape_through_one_melee_hit(self):
+        world = self.world([-2, 64, .5])
+        world.status["health"] = 12
+        move = world.move_to
+
+        def move_under_attack(*args, **kwargs):
+            result = move(*args, **kwargs)
+            world.status["health"] = 8
+            return result
+
+        world.move_to = move_under_attack
+        result = self.run_retreat(world, {"campaign_ground_escape": True})
+        self.assertTrue(result.success, result)
+        self.assertTrue(result.data["bounded_melee_escape"])
+        self.assertEqual(result.data["health_lost"], 4)
+        self.assertEqual(world.writes()[0][2], {"range": 0, "timeout_ms": 2000, "stop_on": ["death"]})
+
+    def test_campaign_preserves_hurt_stop_against_short_range_explosions(self):
+        world = self.world([-2, 64, .5])
+        world.status["health"] = 12
+        world.entities[0]["name"] = "creeper"
+        result = self.run_retreat(world, {"campaign_ground_escape": True})
+        self.assertTrue(result.success, result)
+        self.assertNotIn("bounded_melee_escape", result.data)
+        self.assertEqual(world.writes()[0][2], {"range": 0, "timeout_ms": 10000})
+
     def test_existing_recovery_anchor_does_not_reduce_next_ground_run_to_one_cell(self):
         world = self.world()
         world.status["pos"] = [2.5, 64, .5]

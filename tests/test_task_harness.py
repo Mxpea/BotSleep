@@ -401,6 +401,30 @@ class TaskHarnessTests(unittest.TestCase):
         self.assertEqual(len(brain.requests),1)
         self.assertEqual(len(self.feedback(harness.planner)),1)
 
+    def test_hand_recipe_uses_one_bounded_batch_and_one_model_goal(self):
+        self.world.counts["oak_log"] = 3
+        harness, brain = self.harness(response("run_survival_task", {"task": "craft", "item": "oak_planks", "count": 12}))
+        self.cycle(harness)
+        self.until(harness, lambda: harness.snapshot()["task_execution"]["status"] == "completed")
+        self.assertEqual([call for call in self.world.calls if call[0] == "craft"], [("craft", "oak_planks", 12)])
+        self.assertEqual(self.world.counts["oak_log"], 0)
+        self.assertEqual(self.world.counts["oak_planks"], 12)
+        self.assertEqual(len(brain.requests), 1)
+        self.assertEqual(len(self.feedback(harness.planner)), 1)
+
+    def test_gather_uses_verified_storage_before_mining_more_wood(self):
+        self.logs(mixed=False)
+        self.world.block([-2, 64, 0], "chest")
+        self.world.sections["container"] = [{"name": "oak_log", "count": 8}]
+        harness, brain = self.harness(response("run_survival_task", {"task": "gather", "resource": "logs", "count": 3}))
+        self.cycle(harness)
+        self.until(harness, lambda: harness.snapshot()["task_execution"]["status"] == "completed")
+        self.assertEqual(self.world.counts["oak_log"], 3)
+        self.assertEqual(self.world.sections["container"][0]["count"], 5)
+        self.assertFalse(any(call[0] == "dig" for call in self.world.calls))
+        self.assertEqual(len(brain.requests), 1)
+        self.assertEqual(len(self.feedback(harness.planner)), 1)
+
     def forest(self):
         self.world = ForestWorld()
         for height in (64, 65, 66):
@@ -453,7 +477,7 @@ class TaskHarnessTests(unittest.TestCase):
         self.assertEqual(self.world.counts["birch_planks"], 9)
         self.assertEqual(self.world.counts["stripped_birch_log"], 0)
         self.assertEqual([call for call in self.world.calls if call[0] == "craft"],
-                         [("craft", "birch_planks", 4), ("craft", "birch_planks", 1)])
+                         [("craft", "birch_planks", 5)])
         self.assertFalse(any(call[0] in {"dig", "move"} for call in self.world.calls))
         self.assertEqual(len(brain.requests), 1)
         self.assertEqual(len(self.feedback(harness.planner)),1)

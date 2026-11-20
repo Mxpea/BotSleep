@@ -33,4 +33,4 @@
 
 ### 含末影龙的普通 Java 世界
 
-通用冒险路线可在基地准备之后延伸为「随身口粮与防御 → 下界门与回程通道 → 要塞与烈焰棒 → 末影珍珠、烈焰粉与末影之眼 → 定位主世界要塞 → 检查并补全末地门 → 入末地、清理水晶、击败龙并返程」。当前服务器采用前述无龙终点。独立门户与洞穴模块的绑定情况以及下界、要塞和末地阶段所需证据见[生存与速通阶段建议](SURVIVAL_PLAYBOOK.md)。游戏机制参考 Minecraft 官方的[第一天生存](https://www.minecraft.net/zh-hans/article/how-survive-your-first-day)、[要塞](https://www.minecraft.net/en-us/article/stronghold)和[末影龙](https://www.minecraft.net/en-us/article/ender-dragon)。
+在有龙的 Java 生存存档中，可显式启用 [通关模式](CAMPAIGN.md)，从开局工具推进到下界、要塞、末地与返程。模式的起点、判断证据和实服验证范围见该文档。游戏机制参考 Minecraft 官方的[第一天生存](https://www.minecraft.net/zh-hans/article/how-survive-your-first-day)、[要塞](https://www.minecraft.net/en-us/article/stronghold)和[末影龙](https://www.minecraft.net/en-us/article/ender-dragon)。

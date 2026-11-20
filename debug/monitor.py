@@ -71,7 +71,7 @@ class EventMonitor:
             "status": {}, "decision": None, "last_result": None,
             "status_updated_at": None, "status_fresh": False,
             "status_connection": "unknown", "status_error": None,
-            "playbook": None, "mainline": None, "combat": None, "combat_result": None,
+            "playbook": None, "mainline": None, "campaign": None, "combat": None, "combat_result": None,
             "task_execution": None,
             "daily": {"board": None, "memory_counts": {}},
             "competition": {"board": None},
@@ -225,7 +225,7 @@ class EventMonitor:
         if event == "HEARTBEAT":
             state["heartbeat_at"] = record["timestamp"]
         if event in {"HEARTBEAT", "AGENT_STATE", "MAINLINE_STAGE"}:
-            for key in ("playbook", "mainline", "combat"):
+            for key in ("playbook", "mainline", "campaign", "combat"):
                 if key in data and (data[key] is None or isinstance(data[key], dict)):
                     state[key] = data[key]
         if event in {"HEARTBEAT", "AGENT_STATE", "TASK_STARTED", "TASK_PROGRESS", "TASK_SUSPENDED",

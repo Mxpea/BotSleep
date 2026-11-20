@@ -183,20 +183,29 @@ function renderCompetition(state) {
   txt('competition-json',pretty(board));
 }
 function renderSurvival(state) {
-  const plan=object(state.playbook), mainline=object(state.mainline), combat=object(state.combat), entry=object(state.combat_result);
-  $('survival-panel').classList.toggle('hidden',!state.mainline && !state.playbook && !state.combat && !state.combat_result);
+  const plan=object(state.playbook), mainline=object(state.mainline), campaign=object(state.campaign), combat=object(state.combat), entry=object(state.combat_result);
+  $('survival-panel').classList.toggle('hidden',!state.mainline && !state.playbook && !state.campaign && !state.combat && !state.combat_result);
   const stages={opening:'初期工具与食物',iron_defense:'铁器与防御',home_farm:'住所、床与生产点',maintenance:'日常维护',nether_preparation:'下界准备',nether_portal:'下界入口',nether_resources:'下界资源',stronghold:'要塞定位',end_preparation:'末地准备',dragon:'末影龙阶段',post_dragon:'击龙后阶段',recovery:'死亡或未知结果恢复',safety:'本地安全处理'};
   const fresh=mainline.stage ? mainline.fresh : plan.fresh;
   badge('survival-freshness',fresh===false ? '旧阶段建议 · 待完整观察' : fresh===true ? '完整观察时生成' : '新鲜度未确认',fresh===false ? 'warn' : '');
   txt('survival-stage',(stages[plan.stage] || display(plan.stage))+' · '+display(plan.state)+' · '+display(plan.goal));
   if (mainline.stage) txt('survival-stage','生存主线 '+mainline.chapter+'/'+mainline.chapters+' · '+mainline.label);
   txt('survival-missing','缺少前置：'+display(plan.missing)+'；尚未绑定：'+display(plan.unsupported)+'；建议不代表阶段已完成');
+  if (campaign.stage) {
+    const labels={observe:'等待观察',opening:'开局工具',iron_gear:'铁器与盾',supplies:'准备补给',water:'获取水桶',nether_portal:'下界门',blaze_rods:'烈焰棒',ender_pearls:'末影珍珠',resupply:'补给',return_overworld:'返回主世界',eyes:'制作末影之眼',end_equipment:'末地装备',stronghold:'定位要塞与开启末地门',dragon:'水晶与末影龙',leave_end:'从末地返程',completed:'已通关并返回主世界',projection:'建筑投影'};
+    txt('survival-stage','通关主线 · '+(labels[campaign.stage] || display(campaign.stage)));
+    const build=object(campaign.projection);
+    const woodLabels={oak:'橡木',spruce:'云杉',birch:'白桦',jungle:'丛林木',acacia:'金合欢',dark_oak:'深色橡木',mangrove:'红树',cherry:'樱花',pale_oak:'苍白橡木'};
+    const wood=woodLabels[build.wood_species];
+    const buildProgress=build.total ? '投影 '+build.confirmed+'/'+build.total+' 格 · '+(build.complete?'验收完成':display(build.stage))+(wood?' · '+wood:'') : '';
+    txt('survival-missing',[buildProgress,campaign.reason,campaign.last_result].filter(Boolean).join(' · '));
+  }
   txt('combat-available','本轮战斗候选：'+display(combat.mode)+' · allowed '+display(combat.allowed)+' · '+display(combat.reason)+'；候选仍须技能复核');
   const result=object(entry.result), evidence=object(result.data);
   const labels={attack_sent:'已发攻击',damage_verified:'伤害已确认',killed:'击杀已确认',completed:'动作目标已完成',shield_commanded:'已发举盾',source_recovered:'岩浆源已回收',lava_outstanding:'岩浆尚待回收',retreat_required:'需要撤退'};
   const flags=Object.entries(labels).map(([key,label])=>label+'：'+(evidence[key]===true ? '是' : evidence[key]===false ? '否' : '未确认'));
   txt('combat-evidence',entry.skill ? display(entry.skill)+' · '+ageText(entry.updated_at)+'\n'+flags.join(' · ')+'\n'+display(result.error_code)+' · '+display(result.message)+'；单步成功不等于击杀，旧结果不代表当前状态' : '尚无狩猎、战斗或桶类执行结果');
-  txt('survival-json',pretty({mainline:state.mainline,playbook:state.playbook,combat:state.combat,last_result:state.combat_result}));
+  txt('survival-json',pretty({mainline:state.mainline,campaign:state.campaign,playbook:state.playbook,combat:state.combat,last_result:state.combat_result}));
 }
 const taskStatusLabels={idle:'空闲',running:'执行中',suspended:'应急中断 / 已挂起',completed:'已完成（运行时发布）',needs_ai:'需要 AI 决策',unknown:'执行结果未知',cancelled:'已取消'};
 const longTaskLabels={gather:'采集材料',craft:'制作物品',smelt:'熔炼物品',food:'获取食物',starter_tools:'基础工具',iron_tools:'铁器升级',shelter:'住所',bed:'床与睡眠',storage:'储物',farm:'农作',recover_drops:'死亡掉落恢复',maintenance:'持续维护'};
@@ -274,7 +283,7 @@ function renderState(state) {
   renderModel();
 }
 function isModel(event) { return /^(LLM_|MODEL_)/.test(String(event.event)); }
-function isAction(event) { return /DECISION|STEP_RESULT|SLEEP_|ACTION|SKILL|^TASK_/.test(String(event.event)); }
+function isAction(event) { return /DECISION|STEP_RESULT|SLEEP_|ACTION|SKILL|^TASK_|COMBAT_PREEMPT/.test(String(event.event)); }
 function matches(event) {
   const kind=$('filter').value;
   if (kind==='model' && !isModel(event)) return false;
@@ -288,6 +297,7 @@ function describe(event) {
   const d=event.data || {};
   if (event.event==='DECISION') return ((d.decision || {}).name || '决策')+' · '+((d.decision || {}).reason || '');
   if (event.event==='STEP_RESULT') return ((d.result || {}).success ? '成功 · ' : '失败 · ')+((d.result || {}).message || '');
+  if (event.event==='COMBAT_PREEMPT') return '受击 · 本地规则优先 · '+((d.decision || {}).reason || '重新观察');
   if (event.event==='HEARTBEAT') return '状态更新 · '+(d.paused ? '已暂停' : d.busy ? '执行中' : '等待下一步')+' · 步数 '+(d.steps || 0);
   if (['HEARTBEAT_FAILED','IDLE_STATUS_UNAVAILABLE'].includes(event.event)) return '游戏状态读取失败 · '+display(d.code)+' · 保留旧观察，当前生命状态未确认';
   if (event.event==='COMPETITION_TASKS') return '赛事任务快照 · '+display(object(d.board).phase);

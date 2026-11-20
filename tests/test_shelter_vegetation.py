@@ -63,6 +63,15 @@ class ShelterVegetationTests(unittest.TestCase):
         self.assertEqual(self.client.actions, [])
         self.assertEqual(result.data["block_reads"], 103)
 
+    def test_bad_floor_corner_rejects_before_scanning_walls_and_roof(self):
+        self.client.blocks[(-2, 63, -2)] = {"name": "air"}
+        result = self.skills.execute("plan_shelter", self.args)
+        self.assertEqual(result.error_code, "unsafe_site")
+        self.assertIs(result.data["geometry"]["floor_verified"], False)
+        self.assertTrue(result.data["fresh"])
+        self.assertEqual(result.data["block_reads"], 2)
+        self.assertEqual(self.client.actions, [])
+
     def test_full_covered_site_builds_55_blocks_and_requires_actual_closed_door(self):
         self.cover()
         self.client.items["oak_door"] = 1

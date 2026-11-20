@@ -16,6 +16,7 @@ from core.domain import LOG_NAMES, PLANK_NAMES, SAFE_FOOD, TOOL_KINDS, parse_pos
 from core.skill_registry import skills_for_objective
 from core.structure_spec import SHELTER_BUILDING_BLOCKS
 from skills.daily_survival import DailySurvivalSkills
+from skills.hunting import HUNTING_TOOLS
 
 
 DAILY_SKILLS = skills_for_objective("daily")
@@ -307,8 +308,10 @@ class DailySurvivalGoals:
                 entity_id = row.get("id", row.get("entity_id"))
                 if type(entity_id) is int and self._can_hunt(observation, counts, row):
                     if math.dist(observation["status"]["pos"], row["pos"]) > 2.8:
-                        return self._action("move_to", {"pos": list(row["pos"]), "range": 2},
-                            "Approach the observed passive animal once, then reobserve before the stationary short hunt", "food_reserve")
+                        approach = self._hunt_approach(observation, row, context, "food_reserve")
+                        if approach is not None:
+                            return approach
+                        continue
                     return self._action("hunt_animal", {"entity_id": entity_id, "expected_name": row["name"]},
                                         "Acquire food from one observed passive animal", "food_reserve")
         return None
@@ -316,24 +319,49 @@ class DailySurvivalGoals:
     def _can_hunt(self, observation, counts, row):
         status = observation["status"]
         return (status.get("health", 0) >= 12 and status.get("food", 0) >= 10
-                and any(count and (name.endswith("_axe") or name.endswith("_sword")) for name, count in counts.items())
+                and any(counts.get(item) for item in HUNTING_TOOLS)
                 and math.dist(status["pos"], row["pos"]) <= 8)
 
-    def _containers(self, observation, context=None):
+    def _hunt_approach(self, observation, row, context, goal):
+        origin = observation["status"]["pos"]
+        target = row["pos"]
+        if observation.get("local_geometry_origin") != origin or abs(target[1] - origin[1]) > 2:
+            return None
+        blocked = self.rules._blocked(context or {})
+        x, y, z = map(math.floor, origin)
+
+        def supported_step(point):
+            if abs(point[1] - origin[1]) <= .05:
+                return True
+            return (abs(point[1] - y) == 1 and abs(origin[1] - y) <= .05
+                    and abs(math.floor(point[0]) - x) + abs(math.floor(point[2]) - z) == 1)
+
+        points = [point for candidate in self._rows(observation.get("safe_stand_candidates"))
+                  if candidate.get("support") in DailySurvivalSkills.SUPPORT
+                  and (point := self.rules._pos(candidate.get("pos"))) is not None
+                  and 0.5 <= math.dist(origin, point) <= 3 and supported_step(point)
+                  and math.dist(point, target) + .5 < math.dist(origin, target)
+                  and self.rules._key(point) not in blocked and not self.rules._dangerous_hostiles(observation, point)]
+        if points:
+            return self._action("position_for_task", {"pos": min(points, key=lambda p: math.dist(p, target))},
+                                "Take one checked ground step toward the animal, then reobserve", goal)
+        return None
+
+    def _containers(self, observation, context=None, *, radius=16):
         dimension = observation["status"].get("dimension")
         blocked = self.rules._blocked(context or {})
         hostiles = self.rules._hostiles(observation, observation["status"]["pos"])
         return [row for row in self._rows(observation.get("containers"))[:8]
                 if self._verified(row, dimension) and row.get("name") in {"chest", "barrel"}
                 and isinstance(row.get("items"), list) and self.rules._key(row["pos"]) not in blocked
-                and math.dist(row["pos"], observation["status"]["pos"]) <= 16
+                and math.dist(row["pos"], observation["status"]["pos"]) <= min(16, radius)
                 and not any(math.dist(row["pos"], threat) <= self.rules.threat_radius for _, threat in hostiles)]
 
-    def _take_supplies(self, observation, counts, names, target, goal, context):
+    def _take_supplies(self, observation, counts, names, target, goal, context, *, radius=16):
         deficit = target - sum(counts.get(name, 0) for name in names)
         if deficit <= 0:
             return None
-        for row in self._containers(observation, context):
+        for row in self._containers(observation, context, radius=radius):
             stored = self.rules._counts({"inventory": row["items"]})
             for item in sorted(stored):
                 if item in names:
@@ -657,8 +685,9 @@ class DailySurvivalGoals:
                     entity_id = row.get("id", row.get("entity_id"))
                     if type(entity_id) is int and self._can_hunt(observation, counts, row):
                         if math.dist(observation["status"]["pos"], row["pos"]) > 2.8:
-                            bed_action = self._action("move_to", {"pos": list(row["pos"]), "range": 2},
-                                "Approach the observed sheep once, then reobserve before the stationary wool hunt", "bed")
+                            bed_action = self._hunt_approach(observation, row, context, "bed")
+                            if bed_action is None:
+                                continue
                         else:
                             bed_action = self._action("hunt_animal", {"entity_id": entity_id, "expected_name": "sheep"},
                                                       "Acquire wool from one observed sheep; verify its actual drops", "bed")

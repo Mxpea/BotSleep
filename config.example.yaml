@@ -12,6 +12,8 @@ agent:
 
 survival:
   intent: survival                         # survival or speedrun; phase hints never enable unbound actions.
+  campaign: false                          # true with objective=daily and intent=speedrun enables the dragon route.
+  projection: timber_house                  # Local preset in data/projections. An empty string selects the compact shelter.
   objective: "starter"                     # starter, daily, competition (requires llm.enabled; no chat debug).
   continuous: true                         # Daily survival keeps running across deaths and overall budgets.
   sleep_policy: "opportunistic"            # opportunistic (sleep only if nearby bed exists; thunder/night no-bed keeps working) or strict.

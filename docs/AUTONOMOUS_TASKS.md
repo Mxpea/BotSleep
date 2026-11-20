@@ -59,7 +59,7 @@ gather/craft/smelt 的数量是接受目标时库存基线之上的增加量。f
 
 `plan_shelter_preparation` 和 `prepare_shelter_step` 是住所目标内部能力，不加入模型工具。前者独立只读评估完整天然地板与出口、最多 8 个 `dirt/grass_block` 凸起；后者重新读取全场、站位、视线和全部敌人后，至多挖一格且不移动。禁止补地、架空、清建筑或树干、挖实际身体覆盖列及未知邻格；每步有 320 读/15 秒预算，写前预留后验读额度。只读已知否决可换朝向，缺块和网络错误不能当作确定的场地否决。任何 `prepared` 都必须再经过普通 `plan_shelter`，不能直接获得基地授权；未知写入不补发停止、挖掘或移动。
 
-当前制作程序是明确的常用配方子集：62 项产物，包括 9 种木板/木门、16 色床、木石铁与钻石工具/锄（含 `diamond_pickaxe`/`diamond_sword`/`diamond_axe`/`diamond_hoe`）、铁甲、盾、桶、熔炉、工作台、箱子、火把与面包。支持的熔炼产物有 10 种：铁锭、木炭、烤马铃薯以及已列出的牛/猪/羊/鸡/兔/鳕鱼/鲑鱼熟食。产物可识别不代表其所有原料来源都可自动获得；例如不能由此宣称钓鱼或兔子狩猎已经绑定。独立配方目录的 886 条记录不等于目标程序可规划和实服验证的 886 个配方。
+目标程序支持 67 项常用产物，包括木板、门、床、基础及钻石工具、铁甲、盾、桶、熔炉、工作台、箱子、火把、面包，以及通关所需的打火石、烈焰粉、末影之眼、弓和箭。熔炼支持 10 种产物。通关专用资源的来源见 [CAMPAIGN.md](CAMPAIGN.md)。
 
 ## 模型与程序的分工
 
@@ -80,6 +80,10 @@ gather/craft/smelt 的数量是接受目标时库存基线之上的增加量。f
 普通子步骤没有伪造的模型工具调用，也不逐步请求 AI 批准。`AutonomousTaskController` 本身只有纯规划、证据和预算；`AutonomyRuntime` 接入原有单动作线程、串行模型 worker、本地安全层与 scoped journal。目标不扩大技能白名单，资源必须来自当前观察，不能用 terrain 的 nearest-per-type 代表点、旧记忆或模型猜测直接授权采集。
 
 普通单步工具和最多 8 步的小批技能仍可使用。目标程序为保持每子步独立观察和意图记录，不把小批技能当作一个无边界的内部执行器。探索只使用已观察、近处、已知实心支撑的工作站位候选，并受探索预算限制。住所任务额外允许相邻直向上下 1 格，技能须复核完整身体扫掠、支撑、敌情和稳定落点；其他目标仍只使用同层探索。当前没有通用远路返家能力：超过 16 格或缺少当前基地证据时不能靠记忆授权施工，也不保证离开任意树冠或跨水。
+
+制作计划按背包计算本次可做的配方次数。手合配方单次最多 4 轮，工作台配方每次 1 轮，执行后重新读库存。缺少原料时优先利用符合目标的近处掉落与新鲜箱内库存，取料数量受当前缺口与观察范围约束。制作、采集、取料和移动按对应物品或到目标的距离判断进展，近处扫到新方块或不相关的库存变化不会重置这些步骤的无进展计数。最近动作详情中的 `made_progress` 记录本轮观察结果。
+
+这次重构参考了 AltoClef 的 [CollectRecipeCataloguedResourcesTask](https://github.com/gaucho-matrero/altoclef/blob/af22e3bc2f03dde45da703f5f7535baae18ea486/src/main/java/adris/altoclef/tasks/resources/CollectRecipeCataloguedResourcesTask.java)、[ResourceTask](https://github.com/gaucho-matrero/altoclef/blob/af22e3bc2f03dde45da703f5f7535baae18ea486/src/main/java/adris/altoclef/tasks/ResourceTask.java) 和 [MovementProgressChecker](https://github.com/gaucho-matrero/altoclef/blob/af22e3bc2f03dde45da703f5f7535baae18ea486/src/main/java/adris/altoclef/util/progresscheck/MovementProgressChecker.java)。BotSleep 使用现有 HTTP 动作与观察接口在 Python 内实现。
 
 自然台阶仍只发送一次移动。落地后遇到纯残余速度、短暂离地或高度未稳时，在原有 1.5 秒和 96 次总读预算内继续观察，每次检查敌情；需要连续稳定状态、实际目标格、脚下支撑与净空，才能确认成功。受伤、生命变化、控制输入、危险状态、缺失字段或读失败仍为未知结果；没有追加移动或停止。`landing_observation` 记录首末状态、待稳原因、样本数与结束原因，避免把所有后验问题混成同一个错误码。
 

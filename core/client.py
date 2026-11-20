@@ -341,9 +341,10 @@ class MinecraftAgentClient:
     def get_status(self, timeout_seconds: Optional[float] = None) -> Dict[str, Any]:
         return self._request("GET", "status", timeout_seconds=timeout_seconds)
 
-    def get_events_page(self, since: int = 0, limit: int = 50) -> Dict[str, Any]:
+    def get_events_page(self, since: int = 0, limit: int = 50, *,
+                        timeout_seconds: Optional[float] = None) -> Dict[str, Any]:
         """Return the envelope, including last_seq, has_more and total."""
-        response = self._request("GET", "events", params={"since": since, "limit": limit})
+        response = self._request("GET", "events", params={"since": since, "limit": limit}, timeout_seconds=timeout_seconds)
         self._list(self._result(response), "events")
         return response
 
@@ -510,14 +511,16 @@ class MinecraftAgentClient:
 
     def find_blocks(self, types: List[str], radius: int = 16, limit: int = 64, *,
                     properties: Optional[Dict[str, Any]] = None,
-                    mature: Optional[bool] = None) -> List[Dict[str, Any]]:
+                    mature: Optional[bool] = None,
+                    timeout_seconds: Optional[float] = None) -> List[Dict[str, Any]]:
         """Return typed rows with the upstream crop/property filters."""
         payload: Dict[str, Any] = {"types": types, "radius": radius, "limit": limit}
         if properties is not None:
             payload["properties"] = properties
         if mature is not None:
             payload["mature"] = mature
-        return self._list(self._result(self._request("POST", "find_blocks", payload=payload)), "blocks")
+        return self._list(self._result(self._request("POST", "find_blocks", payload=payload,
+                                                     timeout_seconds=timeout_seconds)), "blocks")
 
     def window_view(self, pos: List[int], *, timeout_seconds: Optional[float] = None) -> Dict[str, Any]:
         """Open, inspect and close a GUI; this may pathfind and takes the action lock."""

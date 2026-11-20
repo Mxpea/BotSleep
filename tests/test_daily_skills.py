@@ -600,6 +600,21 @@ class DailySkillTests(unittest.TestCase):
         self.assertEqual((control["hit"], control["ms"], control["wait"]), (1, 50, True))
 
     @patch("skills.hunting._rest", return_value=None)
+    def test_hunting_allows_dry_short_grass_on_solid_footing(self, _rest):
+        self.world.block([0, 64, 0], "short_grass")
+        self.world.entities = [{"id": 1, "name": "cow", "type": "mob", "pos": self.pos}]
+        self.world.counts["stone_sword"] = 1
+        self.assertTrue(self.act("hunt_animal", entity_id=1, expected_name="cow").success)
+
+    @patch("skills.hunting._rest", return_value=None)
+    def test_hunting_can_use_an_existing_pickaxe_when_no_sword_or_axe_is_available(self, _rest):
+        self.world.entities = [{"id": 1, "name": "cow", "type": "mob", "pos": self.pos}]
+        self.world.counts["stone_pickaxe"] = 1
+        result = self.act("hunt_animal", entity_id=1, expected_name="cow")
+        self.assertTrue(result.success, result)
+        self.assertEqual(result.data["weapon"], "stone_pickaxe")
+
+    @patch("skills.hunting._rest", return_value=None)
     def test_hunting_killed_flag_without_loot_is_unverified(self, _rest):
         self.world.entities = [{"id": 1, "name": "cow", "type": "mob", "pos": self.pos}]
         self.world.counts["stone_sword"] = 1

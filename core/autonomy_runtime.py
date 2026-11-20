@@ -11,6 +11,7 @@ from dataclasses import asdict
 
 from agent.brain import LLMError
 from agent.survival_planner import Decision
+from core.build_projection import wood_material
 from core.client import APIError
 from core.domain import LOG_NAMES, PLANK_NAMES, extract_blocks, inventory_counts, parse_pos
 from core.model_gate import ModelGateError
@@ -179,17 +180,17 @@ class AutonomyRuntime:
             "accepted": True, "completed": False, "executed": False,
             "task_id": self._task_snapshot().get("task_id")})
 
-    def _remote_log_waypoint(self, observation):
-        if any(row.get("name") in LOG_NAMES for row in extract_blocks(observation)):
+    def _remote_log_waypoint(self, observation, log_names=LOG_NAMES):
+        if any(row.get("name") in log_names for row in extract_blocks(observation)):
             return None
         origin = parse_pos((observation.get("status") or {}).get("pos"))
         if origin is None:
             return None
         try:
-            rows = self.client.get_blocks(radius=128, types=sorted(LOG_NAMES), limit=8)
+            rows = self.client.get_blocks(radius=64, types=sorted(log_names), limit=8)
         except APIError:
             return None
-        candidates = [row["pos"] for row in extract_blocks({"blocks": rows}) if row["name"] in LOG_NAMES]
+        candidates = [row["pos"] for row in extract_blocks({"blocks": rows}) if row["name"] in log_names]
         best = min(candidates, key=lambda pos: math.dist(origin, pos), default=None)
         if best is None:
             return None
@@ -316,6 +317,8 @@ class AutonomyRuntime:
             targets = {"iron": {"count": max(count, 7), "min_tool": "stone_pickaxe"}}
         else:
             targets = {"coal": {"count": count, "min_tool": "wooden_pickaxe"}}
+        if self.campaign is not None:
+            deep_home_thresholds["min_pickaxe_tool"] = next(iter(targets.values()))["min_tool"]
         total_t = min(840 if resource == "diamond" else 540, window.remaining())
         band_t = min(760 if resource == "diamond" else 460, total_t * .9)
         res = miner.mine_targets_from_surface(
@@ -402,12 +405,15 @@ class AutonomyRuntime:
         task_ctx = {**self.context, "deep_mining_enabled": self.settings.get("disable_deep_mining") is not True}
         args = self._task_snapshot()["args"]
         counts = observation.get("counts") or {}
-        gathering_wood = args.get("task") == "gather" and args.get("resource") == "logs"
+        material = wood_material(args.get("resource") or args.get("item"))
+        log_names = (material[0] + "_log",) if material is not None else LOG_NAMES
+        plank_names = (material[0] + "_planks",) if material is not None else PLANK_NAMES
+        gathering_wood = args.get("task") == "gather" and args.get("resource") in {"logs", *LOG_NAMES}
         needs_wood = args.get("task") in {"craft", "starter_tools", "shelter", "storage", "bed"} and not any(
-            counts.get(name) for name in (*LOG_NAMES, *PLANK_NAMES))
+            counts.get(name) for name in (*log_names, *plank_names))
         if ((gathering_wood or needs_wood) and self.task_controller._fresh(observation)
                 and not task_ctx.get("cautious_bootstrap")):
-            task_ctx["remote_log_target"] = self._remote_log_waypoint(observation)
+            task_ctx["remote_log_target"] = self._remote_log_waypoint(observation, log_names)
         decision = self.task_controller.next_action(observation, task_ctx)
         if recovered and self._task_snapshot()["status"] in {"running", "suspended", "completed"}:
             self._record("INFO", "STARTER_MINE_LANDMARK_RECOVERED", {"pos": observation["status"]["pos"],

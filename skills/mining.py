@@ -18,6 +18,7 @@ from core.cave_probe import (
     is_water_like,
     new_exposed_face_positions,
     ore_cell_hazard_free,
+    overhead_excavation_hazard,
     probe_cavity,
 )
 from core.domain import AIR, parse_pos
@@ -1084,6 +1085,18 @@ class MineShaftSkill(BaseSkill):
                         blocker_type="safety_interrupted",
                         blocker_pos=[world[0], world[1] + 2, world[2]],
                     )
+        if bname not in AIR:
+            hazard = overhead_excavation_hazard(world, ctx.read_block)
+            if hazard is not None:
+                above, name = hazard
+                unloaded = name in {"unknown", "not_loaded", "void_air"}
+                raise WorkflowStepError(
+                    "not_loaded" if unloaded else "hazard_adjacent",
+                    f"Overhead column near {world} contains {name} at {above}",
+                    blocker_type="unloaded" if unloaded else "safety_interrupted",
+                    blocker_pos=list(above),
+                    blocker_block=name,
+                )
         return bname
 
     @staticmethod

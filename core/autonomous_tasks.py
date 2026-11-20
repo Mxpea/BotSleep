@@ -15,6 +15,7 @@ from agent.daily_survival import DAILY_SKILLS, DailySurvivalGoals
 from agent.survival_planner import Decision, LOG_NAMES, PLANK_NAMES, SAFE_FOOD, WOOD_SPECIES
 from core.daily_policy import DailySafetyPolicy
 from core.mining_targets import estimate_empty_main_slots
+from core.production_recipes import CRAFT_ITEMS, RECIPES, ingredient_items, plan_craft, wood_inputs
 from core.skill_registry import STARTER_MINING_SKILLS, internal_skills_for_objective
 from core.route_foliage_recovery import choose_route_foliage, cleared_route_targets, confirmed_leaf_removal, position_foliage_hint
 from core.shelter_project import active_project, same_site
@@ -26,6 +27,7 @@ from core.survival_mainline import mainline_enabled
 from core.structure_spec import SHELTER_5X5_SPEC, SHELTER_BUILDING_BLOCKS
 from skills.daily_survival import DailySurvivalSkills
 from skills.equipment import ARMOR_SLOTS, SLOT_SUFFIX, armor_rank, read_worn_slot_item
+from skills.hunting import HUNTING_TOOLS
 from skills.positioning import PositioningSkills
 
 
@@ -33,21 +35,6 @@ TASKS = frozenset({"gather", "craft", "smelt", "food", "starter_tools", "iron_to
                   "shelter", "bed", "storage", "farm", "recover_drops", "maintenance"})
 RESOURCES = frozenset({"logs", "cobblestone", "coal", "raw_iron", "diamond"})
 SMELT_ITEMS = frozenset(DailySurvivalSkills.SMELTABLE.values())
-RECIPES = {
-    "crafting_table": ({"planks": 4}, 1), "stick": ({"planks": 2}, 4),
-    "furnace": ({"cobblestone": 8}, 1), "chest": ({"planks": 8}, 1),
-    "torch": ({"coal": 1, "stick": 1}, 4), "bread": ({"wheat": 3}, 1),
-    "shield": ({"planks": 6, "iron_ingot": 1}, 1), "bucket": ({"iron_ingot": 3}, 1),
-    **{f"{tier}_{tool}": ({material: quantity, "stick": sticks}, 1)
-       for tier, material in (("wooden", "planks"), ("stone", "cobblestone"), ("iron", "iron_ingot"), ("diamond", "diamond"))
-       for tool, quantity, sticks in (("pickaxe", 3, 2), ("axe", 3, 2), ("sword", 2, 1), ("hoe", 2, 2))},
-    **{f"iron_{armor}": ({"iron_ingot": count}, 1)
-       for armor, count in (("helmet", 5), ("chestplate", 8), ("leggings", 7), ("boots", 4))},
-    **{f"{wood}_planks": ({f"{wood}_log": 1}, 4) for wood in WOOD_SPECIES},
-    **{f"{wood}_door": ({f"{wood}_planks": 6}, 3) for wood in WOOD_SPECIES},
-    **{bed: ({bed[:-4] + "_wool": 3, "planks": 3}, 1) for bed in DailySurvivalSkills.BEDS},
-}
-CRAFT_ITEMS = frozenset(RECIPES)
 STATES = frozenset({"idle", "running", "suspended", "completed", "needs_ai", "unknown", "cancelled"})
 UNKNOWN = frozenset({"request_timeout", "network_error", "invalid_json", "invalid_response",
                      "dig_unconfirmed", "action_unconfirmed", "internal", "internal_error"})
@@ -55,7 +42,8 @@ PATH_FAILURES = frozenset({"stalled", "no_path", "path_not_found", "out_of_reach
                            "move_unverified", "target_occluded", "visibility_unknown", "unsafe_target"})
 GATHER_NAVIGATION_FAILURES = frozenset({"stalled", "no_path", "path_not_found", "move_unverified"})
 TASK_ROWS = {"food": "food_reserve", "farm": "food_production", "maintenance": "maintain"}
-RESOURCE_NAMES = {"logs": frozenset(LOG_NAMES), "cobblestone": frozenset({"stone", "cobblestone"}),
+RESOURCE_NAMES = {"logs": frozenset(LOG_NAMES), "sand": frozenset({"sand"}),
+                  "cobblestone": frozenset({"stone", "cobblestone"}),
                   "coal": frozenset({"coal_ore", "deepslate_coal_ore"}),
                   "raw_iron": DailySurvivalSkills.IRON,
                   "diamond": frozenset({"diamond_ore", "deepslate_diamond_ore"})}
@@ -95,6 +83,7 @@ class AutonomousTaskController:
         self.rules = self.daily.rules
         self.safety_policy = DailySafetyPolicy(self.settings)
         self._mine = StarterMiningTask()
+        self._before_child = None
         self._data = {"version": 1, "task_id": None, "task": None, "status": "idle", "args": {},
                       "progress": {"current": 0, "target": 0, "unit": "items"}, "current_step": None,
                       "local_recoveries": 0, "emergency_interruptions": 0, "ai_escalations": 0,
@@ -127,7 +116,7 @@ class AutonomousTaskController:
             if type(value[key]) is not int or not low <= value[key] <= high:
                 raise ValueError(f"{key} must be an integer from {low} to {high}")
         if task == "gather":
-            if not isinstance(args.get("resource"), str) or args["resource"] not in RESOURCES or "item" in args:
+            if not isinstance(args.get("resource"), str) or args["resource"] not in RESOURCES | {"sand", *LOG_NAMES} or "item" in args:
                 raise ValueError("gather requires a supported resource and no item")
             value["resource"] = args["resource"]
         elif task in {"craft", "smelt"}:
@@ -332,7 +321,6 @@ class AutonomousTaskController:
                                  if args["task"] == "food" else 4
                                  if args["task"] == "iron_armor" else max(1, len(self._data["observed_drop_ids"]))
                                  if args["task"] == "recover_drops" else 1, "unit": self._unit()}
-        self._data["fingerprint"] = self._fingerprint(observation)
         self._set("running", "Goal selected; every child requires fresh evidence")
         return self.snapshot()
 
@@ -389,6 +377,27 @@ class AutonomousTaskController:
             "armor": observation.get("armor", {}), "offhand": status.get("offhand"),
             "scout_completed": bool(self._data.get("scout_completed"))})
 
+    def _child_metric(self, decision, observation):
+        """Measure only the output or destination of a resource, craft or move."""
+        name, args = decision.name, decision.args
+        counts = observation["counts"]
+        if name in {"craft_item", "take_items", "smelt_collect", "collect_drops", "store_items"}:
+            item = args["expected_item"] if name == "collect_drops" else args["item"]
+            direction = -1 if name == "store_items" else 1
+            return direction * counts.get(item, 0)
+        if name in {"gather_block", "gather_resource"}:
+            block = args["expected_name"]
+            if block == "dead_bush":
+                return counts.get("stick", 0)
+            for material, names in RESOURCE_NAMES.items():
+                if block in names:
+                    return counts.get(block if material == "logs" else material, 0)
+        if name in {"move_to", "position_for_task"} and decision.goal != "scout_surface":
+            # Positive change means the destination got closer. Quantization
+            # avoids interpreting rounded position jitter as movement.
+            return -round(math.dist(observation["status"]["pos"], args["pos"]), 1)
+        return None
+
     def _context(self, context, observation=None):
         result = copy.deepcopy(context or {})
         now = time.time()
@@ -407,6 +416,12 @@ class AutonomousTaskController:
                 key = self.rules._key(row["pos"])
                 if (row.get("can_see") is True and self._data["blocked_codes"].get(key) in {"target_occluded", "visibility_unknown"}):
                     self._data["blocked"].pop(key, None)
+                if (row["name"] == "crafting_table" and self._data["blocked_codes"].get(key) == "move_unverified"
+                        and self._fresh(observation) and observation["status"].get("on_ground") is True
+                        and math.dist(row["pos"], observation["status"]["pos"]) <= 3.25):
+                    # A narrower navigation radius failed, but fresh footing is now
+                    # within the interaction range. The craft skill still verifies output.
+                    self._data["blocked"].pop(key, None)
         self._data["blocked_codes"] = {k: v for k, v in self._data["blocked_codes"].items() if k in self._data["blocked"]}
         self._data["blocked_entities"] = {k: v for k, v in self._data["blocked_entities"].items() if _finite(v) and v > now}
         # Keep the original refused sweep cooling down. Only its projection
@@ -423,7 +438,7 @@ class AutonomousTaskController:
         result["shelter_rejected_sites"] = list(dict.fromkeys(
             [*self._shelter_search["rejected"], *self._data["rejected_sites"]]))
         result["shelter_visited_stances"] = list(self._shelter_search["visited"])
-        result["shelter_survey_reposition"] = self._data["survey_since_move"] >= 4
+        result["shelter_survey_reposition"] = self._data["survey_since_move"] >= (2 if self.settings.get("campaign") is True else 4)
         result["shelter_survey_exhausted"] = self._data["survey_steps"] >= 32
         return result
 
@@ -439,6 +454,15 @@ class AutonomousTaskController:
             if item in names and type(row.get("id")) is int and math.dist(obs["status"]["pos"], row["pos"]) <= 8:
                 return self._decision("collect_drops", {"entity_id": row["id"], "expected_item": item}, "Collect freshly observed needed drops before producing more")
         return None
+
+    def _withdraw(self, names, needed, obs, context):
+        if (context.get("_bounded_bootstrap") or needed <= 0
+                or "take_items" not in context.get("capabilities", DAILY_SKILLS)):
+            return None
+        counts = obs["counts"]
+        target = sum(counts.get(name, 0) for name in names) + needed
+        return self._row_decision(self.daily._take_supplies(
+            obs, counts, names, target, self._data["task"], context, radius=self._data["args"]["radius"]))
 
     def _stash_bulk_if_crowded(self, obs, counts, context):
         if self._data.get("stash_done"):
@@ -520,6 +544,9 @@ class AutonomousTaskController:
 
     def _gather(self, resource, obs, context, names=None, *, target_count=None):
         counts = obs["counts"]
+        if resource in LOG_NAMES:
+            wanted = self._data["progress"]["target"]
+            return self._gather("logs", obs, context, {resource}, target_count=wanted)
         cautious = context.get("_bounded_bootstrap") is True
         if cautious and resource != "logs":
             return None
@@ -527,10 +554,18 @@ class AutonomousTaskController:
         failures = self._gather_navigation_hints(obs)
         needs_stance = any("blocker" not in row and tuple(map(math.floor, row["origin"])) == tuple(map(math.floor, origin))
                            and math.dist(row["origin"], origin) <= .5 for row in failures)
-        drops = None if cautious else self._drop(set(names or LOG_NAMES) if resource == "logs" else {resource}, obs, context)
-        if drops and not needs_stance:
-            return drops
-        if resource != "logs":
+        items = set(names or LOG_NAMES) if resource == "logs" else {resource}
+        if not cautious and not needs_stance:
+            drop = self._drop(items, obs, context)
+            if drop is not None:
+                return drop
+            needed = 1 if target_count is None else target_count - sum(counts.get(name, 0) for name in items)
+            if self._data["task"] == "gather" and self._data["args"].get("resource") == resource:
+                needed = self._data["progress"]["target"] - self._quantity(obs)
+            withdrawal = self._withdraw(items, needed, obs, context)
+            if withdrawal is not None:
+                return withdrawal
+        if resource not in {"logs", "sand"}:
             if resource == "diamond":
                 required = "iron_pickaxe"
                 minimum = ("iron", "diamond", "netherite")
@@ -562,7 +597,7 @@ class AutonomousTaskController:
                            if row["expected_name"] in LOG_NAMES and "blocker" not in row}
         occluded_columns = {tuple(row["target"][i] for i in (0, 2)) for row in failures if "blocker" in row}
         ground = obs.get("ground_log_approach")
-        if (resource == "logs" and not cautious and mainline_enabled(self.settings)
+        if (resource == "logs" and not cautious and (mainline_enabled(self.settings) or self.settings.get("campaign") is True)
                 and isinstance(ground, dict) and ground.get("verified") is True
                 and ground.get("origin") == obs.get("local_geometry_origin") == origin
                 and ground.get("ground") in PositioningSkills.EDGE_GROUND
@@ -593,7 +628,8 @@ class AutonomousTaskController:
                                 for row in self.daily._rows(obs.get("safe_stand_candidates")))):
                     return self._decision("position_for_task", {"pos": step},
                                           "Move one level ground cell toward the checked low trunk, then reobserve")
-        candidates = [row for row in blocks if row["name"] in (names or RESOURCE_NAMES[resource])
+        mineable = RESOURCE_NAMES[resource] if names is None else RESOURCE_NAMES[resource].intersection(names)
+        candidates = [row for row in blocks if row["name"] in mineable
                       and math.dist(origin, row["pos"]) <= self._data["args"]["radius"]
                       and (resource != "cobblestone" or "plan_starter_staircase" not in context["capabilities"]
                            or obs.get("local_geometry_origin") != origin or row.get("can_see") is True
@@ -639,6 +675,11 @@ class AutonomousTaskController:
         if resource in {"cobblestone", "coal", "raw_iron", "diamond"} and not cautious and isinstance(context, dict) and context.get("deep_mining_enabled") is True:
             stone_plus = sum(counts.get(t + "_pickaxe", 0) for t in ("stone", "iron", "diamond", "netherite"))
             iron_plus = sum(counts.get(t + "_pickaxe", 0) for t in ("iron", "diamond", "netherite"))
+            if (self.settings.get("campaign") is True and resource == "raw_iron"
+                    and iron_plus == 0 and stone_plus < 2):
+                # A stone pick can wear out reaching the iron band. Gather the
+                # spare's material before starting an underground expedition.
+                return self._craft("stone_pickaxe", 1, obs, context)
             if (resource == "diamond" and counts.get("diamond_pickaxe", 0) == 0
                     and counts.get("netherite_pickaxe", 0) == 0 and iron_plus < 2):
                 spare_iron = self._craft("iron_pickaxe", 1, obs, context)
@@ -708,32 +749,37 @@ class AutonomousTaskController:
         if approach_occluded:
             recent["gather_navigation"]["blocker"] = list(blocker)
 
-    def _obtain(self, item, needed, obs, context, depth):
+    def _obtain(self, item, needed, obs, context, depth, *, output=None):
         counts = obs["counts"]
+        accepted = ingredient_items(item, output)
+        if item in LOG_NAMES:
+            held = sum(counts.get(name, 0) for name in accepted)
+            return self._gather("logs", obs, context, set(accepted), target_count=held + needed)
+        if item in RESOURCE_NAMES and accepted == (item,):
+            return self._gather(item, obs, context, target_count=counts.get(item, 0) + needed)
         if item == "planks":
             for wood, planks in zip(WOOD_SPECIES, PLANK_NAMES):
-                available = sum(counts.get(name, 0) for name in self._wood_inputs(wood))
-                if available:
-                    return self._decision("craft_item", {"item": planks, "count": min(64, available * 4, 4 * math.ceil(needed / 4))}, "Convert held wood into required planks")
+                if any(counts.get(name, 0) for name in wood_inputs(wood)):
+                    return self._craft(planks, 4 * math.ceil(needed / 4), obs, context, depth + 1)
+        if not context.get("_bounded_bootstrap"):
+            names = set(accepted)
+            found = self._drop(names, obs, context) or self._withdraw(names, needed, obs, context)
+            if found is not None:
+                return found
+        if item == "planks":
             return self._gather("logs", obs, context)
         if item in CRAFT_ITEMS:
             return self._craft(item, needed, obs, context, depth + 1)
         if item == "iron_ingot":
             return self._smelt(item, obs, context, depth + 1)
-        if item in {"cobblestone", "coal", "raw_iron", "diamond"}:
+        if item in RESOURCE_NAMES:
             return self._gather(item, obs, context, target_count=counts.get(item, 0) + needed)
-        if item in LOG_NAMES:
-            return self._gather("logs", obs, context, {item})
         if item == "wheat":
             for row in self.daily._safe_rows(obs, {"wheat"}, context=context):
                 age = (row.get("properties") or {}).get("age")
                 if age in (7, "7"):
                     return self._decision("harvest_crop", {"pos": row["pos"], "expected_name": "wheat"}, "Harvest currently mature wheat")
-        return self._drop({item}, obs, context)
-
-    @staticmethod
-    def _wood_inputs(wood):
-        return (f"{wood}_log", f"{wood}_wood", f"stripped_{wood}_log", f"stripped_{wood}_wood")
+        return None
 
     def _resource_child(self, decision, obs, context):
         """Board/workstation prerequisites use the same fresh resource recovery."""
@@ -792,32 +838,25 @@ class AutonomousTaskController:
         return 0 <= y <= 1 and side == 0 and 0 <= front <= 3  # Centre, inner approach, door and exit.
 
     def _craft(self, item, needed, obs, context, depth=0):
-        if depth > 8 or item not in RECIPES:
+        if depth > 8 or item not in RECIPES or needed <= 0:
             return None
         counts = obs["counts"]
-        recipe, output = RECIPES[item]
-        # One recipe at a time keeps prerequisite acquisition bounded. The
-        # external count still means the required inventory increase.
-        for ingredient, amount in recipe.items():
-            held = sum(counts.get(n, 0) for n in PLANK_NAMES) if ingredient == "planks" else counts.get(ingredient, 0)
-            if item in PLANK_NAMES:
-                held = sum(counts.get(name, 0) for name in self._wood_inputs(item[:-7]))
-            if item == "torch" and ingredient == "coal":
-                held += counts.get("charcoal", 0)
-            if held < amount:
-                total_planks = sum(counts.get(n, 0) for n in PLANK_NAMES)
-                needed_planks = int(recipe.get("planks", 0))
-                if ((item == "stick" and total_planks < amount and not any(counts.get(n, 0) for n in LOG_NAMES))
-                        or (ingredient == "stick" and total_planks < needed_planks + 2)):
-                    bush = self._gather_dead_bush(obs, context)
-                    if bush is not None:
-                        return bush
-                return self._obtain(ingredient, amount - held, obs, context, depth)
-        if item not in {"stick", "crafting_table", "torch", *PLANK_NAMES}:
+        plan = plan_craft(item, needed, counts)
+        if plan.missing:
+            ingredient, missing = plan.missing
+            total_planks = sum(counts.get(n, 0) for n in PLANK_NAMES)
+            if ((item == "stick" and not any(counts.get(n, 0) for n in LOG_NAMES))
+                    or (ingredient == "stick" and total_planks < RECIPES[item][0].get("planks", 0) + 2)):
+                bush = self._gather_dead_bush(obs, context)
+                if bush is not None:
+                    return bush
+            return self._obtain(ingredient, missing, obs, context, depth, output=item)
+        if plan.needs_table:
             workspace = self.rules._workspace(obs, context)
             if workspace:
                 return self._resource_child(workspace, obs, context)
-        return self._decision("craft_item", {"item": item, "count": min(64, needed, output)}, "Craft one available recipe and verify the new inventory")
+        return self._decision("craft_item", {"item": item, "count": plan.request_count},
+                              "Craft the batch supported by the current ingredients and verify inventory gain")
 
     @staticmethod
     def _window_to_furnace_row(pos, window, dimension):
@@ -846,6 +885,19 @@ class AutonomousTaskController:
     def _smelt(self, item, obs, context, depth=0):
         if depth > 8:
             return None
+        if self.settings.get("campaign") is True:
+            origin = obs["status"]["pos"]
+
+            def local(row):
+                pos = self.rules._pos(row.get("pos"))
+                return (pos is not None and abs(pos[1] - origin[1]) <= 1.25
+                        and math.dist(pos, origin) <= 3 and row.get("can_see") is not False)
+
+            obs = {**obs,
+                   **{key: [row for row in self.daily._rows(obs.get(key)) if row.get("name") != "furnace" or local(row)]
+                      for key in ("blocks", "terrain")},
+                   "furnaces": [row for row in self.daily._rows(obs.get("furnaces")) if local(row)]}
+            context = {**context, "smelting_jobs": [row for row in context.get("smelting_jobs", []) if local(row)]}
         counts = obs["counts"]
         smelt_obs = obs
         inspected = self._data.get("inspected_furnace")
@@ -872,6 +924,8 @@ class AutonomousTaskController:
                 return self._gather("raw_iron", obs, context)
             if item == "charcoal":
                 return self._gather("logs", obs, context)
+            if item == "glass":
+                return self._gather("sand", obs, context)
             animals = {"cooked_beef": "cow", "cooked_porkchop": "pig", "cooked_mutton": "sheep", "cooked_chicken": "chicken"}
             if item in animals:
                 return self._hunt({animals[item]}, obs, context)
@@ -888,16 +942,23 @@ class AutonomousTaskController:
         for row in self.daily._safe_rows(obs, names, entities=True, context=context):
             if type(row.get("id")) is not int or math.dist(row["pos"], obs["status"]["pos"]) > 8:
                 continue
-            if not any(count and (name.endswith("_sword") or name.endswith("_axe")) for name, count in obs["counts"].items()):
+            if not any(obs["counts"].get(item) for item in HUNTING_TOOLS):
                 return self._craft("stone_sword", 1, obs, context)
             if not self.daily._can_hunt(obs, obs["counts"], row):
                 continue
             if math.dist(row["pos"], obs["status"]["pos"]) > 2.8:
-                return self._decision("move_to", {"pos": row["pos"], "range": 2}, "Approach the observed passive animal once and reobserve")
+                approach = self.daily._hunt_approach(obs, row, context, self._data["task"])
+                if approach is not None:
+                    return self._row_decision(approach)
+                continue
             return self._decision("hunt_animal", {"entity_id": row["id"], "expected_name": row["name"]}, "Hunt only the species needed for this goal")
         return None
 
     def _food(self, obs, context):
+        if self.settings.get("campaign") is True:
+            for source, output in DailySurvivalSkills.SMELTABLE.items():
+                if output in SAFE_FOOD and obs["counts"].get(source, 0):
+                    return self._smelt(output, obs, context)
         decision = self.daily._food_action(obs, obs["counts"], context)
         if decision:
             return self._row_decision(decision)
@@ -1009,14 +1070,14 @@ class AutonomousTaskController:
         plank_demand = wall_demand + (6 if needs_door else 0) + table_planks
         woods = [wood for wood in WOOD_SPECIES if wood + "_door" in DailySurvivalSkills.DOORS]
         wood_supply = {wood: counts.get(wood + "_planks", 0)
-            + 4 * sum(counts.get(name, 0) for name in self._wood_inputs(wood)) for wood in woods}
+            + 4 * sum(counts.get(name, 0) for name in wood_inputs(wood)) for wood in woods}
         total_supply = sum(wood_supply.values())
         building_woods = {wood for wood in woods if wood + "_planks" in SHELTER_BUILDING_BLOCKS}
         wall_supply = sum(wood_supply[wood] for wood in building_woods)
         visible = {row["name"] for row in self.rules._blocks(obs)}
         # Reserve one craftable door species; mixed plank totals cannot meet it.
         door_woods = sorted(woods, key=lambda wood: (wood_supply[wood],
-            bool(set(self._wood_inputs(wood)) & visible)), reverse=True)
+            bool(set(wood_inputs(wood)) & visible)), reverse=True)
         door_short = needs_door and wood_supply[door_woods[0]] < 6
         if not door_short and total_supply >= plank_demand and wall_supply >= wall_demand:
             return None, False
@@ -1024,9 +1085,9 @@ class AutonomousTaskController:
             # A few held planks cannot lock the goal to an unavailable species.
             # Each alternative still goes through the real fresh resource filter.
             decision = next((candidate for wood in door_woods
-                if (candidate := self._gather("logs", obs, context, set(self._wood_inputs(wood))))), None)
+                if (candidate := self._gather("logs", obs, context, set(wood_inputs(wood))))), None)
         else:
-            names = {name for wood in building_woods for name in self._wood_inputs(wood)} if wall_supply < wall_demand else None
+            names = {name for wood in building_woods for name in wood_inputs(wood)} if wall_supply < wall_demand else None
             decision = self._gather("logs", obs, context, names)
         if decision:
             decision = Decision(decision.name, decision.args,
@@ -1139,7 +1200,7 @@ class AutonomousTaskController:
                 visible = {block["name"] for block in self.rules._blocks(obs)}
                 def available(wood):
                     planks = obs["counts"].get(wood + "_planks", 0)
-                    logs = sum(obs["counts"].get(name, 0) for name in self._wood_inputs(wood))
+                    logs = sum(obs["counts"].get(name, 0) for name in wood_inputs(wood))
                     return planks >= 6, planks + logs * 4 >= 6, wood + "_log" in visible, planks
                 woods = [wood for wood in WOOD_SPECIES if wood + "_door" in DailySurvivalSkills.DOORS]
                 wood = max(woods, key=available)
@@ -1390,6 +1451,9 @@ class AutonomousTaskController:
                 if decision is None:
                     return None
         if decision is None:
+            if task == "shelter" and self.settings.get("campaign") is True and local["shelter_survey_reposition"]:
+                self._escalate("shelter_needs_new_patch")
+                return None
             decision = self._explore(obs, local)
         if decision is None:
             self._escalate("no_safe_local_action_or_unavailable_prerequisite")
@@ -1409,8 +1473,9 @@ class AutonomousTaskController:
             if decision is None:
                 self._escalate("no_progress_move_requires_new_strategy")
                 return None
+        self._before_child = self._child_metric(decision, observation)
         self._data.update(current_step=decision.name, pending_digest=_digest([decision.name, decision.args]),
-                          fingerprint=self._fingerprint(observation))
+                          fingerprint=self._fingerprint(observation) if self._before_child is None else None)
         if decision.name == "collect_drops":
             item = decision.args["expected_item"]
             self._data["drop_before"] = {"item": item, "count": observation["counts"].get(item, 0),
@@ -1575,7 +1640,7 @@ class AutonomousTaskController:
                 intent.update(stage="position", clear_cells=copy.deepcopy(data["clear_cells"]))
             elif preparation_rejected:
                 remaining = [o for o in ("north", "east", "south", "west") if o not in intent["plan_orientations"]]
-                if remaining:
+                if remaining and self.settings.get("campaign") is not True:
                     intent.update(stage="plan", orientation=remaining[0], clear_cells=[])
                 else:
                     self._data["preparation_site"] = None
@@ -1640,7 +1705,9 @@ class AutonomousTaskController:
                 self._data["blocked"] = dict(list(self._data["blocked"].items())[-16:])
                 self._data["blocked_codes"][self.rules._key(target)] = code or "no_movement"
                 self._data["blocked_codes"] = {k: v for k, v in self._data["blocked_codes"].items() if k in self._data["blocked"]}
-            if type(decision.args.get("entity_id")) is int:
+            moved_animal = (decision.name == "hunt_animal" and code == "out_of_range" and data.get("executed") is False
+                            and self.rules._pos(data.get("target_pos")) is not None)
+            if type(decision.args.get("entity_id")) is int and not moved_animal:
                 self._data["blocked_entities"][str(decision.args["entity_id"])] = time.time() + 30
                 self._data["blocked_entities"] = dict(list(self._data["blocked_entities"].items())[-16:])
         if decision.goal in {"explore", "shelter_preparation_position"}:
@@ -1683,8 +1750,11 @@ class AutonomousTaskController:
                     and math.dist(status["pos"], decision.args["pos"]) <= .4):
                 self._remember_shelter_search("visited", self.rules._key(status["pos"]),
                                               pos=list(status["pos"]))
-            current = self._fingerprint(observation)
-            progress = current != self._data.get("fingerprint")
+            if self._before_child is None:
+                progress = self._fingerprint(observation) != self._data.get("fingerprint")
+            else:
+                progress = self._child_metric(decision, observation) > self._before_child
+            recent["made_progress"] = progress
             furnaces = list(self.daily._rows(observation.get("furnaces")))
             inspected = self._data.get("inspected_furnace")
             if isinstance(inspected, dict) and not any(row.get("pos") == inspected.get("pos") for row in furnaces):
@@ -1698,7 +1768,6 @@ class AutonomousTaskController:
                     self._data["local_failures"] = 0
                 if decision.name == "position_for_task" and result.success is True:
                     self._data["survey_since_move"] = 0
-            self._data["fingerprint"] = current
             drop = self._data.get("drop_before")
             if (self._data["task"] == "recover_drops" and decision.name == "collect_drops" and result.success
                     and data.get("verified") is True and drop and drop["id"] in self._data["observed_drop_ids"]
@@ -1711,6 +1780,7 @@ class AutonomousTaskController:
             self._data["fresh"] = False
             self._data["no_progress"] += 1
         self._data["drop_before"] = None
+        self._before_child = None
         if code == "cancelled":
             self.interrupt("cancelled_before_known_write")
         else:

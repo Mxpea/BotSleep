@@ -33,10 +33,10 @@ class SurvivalTaskPlannerTests(unittest.TestCase):
             enabled_names = {tool["function"]["name"] for tool in visible}
             self.assertNotIn("run_survival_task", enabled_names)
             self.assertTrue({"gather_block", "craft_item", "move_to", "wait"} <= enabled_names)
-            self.assertEqual(enabled_names, names - {"run_survival_task"})
+            self.assertEqual(enabled_names, names - {"run_survival_task", "retreat_from", "fight_hostile"})
 
     def test_normal_autonomy_requests_expose_goals_safety_and_competition_metadata_only(self):
-        normal={"run_survival_task","wait","eat_food","auto_sleep","retreat_from","fight_hostile"}
+        normal={"run_survival_task","wait","eat_food","auto_sleep"}
         metadata={"select_task","update_progress","finish_task","force_exit_task","end_competition"}
         for objective,size in (("daily",35),("competition",40)):
             with self.subTest(objective=objective):
@@ -181,7 +181,7 @@ class SurvivalTaskPlannerTests(unittest.TestCase):
                 self.assertEqual(planner._task_repair_uses, {})
                 planner.observe_result(decision, SkillResult(True, "Tool verified", {"gained": 1}), observation({"wooden_pickaxe": 1}))
                 planner.choose(observation({"wooden_pickaxe": 1}), {})
-                self.assertEqual(len(brain.requests[1]["tools"]), 6 if objective == "daily" else 11)
+                self.assertEqual(len(brain.requests[1]["tools"]), 4 if objective == "daily" else 9)
                 self.assertEqual([m["tool_call_id"] for m in brain.requests[1]["messages"] if m["role"] == "tool"], ["cautious_goal"])
 
     def test_cautious_schema_rejection_and_repair_use_same_request_permissions(self):
