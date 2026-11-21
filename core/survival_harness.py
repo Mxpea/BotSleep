@@ -10,6 +10,8 @@ from dataclasses import asdict
 
 from agent.survival_planner import Decision, SurvivalPlanner
 from core.client import APIError
+from core.model_gate import ModelGateError
+from core.policy_relaxation import RelaxedWork, allows_goal
 from core.retreat_controller import (
     RETREAT_REPLAN,
     RETREAT_SEARCH_COOLDOWN,
@@ -140,6 +142,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
         self._paused = bool(self.journal.state.get("pending"))
         self._closed = False
         self._active_decision = None
+        self._active_relaxed_work = None
         self._next_attempt = 0.0
         self._next_monitor = 0.0
         self._next_idle_monitor = 0.0
@@ -213,7 +216,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
         self.phase = phase
         self._record("INFO", "AGENT_PHASE", {"phase": phase, "planner": "llm" if self.uses_llm else "rules"})
 
-    def _mandatory_safety(self, observation, baseline=None):
+    def _mandatory_safety(self, observation, baseline=None, *, proposed=None):
         """Apply the local safety policy to the current observation."""
         decision = baseline if baseline is not None else self._safety_rules.choose(observation, self.context)
         if not self.daily:
@@ -222,8 +225,11 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
         if not self.daily:
             decision = self._starter_safety(observation, decision)
         if self.daily_policy:
+            baseline_safety = decision
             decision = self.daily_policy.choose(observation, decision, self.daily_board, context=self.context)
-            decision = self._local_recovery_decision(decision, observation)
+            if (decision is None and self._can_continue_work(baseline_safety, observation, proposed=proposed)):
+                decision = baseline_safety
+            decision = self._local_recovery_decision(decision, observation, proposed=proposed)
         recovery = self.context.get("combat_retreat")
         if isinstance(recovery, dict):
             status = observation["status"]
@@ -259,6 +265,32 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                 return Decision("fight_hostile", {"entity_id": target["id"], "expected_name": target["name"]},
                                 "Counter an isolated zombie already within reach", "safety")
         return decision
+
+    def _relaxable_hold(self, safety, observation):
+        if (not self.daily_policy or self.journal.state.get("pending") or self._model_blocked
+                or self._cancel.is_set() or self._paused
+                or self._model_worker is not None and self._model_worker.pending):
+            return None
+        mode = self.daily_policy.soft_hold(safety, observation, self.context)
+        gate = getattr(getattr(self.planner, "brain", None), "request_gate", None)
+        if mode and gate is not None:
+            try:
+                if gate.snapshot().get("state") != "idle":
+                    return None
+            except ModelGateError:
+                return None
+        return mode
+
+    def _can_continue_work(self, safety, observation, *, proposed=None):
+        if proposed is None and not self._task_active():
+            return False
+        mode = self._relaxable_hold(safety, observation)
+        if mode is None:
+            return False
+        if proposed is not None:
+            return (self.daily_policy.validate(proposed, observation, context=self.context) == mode
+                    and self.daily_policy.allows_relaxed(proposed, mode, observation))
+        return allows_goal(self._task_snapshot()["args"], mode)
 
     def _retreat_state(self, observation, threat):
         """Persist recovery evidence, never an executable route or old pending action."""
@@ -459,6 +491,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
         fetched_at = self._competition_advancements_fetched_at if cache_fresh else None
         tools = getattr(self.planner, "tool_definitions", [])
         capabilities = [entry["function"]["name"] for entry in tools]
+        if self.task_controller is None:
+            capabilities = [name for name in capabilities if name != "run_survival_task"]
         board = self.competition.update(observation, advancements, capabilities=capabilities,
                                         advancements_fetched_at=fetched_at)
         self.context["competition"] = self.competition.state()
@@ -666,6 +700,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
         self._task_child = False
         self._task_safety = False
         starter_recovery = False
+        relaxed_policy = None
         try:
             self._phase("observing")
             observation = self._observe()
@@ -706,7 +741,16 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                 decision = manual
             elif self.uses_llm:
                 safety = self._mandatory_safety(observation) or self._local_task_food(observation)
-                if safety is not None:
+                continued = None
+                if safety is not None and self._task_active():
+                    mode = self._relaxable_hold(safety, observation)
+                    if allows_goal(self._task_snapshot()["args"], mode):
+                        continued = self._task_next(observation, relaxed_policy=mode)
+                        if continued is not None and self._task_child:
+                            relaxed_policy = mode
+                if continued is not None:
+                    decision = continued
+                elif safety is not None:
                     if self._model_worker and self._model_worker.pending:
                         self._model_worker.cancel()
                     decision = safety
@@ -758,13 +802,20 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                         decision = alternative
                         self._record("INFO", "STARTER_RECOVERY", {"decision": asdict(decision)})
                     unsafe_target = self._unsafe_destination(decision, observation)
-                    if self.daily_policy:
-                        unsafe_target = unsafe_target or self.daily_policy.validate(decision, observation, context=self.context)
+                    policy_rejection = (self.daily_policy.validate(decision, observation, context=self.context)
+                                        if self.daily_policy and not unsafe_target else None)
+                    safety = self._mandatory_safety(observation, proposed=decision) if not unsafe_target else None
+                    mode = self._relaxable_hold(safety, observation) if policy_rejection else None
+                    if (mode is not None and mode == policy_rejection
+                            and self.daily_policy.allows_relaxed(decision, mode, observation)):
+                        relaxed_policy = mode
+                    else:
+                        unsafe_target = unsafe_target or policy_rejection
                     if unsafe_target:
                         self._record("WARN", "SAFETY_OVERRIDE", {"model_decision": asdict(decision), "reason": unsafe_target})
                         return decision, SkillResult(False, unsafe_target, {"executed": False}, "safety_changed"), observation
-                    safety = self._mandatory_safety(observation)
-                    if safety is not None and (safety.name != decision.name or safety.args != decision.args):
+                    if (relaxed_policy is None and safety is not None
+                            and (safety.name != decision.name or safety.args != decision.args)):
                         self._record("WARN", "SAFETY_OVERRIDE", {"model_decision": asdict(decision), "decision": asdict(safety)})
                         return decision, SkillResult(False, "Fresh local safety check rejected the model action; replan",
                                                      {"executed": False, "safety_decision": asdict(safety)}, "safety_changed"), observation
@@ -781,11 +832,22 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                     and decision.goal in {"safety", "recover", "observe", "food", "food_recovery", "sleep"}):
                 self._task_interrupt(decision.reason)
             if self._task_child:
-                rejected = self._unsafe_destination(decision, observation) or self.daily_policy.validate(decision, observation, context=self.context)
+                rejected = self._unsafe_destination(decision, observation)
+                policy_rejection = self.daily_policy.validate(decision, observation, context=self.context)
+                if policy_rejection != relaxed_policy:
+                    rejected = rejected or policy_rejection
                 if rejected:
-                    return decision, SkillResult(False, rejected, {"executed": False}, "safety_changed"), observation
+                    data = {"executed": False}
+                    if relaxed_policy is not None:
+                        data["relaxed_policy"] = relaxed_policy
+                    return decision, SkillResult(False, rejected, data, "safety_changed"), observation
+            permit = (RelaxedWork(relaxed_policy, copy.deepcopy(observation["status"]), self._safety_rules.threat_radius)
+                      if relaxed_policy is not None and decision.name != "run_survival_task" else None)
+            self._active_relaxed_work = permit
             self._active_decision = decision
             self._safety_baseline = copy.deepcopy(observation["status"])
+            if relaxed_policy is not None:
+                self._record("INFO", "SOFT_POLICY_RELAXED", {"policy": relaxed_policy, "decision": asdict(decision)})
             self._record("INFO", "DECISION", {"decision": asdict(decision), "status": observation["status"],
                                                "counts": observation["counts"], "milestones": self.context["milestones"],
                                                "source": ("starter_recovery" if starter_recovery else "task" if self._task_child
@@ -818,6 +880,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                     options["recovery_context"] = self._canopy_options(observation)
                 if self._task_child and self.context.get("cautious_bootstrap") is True:
                     options["cautious"] = True
+                if permit is not None:
+                    options["relaxed_work"] = permit
                 if self._task_child and decision.goal == "deep_mine":
                     result = self._run_task_deep_mine(decision, observation)
                 elif self._task_child and decision.goal == "scout_surface":
@@ -831,6 +895,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                     result = runner.execute(decision.name, decision.args, cancel_event=self._cancel, **options)
             if not isinstance(result, SkillResult):
                 raise TypeError("Skill returned an invalid result")
+            if permit is not None:
+                result.data["relaxed_policy"] = permit.mode
             if ((self._model_feedback or self.daily or decision.name == "canopy_escape"
                     or decision.name == "fight_hostile" or result.error_code == "retreat_interrupted")
                     and not self._cancel.is_set() and not _uncertain_result(result)):
@@ -941,6 +1007,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
             and status.get("health", 0) >= baseline.get("health", 20)
             and status.get("food", 0) >= 12 and status.get("on_ground") is True)
         combat_action = decision is not None and decision.name == "fight_hostile"
+        permit = self._active_relaxed_work if decision is not None else None
+        relaxed_stable = permit is not None and permit.stable(status, require_idle=False)
         combat_changed = combat_action and (
             status.get("dimension") != baseline.get("dimension")
             or status.get("last_death") != baseline.get("last_death")
@@ -955,7 +1023,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
         )
         danger = (not status.get("alive") or status.get("in_lava") or status.get("on_fire")
                   or submerged_danger or (status.get("in_water") and not deep_mine_active)
-                  or status.get("health", 20) <= self.settings["low_health_threshold"] and not (food_turn or local_recovery_turn)
+                  or status.get("health", 20) <= self.settings["low_health_threshold"] and not (food_turn or local_recovery_turn or relaxed_stable)
+                  or permit is not None and not relaxed_stable
                   or combat_changed
                   or (not combat_action and isinstance(hostile.get("dist"), (int, float))
                       and hostile["dist"] <= self._safety_rules._threat_distance(hostile.get("name"))))
@@ -1022,6 +1091,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                 result, observation = SkillResult(False, "Cancelled", error_code="cancelled"), None
             self._future = None
             self._active_decision = None
+            self._active_relaxed_work = None
             if self._model_feedback:
                 try:
                     self.planner.observe_result(decision, result, observation or {})

@@ -154,7 +154,7 @@ class LocalRecoveryRuntime:
             return self._local_recovery_decision(escape, observation)
         return decision
 
-    def _local_recovery_decision(self, decision, observation):
+    def _local_recovery_decision(self, decision, observation, *, proposed=None):
         if decision is None:
             return decision
         if decision.name == "canopy_escape":
@@ -191,6 +191,8 @@ class LocalRecoveryRuntime:
             state.update(needs_ai=True, reason=decision.reason, daylight_search_evaluated=True)
             if first:
                 self._record("WARN", "FOOD_RECOVERY_EXHAUSTED", {"recovery": copy.deepcopy(state)})
+            if self._can_continue_work(decision, observation, proposed=proposed):
+                return decision
             if self._task_active() and self.context.get("cautious_bootstrap") is not True:
                 self.task_controller.stop("local_food_recovery_exhausted")
                 self._save_task("TASK_NEEDS_AI")

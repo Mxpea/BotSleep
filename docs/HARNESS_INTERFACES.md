@@ -104,7 +104,17 @@
 | `force_exit_task(reason)` | 原因 | 结束当前目标并 cooldown，回到选择；不清游戏 pending 或模型 uncertain。 |
 | `end_competition(reason)` | 原因 | 只在 selection 且 fresh 全目录检测后进入 terminal；未知目标留 unknown、不计分。 |
 
-工具定义见 `agent/tools.py`，状态由 `core/competition_tasks.py` 保存至 scoped journal。`competition` 目录共 40 个工具（35 个日常工具 + 5 个生命周期工具）；规则目录 125 项，8 个 scored 目标有当前行动计划。新增怪物猎人只在当前战斗门禁允许攻击时提供下一步；击中或实体消失不是 advancement 完成证据。
+工具定义见 `agent/tools.py`，状态由 `core/competition_tasks.py` 保存至 scoped journal。`competition` 仍注册 40 个工具（35 个日常工具 + 5 个生命周期工具），没有为每项得分单独增加模型工具。
+
+| v2 草案项 | 数量 | 执行状态 |
+| --- | ---: | --- |
+| 无条件计分 | 45 | 13 项有现有工具路线；32 项只有蓝图。 |
+| 条件计分 | 54 | 均有蓝图，当前未接执行；只有显式 override 才纳入计分。 |
+| 不计分（含 5 个根节点） | 26 | 保留规则记录，不做行动计划。 |
+
+已有石器、升级石镐、熔铁、铁镐、护甲、睡觉、播种、怪物猎人路线。新增 `mine_diamond`（持铁级或以上镐后走钻石采集任务）、`shiny_gear`（持四颗钻石后制作钻石靴）、`lava_bucket`（已观察到近距源，再准备空桶并站定取源）、`shoot_arrow` 和 `ol_betsy`（已有武器及当前可行的短步射击机会；后者要求技能选择弩）。活动岩浆桶目标准备就绪时，正常目标模式额外提供 `collect_liquid`；技能仍复核姿态、射线、源方块和库存。以上是有条件的工具路线，尚未实服逐项验收。
+
+剩余 86 项在 `core/competition_blueprints.py` 记录前置、触发步骤和缺失能力。蓝图只在本地完整任务板显示为 `unsupported`，不进入模型候选，也不因设置计分资格而自动解锁；传送门建成不等于跨维度，独立要塞计算也不等于已完成赛事导航。所有完成与得分仍看服务端 advancement，而不是技能返回值。
 
 `CompetitionTasks.model_view()` 是每轮模型输入：选择阶段只列 `selectable_goal_ids` 与对应简表；执行阶段以 `active_goal` 展开条件、所缺资源、下一步和退出条件。`snapshot()` 保留全目录计分与监控信息，不作为模型候选列表发送；精简投影不改变终态需要的全目录检测。
 
@@ -117,7 +127,7 @@
 | `observe()` | 范围/新鲜度要求 | 时间、会话、维度、状态和缺失字段 |
 | `select_task(goal_id)` | 当前阶段可做目标 ID | 已实现；实际语义见上表 |
 | `update_progress_card(task_id, summary)` | 目标、已确认进度、下一意图 | 未实现；当前仅有 `update_progress(summary)` |
-| `get_task(task_id)` | 标识 | 未实现；模型通过上下文接收完整目录和当前进度卡 |
+| `get_task(task_id)` | 标识 | 未实现；模型通过上下文收到可选简表或当前任务详情及进度卡 |
 | `finish_task(task_id, reason, evidence)` | 标识、原因及检测证据 | 草案接口未实现；当前 `finish_task(reason)` 用最新服务器证据结束单任务 |
 | `force_exit_task(task_id, reason)` | 标识及原因 | 草案接口未实现；当前 `force_exit_task(reason)` 结束活动目标并 cooldown |
 | `execute_action(spec)` | 内部动作和截止时间 | action_id、已确认或不确定的执行结果 |

@@ -20,7 +20,7 @@ BotSleep 基于 mc-agent-api 控制 Minecraft 机器人，采用大模型决策�
 - `skills/action_workflow.py`、独立门户/矿井/洞穴/容器、`core/world_3d.py` 与 `skills/world_navigator.py` 是结构工作流及 3D 探索能力，未默认注册到日常模型或替换地表采集。未知写入必须跨工作流传播，禁止通过新建 guard、换候选、返程或姿态清理追加动作。3D 记忆不替代新鲜观察；持久化调用须显式提供正确服务器、账号、世界和维度作用域。
 - `SurvivalJournal.instance_lock()` 防止同作用域重复启动；`scripts/botctl.py` 只读检查实例、游戏 pending 和模型门禁。会话保持仅由 `--keep-connected` / `mc_api.keep_session_on_exit` 显式开启，competition 默认退出仍登出。
 - autonomy 正常规划采用实际动态工具目录：目标工具与必要安全/赛事管理工具可见，`needs_ai` 后开放原子修复；不只依赖 prompt 的 prefer。9/35/40 是完整注册数，不是每次模型请求的暴露数；禁用 autonomy 保留原单步目录。
-- `core/competition_rules.py` 与 `core/competition_tasks.py` 实现 competition 规则快照、advancement 证据计分、任务状态与终态恢复；只读面板见 `docs/MONITORING.md`。计分以服务端状态为准，条件项须显式 override。当前 45 个明确计分项目中仅 8 个有明确行动计划（含有条件的怪物猎人）；其余目录虽可评估计分但标为 unsupported。不得把离线覆盖说成完整比赛执行验收。
+- `core/competition_rules.py` 与 `core/competition_tasks.py` 管理规则、服务端 advancement 计分、任务状态及恢复。45 个无条件计分项中 13 个已有工具路线；其余 32 个及 54 个条件项在 `core/competition_blueprints.py` 有步骤和能力缺口，但不可选择。条件项计分仍须显式 override。见 `docs/HARNESS_INTERFACES.md`；不得把蓝图或离线回归说成实服执行验收。
 - `skills/combat.py`、`skills/hunting.py`、`skills/buckets.py` 分别实现短步战斗、静止狩猎和受限液体操作。攻击已发、伤害已证实、击杀与实际掉落增量分开；未知副作用保持 pending，不补发 stop/攻击/收桶。`core/survival_playbook.py` 的版本化阶段建议经 `survival.intent` 选择，未绑定的下界/末地技能保持 blocked；参见 `docs/COMBAT_AND_HUNTING.md` 与 `docs/SURVIVAL_PLAYBOOK.md`。
 - 模型只能选择已注册技能；返回后须重新观察并通过本地安全门禁。所有模型请求必须经过 `core/model_gate.py`，禁止并发请求；传输超时/连接中断留下持久化未知状态，不得自动重试或擅自清锁。明确 HTTP 失败可有界退避，不回退为规则采集。`llm.model` 是请求路由，实际模型仅采用 `response.model`，缺失时显示“未确认”。
 

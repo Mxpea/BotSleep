@@ -17,6 +17,8 @@ import threading
 from functools import wraps
 from typing import Any, Callable
 
+from core.competition_blueprints import BLUEPRINTS
+
 
 SCHEMA_VERSION = 2
 RULES_VERSION = "v2-draft"
@@ -29,11 +31,14 @@ _ELIGIBILITY = {"scored": "scored", "pending": "conditional_pending", "excluded"
 _KNOWN_SKILLS = frozenset({"gather_block", "gather_resource", "craft_item", "place_item",
                            "smelt_start", "smelt_collect", "equip_armor", "auto_sleep", "plant_crop",
                            "eat_food", "place_bed", "gather_seeds", "harvest_crop", "till_soil",
-                           "hunt_animal", "fight_hostile", "collect_liquid", "hunt_with_lava", "wait"})
+                           "hunt_animal", "fight_hostile", "collect_liquid", "hunt_with_lava", "wait",
+                           "run_survival_task"})
 _MAPPED = frozenset({"minecraft:story/mine_stone", "minecraft:story/upgrade_tools",
                      "minecraft:story/smelt_iron", "minecraft:story/iron_tools",
                      "minecraft:story/obtain_armor", "minecraft:adventure/sleep_in_bed",
-                     "minecraft:husbandry/plant_seed", "minecraft:adventure/kill_a_mob"})
+                     "minecraft:husbandry/plant_seed", "minecraft:adventure/kill_a_mob",
+                     "minecraft:story/mine_diamond", "minecraft:story/shiny_gear", "minecraft:story/lava_bucket",
+                     "minecraft:adventure/shoot_arrow", "minecraft:adventure/ol_betsy"})
 
 
 def _number(value: Any) -> bool:
@@ -355,8 +360,13 @@ class CompetitionTasks:
         plan = {"availability": "unknown", "stage": "prerequisites", "reason": "requires_planning",
                 "missing": [], "next_steps": [], "required_skills": []}
         if ident not in _MAPPED:
-            # Unsupported is about this limited planner, not the Minecraft API.
-            plan.update(availability="unsupported", reason="requires_planning")
+            if ident in BLUEPRINTS:
+                gap, prerequisite, trigger = BLUEPRINTS[ident]
+                plan.update(availability="unsupported", reason="missing_execution_capability",
+                            missing=[gap], next_steps=[prerequisite, trigger])
+            else:
+                # Excluded or unknown rules do not acquire an executable plan.
+                plan.update(availability="unsupported", reason="requires_planning")
             return plan
         if not known:
             plan["reason"] = "fresh_resources_required"
@@ -408,6 +418,37 @@ class CompetitionTasks:
                 step("Prepare safe health, food and a weapon; shield lowers the permitted health threshold")
             step("Use one verified fight_hostile step only when the current target and terrain permit it", "fight_hostile")
             step("Reobserve the server advancement before finish_task; hits and missing targets do not prove a kill")
+        elif path in {"shoot_arrow", "ol_betsy"}:
+            from skills.combat import combat_options
+            combat = combat_options(self._observation)
+            ready = (combat.get("allowed") is True and combat.get("mode") == "ranged"
+                     and (path != "ol_betsy" or combat.get("weapon") == "crossbow"))
+            need(ready, "fresh_safe_crossbow_opportunity" if path == "ol_betsy" else "fresh_safe_arrow_opportunity")
+            step("Use one verified ranged fight_hostile step against the currently permitted hostile", "fight_hostile")
+            step("Check the server advancement; a local shot acknowledgement is not a score")
+        elif path == "mine_diamond":
+            ready = any(has(f"{tier}_pickaxe") for tier in ("iron", "diamond", "netherite"))
+            need(ready, "iron_or_better_pickaxe")
+            step('Run run_survival_task with {"task":"gather","resource":"diamond","count":1}; verify inventory and the server advancement',
+                 "run_survival_task")
+        elif path == "shiny_gear":
+            ready = has("diamond", 4) and station("crafting_table")
+            need(has("diamond", 4), "diamond:4")
+            need(station("crafting_table"), "crafting_table")
+            step('With four diamonds, use run_survival_task {"task":"craft","item":"diamond_boots","count":1}; verify the server advancement',
+                 "run_survival_task")
+        elif path == "lava_bucket":
+            source = self._near_lava_source()
+            ready = has("bucket") and source is not None
+            need(has("bucket"), "bucket:1")
+            need(source is not None, "stationary_lava_source")
+            if not has("bucket"):
+                step('Craft an empty bucket with run_survival_task {"task":"craft","item":"bucket","count":1}', "run_survival_task")
+            if source is not None:
+                step(f'Use collect_liquid with {{"pos":{source},"expected_name":"lava"}} from the current stance', "collect_liquid")
+            else:
+                step("Observe a level-zero source within stationary bucket reach", "collect_liquid")
+            step("Check the server advancement; bucket inventory alone does not award points")
         elif path == "mine_stone":
             ready = pick and stone
             if not ready:
@@ -549,6 +590,30 @@ class CompetitionTasks:
         elif not required <= self._capabilities:
             plan.update(availability="unsupported", reason="missing_registered_skills")
         return plan
+
+    def _near_lava_source(self):
+        """Find a planning candidate, never substitute this for bucket skill checks."""
+        observation = self._observation or {}
+        status = observation.get("status", {})
+        health, food, origin = status.get("health"), status.get("food"), status.get("pos")
+        if (status.get("dimension") not in {"overworld", "minecraft:overworld"}
+                or status.get("gamemode") != "survival" or status.get("on_ground") is not True
+                or not _number(health) or health < 12 or not _number(food) or food < 8
+                or any(status.get(key) for key in ("in_water", "in_lava", "on_fire", "submerged", "in_vehicle", "is_sleeping"))
+                or not isinstance(origin, (list, tuple)) or len(origin) != 3
+                or not all(type(v) in (int, float) and math.isfinite(v) for v in origin)):
+            return None
+        feet = tuple(math.floor(v) for v in origin)
+        candidates = []
+        for row in observation.get("blocks", []):
+            if not isinstance(row, dict) or row.get("name") not in ("lava", "minecraft:lava") or row.get("fresh") is False:
+                continue
+            pos, properties = row.get("pos"), row.get("properties")
+            if (isinstance(pos, (list, tuple)) and len(pos) == 3 and all(type(v) is int for v in pos)
+                    and isinstance(properties, dict) and str(properties.get("level")) == "0"
+                    and (pos[0], pos[2]) != (feet[0], feet[2]) and math.dist(origin, pos) <= 2.9):
+                candidates.append((math.dist(origin, pos), list(pos)))
+        return min(candidates, default=(0, None))[1]
 
     def _refresh_resources(self, observation: Any) -> bool:
         known, counts, blocks = self._resources(observation)
@@ -697,8 +762,13 @@ class CompetitionTasks:
         if path == "plant_seed":
             return (any(counts.get(name, 0) for name in ("wheat_seeds", "beetroot_seeds", "carrot", "potato"))
                     or bool(blocks & {"wheat", "carrots", "potatoes", "beetroots", "short_grass", "tall_grass"}))
-        if path == "kill_a_mob":
+        if path in {"kill_a_mob", "mine_diamond", "shoot_arrow", "ol_betsy"}:
             return self._plans.get(goal_id, {}).get("availability") == "ready"
+        if path == "shiny_gear":
+            return counts.get("diamond", 0) >= 4
+        if path == "lava_bucket":
+            return ("stationary_lava_source" not in self._plans[goal_id]["missing"]
+                    and (counts.get("bucket", 0) > 0 or counts.get("iron_ingot", 0) >= 3))
         return False
 
     @_synchronized
@@ -732,8 +802,9 @@ class CompetitionTasks:
         for source in self._catalog:
             row = copy.deepcopy(source)
             ident = row["id"]
-            plan = self._plans.get(ident, {"availability": "unknown", "stage": "prerequisites",
-                "reason": "not_observed", "missing": [], "next_steps": [], "required_skills": []})
+            plan = self._plans.get(ident)
+            if plan is None:
+                plan = self._plan(ident, False, {}, set())
             row.update(copy.deepcopy(plan))
             row["scoring_status"] = _ELIGIBILITY[row["eligibility"]]
             row["condition"] = _text(row["condition"], 96)

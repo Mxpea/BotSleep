@@ -77,7 +77,7 @@ def _capture(args):
     try:
         client.login(max_wait_seconds=30)
         try:
-            observation = EyeObservationCollector(client).capture(sigma_deg=args.sigma)
+            observation = EyeObservationCollector(client).capture(sigma_deg=args.sigma, recover=not args.no_recover_eye)
             # Do not merge repeated throws into falsely independent evidence.
             current = EyeThrow(**observation["throw"])
             previous = _measurements(session)
@@ -120,6 +120,7 @@ def main(argv=None):
     capture.add_argument("--username")
     capture.add_argument("--api-config", help="explicit local API config path; credentials are never written to output")
     capture.add_argument("--sigma", type=float, help="angular standard deviation in degrees; otherwise estimate from coordinate precision")
+    capture.add_argument("--no-recover-eye", action="store_true", help="keep the bot stationary after sampling")
     capture.add_argument("--top", type=int, default=5)
     capture.add_argument("--output")
     args = parser.parse_args(argv)

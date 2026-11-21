@@ -1,5 +1,15 @@
 # BotSleep / Minecraft Agent Harness 交接
 
+## 当前基线与下一步（2026-11-21）
+
+已重新拉取远端引用：`dev-aure 064989a` 已包含 `origin/main 27b11d9`（PR #8），无需再次合并。本次只更新文档，不创建本地 `main` 分支。整合代码对应 [PR #10](https://github.com/Mxpea/BotSleep/pull/10)。下方早期交接和跑服结果均为历史记录。
+
+- **已实现**：`starter` 在本地对通过门禁的单只僵尸做一次站定反击，不追击、不依赖模型；`daily` / `competition` 保留僵尸、骷髅、苦力怕的短战斗步。已知失败按现场重规划，写结果未知则保留 `pending` 并暂停。详见 [当前战斗接口](docs/COMBAT_AND_HUNTING.md)。
+- **待实服验收**：整合基线历史离线结果为 1538 项通过、5 项跳过。和平模式多 Bot 压测不验证战斗。建议按 [实服手册](docs/COMBAT_LIVE_TEST.md) 先验 A01、A02、A05，观察单击、多怪拒打及脱险后恢复主线。
+- **已接入一个掉落物用途**：`daily` / `competition` 可用 `run_survival_task(task="craft", item="bone_meal", count=3)` 把已持有的骨头制成骨粉。缺骨头时报告余量并交回规划；不为此发起移动、扫描或战斗。泛化的随行需求、主动拾取、资源保全及主动打怪取材料仍待实现，详见 [自保与随行拾取设计](docs/COMBAT_AND_LOOT_DESIGN.md)。
+- **软限制下续做原计划**：`daily` / `competition` 在夜间或低血只剩等待时，可以继续已选的原地制作与就近采木，记录 `SOFT_POLICY_RELAXED`。隔离实服验证了夜间及低血制作、夜间原地挖除原木和危险目标拒绝。实测木头滚出拾取范围时，库存目标保持未完成。详见 [测试记录](docs/TESTING.md)。
+- **赛事任务覆盖**：99 个可能计分项均有任务说明；其中 13 项接有工具路线，新增钻石、钻石护甲、岩浆桶、弓箭命中与弩射击。其余 86 项有蓝图和缺口，但不能选做。以现有工具核验物品或动作不等于确认 advancement，接线和验收见 [赛事接口](docs/HARNESS_INTERFACES.md)。
+
 **2026-11-19 分支合入与阶段交接（`develop-tianya/ai-iron-diamond-loop` → `main`）**：本分支在 `main 9018f76` 上完成装备/侦察/洞穴优先/浅水脱困/多炉批炼/多 Bot 并发防冻开发并合入 `origin/main (cab309d)`；冲突仅涉及 `core/autonomy_runtime.py` 与 `docs/TESTING.md`，均已整合。相邻 `mc-agent-api` 仓库保持零本地修改。
 
 - **当前已完成与已验证进展**：
@@ -74,7 +84,7 @@ Copy-Item config.example.yaml config.yaml
 
 `survival.objective: starter` 执行初期石器工具链；`daily` 持续计算13项基于当前证据的任务，包含食物、材料、盾与桶、铁器、熔炼、床与住所、储物、死亡掉落恢复及维护。日常模式完整注册35个工具，实际模型请求按目标/修复阶段过滤，仍受步骤、时间、死亡及安全预算限制，不承诺无限无人值守。详情见 [DAILY_SURVIVAL.md](docs/DAILY_SURVIVAL.md)。
 
-`competition` 需要模型规划，已接入规则版本、完整规则目录、条件 override、任务选择/进度/完成/强退/正常结束、服务器 advancement 计分与终态检查点。模型每轮可看到全部目录；8 个目标具备明确行动计划，新增怪物猎人只在当前具备可执行攻击条件时开放，计分仍只认服务端 advancement。详细监控信号及缺口见 [MONITORING.md](docs/MONITORING.md)。
+`competition` 需要模型规划，已接入规则版本、完整规则目录、条件 override、任务选择/进度/完成/强退/正常结束、服务器 advancement 计分与终态检查点。完整目录用于本地评估与监控；模型只收到当前可选目标简表和已选任务详情。当前 13 项有工具路线，战斗类候选受现有安全门禁约束；未接入的蓝图不开放给模型。详细监控信号及缺口见 [MONITORING.md](docs/MONITORING.md)。
 
 | 模块 | 当前状态 |
 | --- | --- |

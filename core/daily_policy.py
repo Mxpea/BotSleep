@@ -13,6 +13,7 @@ from collections.abc import Mapping
 from agent.survival_planner import Decision, SurvivalPlanner
 from core.domain import FOOD_POINTS, LOG_NAMES, PLANK_NAMES, RANGED_HOSTILES, cell_coords, extract_blocks, parse_pos
 from core.local_recovery_runtime import TREE_SUPPORTS, has_canopy_support, verified_footing
+from core.policy_relaxation import LOW_HEALTH, NIGHT, allows_atomic, allows_goal
 from skills.daily_survival import DailySurvivalSkills
 from skills.combat import combat_options
 
@@ -624,3 +625,52 @@ class DailySafetyPolicy:
             combat = combat_options(observation, decision.args.get("entity_id"), decision.args.get("expected_name"))
             return None if combat.get("allowed") is True else combat.get("reason", "combat_not_verified")
         return None
+
+    def soft_hold(self, safety_decision, observation, context=None):
+        """Identify a relaxation candidate only when local safety would just wait."""
+        if not isinstance(safety_decision, Decision) or safety_decision.name != "wait":
+            return None
+        if not self.relaxation_stance(observation, context):
+            return None
+        status = observation["status"]
+        if safety_decision.goal == "sleep" and self._strict_night_block(observation, status):
+            return NIGHT if status["health"] > self.low_health else None
+        if (safety_decision.goal == "recover" and status["health"] <= self.low_health
+                and status["food"] < 18 and not self._night(status)
+                and not self._food_options(observation, low_health=True)
+                and self._food_search(observation, context) is None):
+            return LOW_HEALTH
+        return None
+
+    def relaxation_stance(self, observation, context=None):
+        """Full observation is a prerequisite, not an execution authorization."""
+        context = context or {}
+        if (not isinstance(observation, dict) or self._partial(observation) or context.get("pending")
+                or context.get("cautious_bootstrap") or (context.get("retreat_recovery") or {}).get("evacuating")
+                or context.get("combat_retreat") or observation.get("inventory_fresh") is False
+                or observation.get("terrain_fresh") is False or self._basics(observation, context)[1] is not None):
+            return False
+        status = observation["status"]
+        footing = self._footing(observation)
+        entities = observation.get("entities")
+        return (status.get("on_ground") is True and status.get("thundering") is False
+                and "busy" in status and status["busy"] in (None, False)
+                and status["health"] > 4 and status["food"] > 6 and self._meal(observation) is None
+                and footing is not None and footing["name"] in DailySurvivalSkills.SUPPORT - TREE_SUPPORTS
+                and isinstance(entities, list) and len(entities) < 40)
+
+    def allows_relaxed(self, decision, mode, observation):
+        """Match the original intent, without authorizing an implicit approach."""
+        if decision.name == "run_survival_task":
+            return allows_goal(decision.args, mode)
+        if not allows_atomic(decision.name, decision.args, mode):
+            return False
+        if decision.name == "craft_item":
+            return True
+        target = self._point(decision.args.get("pos"))
+        origin = observation["status"]["pos"]
+        return (target is not None and math.dist(origin, target) <= 2.8
+                and self._cell(target)[0::2] != self._cell(origin)[0::2]
+                and any(row["pos"] == target and row["name"] == decision.args["expected_name"]
+                        and row.get("can_see") is True and row.get("can_dig", row.get("harvest_tool_ok")) is True
+                        for row in self.rules._blocks(observation)))

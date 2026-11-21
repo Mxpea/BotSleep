@@ -11,7 +11,7 @@
 | sleep（默认） | `SleepController` + 睡眠技能 | 夜间/雷暴找床、验证入睡及醒来；可取消，有超时 |
 | survival/starter | `SurvivalHarness` + 规则或 `LLMSurvivalPlanner` | 根据当前物品/工作站核验初期石器目标；受步骤/时间/死亡预算限制 |
 | survival/daily | 同一 harness + 日常任务板和本地策略 | 13 项任务动态重算，35 个模型工具；持续维护，无 starter 的最终 goal_complete |
-| survival/competition | 同一 harness + `CompetitionTasks`、服务器 advancement 和 LLM | 40 个模型工具，125 项规则目录（120 个目标、5 个根节点）；8 个计分目标有有限行动计划，其余保持 unsupported；只有 fresh 服务器证据计分 |
+| survival/competition | 同一 harness + `CompetitionTasks`、服务器 advancement 和 LLM | 40 个注册工具，125 项规则目录；99 个可能计分项均有任务说明，13 项接有工具路线，另 86 项为不可选蓝图；只认服务端计分证据 |
 
 开启模型需 `agent.mode: survival` 且 `llm.enabled: true`。`--check-config` 只检查配置，不连接服务。`.env` 不由主程序自动加载。主入口退出会关闭控制器、等待工作线程清理并登出；这不是设计中“模型对话 handoff 保持游戏会话”的实现。
 
@@ -35,6 +35,8 @@ flowchart TD
 `DailySurvivalGoals`、`CompetitionTasks` 是本地任务组件，不是模型 subagent；`SurvivalPlaybook` 从已有观察补充有界阶段建议，也不发额外模型或游戏请求。当前无“多专项模型派发”运行时。主循环也没有把传送门、整树伐木或独立配方规划器接入模型分派。
 
 近敌时，本地策略可以直接选择一次符合当前装备、生命、目标与地形条件的 `fight_hostile`，不等待慢模型。规则与模型路径共享撤退锁存、目标冷却和安全门禁；模型在途提案可被取消消费，但远端请求仍须排空。短安全观察仅增加有限库存核验以判断武器/盾，不据此执行生产。已知战斗失败要求撤退时立即重新观察并交回撤退，保留失败反馈，不被普通生产失败熔断阻断；未知结果仍暂停。
+
+`starter` 的孤立僵尸反击由 Harness 本地触发，不新增模型工具；`daily` / `competition` 注册 `fight_hostile`。现有 `craft` 目标能用已持有的骨头制作骨粉；它不创建跨目标的掉落需求，也不插入拾取移动。顺路拾取和主动打怪取材料仍是提案。见 [现行战斗接口](COMBAT_AND_HUNTING.md) 与 [随行拾取设计](COMBAT_AND_LOOT_DESIGN.md)。
 
 另有开发路径：`--debug --radar` 创建 `ContinuousRadarSkill` 并开启 daemon 线程，读取客户端、将 POI/航迹写入 `MemoryEngine`。单独 `--radar` 不创建该对象。门户浇筑、独立合成与伐木需由程序显式调用；聊天的 `chop_skill`、`craft_skill` 注入槽在 `main.py` 尚未赋值。它们不继承生存 harness 的动作互斥、pending 和取消恢复保证。
 
@@ -105,6 +107,8 @@ flowchart TD
 ## 6. 安全与导航边界
 
 已有安全监测能识别近敌、生命、火/岩浆、水中和死亡等变化，取消过期模型提案或请求停止动作；日常策略可选择进食、睡眠、撤退和短安全观察。现场安全可能只能返回 unsafe/等待，不能宣称一定脱困。
+
+在 `daily` / `competition` 的模型执行链，单纯的夜间等待或无可用食物恢复路线的低血等待，可以让已提交的原地制作及就近采木继续。每步依据新观察授权，技能在写入前再次检查现场。权限由 Harness 内部传递，记录 `SOFT_POLICY_RELAXED`。执行范围和检查条件见 [目标程序](AUTONOMOUS_TASKS.md)。
 
 短步战斗不等于自动击杀：攻击已发、伤害已证实、目标消失、击杀和实际掉落分别记录。低血、多敌、未知目标或危险地形不放行进攻；苦力怕缺少引信证据，未开放近战击杀。普通狩猎先接近再重新观察，技能只做 2.8 格内站定攻击。岩浆狩猎仅限已核验的不燃容纳坑并立即核验回收源，不能当作开放地面通用攻击。条件和验收边界见 [COMBAT_AND_HUNTING.md](COMBAT_AND_HUNTING.md)。
 

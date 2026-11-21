@@ -760,6 +760,25 @@ class DailySkillTests(unittest.TestCase):
         self.assertEqual(self.writes("move")[0][2]["range"], 0)
         self.assertEqual(len(self.writes("move")), 1)
 
+    def test_pickup_accepts_inventory_gain_after_movement_returns(self):
+        self.world.entities = [{"id": 3, "name": "item", "type": "object", "pos": [2.5, 64, .5], "item": "oak_logx2"}]
+        inventory = self.world.inventory
+        after_move_reads = 0
+
+        def delayed_inventory(**kwargs):
+            nonlocal after_move_reads
+            if self.writes("move"):
+                after_move_reads += 1
+                if after_move_reads == 2:
+                    self.world.counts["oak_log"] = 2
+            return inventory(**kwargs)
+
+        with patch.object(self.world, "inventory", side_effect=delayed_inventory):
+            result = self.act("collect_drops", entity_id=3, expected_item="oak_log")
+        self.assertTrue(result.success, result)
+        self.assertEqual(result.data["gained"], 2)
+        self.assertEqual(len(self.writes("move")), 1)
+
     def test_pickup_rejects_liquid_and_does_not_trust_move_ack(self):
         self.world.entities = [{"id": 3, "name": "item", "type": "object", "pos": [2.5, 64, .5], "item": "oak_logx2"}]
         self.world.block(self.pos, "water")

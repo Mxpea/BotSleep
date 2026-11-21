@@ -310,6 +310,31 @@ class CompetitionRuntimeTests(unittest.TestCase):
         self.assertLessEqual(planner._request_bytes([{"role": "system", "content": planner.system_prompt}, message]),
                              planner.MAX_REQUEST_BYTES)
 
+    def test_lava_goal_routes_bucket_tool_only_when_active_and_ready(self):
+        from test_buckets import LiquidWorld
+        from skills.buckets import BucketSkills
+
+        self.settings["autonomy"]["enabled"] = True
+        lava = "minecraft:story/lava_bucket"
+        world = LiquidWorld()
+        world.status["pos"] = [1.5, 64, .5]
+        world.counts = {"bucket": 1}
+        world.block(world.source, "lava", properties={"level": 0})
+        self.obs["status"]["pos"] = world.status["pos"]
+        self.obs["blocks"].append({"name": "lava", "pos": world.source, "properties": {"level": 0}})
+        runner, brain = self.harness(response("select_task", {"goal_id": lava}),
+            response("collect_liquid", {"pos": world.source, "expected_name": "lava"}, call_id="fill"))
+        runner.bucket_skills = BucketSkills(world)
+        self.assertTrue(self.step(runner).success)
+        result = self.step(runner)
+        self.assertTrue(result.success, result)
+        tools = [{row["function"]["name"] for row in request["tools"]} for request in brain.requests]
+        self.assertNotIn("collect_liquid", tools[0])
+        self.assertIn("collect_liquid", tools[1])
+        self.assertEqual(world.counts["lava_bucket"], 1)
+        self.assertFalse(any(call[0] == "move" for call in world.calls))
+        self.assertEqual(runner.competition.snapshot()["score"]["raw"], 0)
+
     def test_task_tools_do_not_enter_starter_daily_catalogs(self):
         for objective in ("starter", "daily"):
             names = {row["function"]["name"] for row in tools_for_objective(objective)}
