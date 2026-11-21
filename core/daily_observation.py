@@ -9,7 +9,7 @@ from core.client import APIError
 from core.structure_spec import normalize_orientation, transform_rel_pos
 from core.survival_state import ObservationCollector
 from skills.survival import SurvivalSkills
-from skills.combat import HOSTILES, combat_options
+from skills.combat import combat_options
 
 
 class DailyObservationCollector(ObservationCollector):
@@ -17,7 +17,7 @@ class DailyObservationCollector(ObservationCollector):
     CONTAINERS = {"chest", "barrel"}
     SEED_PLANTS = {"short_grass", "tall_grass"}
     def __init__(self, client, radius=24, *, low_health_threshold=8):
-        super().__init__(client, radius, include_terrain=True)
+        super().__init__(client, radius, include_terrain=True, combat_mode="daily")
         self.context = {}
         self.low_health_threshold = low_health_threshold
 
@@ -47,58 +47,6 @@ class DailyObservationCollector(ObservationCollector):
                 or "pos" in value and self._block_pos(value["pos"]) != pos):
             raise APIError("invalid_response", "Daily block evidence is malformed")
         return copy.deepcopy(value)
-
-    def _status(self, original, cancel_event, *, grounded=False, timeout_seconds=2):
-        self._check_cancel(cancel_event)
-        status = self._result(self.client.get_status(timeout_seconds=timeout_seconds))
-        self._check_cancel(cancel_event)
-        pos, origin = self._position(status), self._position(original)
-        if (status.get("alive") is not True or status.get("ready") is not True
-                or status.get("dimension") != original.get("dimension")
-                or status.get("last_death") != original.get("last_death")
-                or "busy" not in status or status["busy"] is not None and status["busy"] is not False
-                or self._cell(pos) != self._cell(origin) or math.dist(pos, origin) > .2
-                or grounded and status.get("on_ground") is not True):
-            raise APIError("observation_changed", "Daily evidence requires the same idle living bot and position")
-        return status
-
-    def collect_safety(self, cancel_event=None, *, force=False, threat_radius=8):
-        observation = super().collect_safety(cancel_event, force=force, threat_radius=threat_radius)
-        if observation is None:
-            return None
-        status = observation["status"]
-        # Complete production scans must never delay an immediate defensive step.
-        # Only this bounded inventory read can authorize combat on a short snapshot.
-        candidates = [row for row in observation.get("entities", [])
-                      if row.get("type") == "hostile" and row.get("name") in HOSTILES]
-        if (not candidates or status.get("ready") is not True or status.get("alive") is not True
-                or status.get("busy") or status.get("on_ground") is not True):
-            return observation
-        deadline = time.monotonic() + 1.5
-
-        def remaining():
-            self._check_cancel(cancel_event)
-            seconds = deadline - time.monotonic()
-            if seconds <= 0:
-                raise APIError("observation_changed", "Combat inventory observation budget exhausted")
-            return seconds
-
-        inventory = self._result(self.client.inventory(timeout_seconds=remaining()))
-        items = inventory.get("items")
-        if (not isinstance(items, list) or len(items) > 256
-                or any(not isinstance(row, dict) or not isinstance(row.get("name"), str)
-                       or type(row.get("count")) is not int or row["count"] < 0 for row in items)):
-            raise APIError("invalid_response", "Combat inventory evidence is malformed")
-        counts = {}
-        for row in items:
-            counts[row["name"]] = counts.get(row["name"], 0) + row["count"]
-        observation.update(inventory=copy.deepcopy(items), counts=counts, inventory_fresh=True)
-        if isinstance(inventory.get("armor"), dict):
-            observation["armor"] = copy.deepcopy(inventory["armor"])
-        observation["status"] = self._status(status, cancel_event, grounded=True, timeout_seconds=remaining())
-        remaining()
-        observation["combat"] = combat_options(observation)
-        return observation
 
     @staticmethod
     def _slot(rows):

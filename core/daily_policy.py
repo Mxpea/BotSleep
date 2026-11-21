@@ -9,8 +9,8 @@ import math
 import re
 from collections.abc import Mapping
 
-from agent.survival_planner import Decision, SurvivalPlanner, RANGED_HOSTILES
-from core.domain import FOOD_POINTS, LOG_NAMES, PLANK_NAMES, cell_coords, extract_blocks, parse_pos
+from agent.survival_planner import Decision, SurvivalPlanner
+from core.domain import FOOD_POINTS, LOG_NAMES, PLANK_NAMES, RANGED_HOSTILES, cell_coords, extract_blocks, parse_pos
 from core.local_recovery_runtime import TREE_SUPPORTS, has_canopy_support, verified_footing
 from skills.daily_survival import DailySurvivalSkills
 from skills.combat import combat_options

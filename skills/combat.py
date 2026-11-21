@@ -3,6 +3,7 @@
 import math
 import time
 
+from core.domain import hostile_threat_radius
 from core.block_geometry import PASS_THROUGH, _ray_cells
 from core.client import APIError
 from . import SkillResult
@@ -21,15 +22,17 @@ RANGED_MAX = 12
 SHIELD_WARMUP = .30
 
 
-def melee_weapon(inventory):
-    """Choose an observed usable sword/axe and its conservative cooldown."""
+def melee_weapon(inventory, *, prefer_tier=False):
+    """Choose an observed sword or axe and its conservative cooldown."""
     names = {row.get("name") for row in inventory if isinstance(row, dict) and row.get("count", 0) > 0}
-    for suffix in ("_sword", "_axe"):
-        for tier in TIERS:
-            name = tier + suffix
-            if name in names:
-                cooldown = .65 if suffix == "_sword" else 1.30 if tier in {"wooden", "stone", "copper"} else 1.15 if tier == "iron" else 1.05
-                return name, cooldown
+    kinds = ("_sword", "_axe")
+    order = ((tier, kind) for tier in TIERS for kind in kinds) if prefer_tier else (
+        (tier, kind) for kind in kinds for tier in TIERS)
+    for tier, kind in order:
+        name = tier + kind
+        if name in names:
+            cooldown = .65 if kind == "_sword" else 1.30 if tier in {"wooden", "stone", "copper"} else 1.15 if tier == "iron" else 1.05
+            return name, cooldown
     return None
 
 
@@ -58,10 +61,12 @@ def clear_entity_ray(origin, target, get_block, max_queries=48):
     return {"visible": True, "queries": len(visited), "reason": "clear_ray"}
 
 
-def combat_options(observation, entity_id=None, expected_name=None):
+def combat_options(observation: dict, entity_id: int | None = None, expected_name: str | None = None,
+                   *, starter_defense: bool = False, threat_radius: float = 8) -> dict:
     """Pure eligibility hint; the executing skill rereads geometry and state."""
     denied = lambda reason: {"allowed": False, "reason": reason}
-    if not isinstance(observation, dict) or observation.get("fresh") is not True or observation.get("inventory_fresh") is False:
+    if (not isinstance(observation, dict) or observation.get("fresh") is not True
+            or observation.get("stale") is True or observation.get("inventory_fresh") is False):
         return denied("fresh_inventory_required")
     status, rows, inventory = observation.get("status", {}), observation.get("entities"), observation.get("inventory")
     if not isinstance(status, dict) or not isinstance(rows, list) or not isinstance(inventory, list):
@@ -96,13 +101,23 @@ def combat_options(observation, entity_id=None, expected_name=None):
     if not targets:
         return denied("target_not_observed")
     target = min(targets, key=lambda r: math.dist(origin, r["pos"]))
-    if any(r["id"] != target["id"] and r.get("type") == "hostile" and math.dist(origin, r["pos"]) <= 8 for r in rows):
+    danger_radius = max(8, threat_radius) if starter_defense else 8
+    if any(r["id"] != target["id"] and r.get("type") == "hostile"
+           and math.dist(origin, r["pos"]) <= (
+               hostile_threat_radius(r["name"], danger_radius) if starter_defense else danger_radius)
+           for r in rows):
         return denied("multiple_hostiles")
+    nearest = status.get("nearest_hostile")
+    if starter_defense and isinstance(nearest, dict) and nearest.get("id") != target["id"]:
+        gap = nearest.get("dist")
+        limit = hostile_threat_radius(nearest.get("name"), danger_radius)
+        if type(gap) in (int, float) and 0 <= gap <= limit:
+            return denied("other_hostile_reported")
     distance = math.dist(origin, target["pos"])
     if distance > RANGED_MAX or abs(origin[1] - target["pos"][1]) > 2:
         return denied("target_out_of_range")
     ranged = next((name for name in ("bow", "crossbow") if name in names and "arrow" in names), None)
-    melee = melee_weapon(inventory)
+    melee = melee_weapon(inventory, prefer_tier=starter_defense)
     mode, weapon = None, None
     if ranged and (8 if target["name"] == "creeper" else RANGED_MIN) <= distance <= RANGED_MAX:
         mode, weapon = "ranged", ranged
@@ -114,6 +129,11 @@ def combat_options(observation, entity_id=None, expected_name=None):
         mode = "withdraw"
     else:
         return denied("no_safe_attack_range")
+    if starter_defense:
+        if mode != "melee" or target["name"] != "zombie":
+            return denied("starter_counterattack_only")
+        if weapon.startswith(("wooden_", "golden_")) and hp < 20:
+            return denied("weak_weapon_needs_full_health")
     return {"allowed": True, "reason": "bounded_step_available", "mode": mode,
             "target": dict(target), "shield": shield, "weapon": weapon, "distance": distance}
 
@@ -126,10 +146,19 @@ class CombatSkills(SurvivalSkills):
     UNKNOWN = frozenset({"request_timeout", "network_error", "invalid_json", "invalid_response",
                          "action_unconfirmed", "internal", "internal_error"})
 
-    def __init__(self, client):
+    def __init__(self, client, *, starter_defense=False, threat_radius=8):
         super().__init__(client)
+        self.starter_defense = starter_defense
+        self.threat_radius = threat_radius
+        self.entity_radius = max(16, threat_radius) if starter_defense else 16
         self._encounters = {}
         self._defense_owned = False
+
+    def options(self, observation: dict, entity_id: int | None = None,
+                expected_name: str | None = None) -> dict:
+        """Use the same eligibility policy for scheduling and write rechecks."""
+        return combat_options(observation, entity_id, expected_name, starter_defense=self.starter_defense,
+                              threat_radius=self.threat_radius)
 
     @property
     def defense_active(self):
@@ -176,7 +205,7 @@ class CombatSkills(SurvivalSkills):
             context["life"] = (first.get("last_death"), first["dimension"])
         if context["life"] != (first.get("last_death"), first["dimension"]):
             raise _Failure("life_changed", "Life changed during combat")
-        rows = self.client.get_entities(radius=16, **self._read_options(context))
+        rows = self.client.get_entities(radius=self.entity_radius, **self._read_options(context))
         inv = self._call_result(context, self.client.inventory, **self._read_options(context))
         final = self._status(context)
         if (context["life"] != (final.get("last_death"), final["dimension"])
@@ -250,10 +279,10 @@ class CombatSkills(SurvivalSkills):
         if context.get("life") != (latest.get("last_death"), latest["dimension"]):
             raise _Failure("life_changed", "Life changed immediately before the combat write")
         if attack_observation is not None:
-            rows = self.client.get_entities(radius=16, **self._read_options(context))
+            rows = self.client.get_entities(radius=self.entity_radius, **self._read_options(context))
             current = {**attack_observation, "status": latest, "entities": rows}
             expected = context["data"]["target"]
-            option = combat_options(current, expected["id"], expected["name"])
+            option = self.options(current, expected["id"], expected["name"])
             if (not option["allowed"] or option.get("mode") != context["data"]["mode"]
                     or math.dist(option["target"]["pos"], expected["pos"]) > .35):
                 raise _Failure("safety_changed", "The target or nearby entities changed before attack", {"retreat_required": True})
@@ -265,6 +294,14 @@ class CombatSkills(SurvivalSkills):
                     or any(newest.get(k) for k in ("in_lava", "in_water", "submerged", "on_fire"))
                     or context["life"] != (newest.get("last_death"), newest["dimension"])):
                 raise _Failure("safety_changed", "Stance changed during final attack geometry verification", {"retreat_required": True})
+            if self.starter_defense:
+                final_option = self.options({**current, "status": newest}, expected["id"], expected["name"])
+                if not final_option["allowed"] or final_option["mode"] != option["mode"]:
+                    raise _Failure("safety_changed", "The final status no longer allows a counterattack",
+                                   {"retreat_required": True, "reason": final_option["reason"]})
+                if (newest.get("held") or {}).get("name") != final_option["weapon"]:
+                    raise _Failure("weapon_unverified", "The counterattack weapon changed before the hit",
+                                   {"retreat_required": True})
             context["data"]["target"] = option["target"]
             if kwargs.get("hit") is not None:
                 # /control uses these angles, unlike /shoot's entity-id aim.
@@ -275,11 +312,20 @@ class CombatSkills(SurvivalSkills):
         if remaining <= 0:
             raise _Failure("combat_budget", "The bounded combat step expired before its write")
         kwargs["timeout_seconds"] = min(5, remaining)
+        wrote_before = context["write_sent"]
         context["write_sent"] = context["acted"] = context["pending_write"] = True
         if attack_observation is not None:
             context["encounter"]["attacks"] += 1
         context["data"]["executed"] = True
-        reply = self._call_result(context, operation, *args, **kwargs)
+        try:
+            reply = self._call_result(context, operation, *args, **kwargs)
+        except APIError as error:
+            # Upstream equip reports missing_item before changing equipment.
+            if (operation == self.client.equip and error.status_code == 200 and error.code == "missing_item"
+                    and error.details.get("action_state") != "unknown"):
+                context.update(pending_write=False, write_sent=wrote_before, acted=wrote_before)
+                context["data"]["executed"] = wrote_before
+            raise
         context["pending_write"] = False
         return reply
 
@@ -296,6 +342,9 @@ class CombatSkills(SurvivalSkills):
         context["data"]["shield_protection_verified"] = False
 
     def _withdraw(self, context, observation, target):
+        if self.starter_defense:
+            raise _Failure("retreat_required", "Replan withdrawal using the current threats",
+                           {"retreat_required": True})
         origin = observation["status"]["pos"]
         dx, dz = origin[0] - target["pos"][0], origin[2] - target["pos"][2]
         norm = math.hypot(dx, dz)
@@ -329,7 +378,7 @@ class CombatSkills(SurvivalSkills):
 
     def _fight(self, context, args):
         observation = self._snapshot(context)
-        option = combat_options(observation, args["entity_id"], args["expected_name"])
+        option = self.options(observation, args["entity_id"], args["expected_name"])
         if not option["allowed"]:
             raise _Failure("combat_unsafe", option["reason"], {"retreat_required": True, "reason": option["reason"]})
         target, shield = option["target"], option["shield"]
@@ -345,14 +394,14 @@ class CombatSkills(SurvivalSkills):
         if observation["status"].get("blocking"):
             self._shield(context, False, observation["status"])
         if option["mode"] == "melee":
-            weapon, cooldown = melee_weapon(observation["inventory"])
+            weapon, cooldown = melee_weapon(observation["inventory"], prefer_tier=self.starter_defense)
             self._write(context, self.client.equip, weapon, status=observation["status"])
             self._write(context, self.client.look_at, target["pos"][0], target["pos"][1] + .9, target["pos"][2], status=observation["status"])
             if shield:
                 self._shield(context, True, observation["status"])
             self._wait(context, cooldown)
         refreshed = self._snapshot(context)
-        fresh_option = combat_options(refreshed, args["entity_id"], args["expected_name"])
+        fresh_option = self.options(refreshed, args["entity_id"], args["expected_name"])
         if not any(r.get("id") == target["id"] and r.get("name") == target["name"] for r in refreshed["entities"]):
             if self._defense_owned:
                 self._shield(context, False, refreshed["status"])
@@ -411,7 +460,7 @@ class CombatSkills(SurvivalSkills):
             raise _Failure("combat_no_progress", "Repeated attacks have no verified damage; withdraw before replanning",
                            {"retreat_required": True, "cooldown_seconds": 30})
         if (after["status"]["health"] < observation["status"]["health"]
-                or not combat_options(after, args["entity_id"], args["expected_name"])["allowed"] and current is not None):
+                or not self.options(after, args["entity_id"], args["expected_name"])["allowed"] and current is not None):
             context["data"]["retreat_required"] = True
             if current is not None:
                 self._withdraw(context, after, current)
@@ -477,6 +526,8 @@ class CombatSkills(SurvivalSkills):
             if context.get("disconnected_unknown"):
                 data.update(action_state="unknown", cleanup_skipped="disconnected_unknown",
                             api_details=context["disconnection_details"])
+            if not context["write_sent"] and not uncertain:
+                data.setdefault("action_state", "not_executed")
             data.setdefault("retreat_required", code not in {"bad_args", "cancelled"})
             return SkillResult(False, str(error), data, code)
         finally:

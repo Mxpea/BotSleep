@@ -20,6 +20,7 @@ from core.skill_registry import destination_checked_skills, resolve_skill_runner
 from core.sleep_controller import SleepController
 from core.survival_state import ObservationCollector, SurvivalJournal
 from skills import SkillResult
+from skills.combat import CombatSkills
 from skills.sleep import AutoSleepSkill
 from skills.survival import SurvivalSkills
 from agent.brain import LLMError
@@ -34,8 +35,10 @@ FATAL = {"unauthorized", "invalid_credentials", "death_loop", "death_loop_cooldo
 
 
 def _uncertain_result(result):
-    return (result.error_code in UNCERTAIN | {"internal", "internal_error"}
-            or isinstance(result.data, dict) and result.data.get("action_state") == "unknown")
+    action_state = result.data.get("action_state") if isinstance(result.data, dict) else None
+    if action_state == "not_executed" and result.data.get("executed") is False:
+        return False
+    return action_state == "unknown" or result.error_code in UNCERTAIN | {"internal", "internal_error"}
 
 
 class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
@@ -72,7 +75,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
         self.batch_skills = None
         self.door_skills = None
         self.positioning_skills = None
-        self.combat_skills = None
+        self.combat_skills = CombatSkills(client, starter_defense=not self.daily,
+                                         threat_radius=self._safety_rules.threat_radius)
         self.bucket_skills = None
         self.daily_board = None
         self.playbook = None
@@ -87,7 +91,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
         self.latest_status = None
         self.skills = skills or SurvivalSkills(client)
         self.collector = collector or ObservationCollector(client, settings["scan_radius"],
-            include_terrain=self.uses_llm, include_footing=not self.daily)
+            include_terrain=self.uses_llm, include_footing=not self.daily, combat_mode="starter")
         if self.daily:
             from agent.daily_survival import DailySurvivalGoals
             from core.daily_observation import DailyObservationCollector
@@ -97,7 +101,6 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
             from skills.batch import BatchSkills
             from skills.doors import DoorSkills
             from skills.positioning import PositioningSkills
-            from skills.combat import CombatSkills
             from skills.buckets import BucketSkills
             self.daily_goals = DailySurvivalGoals(settings)
             self.daily_policy = DailySafetyPolicy(settings)
@@ -108,7 +111,6 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
             self.batch_skills = BatchSkills(client, gather_skills=self.skills, shelter_skills=self.shelter_skills)
             self.door_skills = DoorSkills(client)
             self.positioning_skills = PositioningSkills(client)
-            self.combat_skills = CombatSkills(client)
             self.bucket_skills = BucketSkills(client)
             from core.survival_playbook import SurvivalPlaybook
             from agent.daily_survival import DAILY_SKILLS
@@ -211,40 +213,52 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
         self.phase = phase
         self._record("INFO", "AGENT_PHASE", {"phase": phase, "planner": "llm" if self.uses_llm else "rules"})
 
-    def _mandatory_safety(self, observation):
-        """Only safety decisions may override the model, never its resource plan."""
-        decision = self._safety_rules.choose(observation, self.context)
+    def _mandatory_safety(self, observation, baseline=None):
+        """Apply the local safety policy to the current observation."""
+        decision = baseline if baseline is not None else self._safety_rules.choose(observation, self.context)
         if not self.daily:
             decision = self._starter_canopy_decision(observation, decision)
         decision = self._retreat_decision(observation, decision)
+        if not self.daily:
+            decision = self._starter_safety(observation, decision)
         if self.daily_policy:
             decision = self.daily_policy.choose(observation, decision, self.daily_board, context=self.context)
             decision = self._local_recovery_decision(decision, observation)
-            recovery = self.context.get("combat_retreat")
-            if isinstance(recovery, dict):
-                status = observation["status"]
-                target = next((row for row in observation.get("entities", [])
-                               if row.get("id") == recovery.get("entity_id") and row.get("name") == recovery.get("name")), {})
-                pos = self._safety_rules._pos(target.get("pos"))
-                if (status.get("dimension") != recovery.get("dimension")
-                        or status.get("last_death") != recovery.get("last_death") or pos is None
-                        or math.dist(status["pos"], pos) > self._safety_rules._threat_distance(target.get("name"))):
-                    self.context.pop("combat_retreat", None)
-                elif decision is None or decision.name in {"fight_hostile", "retreat_from"}:
-                    return self._retreat_decision(observation, Decision("retreat_from", {"pos": pos, "distance": 8},
-                        "The previous combat step requires withdrawal before another attack", "safety"))
-            if decision is None:
-                return None
-            if decision.name == "fight_hostile" and self.context.get("combat_blocked_until", {}).get(str(decision.args["entity_id"]), 0) > time.time():
-                target = next((row for row in observation.get("entities", [])
-                               if row.get("id") == decision.args["entity_id"]), {})
-                pos = self._safety_rules._pos(target.get("pos"))
-                if pos is not None:
-                    return self._retreat_decision(observation, Decision("retreat_from", {"pos": pos, "distance": 8},
-                        "The last combat step was not verified; withdraw instead of repeating it", "safety"))
+        recovery = self.context.get("combat_retreat")
+        if isinstance(recovery, dict):
+            status = observation["status"]
+            target = next((row for row in observation.get("entities", [])
+                           if row.get("id") == recovery.get("entity_id") and row.get("name") == recovery.get("name")), {})
+            pos = self._safety_rules._pos(target.get("pos"))
+            if (status.get("dimension") != recovery.get("dimension")
+                    or status.get("last_death") != recovery.get("last_death") or pos is None
+                    or math.dist(status["pos"], pos) > self._safety_rules._threat_distance(target.get("name"))):
+                self.context.pop("combat_retreat", None)
+            elif decision is None or decision.name in {"fight_hostile", "retreat_from"}:
+                return self._retreat_decision(observation, Decision("retreat_from", {"pos": pos, "distance": 8},
+                    "The previous combat step requires withdrawal before another attack", "safety"))
+        if decision is None:
+            return None
+        if decision.name == "fight_hostile" and self.context.get("combat_blocked_until", {}).get(str(decision.args["entity_id"]), 0) > time.time():
+            target = next((row for row in observation.get("entities", [])
+                           if row.get("id") == decision.args["entity_id"]), {})
+            pos = self._safety_rules._pos(target.get("pos"))
+            if pos is not None:
+                return self._retreat_decision(observation, Decision("retreat_from", {"pos": pos, "distance": 8},
+                    "The last combat step was not verified; withdraw instead of repeating it", "safety"))
         if decision.goal in {"safety", "recover", "observe", "food", "food_recovery", "sleep"}:
             return decision
         return None
+
+    def _starter_safety(self, observation, decision):
+        if (decision.name == "retreat_from" and not self.journal.state.get("pending")
+                and not (self.context.get("retreat_recovery") or {}).get("evacuating")):
+            option = self.combat_skills.options(observation, expected_name="zombie")
+            if option["allowed"]:
+                target = option["target"]
+                return Decision("fight_hostile", {"entity_id": target["id"], "expected_name": target["name"]},
+                                "Counter an isolated zombie already within reach", "safety")
+        return decision
 
     def _retreat_state(self, observation, threat):
         """Persist recovery evidence, never an executable route or old pending action."""
@@ -761,8 +775,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                         decision = Decision("wait", {"seconds": 5}, "No verified daily action is currently available", "observe")
                 else:
                     decision = self.planner.choose(observation, self.context)
-                    decision = self._starter_canopy_decision(observation, decision)
-                    decision = self._retreat_decision(observation, decision)
+                    decision = self._mandatory_safety(observation, decision) or decision
             if (self._task_active() and not self._task_child and decision.name != "run_survival_task"
                     and decision.goal in {"safety", "recover", "observe", "food", "food_recovery", "sleep"}):
                 self._task_interrupt(decision.reason)
@@ -809,7 +822,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
             if not isinstance(result, SkillResult):
                 raise TypeError("Skill returned an invalid result")
             if ((self._model_feedback or self.daily or decision.name == "canopy_escape"
-                    or result.error_code == "retreat_interrupted")
+                    or decision.name == "fight_hostile" or result.error_code == "retreat_interrupted")
                     and not self._cancel.is_set() and not _uncertain_result(result)):
                 try:
                     observation = self._observe(safety_only=decision.name in {"retreat_from", "fight_hostile"})
@@ -844,7 +857,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
 
     def _release_defense(self, observation):
         """Journal shield release separately; never attach it to a model proposal."""
-        if (not self.daily or getattr(self.combat_skills, "defense_active", False) is not True
+        if (getattr(self.combat_skills, "defense_active", False) is not True
                 or self.journal.state.get("pending") or self._cancel.is_set()
                 or observation.get("fresh") is not True or observation.get("observation_scope") == "safety"):
             return None

@@ -22,11 +22,11 @@ from core.domain import (
     extract_hostiles,
     finite_number,
     has_tool_tier,
+    hostile_threat_radius,
     inventory_counts,
     parse_pos,
 )
 
-RANGED_HOSTILES = frozenset({"skeleton", "stray", "bogged", "pillager"})
 RECIPES = {
     "wooden_pickaxe": {"planks": 3, "stick": 2},
     "stone_pickaxe": {"cobblestone": 3, "stick": 2},
@@ -126,7 +126,7 @@ class SurvivalPlanner:
 
     def _threat_distance(self, name):
         """Ranged enemies remain dangerous beyond the melee avoidance radius."""
-        return max(self.threat_radius, 16) if name in RANGED_HOSTILES else self.threat_radius
+        return hostile_threat_radius(name, self.threat_radius)
 
     def _dangerous_hostiles(self, observation, origin):
         found = []

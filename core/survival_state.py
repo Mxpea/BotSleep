@@ -13,10 +13,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from agent.survival_planner import RANGED_HOSTILES
 from core.client import APIError
 from core.block_geometry import trace_block_visibility
-from core.domain import BED_NAMES, LOG_NAMES
+from core.domain import BED_NAMES, LOG_NAMES, hostile_threat_radius
+from skills.combat import HOSTILES, MELEE_RANGE, combat_options
 from skills.survival import SurvivalSkills
 
 
@@ -37,11 +37,12 @@ class ObservationCollector:
                      (2, 0), (0, 2), (-2, 0), (0, -2))
     PASSABLE = SurvivalSkills.AIR | {"short_grass", "leaf_litter"}
 
-    def __init__(self, client, radius=24, include_terrain=False, *, include_footing=False):
+    def __init__(self, client, radius=24, include_terrain=False, *, include_footing=False, combat_mode=None):
         self.client = client
         self.radius = radius
         self.include_terrain = include_terrain
         self.include_footing = include_footing
+        self.combat_mode = combat_mode
 
     @staticmethod
     def _check_cancel(cancel_event):
@@ -79,11 +80,30 @@ class ObservationCollector:
             "properties": copy.deepcopy(block.get("properties") or {}),
             "fresh": True, "verified": True, "source": "api_verified"}
 
-    def collect_safety(self, cancel_event=None, *, force=False, threat_radius=8):
-        """A bounded status/entities snapshot, never fresh inventory or terrain.
+    def _status(self, original, cancel_event, *, grounded=False, timeout_seconds=2):
+        self._check_cancel(cancel_event)
+        reply = self.client.get_status(timeout_seconds=timeout_seconds)
+        self._check_cancel(cancel_event)
+        status = reply.get("result") if isinstance(reply, dict) and reply.get("ok") is True else None
+        if not isinstance(status, dict):
+            raise APIError("invalid_response", "Status response is malformed")
+        if (status.get("alive") is not True or status.get("ready") is not True
+                or status.get("dimension") != original.get("dimension")
+                or status.get("last_death") != original.get("last_death")
+                or "busy" not in status or (status["busy"] is not None and status["busy"] is not False)
+                or grounded and status.get("on_ground") is not True):
+            raise APIError("observation_changed", "Stance check requires the same idle living bot")
+        pos, origin = self._position(status), self._position(original)
+        if self._cell(pos) != self._cell(origin) or math.dist(pos, origin) > .2:
+            raise APIError("observation_changed", "Bot moved during the stance check")
+        return status
 
-        Return None after the status probe when no emergency requires this path.
-        The caller must restrict partial snapshots to local retreat/wait actions.
+    def collect_safety(self, cancel_event=None, *, force: bool = False,
+                       threat_radius: float = 8) -> dict | None:
+        """Read bounded threat evidence for local safety decisions.
+
+        Eligible encounters may include a fresh inventory for combat only.
+        None indicates that a full observation can proceed.
         """
         started = time.monotonic()
         deadline = started + 2.0
@@ -114,7 +134,7 @@ class ObservationCollector:
         def near_summary(status):
             row = status.get("nearest_hostile")
             gap = row.get("dist") if isinstance(row, dict) else None
-            limit = max(threat_radius, 16) if isinstance(row, dict) and row.get("name") in RANGED_HOSTILES else threat_radius
+            limit = hostile_threat_radius(row.get("name") if isinstance(row, dict) else None, threat_radius)
             return type(gap) in (int, float) and math.isfinite(gap) and 0 <= gap <= limit
 
         near = near_summary(first)
@@ -148,11 +168,58 @@ class ObservationCollector:
         if self._cell(origin) != self._cell(endpoint) or abs(origin[1] - endpoint[1]) >= .5:
             raise APIError("observation_changed", "Position changed during short safety observation")
         options()  # Enforce the same total budget after the final response.
-        dangerous = any(entity["type"] == "hostile" and math.dist(endpoint, entity["pos"]) <= (
-            max(threat_radius, 16) if entity.get("name") in RANGED_HOSTILES else threat_radius) for entity in entities)
+        dangerous = any(entity["type"] == "hostile" and math.dist(endpoint, entity["pos"]) <=
+                        hostile_threat_radius(entity.get("name"), threat_radius) for entity in entities)
         if not force and not near_summary(final) and not dangerous:
             return None  # A distant melee-only scan must not starve full observations.
         observation.update(status=final, entities=entities, duration_seconds=round(time.monotonic() - started, 3))
+        return self._collect_combat_inventory(observation, cancel_event, threat_radius)
+
+    def _collect_combat_inventory(self, observation, cancel_event, threat_radius):
+        status = observation["status"]
+        if self.combat_mode is None or status.get("on_ground") is not True:
+            return observation
+        targets = [row for row in observation["entities"] if row["type"] == "hostile" and row.get("name") in HOSTILES]
+        if self.combat_mode == "starter":
+            targets = [row for row in targets if row["name"] == "zombie"
+                       and 1.5 <= math.dist(row["pos"], status["pos"]) <= MELEE_RANGE]
+        if not targets:
+            return observation
+        deadline = time.monotonic() + 1.5
+
+        def remaining():
+            self._check_cancel(cancel_event)
+            seconds = deadline - time.monotonic()
+            if seconds <= 0:
+                raise APIError("request_timeout", "Combat inventory observation budget exhausted")
+            return seconds
+
+        try:
+            reply = self.client.inventory(timeout_seconds=remaining())
+            inventory = reply.get("result") if isinstance(reply, dict) and reply.get("ok") is True else None
+            items = inventory.get("items") if isinstance(inventory, dict) else None
+            if (not isinstance(items, list) or len(items) > 256
+                    or any(not isinstance(row, dict) or not isinstance(row.get("name"), str)
+                           or type(row.get("count")) is not int or row["count"] < 0 for row in items)):
+                raise APIError("invalid_response", "Combat inventory evidence is malformed")
+            final = self._status(status, cancel_event, grounded=True, timeout_seconds=remaining())
+            remaining()
+        except APIError as error:
+            if self.combat_mode != "starter" or error.code not in {
+                    "request_timeout", "network_error", "invalid_json", "invalid_response"}:
+                raise
+            # The retreat skill will recheck status and terrain before any write.
+            observation["combat"] = {"allowed": False, "reason": "combat_observation_unavailable",
+                                     "error_code": error.code}
+            return observation
+        counts = {}
+        for row in items:
+            counts[row["name"]] = counts.get(row["name"], 0) + row["count"]
+        observation.update(status=final, inventory=copy.deepcopy(items), counts=counts, inventory_fresh=True)
+        if isinstance(inventory.get("armor"), dict):
+            observation["armor"] = copy.deepcopy(inventory["armor"])
+        observation["combat"] = combat_options(observation, starter_defense=self.combat_mode == "starter",
+                                                threat_radius=threat_radius)
         return observation
 
     def _local_geometry(self, status, cancel_event):

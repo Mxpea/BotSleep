@@ -26,7 +26,7 @@
 
 ### 当前已绑定的战斗与桶类扩展
 
-以下三项只加入 daily/competition，starter 仍为 9 项。模型参数须通过严格 schema；harness 分派到对应类后，技能还会重新读取并核验现场。
+以下三项仅在 daily/competition 的模型目录中公开。starter 的 9 项模型目录以外，harness 可本地调度 `fight_hostile` 进行自保。模型参数须通过严格 schema；harness 分派到对应类后，技能还会重新读取并核验现场。
 
 | 模型动作 | 分派与参数 | 成功和中止边界 |
 |---|---|---|

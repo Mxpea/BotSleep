@@ -42,6 +42,14 @@ STONE_TIERS: Tuple[str, ...] = ("stone", "iron", "diamond", "netherite")
 TOOL_KINDS: Tuple[str, ...] = ("pickaxe", "axe", "sword")
 
 
+RANGED_HOSTILES = frozenset({"skeleton", "stray", "bogged", "pillager"})
+
+
+def hostile_threat_radius(name: str | None, base_radius: float) -> float:
+    """Extend the local danger radius for mobs with ranged attacks."""
+    return max(base_radius, 16) if isinstance(name, str) and name in RANGED_HOSTILES else base_radius
+
+
 class BotStatusDict(TypedDict, total=False):
     pos: List[float]
     health: float
