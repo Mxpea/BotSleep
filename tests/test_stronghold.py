@@ -14,6 +14,8 @@ import requests
 
 from integrations.ninjabrain.calculator import CalculationError, EyeThrow, JAR_PATH, StrongholdCalculator
 from integrations.ninjabrain.observations import EyeObservationCollector, ObservationError, fit_trajectory
+from integrations.ninjabrain.recovery import recover_eye
+from skills import SkillResult
 from skills.stronghold import CalculateStrongholdSkill
 from core.client import APIError, MinecraftAgentClient, MinecraftAPIError
 
@@ -150,6 +152,50 @@ class CaptureTests(unittest.TestCase):
         with self.assertRaises(ObservationError) as error:
             self.run_capture(client)
         self.assertIn("moved", str(error.exception))
+
+
+class EyeRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.client = Mock()
+        self.client.get_block.return_value = {"ok": True, "result": {"name": "stone", "properties": {}}}
+        self.origin = {"pos": [.5, 64, .5], "dimension": "overworld", "busy": None}
+
+    @staticmethod
+    def drop(entity_id, pos):
+        return {"id": entity_id, "name": "item", "item": "ender_eyex1", "pos": pos}
+
+    def recover(self, rows, current=None):
+        self.client.get_entities.side_effect = rows
+        with patch("integrations.ninjabrain.recovery.time.sleep"), \
+             patch("integrations.ninjabrain.recovery._EyePickup") as pickup:
+            pickup.PICKUP_DISTANCE = 20
+            pickup.SUPPORT = {"stone"}
+            pickup._safe_block.return_value = True
+            pickup.return_value.execute.return_value = SkillResult(True, "picked up", {"gained": 1})
+            result = recover_eye(self.client, lambda: current or self.origin, self.origin, 7,
+                                 [10, 67, 0], {8: [10, 64, 0]}, {"eye_of_ender"})
+            return result, pickup.return_value.execute
+
+    def test_pickup_waits_for_grounded_drop_and_ignores_preexisting_eye(self):
+        old = self.drop(8, [10, 64, 0])
+        flying = {"id": 7, "name": "eye_of_ender", "pos": [11, 67, 0]}
+        falling = self.drop(9, [11, 65, 0])
+        landed = self.drop(9, [11, 64, 0])
+        result, execute = self.recover([[flying, old], [falling, old], [falling, old], [landed, old], [landed, old]])
+        self.assertEqual(result["status"], "recovered")
+        self.assertEqual(self.client.get_entities.call_count, 5)
+        execute.assert_called_once_with("collect_drops", {"entity_id": 9, "expected_item": "ender_eye"})
+
+    def test_multiple_new_eyes_are_ambiguous(self):
+        result, execute = self.recover([[self.drop(9, [10, 64, 0]), self.drop(10, [11, 64, 0])]])
+        self.assertEqual(result["status"], "ambiguous_drop")
+        execute.assert_not_called()
+
+    def test_busy_session_does_not_attempt_pickup(self):
+        drop = self.drop(9, [10, 64, 0])
+        result, execute = self.recover([[drop], [drop]], current={**self.origin, "busy": True})
+        self.assertEqual(result["status"], "state_changed")
+        execute.assert_not_called()
 
 
 class RealClientCaptureTests(unittest.TestCase):

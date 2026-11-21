@@ -367,6 +367,22 @@ class LocalRecoveryRuntimeTests(unittest.TestCase):
         self.assertEqual(self.world.status["pos"], [3.5, 67, .5])
         self.assertEqual(brain.requests, [])
 
+    def test_starter_hands_off_old_retreat_to_the_same_canopy_escape(self):
+        self.settings["objective"] = "starter"
+        self.canopy()
+        self.world.status.update(health=20, food=20, is_day=False)
+        harness, brain = self.make_harness()
+        self.saved_evacuation(harness)
+        for _ in range(3):
+            result = self.cycle(harness)
+            self.assertTrue(result.success, result)
+            self.assertEqual(self.last_decision(harness)["name"], "canopy_escape")
+        self.assertNotIn("retreat_recovery", harness.context)
+        self.assertNotIn("canopy_recovery", harness.context)
+        self.assertEqual(self.world.status["pos"], [3.5, 67, .5])
+        self.assertEqual(brain.requests, [])
+        self.assertIsNone(harness.journal.state["pending"])
+
     def saved_evacuation(self, harness):
         harness.context["retreat_recovery"] = {"dimension": "overworld", "evacuating": True,
             "evacuation_origin": list(self.world.status["pos"]), "threat_pos": [10, 64, 0],

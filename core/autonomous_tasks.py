@@ -15,6 +15,7 @@ from agent.daily_survival import DAILY_SKILLS, DailySurvivalGoals
 from agent.survival_planner import Decision, LOG_NAMES, PLANK_NAMES, SAFE_FOOD, WOOD_SPECIES
 from core.daily_policy import DailySafetyPolicy
 from core.mining_targets import estimate_empty_main_slots
+from core.policy_relaxation import LOW_HEALTH, NIGHT, allows_goal
 from skills.daily_survival import DailySurvivalSkills
 from skills.equipment import ARMOR_SLOTS, SLOT_SUFFIX, armor_rank, read_worn_slot_item
 
@@ -28,6 +29,7 @@ RECIPES = {
     "crafting_table": ({"planks": 4}, 1), "stick": ({"planks": 2}, 4),
     "furnace": ({"cobblestone": 8}, 1), "chest": ({"planks": 8}, 1),
     "torch": ({"coal": 1, "stick": 1}, 4), "bread": ({"wheat": 3}, 1),
+    "bone_meal": ({"bone": 1}, 3),
     "shield": ({"planks": 6, "iron_ingot": 1}, 1), "bucket": ({"iron_ingot": 3}, 1),
     "flint_and_steel": ({"iron_ingot": 1, "flint": 1}, 1),
     **{f"{tier}_{tool}": ({material: quantity, "stick": sticks}, 1)
@@ -35,6 +37,7 @@ RECIPES = {
        for tool, quantity, sticks in (("pickaxe", 3, 2), ("axe", 3, 2), ("sword", 2, 1), ("hoe", 2, 2))},
     **{f"iron_{armor}": ({"iron_ingot": count}, 1)
        for armor, count in (("helmet", 5), ("chestplate", 8), ("leggings", 7), ("boots", 4))},
+    "diamond_boots": ({"diamond": 4}, 1),
     **{f"{wood}_planks": ({f"{wood}_log": 1}, 4) for wood in WOOD_SPECIES},
     **{f"{wood}_door": ({f"{wood}_planks": 6}, 3) for wood in WOOD_SPECIES},
     **{bed: ({bed[:-4] + "_wool": 3, "planks": 3}, 1) for bed in DailySurvivalSkills.BEDS},
@@ -597,6 +600,8 @@ class AutonomousTaskController:
             if item == "torch" and ingredient == "coal":
                 held += counts.get("charcoal", 0)
             if held < amount:
+                if item == "bone_meal":
+                    return None  # Do not detour or seek combat for bones.
                 total_planks = sum(counts.get(n, 0) for n in PLANK_NAMES)
                 needed_planks = int(recipe.get("planks", 0))
                 if ((item == "stick" and total_planks < amount and not any(counts.get(n, 0) for n in LOG_NAMES))
@@ -605,7 +610,7 @@ class AutonomousTaskController:
                     if bush is not None:
                         return bush
                 return self._obtain(ingredient, amount - held, obs, context, depth)
-        if item not in {"stick", "crafting_table", "torch", *PLANK_NAMES}:
+        if item not in {"stick", "crafting_table", "torch", "bone_meal", *PLANK_NAMES}:
             workspace = self.rules._workspace(obs, context)
             if workspace:
                 if workspace.goal == "explore":
@@ -825,7 +830,7 @@ class AutonomousTaskController:
             return max(base, 600.0)
         return base
 
-    def next_action(self, observation, context=None):
+    def next_action(self, observation, context=None, *, relaxed_policy=None):
         """Replan exactly one atomic child. None means inspect snapshot status."""
         if self._data["status"] not in {"running", "suspended"}:
             return None
@@ -855,6 +860,10 @@ class AutonomousTaskController:
         if exhausted:
             self._escalate("task_budget_exhausted")
             return None
+        if relaxed_policy is not None and (not allows_goal(args, relaxed_policy)
+                or not self.safety_policy.relaxation_stance(observation, context)):
+            self.interrupt("local_safety_policy_required")
+            return None
         cautious = (isinstance(context, dict) and context.get("cautious_bootstrap") is True
                     and isinstance(context.get("survival_constraints"), dict)
                     and context["survival_constraints"].get("scenario") == "cautious_bootstrap"
@@ -864,9 +873,10 @@ class AutonomousTaskController:
             self._escalate("cautious_bootstrap_goal_not_allowed")
             return None
         if (status.get("busy") or status.get("gamemode") != "survival" or status.get("on_ground") is not True
-                or self.safety_policy._strict_night_block(observation, status)
+                or self.safety_policy._strict_night_block(observation, status) and relaxed_policy != NIGHT
                 or not _finite(status.get("health")) or not _finite(status.get("food"))
-                or status["health"] <= self.rules.low_health and not cautious or status["food"] <= 6
+                or status["health"] <= self.rules.low_health and not cautious and relaxed_policy != LOW_HEALTH
+                or status["food"] <= 6
                 or any(status.get(k) for k in ("in_water", "in_lava", "on_fire", "submerged", "is_sleeping", "in_vehicle"))
                 or any(distance <= self.rules.threat_radius for distance, _ in self.rules._hostiles(observation, status["pos"]))
                 or isinstance(status.get("nearest_hostile"), dict) and _finite(status["nearest_hostile"].get("dist"))
@@ -874,10 +884,12 @@ class AutonomousTaskController:
             self.interrupt("local_safety_policy_required")
             return None
         local = self._context(context, observation)
-        local["_bounded_bootstrap"] = cautious
+        local["_bounded_bootstrap"] = cautious or relaxed_policy is not None
         obs = copy.deepcopy(observation)
         origin = obs["status"]["pos"]
         obs["blocks"] = [b for b in self.rules._blocks(obs) if math.dist(origin, b["pos"]) <= self._data["args"]["radius"]]
+        if relaxed_policy is not None:
+            obs["blocks"] = [b for b in obs["blocks"] if b["name"] not in LOG_NAMES or math.dist(origin, b["pos"]) <= 2.8]
         obs["entities"] = [row for row in self.daily._rows(obs.get("entities"))
                            if str(row.get("id")) not in self._data["blocked_entities"]]
         self.daily.targets["food_reserve"] = args["count"] if task == "food" else self.daily.targets["food_reserve"]
@@ -887,7 +899,17 @@ class AutonomousTaskController:
         if task == "gather":
             decision = self._gather(args["resource"], obs, local)
         elif task == "craft":
-            decision = self._craft(args["item"], self._data["progress"]["target"] - self._quantity(obs), obs, local)
+            item = args["item"]
+            remaining = self._data["progress"]["target"] - self._quantity(obs)
+            if item == "bone_meal" and obs["counts"].get("bone_block", 0):
+                # The upstream craft endpoint takes an output, not a recipe ID.
+                self._escalate("ambiguous_recipe: bone_block could be consumed; choose another goal")
+                return None
+            decision = self._craft(item, remaining, obs, local)
+            if item == "bone_meal" and decision is None:
+                missing = math.ceil(remaining / RECIPES[item][1])
+                self._escalate(f"missing_material: bone x{missing}; use held bones only, choose another goal")
+                return None
         elif task == "smelt":
             decision = self._smelt(args["item"], obs, local)
         elif task == "food":
@@ -911,6 +933,10 @@ class AutonomousTaskController:
                 decision.goal == "explore" or decision.name == "move_to" and decision.args.get("pos") not in
                 [b["pos"] for b in self.rules._blocks(obs)] + [row.get("pos") for row in self.daily._rows(obs.get("entities"))]):
             decision = None  # Replace blind radial exploration with checked local geometry.
+        if (relaxed_policy is not None and (decision is None
+                or not self.safety_policy.allows_relaxed(decision, relaxed_policy, observation))):
+            self.interrupt("no_stationary_step_for_relaxed_work")
+            return None
         if decision is None and not (task == "food" and status.get("food", 0) >= 16 and status.get("health", 0) >= 16 and self._recent_hunt_failures() >= 2):
             decision = self._explore(obs, local)
         if decision is None:

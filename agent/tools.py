@@ -187,7 +187,7 @@ def tools_for_objective(objective="starter"):
     add("run_survival_task", "Prefer ONE bounded survival goal over repeated atomic calls. Supports gather, craft, smelt, food, starter_tools, iron_tools, iron_armor (craft+equip armor), scout (forward ~200-block surface scan stopping on structures/wood or conserving stamina), shelter, bed, storage, farm, recover_drops, and maintenance. Stops on safety, unknown writes or budget; only the final summary is tool feedback. gather requires resource; craft/smelt require target item; others accept neither.",
         {"task": {"type": "string", "enum": list(SURVIVAL_TASK_NAMES)},
          "resource": {"type": "string", "enum": list(SURVIVAL_TASK_RESOURCES)},
-         "item": {**_ITEM, "description": "Desired crafted/smelted OUTPUT item, not an ingredient; executor checks supported recipes."},
+         "item": {**_ITEM, "description": "Desired craft/smelt output; bone_meal uses held bones only."},
          "count": {"type": "integer", "minimum": 1, "maximum": 64, "default": 8,
                    "description": "Desired new output for gather/craft/smelt; current food reserve target for food."},
          "radius": {"type": "integer", "minimum": 4, "maximum": 64, "default": 32}}, ("task",))

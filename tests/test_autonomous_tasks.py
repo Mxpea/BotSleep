@@ -88,6 +88,44 @@ class AutonomousTaskTests(unittest.TestCase):
         self.controller.record_result(decision, result, self.obs)
         return decision
 
+    def test_bone_meal_crafts_from_held_bone_without_workstation(self):
+        obs = world({"bone_meal": 2})
+        controller = self.start({"task": "craft", "item": "bone_meal", "count": 3}, obs)
+        obs["counts"]["bone"] = 1  # Newly observed inventory, not an entity or a hit receipt.
+        self.assertEqual(self.act().name, "craft_item")
+        self.assertEqual(obs["counts"], {"bone_meal": 5, "bone": 0})
+        self.assertIsNone(controller.next_action(obs))
+        self.assertEqual(controller.snapshot()["status"], "completed")
+
+    def test_bone_meal_reports_remaining_bones_without_chasing_visible_drop(self):
+        obs = world({"bone": 1})
+        obs["entities"] = [{"id": 7, "name": "item", "item": "bonex4", "pos": [2.5, 64, .5]}]
+        controller = self.start({"task": "craft", "item": "bone_meal", "count": 7}, obs)
+        self.assertEqual(self.act().name, "craft_item")
+        self.assertIsNone(controller.next_action(obs))
+        snapshot = controller.snapshot()
+        self.assertEqual(snapshot["status"], "needs_ai")
+        self.assertIn("missing_material: bone x2", snapshot["reason"])
+        self.assertEqual(snapshot["progress"], {"current": 3, "target": 7, "unit": "bone_meal"})
+        self.assertIsNone(controller.state()["pending_digest"])
+
+    def test_bone_meal_leaves_bone_block_untouched_when_recipe_is_ambiguous(self):
+        obs = world({"bone": 1, "bone_block": 1})
+        controller = self.start({"task": "craft", "item": "bone_meal", "count": 3}, obs)
+        self.assertIsNone(controller.next_action(obs))
+        self.assertIn("ambiguous_recipe", controller.snapshot()["reason"])
+        self.assertEqual(obs["counts"], {"bone": 1, "bone_block": 1})
+
+    def test_diamond_boots_use_four_diamonds_and_verify_output(self):
+        obs = world({"diamond": 4})
+        obs["blocks"].append({"name": "crafting_table", "pos": [1, 64, 0], "can_see": True})
+        controller = self.start({"task": "craft", "item": "diamond_boots", "count": 1}, obs)
+        decision = self.act()
+        self.assertEqual((decision.name, decision.args), ("craft_item", {"item": "diamond_boots", "count": 1}))
+        self.assertEqual(obs["counts"], {"diamond": 0, "diamond_boots": 1})
+        self.assertIsNone(controller.next_action(obs))
+        self.assertEqual(controller.snapshot()["status"], "completed")
+
     def test_invalid_arguments_and_unsupported_items_fail_without_mutating_active_goal(self):
         controller = self.start()
         before = controller.state()

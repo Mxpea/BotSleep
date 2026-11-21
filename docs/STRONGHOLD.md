@@ -30,13 +30,15 @@
 .\.venv\Scripts\python.exe -m integrations.ninjabrain capture --world local-test --session logs/eyes-local-test.json --output logs/stronghold_prediction.json
 ```
 
+采样完成后默认会等待飞行结束、确认新出现的末影之眼掉落已经落到可站立方块，再沿同水平、无近敌的核验走廊拾取。拾取失败只记录 `recovery.status`，不重复投眼；不想移动回收时传 `--no-recover-eye`。已有掉落、多个新掉落、飞行未落地、路线遮挡、状态变化或未知写入都会放弃回收并保留观测。
+
 运行前通过本机环境变量 `MC_AGENT_USER`、`MC_AGENT_PASSWORD` 提供凭据；`--username` 可覆盖用户名。也可显式用 `--api-config ../mc-agent-api/config.json` 只读载入本地 API 配置，路径按实际目录调整；该 JSON 不是 BotSleep 的 YAML 配置。口令和 token 不写入会话。`--base` 可更换接口地址。`--world` 是你给存档起的标签，换世界必须换标签和会话文件。
 
 第一次投眼后只能得到方向和概率分布。通过正常游戏方式横向移动一段距离，稳定站好，再以同一个 `--world/--session` 运行第二次。第二次应取得有效横向基线。当前策略草案在近距离先评估约20～50方块侧移，远距离再按距离、误差和地形调整；这不是自动选点实现，也不是固定两眼必然定位保证。不要为增加基线越过不同要塞的最近区域。路线应服从 harness 的当前安全能力，尚未实现的水面/搭路策略不能只凭提示调用。
 
 采样过程：
 
-1. 读取状态、背包和已有眼实体 ID，再并发调用 `/use_item` 与 `/get_entities`。`client.inventory()` 返回 `ok/result` envelope，物品从 `result.items` 与 `result.offhand` 读取；兼容名 `get_inventory()` 也返回同样的 envelope。
+1. 读取状态、背包和已有眼/掉落实体 ID，再并发调用 `/use_item` 与 `/get_entities`。`client.inventory()` 返回 `ok/result` envelope，物品从 `result.items` 与 `result.offhand` 读取；兼容名 `get_inventory()` 也返回同样的 envelope。
 2. 只接受新出现、身份匹配的同一只眼，约每 100ms 记录位置，共 3.5 秒。
 3. 用多点拟合水平飞行射线，要求至少 3 个不同水平位置、跨度至少 3 方块、轨迹无明显转弯或倒退，且玩家位置基本不变。
 4. 保存原始坐标、实体 ID、拟合质量和投眼响应，随后调用计算核心。失败尝试也保存到 `attempts`，不会混入有效观测。

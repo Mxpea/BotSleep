@@ -13,6 +13,8 @@ from typing import Any, Dict, List
 
 from core.block_geometry import trace_block_visibility
 from core.client import APIError
+from core.domain import hostile_threat_radius
+from core.policy_relaxation import RelaxedWork, allows_atomic
 
 from . import SkillResult
 
@@ -209,6 +211,10 @@ class SurvivalSkills:
 
     def _action(self, context, operation, *args, _validate_status=None, **kwargs):
         status = self._status(context)
+        if context.get("relaxed_work") is not None:
+            if operation not in (self.client.dig, self.client.craft):
+                raise _Failure("unsafe_state", "Relaxed work cannot initiate navigation or another write")
+            self._relaxed_work_guard(context, status)
         if context.get("cautious"):
             if operation == self.client.move_to:
                 raise _Failure("unsafe_state", "Cautious bootstrap cannot initiate navigation")
@@ -314,7 +320,8 @@ class SurvivalSkills:
         if name == "dead_bush":
             expected_drops = {"stick", "dead_bush"}
         try:
-            dig_result = self._action(context, self.client.dig, pos, collect=not context.get("cautious", False))
+            dig_result = self._action(context, self.client.dig, pos,
+                                      collect=not (context.get("cautious") or context.get("relaxed_work")))
         except APIError as error:
             if error.code != "dig_unconfirmed":
                 raise
@@ -323,6 +330,29 @@ class SurvivalSkills:
         after, _ = self._inventory(context)
         remaining = self._block(pos, context)
         gained = {item: after.get(item, 0) - before.get(item, 0) for item in expected_drops if after.get(item, 0) > before.get(item, 0)}
+        if context.get("relaxed_work") is not None and remaining["name"] != name and not gained:
+            # Vanilla drops can remain unpickable for several ticks. Give a
+            # nearby drop time to enter inventory while keeping the bot still.
+            deadline = time.monotonic() + 1.25
+            while not gained and (remaining_time := deadline - time.monotonic()) > .25:
+                if context["cancel"] is None:
+                    time.sleep(.2)
+                else:
+                    context["cancel"].wait(.2)
+                self._check(context)
+                context["recovery_deadline"] = deadline
+                try:
+                    if not context["relaxed_work"].stable(self._status(context)):
+                        break
+                    after, _ = self._inventory(context)
+                except (APIError, _Failure) as error:
+                    if error.code not in {"request_timeout", "recovery_budget_exhausted"}:
+                        raise
+                    break  # The verified removal evidence is still valid.
+                finally:
+                    context.pop("recovery_deadline", None)
+                gained = {item: after[item] - before.get(item, 0) for item in expected_drops
+                          if after.get(item, 0) > before.get(item, 0)}
         evidence = {"pos": pos, "gathered": name, "gained": gained,
                     "remaining_block": remaining["name"], "block_removed": remaining["name"] != name}
         if isinstance(dig_result.get("collection"), dict):
@@ -1403,6 +1433,18 @@ class SurvivalSkills:
         except Exception as error:
             outcome["executed"] = context["acted"]
             outcome["candidate_failed"] = getattr(error, "code", "") in {"path_not_found", "stalled", "out_of_reach"}
+            details = getattr(error, "details", None)
+            interruption = getattr(error, "data", {})
+            hurt = ((isinstance(error, APIError) and error.status_code == 200
+                     and isinstance(details, dict) and details.get("cause") == "hurt")
+                    or isinstance(error, _Failure) and interruption.get("interrupted_by") == "hurt")
+            if not escaping and context.get("write_sent") and getattr(error, "code", "") == "interrupted" and hurt:
+                cache.clear()
+                observed = self._verify_interrupted_retreat(context, before, feet, safe_cell)
+                if observed is not None:
+                    raise _Failure("retreat_interrupted", "Retreat stopped by damage; replan from verified footing",
+                                   evidence(pos=observed["pos"], landing_settled=True, candidate_failed=True,
+                                       safety_changed="health_lost", api_details=details or {"cause": "hurt"})) from None
             raise
         after = self._settle_navigation(context, before, target, outcome)
         horizontal_after = math.hypot(after["pos"][0] - threat[0], after["pos"][2] - threat[2])
@@ -1436,6 +1478,34 @@ class SurvivalSkills:
                         distance_before=origin_distance, distance_after=math.dist(after["pos"], threat),
                         planned_path=planned_path, path_following_verified=False,
                         path_caveat="Candidate terrain was checked; the backend may choose a different route.")
+
+    def _verify_interrupted_retreat(self, context, before, feet, safe_cell):
+        """Confirm a stopped movement's endpoint without repeating or stopping it again."""
+        deadline = time.monotonic() + 1.5
+        context.update(navigation_settle_deadline=deadline, navigation_observe_only=True)
+
+        def stable(status):
+            return (status.get("last_death") == before.get("last_death")
+                    and status.get("on_ground") is True and status.get("jumping") is not True
+                    and "busy" in status and status["busy"] in (None, False)
+                    and not any(status.get(key) for key in ("in_water", "in_lava", "on_fire", "submerged")))
+
+        try:
+            observed = self._status(context)
+            if (not stable(observed) or observed["health"] >= before["health"]
+                    or not safe_cell(feet(observed["pos"]), temporary_leaves=True)):
+                return None
+            final = self._status(context)
+            if (stable(final) and time.monotonic() <= deadline
+                    and final["health"] == observed["health"]
+                    and feet(final["pos"]) == feet(observed["pos"])
+                    and math.dist(final["pos"], observed["pos"]) <= .2):
+                return final
+        except (APIError, _Failure):
+            return None
+        finally:
+            context.pop("navigation_settle_deadline", None)
+        return None
 
     def _cautious_guard(self, context, status):
         """Trusted local emergency bootstrap: no backend pickup/table travel."""
@@ -1493,7 +1563,47 @@ class SurvivalSkills:
         else:
             raise _Failure("unsafe_state", "This action is outside cautious bootstrap")
 
-    def execute(self, name: str, args: Dict[str, Any], cancel_event=None, *, recovery_context=None, cautious=False) -> SkillResult:
+    def _relaxed_work_guard(self, context, status):
+        permit = context["relaxed_work"]
+        if not permit.stable(status):
+            raise _Failure("safety_changed", "Relaxed work lost its stationary safety conditions")
+        name, args = context["relaxed_action"]
+        x, y, z = (math.floor(v) for v in status["pos"])
+        ground = self._block([x, y - 1, z], context)
+        if (ground["name"] not in self.SUPPORT - self.RETREAT_TRUNKS
+                or not self._safe_block(ground)
+                or any(self._block([x, y + dy, z], context)["name"] not in self.AIR for dy in (0, 1))):
+            raise _Failure("unsafe_state", "Relaxed work requires verified solid ground and clear body space")
+        target = status["pos"]
+        if name == "gather_block":
+            target = self._pos(args["pos"], block=True)
+            block = self._gather_guard(target, args["expected_name"], status, context)
+            if (math.dist(status["pos"], target) > 2.8
+                    or block.get("can_dig", block.get("harvest_tool_ok")) is not True):
+                raise _Failure("out_of_reach", "Relaxed work cannot approach a log")
+            visible = block.get("can_see")
+            if type(visible) is not bool:
+                visible = trace_block_visibility(status["pos"], target,
+                    lambda point: self._block(point, context), max_queries=32, max_distance=4)["visible"]
+            if visible is not True:
+                raise _Failure("target_occluded", "Relaxed work needs a visible log")
+        self._check(context)
+        rows = self.client.get_entities(radius=min(64, max(16, permit.threat_radius) + 3), timeout_seconds=2)
+        if not isinstance(rows, list) or len(rows) >= 40:
+            raise _Failure("unsafe_state", "Relaxed work needs a complete bounded entity scan")
+        for row in rows:
+            if not isinstance(row, dict) or not isinstance(row.get("type"), str):
+                raise _Failure("unsafe_state", "Relaxed work has malformed entity evidence")
+            if row["type"] == "hostile":
+                pos = self._pos(row.get("pos"))
+                limit = hostile_threat_radius(row.get("name"), permit.threat_radius)
+                if min(math.dist(pos, status["pos"]), math.dist(pos, target)) <= limit:
+                    raise _Failure("near_hostile", "New enemy evidence prevents relaxed work")
+        if not permit.stable(self._status(context)):
+            raise _Failure("safety_changed", "Relaxed work state changed during its final checks")
+
+    def execute(self, name: str, args: Dict[str, Any], cancel_event=None, *, recovery_context=None,
+                cautious=False, relaxed_work=None) -> SkillResult:
         """Execute one registered action; partial and unverified results fail explicitly."""
         context = {"cancel": cancel_event, "acted": False}
         data = {"skill": name}
@@ -1525,6 +1635,14 @@ class SurvivalSkills:
             context["dimension"] = status["dimension"]
             if type(cautious) is not bool:
                 raise _Failure("bad_args", "Invalid trusted cautious flag")
+            if relaxed_work is not None:
+                if (not isinstance(relaxed_work, RelaxedWork) or cautious
+                        or not allows_atomic(name, args, relaxed_work.mode)):
+                    raise _Failure("bad_args", "Unsupported relaxed-work permission")
+                self._overworld(status)
+                context.update(relaxed_work=relaxed_work, relaxed_action=(name, args))
+                if not relaxed_work.stable(status):
+                    raise _Failure("safety_changed", "Relaxed work state changed before execution")
             if cautious:
                 context.update(cautious=True, cautious_baseline=dict(status), cautious_action=(name, args))
                 self._cautious_guard(context, status)
@@ -1540,6 +1658,11 @@ class SurvivalSkills:
         except Exception as error:
             error = self._disconnection_error(error, context)
             code = getattr(error, "code", "internal_error")
+            interrupted_details = getattr(error, "details", None)
+            if code == "interrupted" and isinstance(interrupted_details, dict) and interrupted_details:
+                data["api_details"] = interrupted_details
+            if code == "interrupted" and getattr(error, "data", {}).get("interrupted_by"):
+                data["interrupted_by"] = error.data["interrupted_by"]
             if (context.get("navigation_write") and context.get("write_sent") and not context.get("navigation_verified")
                     and code in {"request_timeout", "network_error", "invalid_json", "invalid_response", "action_unconfirmed", "dig_unconfirmed", "retreat_budget_exhausted",
                                  "cancelled", "dead", "not_ready", "dimension_changed", "interrupted", "busy",
@@ -1559,6 +1682,11 @@ class SurvivalSkills:
                 evidence.pop("recovered_from", None)
                 data.pop("recovered_from", None)
                 error = _Failure("dig_unconfirmed", "Dig result remains unknown after cancellation", evidence)
+                code = error.code
+            if (context.get("relaxed_work") is not None and context.get("write_sent")
+                    and code in {"cancelled", "interrupted", "dead", "not_ready", "busy", "dimension_changed", "unsafe_state"}):
+                error = _Failure("action_unconfirmed", "Relaxed write was interrupted before its outcome was verified",
+                                 {"verification_error": code, "action_state": "unknown"})
                 code = error.code
             # Preserve bounded API path diagnostics (goal, endpoint, last path
             # status) so the next model turn can change its approach.

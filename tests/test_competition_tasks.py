@@ -6,7 +6,8 @@ import threading
 import unittest
 
 from core.competition_rules import scoring_catalog
-from core.competition_tasks import CompetitionTasks, SCHEMA_VERSION
+from core.competition_blueprints import BLUEPRINTS
+from core.competition_tasks import CompetitionTasks, SCHEMA_VERSION, _MAPPED
 
 
 CATALOG = scoring_catalog()
@@ -59,6 +60,78 @@ class CompetitionTasksTests(unittest.TestCase):
 
     def task(self, snapshot, ident):
         return next(row for row in snapshot["tasks"] if row["id"] == ident)
+
+    def test_all_potentially_scored_rules_have_exactly_one_planning_entry(self):
+        targets = {row["id"] for row in CATALOG if row["classification"] != "excluded"}
+        self.assertEqual(targets, _MAPPED | BLUEPRINTS.keys())
+        self.assertFalse(_MAPPED & BLUEPRINTS.keys())
+        manager = CompetitionTasks({"eligibility_overrides": {row["id"]: True for row in CATALOG
+            if row["classification"] == "conditional"}}, clock=lambda: NOW[0])
+        for snapshot in (manager.snapshot(), manager.update(obs({"iron_pickaxe": 1}), api())):
+            for row in snapshot["tasks"]:
+                if row["id"] in BLUEPRINTS:
+                    self.assertEqual(row["availability"], "unsupported")
+                    self.assertEqual(row["reason"], "missing_execution_capability")
+                    self.assertTrue(row["missing"] and row["next_steps"])
+                    self.assertFalse(row["selectable"] or row["required_skills"])
+                elif row["id"] not in _MAPPED:
+                    self.assertFalse(row["next_steps"] or row["selectable"])
+        self.assertFalse(set(manager.model_view()["selectable_goal_ids"]) & BLUEPRINTS.keys())
+        blocked = "minecraft:story/follow_ender_eye"
+        self.assertFalse(manager.select(blocked)["success"])
+        manager.update(obs(), api({blocked: "completed"}))
+        self.assertEqual(manager.snapshot()["score"]["raw"], 60)
+
+    def test_diamond_routes_are_stage_and_capability_gated(self):
+        gather = "minecraft:story/mine_diamond"
+        armor = "minecraft:story/shiny_gear"
+        tools = CAPABILITIES | {"run_survival_task"}
+        self.assertFalse(self.task(self.update(obs({"stone_pickaxe": 1}), capabilities=tools), gather)["selectable"])
+        prepared = obs({"iron_pickaxe": 1, "diamond": 4, "crafting_table": 1})
+        for goal in (gather, armor):
+            self.assertEqual(self.task(self.update(prepared), goal)["availability"], "unsupported")
+            row = self.task(self.update(prepared, capabilities=tools), goal)
+            self.assertEqual(row["required_skills"], ["run_survival_task"])
+            self.assertTrue(row["selectable"])
+            self.assertFalse(row["confirmed"])
+
+    def test_ranged_goals_only_unlock_with_appropriate_weapon_and_a_safe_shot(self):
+        bow_goal = "minecraft:adventure/shoot_arrow"
+        crossbow_goal = "minecraft:adventure/ol_betsy"
+        tools = CAPABILITIES | {"fight_hostile"}
+        current = obs({"bow": 1, "arrow": 2}, health=20, food=20, on_ground=True, gamemode="survival")
+        current["inventory"] = [{"name": key, "count": value} for key, value in current["counts"].items()]
+        current["entities"] = [{"id": 44, "name": "zombie", "type": "hostile", "pos": [7.5, 64, .5]}]
+        first = self.update(current, capabilities=tools)
+        self.assertTrue(self.task(first, bow_goal)["selectable"])
+        self.assertFalse(self.task(first, crossbow_goal)["selectable"])
+        current["inventory"][0]["name"] = "crossbow"
+        current["counts"] = {"crossbow": 1, "arrow": 2}
+        self.assertTrue(self.task(self.update(current, capabilities=tools), crossbow_goal)["selectable"])
+        current["entities"].append({"id": 45, "name": "zombie", "type": "hostile", "pos": [4.5, 64, .5]})
+        unsafe = self.update(current, capabilities=tools)
+        self.assertFalse(self.task(unsafe, bow_goal)["selectable"])
+        self.assertFalse(self.task(unsafe, crossbow_goal)["selectable"])
+
+    def test_lava_bucket_requires_stationary_source_and_registered_skill(self):
+        goal = "minecraft:story/lava_bucket"
+        source = {"name": "lava", "pos": [2, 64, 0], "properties": {"level": 0}}
+        tools = CAPABILITIES | {"collect_liquid", "run_survival_task"}
+        valid = obs({"bucket": 1}, [source], gamemode="survival", health=20, food=20, on_ground=True)
+        self.assertFalse(self.task(self.update(valid), goal)["selectable"])
+        row = self.task(self.update(valid, capabilities=tools), goal)
+        self.assertTrue(row["selectable"])
+        self.assertEqual(row["availability"], "ready")
+        self.assertIn("[2, 64, 0]", row["next_steps"][0])
+        for patch in ({"properties": {"level": 1}}, {"properties": {}}, {"pos": [4, 64, 0]},
+                      {"pos": [0, 63, 0]}, {"fresh": False}):
+            invalid = {**valid, "blocks": [{**source, **patch}]}
+            self.assertFalse(self.task(self.update(invalid, capabilities=tools), goal)["selectable"])
+        prepped = {**valid, "counts": {"iron_ingot": 3}}
+        row = self.task(self.update(prepped, capabilities=tools), goal)
+        self.assertTrue(row["selectable"])
+        self.assertEqual(row["availability"], "needs_prerequisites")
+        self.assertIn("run_survival_task", row["required_skills"])
 
     def test_catalog_board_and_scoring_do_not_invent_normalized_score(self):
         snap = self.update()

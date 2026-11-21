@@ -89,6 +89,7 @@ class TaskWorld(RuntimeDailyWorld):
         woods = ("oak", "birch", "spruce", "jungle", "acacia", "dark_oak", "mangrove", "cherry", "pale_oak")
         recipes = {**{wood + "_planks": ({wood + "_logs": 1}, 4) for wood in woods},
                    "stick": ({"planks": 2}, 4), "crafting_table": ({"planks": 4}, 1),
+                   "bone_meal": ({"bone": 1}, 3),
                    "wooden_pickaxe": ({"planks": 3, "stick": 2}, 1),
                    "stone_pickaxe": ({"cobblestone": 3, "stick": 2}, 1),
                    "stone_axe": ({"cobblestone": 3, "stick": 2}, 1),
@@ -115,7 +116,7 @@ class TaskWorld(RuntimeDailyWorld):
                     needed -= used
             if needed:
                 raise APIError("missing_ingredients", "Fake game requires real input items")
-        if item not in {"stick", "crafting_table", *(wood + "_planks" for wood in woods)} and not any(row["name"] == "crafting_table"
+        if item not in {"stick", "crafting_table", "bone_meal", *(wood + "_planks" for wood in woods)} and not any(row["name"] == "crafting_table"
                 and math.dist(pos, self.status["pos"]) <= 4 for pos, row in self.blocks.items()):
             raise APIError("missing_workstation", "A placed nearby table is required")
         for name, amount in consumed.items():
@@ -399,6 +400,20 @@ class TaskHarnessTests(unittest.TestCase):
         self.assertTrue(all(count>=0 for count in self.world.counts.values()))
         self.assertEqual(len(brain.requests),1)
         self.assertEqual(len(self.feedback(harness.planner)),1)
+
+    def test_bone_meal_goal_finishes_with_one_model_request_and_no_travel(self):
+        self.world.counts["bone"] = 1
+        harness, brain = self.harness(response("run_survival_task",
+            {"task": "craft", "item": "bone_meal", "count": 3}, "bone-meal"))
+        self.assertTrue(self.cycle(harness).data["accepted"])
+        self.until(harness, lambda: harness.snapshot()["task_execution"]["status"] == "completed")
+        self.assertEqual(self.world.counts.get("bone_meal"), 3)
+        self.assertEqual(self.world.counts.get("bone"), 0)
+        self.assertEqual([call for call in self.world.calls if call[0] in {"move", "dig", "craft"}],
+                         [("craft", "bone_meal", 3)])
+        self.assertEqual(len(brain.requests), 1)
+        self.assertEqual([row["tool_call_id"] for row in self.feedback(harness.planner)], ["bone-meal"])
+        self.assertIsNone(harness.journal.state["pending"])
 
     def forest(self):
         self.world = ForestWorld()

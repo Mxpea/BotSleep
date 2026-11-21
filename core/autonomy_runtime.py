@@ -385,24 +385,24 @@ class AutonomyRuntime:
             data.setdefault("portal_active", True)
         return SkillResult(bool(res.success), str(res.message), data, res.error_code)
 
-    def _task_next(self, observation):
+    def _task_next(self, observation, *, relaxed_policy=None):
         if not self._task_active():
             return None
         task_ctx = dict(self.context)
         task_ctx["deep_mining_enabled"] = not bool(self.settings.get("disable_deep_mining", False))
-        remote_log = self._remote_log_waypoint(
-            observation,
-            blocked=self.task_controller._data.get("blocked") if self.task_controller else None,
-        )
-        if remote_log is not None:
-            task_ctx["remote_log_target"] = remote_log
-        decision = self.task_controller.next_action(observation, task_ctx)
+        if relaxed_policy is None:
+            remote_log = self._remote_log_waypoint(observation, blocked=self.task_controller._data.get("blocked"))
+            if remote_log is not None:
+                task_ctx["remote_log_target"] = remote_log
+        decision = self.task_controller.next_action(observation, task_ctx, relaxed_policy=relaxed_policy)
         if decision is None:
             status = self._task_snapshot().get("status")
             event = {"completed": "TASK_COMPLETED", "needs_ai": "TASK_NEEDS_AI",
                      "unknown": "TASK_UNKNOWN"}.get(status, "TASK_PROGRESS")
             self._save_task(event)
             self._finish_task_feedback(observation)
+            if relaxed_policy is not None and status == "suspended":
+                return None  # Fall back to the original safety hold.
             return Decision("wait", {"seconds": .25},
                             "Goal boundary reached; next planning uses the recorded task report", "autonomous_task")
         self._task_child = True
@@ -432,6 +432,9 @@ class AutonomyRuntime:
             self.task_controller.record_result(decision, result, observation, context=self.context)
             if not uncertain and not fatal:
                 self.task_controller.confirm_completion(observation, self.context)
+                if (result.data.get("relaxed_policy") and not result.success and result.error_code != "cancelled"
+                        and self._task_active()):
+                    self.task_controller.stop("relaxed_work_failed_replan")
         if uncertain and (child or safety or self._task_active()):
             self.task_controller.stop(result.error_code or "unknown_action", unknown=True)
             result.data.setdefault("cleanup_skipped", "task_unknown")

@@ -58,7 +58,7 @@ Copy-Item config.example.yaml config.yaml
 | sleep（默认） | 找床、接近、交互、等待醒来 | 检查维度、床占用与附近敌人；须观察到入睡到醒来，或服务端 slept 证据与昼夜/雷暴转换。下界、末地拒绝用床。 |
 | survival / starter | 木材、工作台、木镐、圆石及初期工具制作 | 目标为石镐、石斧、石剑和熔炉；以当前背包与设施验证，不以模型自报完成。 |
 | survival / daily | 13 项日常任务，以及有条件的短步防御、取液与狩猎 | 按新鲜状态重算任务；小批采集、施工最多 8 步且逐步复核。5×5 住所只验证结构，不保证照明或完全防怪。 |
-| survival / competition | 模型选择得分目标，沿日常动作目录执行，以服务器 advancement 计分 | 125 项规则目录中有 8 个计分目标的有限行动计划，含有条件的怪物猎人；尚非完整赛事执行器。 |
+| survival / competition | 模型选择得分目标，沿日常动作目录执行，以服务器 advancement 计分 | 125 项规则目录中，99 个可能计分项有任务说明，13 项有现有工具路线；尚非完整赛事执行器。 |
 
 starter、daily 支持规则规划或开启模型规划；competition 要求模型。生存 harness 串行执行技能，模型返回后重新观察并通过本地安全门禁，再按背包、方块或位置变化验证结果。工具调用返回、移动达到容差和实际取得物品是不同证据；离线协议覆盖不等于真实技能成功，更不等于完整生存或比赛完成。
 
@@ -96,7 +96,7 @@ daily/competition 默认启用 `survival.autonomy.enabled`。正常任务规划�
 
 规则快照 `data/competition/rules_v2.json` 共 125 项（120 个 advancement 目标、5 个根节点），其中 45 项明确计分、54 项条件待确认、26 项不计分。条件项默认不计分，须通过 `survival.competition.eligibility_overrides` 显式确认；只采纳服务器证据，未知不计分，归一化得分暂为 `null`。
 
-Harness 每次只维护一个活动目标。当前 8 个明确计分目标有有限行动计划，其余可计分项虽能评估和展示，但标为 unsupported、不可选择。怪物猎人的可执行机会须经过战斗门禁；单击或实体消失均不计分。`finish_task` 需 fresh advancement 检测，正常 `end_competition` 需 fresh 全目录检测；未知可记为 unknown，但不能加分。终态持久化后，重启不再调用模型。离线覆盖不能称为完整比赛验收，详见 [赛事接口与限制](docs/HARNESS_INTERFACES.md)。
+Harness 每次只维护一个活动目标。13 个计分目标有现有工具路线，另外 86 项列出前置、触发步骤和缺失能力，但仍标为 `unsupported`、不可选择。近战或远射路线仍须通过战斗门禁；单击、发射回执或实体消失均不计分。`finish_task` 需 fresh advancement 检测，正常 `end_competition` 需 fresh 全目录检测；未知可记为 unknown，但不能加分。终态持久化后，重启不再调用模型。详见 [赛事接口与限制](docs/HARNESS_INTERFACES.md)。
 
 全目录保留在本地计分和监控。模型在任务选择阶段只收到当前证据解锁的简化候选，选中后仅展开活动目标，不重复注入 125 项规则表。
 

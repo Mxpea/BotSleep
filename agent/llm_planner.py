@@ -455,6 +455,11 @@ If that goal tool is unavailable, use only the currently advertised tools.
                 return False
         return not (moved or changed_cell) and all(before.get(key) == after.get(key) for key in ("dimension", "last_death", "counts", "target", "target_properties", "windows", "entity", "shelter", "world_mutation"))
 
+    def active_failed_decisions(self, observation):
+        """Return failed proposals whose relevant game evidence is unchanged."""
+        return [copy.deepcopy(failure["decision"]) for failure in self._failed_actions.values()
+                if self._unchanged_failure(failure, observation, failure["decision"])]
+
     @staticmethod
     def _signature(decision):
         # Adjusting range/count or inserting a successful wait is not progress.
@@ -648,6 +653,10 @@ If that goal tool is unavailable, use only the currently advertised tools.
                     {"mode": "atomic", "atomic_repair_remaining": 0}, None)
         normal = {"run_survival_task", "wait", "eat_food", "auto_sleep", "retreat_from", "fight_hostile",
                   "select_task", "update_progress", "finish_task", "force_exit_task", "end_competition"}
+        if self.objective == "competition":
+            active = (context.get("competition") or {}).get("active_goal") or {}
+            if active.get("id") == "minecraft:story/lava_bucket" and active.get("availability") == "ready":
+                normal.add("collect_liquid")
         task = context.get("task_execution") or {}
         task = task if isinstance(task, dict) else {}
         result = context.get("last_result") or {}
@@ -767,6 +776,9 @@ If that goal tool is unavailable, use only the currently advertised tools.
             if combat.get("allowed") is not True:
                 raise LLMError("llm_unsafe_action", "Combat conditions are not verified: " + combat.get("reason", "unknown"))
         if name == "collect_liquid":
+            active = ((context.get("competition") or {}).get("active_goal") or {}) if self.objective == "competition" else {}
+            if active.get("id") == "minecraft:story/lava_bucket" and args["expected_name"] != "lava":
+                raise LLMError("llm_unsafe_action", "The active lava bucket goal requires lava, not water")
             if counts.get("bucket", 0) < 1 or not any(row["name"] == args["expected_name"] and list(row["pos"]) == args["pos"] for row in blocks):
                 raise LLMError("llm_unsafe_action", "Bucket collection requires an existing empty bucket and a currently observed matching source")
         if name == "hunt_with_lava" and counts.get("lava_bucket", 0) < 1:
