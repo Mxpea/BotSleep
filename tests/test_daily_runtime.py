@@ -166,8 +166,9 @@ class DailyRuntimeTests(unittest.TestCase):
         self.assertEqual(self.world.counts.get("iron_ingot", 0), 0)
         self.assertEqual(harness.context["smelting_jobs"][0]["expected_output"], "iron_ingot")
         tools = {entry["function"]["name"] for entry in endpoint.requests[0]["body"]["tools"]}
-        self.assertTrue((set(DailySurvivalSkills.ARGUMENTS) - {"canopy_escape"}).issubset(tools))
+        self.assertTrue((set(DailySurvivalSkills.ARGUMENTS) - {"canopy_escape", "water_escape"}).issubset(tools))
         self.assertNotIn("canopy_escape", tools)  # Internal local safety, never a model command.
+        self.assertNotIn("water_escape", tools)  # Internal local safety, never a model command.
         self.assertIn("plan_shelter", tools)
         self.assertNotIn("goal_complete", tools)
         self.assertTrue(self.step(harness).success)

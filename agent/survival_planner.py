@@ -224,6 +224,14 @@ class SurvivalPlanner:
                 return Decision("move_to", {"pos": list(table["pos"]), "range": 2}, "Approach the existing crafting table", "crafting_table")
             return None
         if counts.get("crafting_table", 0) > 0:
+            for row in observation.get("placement_candidates") or []:
+                pos = self._pos(row.get("pos")) if isinstance(row, dict) else None
+                if pos is None or len(pos) != 3 or math.dist(pos, origin) > 3.5:
+                    continue
+                target = [math.floor(pos[0]), math.floor(pos[1]), math.floor(pos[2])]
+                if self._key(target) in blocked or self._dangerous_hostiles(observation, target):
+                    continue
+                return Decision("place_item", {"item": "crafting_table", "pos": target}, "Propose an adjacent workspace; the skill must verify air and solid support", "crafting_table")
             base = [math.floor(v) for v in origin]
             by_pos = {self._key(b["pos"]): b for b in blocks}
             for dx, dz in ((2, 0), (0, 2), (-2, 0), (0, -2), (1, 1), (-1, 1), (-1, -1), (1, -1)):

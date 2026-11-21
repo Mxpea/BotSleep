@@ -108,6 +108,8 @@ class MinecraftAgentClient:
         try:
             response = request_fn(method, url, **kwargs)
         except requests.Timeout:
+            if endpoint in self.READ_RETRY_ENDPOINTS:
+                raise APIError("request_timeout", f"{endpoint} read request timed out") from None
             raise APIError("request_timeout", f"{endpoint} request timed out; server action state is unknown", details={"action_state": "unknown"}) from None
         except requests.ConnectionError:
             # Retry read-only status/block queries once when an idle keep-alive socket resets on Windows.
@@ -120,7 +122,7 @@ class MinecraftAgentClient:
                     self._session = requests.Session()
                     response = self._session.request(method, url, **{**kwargs, "timeout": remaining})
                 except requests.Timeout:
-                    raise APIError("request_timeout", f"{endpoint} request timed out; server action state is unknown", details={"action_state": "unknown"}) from None
+                    raise APIError("request_timeout", f"{endpoint} read request timed out") from None
                 except requests.RequestException:
                     raise APIError("network_error", f"{endpoint} request failed") from None
             else:
@@ -612,6 +614,13 @@ class MinecraftAgentClient:
         if stop_on is not None:
             payload["stop_on"] = stop_on
         return self._request("POST", "use_item", payload=payload, timeout_seconds=self._action_timeout(self.PATHFINDING_SECONDS))
+
+    def drop(self, item: str, count: Optional[int] = None) -> Dict[str, Any]:
+        """Toss unneeded items from inventory so mining/storage slots stay open."""
+        payload: Dict[str, Any] = {"item": item}
+        if count is not None:
+            payload["count"] = int(count)
+        return self._request("POST", "drop", payload=payload, timeout_seconds=self._action_timeout(15))
 
     def find_nearest_block(self, name_contains: str = "_bed", radius: int = 16) -> Optional[Dict[str, Any]]:
         """Compatibility helper over the nearest-per-type block summary."""

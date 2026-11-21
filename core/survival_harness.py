@@ -415,6 +415,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
             self.memory.observe(observation)
             recalled = self.memory.recall(observation, limit=6, max_bytes=2500)
             self.context["memory"] = recalled
+            self.context["autonomy_llm_mode"] = bool(self.uses_llm and self.task_controller is not None)
             self.daily_board = self.daily_goals.build(observation, recalled, self.context)
             self.daily_board.update(fresh=True, observation_scope="full")
             self.context["daily_tasks"] = {key: self.daily_board.get(key) for key in ("phase", "active_task_id", "maintenance_ready")}
@@ -473,7 +474,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
         names = {"select_task", "update_progress", "finish_task", "force_exit_task", "end_competition"}
         if decision.name not in names:
             if self.competition.snapshot().get("active_goal_id") is None and decision.name not in {
-                "wait", "retreat_from", "canopy_escape", "eat_food", "auto_sleep", "fight_hostile"}:
+                "wait", "retreat_from", "canopy_escape", "water_escape", "eat_food", "auto_sleep", "fight_hostile"}:
                 return SkillResult(False, "Select a scored goal before production actions", {"executed": False}, "task_selection_required")
             return None
         status = observation.get("status", {})
@@ -817,8 +818,17 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                     options["recovery_context"] = self._canopy_options(observation)
                 if self._task_child and self.context.get("cautious_bootstrap") is True:
                     options["cautious"] = True
-                runner = resolve_skill_runner(self, decision.name)
-                result = runner.execute(decision.name, decision.args, cancel_event=self._cancel, **options)
+                if self._task_child and decision.goal == "deep_mine":
+                    result = self._run_task_deep_mine(decision, observation)
+                elif self._task_child and decision.goal == "scout_surface":
+                    result = self._run_task_scout(decision, observation)
+                elif self._task_child and decision.goal == "equip_loadout":
+                    result = self._run_task_equip_loadout(decision, observation)
+                elif self._task_child and decision.goal == "nether_portal" and decision.name == "move_to":
+                    result = self._run_task_nether_portal(decision, observation)
+                else:
+                    runner = resolve_skill_runner(self, decision.name)
+                    result = runner.execute(decision.name, decision.args, cancel_event=self._cancel, **options)
             if not isinstance(result, SkillResult):
                 raise TypeError("Skill returned an invalid result")
             if ((self._model_feedback or self.daily or decision.name == "canopy_escape"
@@ -898,7 +908,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
         self._next_monitor = time.monotonic() + max(1, self.settings["poll_interval_seconds"])
         decision = self._active_decision
         planning = self.phase == "thinking" and self._model_worker is not None and self._model_worker.pending
-        if (decision is None and not planning) or (decision is not None and decision.name in ("retreat_from", "canopy_escape", "eat_food", "auto_sleep")):
+        if (decision is None and not planning) or (decision is not None and decision.name in ("retreat_from", "canopy_escape", "water_escape", "eat_food", "auto_sleep")):
             return
         try:
             status = self.client.get_status()["result"]
@@ -935,8 +945,16 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
             status.get("dimension") != baseline.get("dimension")
             or status.get("last_death") != baseline.get("last_death")
             or status.get("health", 0) < baseline.get("health", 20))
+        deep_mine_active = decision is not None and decision.goal in {"deep_mine", "scout_surface"}
+        submerged_danger = bool(
+            status.get("submerged")
+            and (
+                not deep_mine_active
+                or (isinstance(status.get("oxygen"), (int, float)) and float(status.get("oxygen", 20)) <= 12)
+            )
+        )
         danger = (not status.get("alive") or status.get("in_lava") or status.get("on_fire")
-                  or status.get("submerged") or status.get("in_water")
+                  or submerged_danger or (status.get("in_water") and not deep_mine_active)
                   or status.get("health", 20) <= self.settings["low_health_threshold"] and not (food_turn or local_recovery_turn)
                   or combat_changed
                   or (not combat_action and isinstance(hostile.get("dist"), (int, float))
@@ -1016,7 +1034,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
             self.steps += 1
             self.last_result, self.last_observation = result, observation
             self.context["last_result"] = asdict(result)
-            task_replan = self._task_result(decision, result, observation, uncertain=_uncertain_result(result),
+            task_replan = self._task_result(decision, result, observation, uncertain=_uncertain_result(result) and decision.name != "observe",
                 fatal=result.error_code in FATAL | {"death_limit", "internal", "internal_error"})
             if self.paused:
                 self._finish_task_feedback(observation, paused=True)
@@ -1053,6 +1071,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                     self._record("WARN", "COMBAT_RECOVERY_SCHEDULED", {
                         "code": result.error_code, "entity_id": decision.args["entity_id"], "retry_seconds": delay})
                 elif task_replan:
+                    delay = 0
+                elif decision.name == "water_escape" and local_replan:
                     delay = 0
                 elif retreat_replan or local_replan:
                     delay = RETREAT_WAIT_SECONDS

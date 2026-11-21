@@ -436,7 +436,7 @@ class NetherPortalSpeedrunSkill(BaseSkill):
         """Build, cast, clear water, ignite, and verify a Nether Portal in 4 orientations."""
         if origin is None:
             orient_filter = (orientation,) if orientation is not None else None
-            sites = self._locate_standard_portal_sites(radius=20, orientations=orient_filter, max_results=16)
+            sites = self._locate_standard_portal_sites(radius=36, orientations=orient_filter, max_results=16)
             if not sites:
                 return SkillResult(
                     success=False,

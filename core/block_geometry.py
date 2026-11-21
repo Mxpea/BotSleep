@@ -11,6 +11,8 @@ import math
 PASS_THROUGH = frozenset({
     "air", "cave_air", "void_air", "short_grass", "tall_grass", "fern", "large_fern",
     "dead_bush", "leaf_litter", "vine", "glow_lichen", "hanging_roots",
+    "moss_carpet", "pale_moss_carpet", "pale_hanging_moss",
+    "eyeblossom", "open_eyeblossom", "closed_eyeblossom",
     "dandelion", "poppy", "blue_orchid", "allium", "azure_bluet", "oxeye_daisy",
     "cornflower", "lily_of_the_valley", "orange_tulip", "pink_tulip", "red_tulip",
     "white_tulip", "sunflower", "lilac", "rose_bush", "peony",

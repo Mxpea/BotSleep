@@ -276,6 +276,13 @@ class ClientTests(unittest.TestCase):
         self.assertNotIn("test-password", str(caught.exception))
         self.assertNotIn("test-token", str(caught.exception))
 
+    def test_read_only_get_block_timeout_omits_unknown_action_state(self):
+        self.request.side_effect = requests.Timeout("read timed out")
+        with self.assertRaises(APIError) as caught:
+            self.client.get_block(1, 64, 1)
+        self.assertEqual(caught.exception.code, "request_timeout")
+        self.assertEqual(caught.exception.details, {})
+
     def test_network_failure_is_structured_without_request_credentials(self):
         self.request.side_effect = requests.ConnectionError("test-password")
         with self.assertRaises(APIError) as caught:

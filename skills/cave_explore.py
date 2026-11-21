@@ -16,7 +16,7 @@ from core.cave_probe import (
     probe_cavity,
     walkable_neighbors,
 )
-from core.domain import AIR, parse_pos
+from core.domain import AIR, LOG_NAMES, parse_pos
 from core.memory import MemoryEngine
 from core.mining_targets import (
     DEFAULT_EDIBLE_FOODS,
@@ -29,6 +29,7 @@ from core.mining_targets import (
 from core.pathfinder_3d import Pathfinder3D
 from core.structure_spec import (
     CAVE_LIMITS,
+    DEFAULT_REPLACEABLE,
     MINE_SHAFT_SPEC,
     MINE_TORCH_BLOCKS,
     ORE_DROP_MAP,
@@ -40,6 +41,7 @@ from skills.action_workflow import (
     WorkflowGuard,
     WorkflowStepError,
     consume,
+    place_block,
     place_torch,
     stand_cell,
 )
@@ -440,7 +442,13 @@ class CaveExploreSkill(BaseSkill):
 
                 base_totals = harvested_totals or {}
                 for k in set(base_totals) | set(cur_counts) | set(before_counts):
-                    inv_progress = int(base_totals.get(k, 0)) + max(0, cur_counts.get(k, 0) - before_counts.get(k, 0))
+                    if k == "raw_iron":
+                        gain = max(0, cur_counts.get("raw_iron", 0) - before_counts.get("raw_iron", 0)) + max(
+                            0, cur_counts.get("iron_ingot", 0) - before_counts.get("iron_ingot", 0)
+                        )
+                    else:
+                        gain = max(0, cur_counts.get(k, 0) - before_counts.get(k, 0))
+                    inv_progress = int(base_totals.get(k, 0)) + gain
                     if inv_progress > running_harvested.get(k, 0):
                         running_harvested[k] = inv_progress
 
@@ -466,8 +474,16 @@ class CaveExploreSkill(BaseSkill):
                         dive_visited.add(tuple(cur_pos))
                         active_world.record_stance(cur_pos)
                     cur_counts, cur_items = OreHarvester.read_inventory(ctx)
+                    if self._try_in_cave_camp(ctx, cur_pos, cur_counts, cached_read, active_world):
+                        cur_counts, cur_items = OreHarvester.read_inventory(ctx)
                     for k in set(base_totals) | set(cur_counts) | set(before_counts):
-                        inv_progress = int(base_totals.get(k, 0)) + max(0, cur_counts.get(k, 0) - before_counts.get(k, 0))
+                        if k == "raw_iron":
+                            gain = max(0, cur_counts.get("raw_iron", 0) - before_counts.get("raw_iron", 0)) + max(
+                                0, cur_counts.get("iron_ingot", 0) - before_counts.get("iron_ingot", 0)
+                            )
+                        else:
+                            gain = max(0, cur_counts.get(k, 0) - before_counts.get(k, 0))
+                        inv_progress = int(base_totals.get(k, 0)) + gain
                         if inv_progress > running_harvested.get(k, 0):
                             running_harvested[k] = inv_progress
                     if (
@@ -844,7 +860,7 @@ class CaveExploreSkill(BaseSkill):
                                 cur_pos = snap
                                 dive_visited.add(tuple(cur_pos))
                                 active_world.record_stance(cur_pos)
-                            if consecutive_step_failures >= 6:
+                            if consecutive_step_failures >= 3:
                                 break
                             continue
                         raise
@@ -901,15 +917,19 @@ class CaveExploreSkill(BaseSkill):
         if not retreat_ok and not escaped_surface:
             stop_reason = "safety_interrupted"
 
-        active_world.invalidate(entry_cell, radius=1)
-        for check_y in (entry_cell[1], entry_cell[1] + 1):
-            for dx, dy, dz in ((0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)):
-                blk = cached_read((entry_cell[0] + dx, check_y + dy, entry_cell[2] + dz))
-                if is_lava_like(blk) or str(blk.get("name") or "") == "spawner":
-                    junction_unsafe = True
-                    break
+        try:
+            active_world.invalidate(entry_cell, radius=1)
+            for check_y in (entry_cell[1], entry_cell[1] + 1):
+                for dx, dy, dz in ((0, 0, 0), (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)):
+                    blk = cached_read((entry_cell[0] + dx, check_y + dy, entry_cell[2] + dz))
+                    if is_lava_like(blk) or str(blk.get("name") or "") == "spawner":
+                        junction_unsafe = True
+                        break
 
-        after_counts, after_items = OreHarvester.read_inventory(ctx)
+            after_counts, after_items = OreHarvester.read_inventory(ctx)
+        except WorkflowStepError:
+            after_counts = ctx.inventory_counts()
+            after_items = [{"name": k, "count": v} for k, v in after_counts.items()]
         harvested = {
             k: after_counts[k] - before_counts.get(k, 0)
             for k in after_counts
@@ -1005,6 +1025,103 @@ class CaveExploreSkill(BaseSkill):
             consume(ctx, food_item)
             return True
         except WorkflowStepError:
+            return False
+
+    def _try_in_cave_camp(
+        self,
+        ctx: WorkflowContext,
+        cur_pos: Sequence[int],
+        cur_counts: Mapping[str, int],
+        read_fn: Callable[[Sequence[int]], Dict[str, Any]],
+        active_world: VoxelWorld3D,
+    ) -> bool:
+        """Set up a safe temporary furnace camp inside a cave/ravine to smelt raw_iron batches."""
+        if not callable(getattr(ctx.guard.client, "window_act", None)) or not callable(
+            getattr(ctx.guard.client, "place_block", None)
+        ):
+            return False
+        raw_iron = int(cur_counts.get("raw_iron", 0))
+        has_fuel = int(cur_counts.get("coal", 0)) >= 1 or any(
+            int(cur_counts.get(n, 0)) >= 2 for n in LOG_NAMES
+        )
+        has_furnace_or_mat = int(cur_counts.get("furnace", 0)) >= 1 or int(cur_counts.get("cobblestone", 0)) >= 8
+        if raw_iron < 8 or not has_fuel or not has_furnace_or_mat:
+            return False
+        if ctx.guard.remaining_timeout(999.0) < 65.0:
+            return False
+        last_try = float(ctx.extra.get("cave_camp_last_try", 0.0)) if isinstance(ctx.extra, dict) else 0.0
+        if time.monotonic() - last_try < 25.0:
+            return False
+        if isinstance(ctx.extra, dict):
+            ctx.extra["cave_camp_last_try"] = time.monotonic()
+
+        from skills.container import ContainerSkill
+        from skills.crafting import CraftItemSkill
+
+        furnace_pos: Optional[List[int]] = None
+        cx, cy, cz = int(cur_pos[0]), int(cur_pos[1]), int(cur_pos[2])
+        for dx in range(-2, 3):
+            for dy in range(-1, 2):
+                for dz in range(-2, 3):
+                    cand = [cx + dx, cy + dy, cz + dz]
+                    if str(read_fn(cand).get("name") or "") == "furnace":
+                        furnace_pos = cand
+                        break
+                if furnace_pos is not None:
+                    break
+            if furnace_pos is not None:
+                break
+
+        if furnace_pos is None:
+            if int(cur_counts.get("furnace", 0)) < 1:
+                try:
+                    cr = CraftItemSkill(self.client, memory=self.memory).execute(
+                        "furnace",
+                        1,
+                        auto_prerequisites=True,
+                        retrieve_table=True,
+                        max_duration_seconds=30.0,
+                    )
+                    if not cr.success:
+                        return False
+                except Exception:
+                    return False
+            for ddx, ddz in ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, 1), (1, -1), (-1, -1)):
+                cand = [cx + ddx, cy, cz + ddz]
+                if cand[0] == cx and cand[2] == cz:
+                    continue
+                here = read_fn(cand)
+                below = read_fn((cand[0], cand[1] - 1, cand[2]))
+                above = read_fn((cand[0], cand[1] + 1, cand[2]))
+                if (
+                    str(here.get("name") or "air") in AIR
+                    and is_solid_floor(below)
+                    and str(above.get("name") or "air") in AIR
+                    and ore_cell_hazard_free(cand, read_fn, block_cache=active_world.block_cache)
+                ):
+                    try:
+                        place_block(ctx, "furnace", cand, relative=False, replaceable=DEFAULT_REPLACEABLE)
+                        active_world.invalidate(cand, radius=1)
+                        furnace_pos = cand
+                        break
+                    except WorkflowStepError:
+                        continue
+
+        if furnace_pos is None:
+            return False
+
+        smelt_timeout = min(90.0, max(25.0, ctx.guard.remaining_timeout(120.0) - 25.0))
+        try:
+            sr = ContainerSkill(self.client).smelt(
+                furnace_pos,
+                "raw_iron",
+                raw_iron,
+                wait_complete=True,
+                timeout_seconds=smelt_timeout,
+                cancel_event=ctx.guard.cancel_event,
+            )
+            return bool(sr.success)
+        except Exception:
             return False
 
     @staticmethod
@@ -1204,12 +1321,18 @@ class CaveExploreSkill(BaseSkill):
         self,
         origin: Optional[Sequence[int]] = None,
         *,
-        search_radius: int = 22,
+        search_radius: int = 40,
         max_candidates: int = 4,
         block_cache: Optional[Dict[Tuple[int, int, int], Dict[str, Any]]] = None,
         world: Optional[VoxelWorld3D] = None,
+        timeout_seconds: float = 15.0,
+        max_reads: int = 600,
+        cancel_event: Optional[threading.Event] = None,
     ) -> List[Dict[str, Any]]:
-        """Discover nearby natural rock-roofed cave openings."""
+        """Discover nearby natural rock-roofed cave openings and accessible water ravines within hard read/time budgets."""
+        scan_deadline = time.monotonic() + max(1.0, float(timeout_seconds))
+        read_limit = max(60, int(max_reads))
+        reads = [0]
         raw_st = self.client.get_status()
         st = raw_st.get("result") if isinstance(raw_st, dict) and "result" in raw_st else raw_st
         bp = parse_pos(origin if origin is not None else (st.get("pos") if isinstance(st, dict) else None))
@@ -1218,7 +1341,15 @@ class CaveExploreSkill(BaseSkill):
         ox, oy, oz = int(math.floor(bp[0])), int(math.floor(bp[1])), int(math.floor(bp[2]))
         active_world = self._resolve_world(world=world, block_cache=block_cache, persistent_world=False)
 
+        def _budget_ok() -> bool:
+            if cancel_event is not None and cancel_event.is_set():
+                return False
+            return time.monotonic() < scan_deadline and reads[0] < read_limit
+
         def raw_read(k: Tuple[int, int, int]) -> Dict[str, Any]:
+            if not _budget_ok():
+                return {"name": "unknown", "properties": {}}
+            reads[0] += 1
             raw = self.client.get_block(k[0], k[1], k[2])
             if isinstance(raw, dict):
                 blk = raw.get("result") if isinstance(raw.get("result"), dict) else raw
@@ -1231,26 +1362,35 @@ class CaveExploreSkill(BaseSkill):
 
         candidates: List[Dict[str, Any]] = []
         seed_coords: List[Tuple[int, int, int]] = []
+        ore_seed_set: Set[Tuple[int, int, int]] = set()
         try:
             fb = getattr(self.client, "find_blocks", None) or getattr(self.client, "get_blocks", None)
             if callable(fb):
-                ores = fb(types=list(ORE_DROP_MAP), radius=min(32, int(search_radius)), limit=24) or []
+                ores = fb(types=list(ORE_DROP_MAP), radius=min(48, int(search_radius)), limit=48) or []
                 for row in ores:
                     p = row.get("pos") if isinstance(row, dict) else None
                     if not isinstance(p, (list, tuple)) or len(p) != 3:
                         continue
                     for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                        seed_coords.append((int(p[0]) + dx, int(p[1]), int(p[2]) + dz))
+                        pt = (int(p[0]) + dx, int(p[1]), int(p[2]) + dz)
+                        seed_coords.append(pt)
+                        ore_seed_set.add(pt)
         except Exception:
             pass
 
-        step = 4
-        for dx in range(-int(search_radius), int(search_radius) + 1, step):
-            for dz in range(-int(search_radius), int(search_radius) + 1, step):
-                if dx == 0 and dz == 0:
-                    continue
-                for dy in range(-14, 10, 3):
-                    seed_coords.append((ox + dx, oy + dy, oz + dz))
+        step = 6
+        grid_offsets = sorted(
+            (
+                (dx, dz)
+                for dx in range(-int(search_radius), int(search_radius) + 1, step)
+                for dz in range(-int(search_radius), int(search_radius) + 1, step)
+                if not (dx == 0 and dz == 0)
+            ),
+            key=lambda d: (d[0] * d[0] + d[1] * d[1], abs(d[0]) + abs(d[1])),
+        )
+        for dx, dz in grid_offsets:
+            for dy in (-4, 0, -8, -12, -16, -20, -24, 4, 8):
+                seed_coords.append((ox + dx, oy + dy, oz + dz))
 
         rock_roof_blocks = {
             "stone", "deepslate", "andesite", "diorite", "granite", "tuff",
@@ -1259,22 +1399,40 @@ class CaveExploreSkill(BaseSkill):
         } | set(ORE_DROP_MAP)
 
         seen_clusters: List[Tuple[int, int, int]] = []
-        for sx, sy, sz in seed_coords:
+        for sx, raw_sy, sz in seed_coords:
+            if not _budget_ok() or len(candidates) >= int(max_candidates):
+                break
+            probe_foot = read_blk((sx, raw_sy, sz))
+            if not is_passable(probe_foot):
+                continue
+            sy: Optional[int] = None
+            for down in range(5):
+                cand_y = raw_sy - down
+                below = read_blk((sx, cand_y - 1, sz))
+                if is_solid_floor(below):
+                    if is_passable(read_blk((sx, cand_y, sz))) and is_passable(read_blk((sx, cand_y + 1, sz))):
+                        sy = cand_y
+                    break
+                if not is_passable(below):
+                    break
+            if sy is None or not _budget_ok():
+                continue
             if any(abs(sx - cx) + abs(sz - cz) < 10 and abs(sy - cy) < 8 for cx, cy, cz in seen_clusters):
                 continue
             foot = read_blk((sx, sy, sz))
             head = read_blk((sx, sy + 1, sz))
-            floor = read_blk((sx, sy - 1, sz))
-            if not (is_passable(foot) and is_passable(head) and is_solid_floor(floor)):
+            if str(foot.get("name") or "") == "water" and str(head.get("name") or "") == "water":
                 continue
             if not any(str(read_blk((sx, sy + ky, sz)).get("name") or "air") in rock_roof_blocks for ky in range(2, 8)):
                 continue
-            rep = probe_cavity([sx, sy, sz], [sx, sy, sz], read_blk, limits={"max_probe_cells": 90, "horizontal_radius": 8, "vertical_span": 6}, block_cache=active_world.block_cache)
-            if rep.get("lava_found") or rep.get("spawner_found") or int(rep.get("water_count", 0)) >= 3:
+            if not _budget_ok():
+                break
+            rep = probe_cavity([sx, sy, sz], [sx, sy, sz], read_blk, limits={"max_probe_cells": 45, "horizontal_radius": 6, "vertical_span": 5}, block_cache=active_world.block_cache)
+            if rep.get("lava_found") or rep.get("spawner_found"):
                 continue
-            if int(rep.get("air_count", 0)) < 10:
+            if int(rep.get("air_count", 0)) < 10 or not _budget_ok():
                 continue
-            graph = Pathfinder3D.plan_horizon(active_world, [sx, sy, sz], read_blk, max_nodes=80, max_radius=10)
+            graph = Pathfinder3D.plan_horizon(active_world, [sx, sy, sz], read_blk, max_nodes=40, max_radius=8)
             if len(graph.get("nodes") or []) < 3:
                 continue
             seen_clusters.append((sx, sy, sz))
@@ -1285,13 +1443,12 @@ class CaveExploreSkill(BaseSkill):
                     "air_count": int(rep.get("air_count", 0)),
                     "safe_nodes": len(graph.get("nodes") or []),
                     "distance": dist,
+                    "has_exposed_ore": (sx, raw_sy, sz) in ore_seed_set,
                     "report": rep,
                 }
             )
-            if len(candidates) >= int(max_candidates) * 2:
-                break
 
-        candidates.sort(key=lambda c: (-c["safe_nodes"], c["distance"]))
+        candidates.sort(key=lambda c: (0 if c.get("has_exposed_ore") else 1, -c["safe_nodes"], c["distance"]))
         return candidates[: int(max_candidates)]
 
     def discover_and_explore_caves(
@@ -1326,81 +1483,118 @@ class CaveExploreSkill(BaseSkill):
         ctx = WorkflowContext(guard=guard, spec=MINE_SHAFT_SPEC, origin=[0, 0, 0], orientation="south", extra={})
         active_world = self._resolve_world(world=world, block_cache=None, persistent_world=persistent_world)
 
-        before_counts, _ = OreHarvester.read_inventory(ctx)
-        if before_counts.get("torch", 0) < 4:
-            if self._try_craft_torches(ctx, before_counts):
-                before_counts, _ = OreHarvester.read_inventory(ctx)
-        openings = self.find_cave_openings(origin=origin, search_radius=search_radius, max_candidates=max_caves, world=active_world)
+        before_counts: Dict[str, int] = {}
+        openings: List[Dict[str, Any]] = []
         caves_explored: List[Dict[str, Any]] = []
         ores_all: List[Dict[str, Any]] = []
         torches_total = 0
-        stop_reason = "no_caves_found" if not openings else "caves_exhausted"
+        stop_reason = "no_caves_found"
         home_reason: Optional[str] = None
+        interrupted_error: Optional[str] = None
 
-        for op in openings:
-            if guard.remaining_timeout(999.0) < 25.0:
-                break
-            entry = op["entry_pos"]
-            if norm_coord(entry) in active_world.scanned_cells:
-                continue
-            nav = self.navigate_with_ops(entry, ctx=ctx, world=active_world, allow_pillar=True, allow_dig=True, allow_bridge=True, allow_drop=True, max_steps=32)
-            if not nav.success:
-                continue
-            cur_counts, _ = OreHarvester.read_inventory(ctx)
-            running = {
-                k: max(0, cur_counts.get(k, 0) - before_counts.get(k, 0))
-                for k in cur_counts
-            }
-            ex = self.explore_cave(
-                entry_pos=nav.data.get("pos", entry),
-                origin_air=entry,
-                targets=targets,
-                cave_policy=policy,
-                home_thresholds=home_thresholds,
-                harvested_totals=running,
+        try:
+            before_counts, _ = OreHarvester.read_inventory(ctx)
+            if before_counts.get("torch", 0) < 4:
+                if self._try_craft_torches(ctx, before_counts):
+                    before_counts, _ = OreHarvester.read_inventory(ctx)
+            openings = self.find_cave_openings(
+                origin=origin,
+                search_radius=search_radius,
+                max_candidates=max_caves,
                 world=active_world,
-                guard=guard,
-                prefer_flood_planner=True,
-                allow_tall_cave_subgraph=True,
-                allow_pillar=True,
-                allow_micro_dig=True,
-                allow_bridge=True,
-                allow_drop=True,
-                allow_surface_escape=True,
-                stop_on_target=True,
+                timeout_seconds=min(15.0, max(5.0, guard.remaining_timeout(60.0) * 0.2)),
+                max_reads=600,
+                cancel_event=cancel_event,
             )
-            caves_explored.extend(ex.data.get("caves") or [])
-            ores_all.extend(ex.data.get("ores") or [])
-            torches_total += int(ex.data.get("torches_placed", 0))
+            stop_reason = "no_caves_found" if not openings else "caves_exhausted"
 
-            after_counts, _ = OreHarvester.read_inventory(ctx)
-            net_counts = {k: max(0, after_counts.get(k, 0) - before_counts.get(k, 0)) for k in after_counts}
-            quotas_done = bool(parsed_targets) and all(
-                net_counts.get(spec["drop_item"], 0) >= int(spec["count"])
-                for spec in parsed_targets.values()
-            )
-            if quotas_done:
-                stop_reason = "target_reached"
-                break
-            if ex.data.get("stop_reason") == "return_home" and ex.data.get("home_reason") in {
-                "inventory_full",
-                "no_pickaxe",
-                "low_health",
-                "low_food",
-            }:
-                stop_reason = "return_home"
-                home_reason = ex.data.get("home_reason")
-                break
+            for op in openings:
+                if guard.remaining_timeout(999.0) < 25.0:
+                    break
+                entry = op["entry_pos"]
+                if norm_coord(entry) in active_world.scanned_cells:
+                    continue
+                nav = self.navigate_with_ops(entry, ctx=ctx, world=active_world, allow_pillar=True, allow_dig=True, allow_bridge=True, allow_drop=True, max_steps=32)
+                if not nav.success:
+                    continue
+                cur_counts, _ = OreHarvester.read_inventory(ctx)
+                running = {
+                    k: (
+                        max(0, cur_counts.get("raw_iron", 0) - before_counts.get("raw_iron", 0))
+                        + max(0, cur_counts.get("iron_ingot", 0) - before_counts.get("iron_ingot", 0))
+                        if k == "raw_iron"
+                        else max(0, cur_counts.get(k, 0) - before_counts.get(k, 0))
+                    )
+                    for k in set(cur_counts) | {"raw_iron"}
+                }
+                ex = self.explore_cave(
+                    entry_pos=nav.data.get("pos", entry),
+                    origin_air=entry,
+                    targets=targets,
+                    cave_policy=policy,
+                    home_thresholds=home_thresholds,
+                    harvested_totals=running,
+                    world=active_world,
+                    guard=guard,
+                    prefer_flood_planner=True,
+                    allow_tall_cave_subgraph=True,
+                    allow_pillar=True,
+                    allow_micro_dig=True,
+                    allow_bridge=True,
+                    allow_drop=True,
+                    allow_surface_escape=True,
+                    stop_on_target=True,
+                )
+                caves_explored.extend(ex.data.get("caves") or [])
+                ores_all.extend(ex.data.get("ores") or [])
+                torches_total += int(ex.data.get("torches_placed", 0))
+
+                after_counts, _ = OreHarvester.read_inventory(ctx)
+                net_counts = {
+                    k: (
+                        max(0, after_counts.get("raw_iron", 0) - before_counts.get("raw_iron", 0))
+                        + max(0, after_counts.get("iron_ingot", 0) - before_counts.get("iron_ingot", 0))
+                        if k == "raw_iron"
+                        else max(0, after_counts.get(k, 0) - before_counts.get(k, 0))
+                    )
+                    for k in set(after_counts) | {"raw_iron"}
+                }
+                quotas_done = bool(parsed_targets) and all(
+                    net_counts.get(spec["drop_item"], 0) >= int(spec["count"])
+                    for spec in parsed_targets.values()
+                )
+                if quotas_done:
+                    stop_reason = "target_reached"
+                    break
+                if ex.data.get("stop_reason") == "return_home" and ex.data.get("home_reason") in {
+                    "inventory_full",
+                    "no_pickaxe",
+                    "low_health",
+                    "low_food",
+                }:
+                    stop_reason = "return_home"
+                    home_reason = ex.data.get("home_reason")
+                    break
+        except WorkflowStepError as exc:
+            interrupted_error = exc.code
+            if exc.code in {"dead", "not_ready", "damage_taken", "life_changed", "safety_interrupted"}:
+                stop_reason = "safety_interrupted"
+            else:
+                stop_reason = exc.code or "interrupted"
 
         if active_world.db_path is not None:
             active_world.save()
 
-        after_counts, _ = OreHarvester.read_inventory(ctx)
+        try:
+            after_counts, _ = OreHarvester.read_inventory(ctx)
+        except WorkflowStepError:
+            after_counts = ctx.inventory_counts()
         harvested = {k: max(0, after_counts.get(k, 0) - before_counts.get(k, 0)) for k in after_counts if after_counts.get(k, 0) > before_counts.get(k, 0)}
+        error_code = interrupted_error if interrupted_error and stop_reason != "target_reached" else ("return_home_requested" if stop_reason == "return_home" else None)
         return SkillResult(
-            stop_reason == "target_reached" or bool(caves_explored),
+            stop_reason == "target_reached" or (bool(caves_explored) and error_code is None),
             f"Cave-first expedition visited {len(caves_explored)} cave(s), stop={stop_reason}, harvested={harvested}",
-            error_code="return_home_requested" if stop_reason == "return_home" else None,
+            error_code=error_code,
             data={
                 "caves": caves_explored,
                 "ores": ores_all,

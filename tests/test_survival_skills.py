@@ -1289,7 +1289,7 @@ class SurvivalTests(unittest.TestCase):
         self.assertFalse(self.world.writes())
 
     def test_retreat_refuses_void_liquid_and_no_direction(self):
-        for ground in ("air", "lava", "sand"):
+        for ground in ("air", "lava", "glass"):
             with self.subTest(ground=ground):
                 self.world.ground = ground
                 result = self.skills.execute("retreat_from", {"pos": [-3, 64, 0.5]})
@@ -1351,6 +1351,76 @@ class SurvivalWrapperTests(unittest.TestCase):
         self.assertGreaterEqual(request.call_args.kwargs["timeout"], 420)
         client.connect()
         self.assertTrue(request.call_args.args[1].endswith("/connect"))
+
+
+class WaterEscapeTests(unittest.TestCase):
+    def test_water_escape_swims_up_when_submerged_and_lands_on_verified_dry_shore(self):
+        world = World()
+        world.ground = "water"
+        world.status.update({"pos": [0.5, 61.0, 0.5], "in_water": True, "submerged": True, "on_ground": False, "oxygen": 10})
+        world.set_block([0, 62, 0], "water")
+        world.set_block([0, 63, 0], "air")
+        world.set_block([1, 62, 0], "grass_block")
+        world.set_block([1, 63, 0], "air")
+        world.set_block([1, 64, 0], "air")
+        control_calls = []
+
+        def fake_control(**kwargs):
+            control_calls.append(kwargs)
+            world.calls.append(("control", kwargs))
+            if kwargs.get("jump") and not kwargs.get("forward"):
+                world.status.update({"pos": [0.5, 62.0, 0.5], "submerged": False, "oxygen": 20})
+            elif kwargs.get("forward"):
+                world.status.update({"pos": [1.5, 63.0, 0.5], "in_water": False, "submerged": False, "on_ground": True})
+            return envelope({"ok": True})
+
+        def fake_move(pos, kwargs):
+            world.status.update({"pos": list(pos), "in_water": False, "submerged": False, "on_ground": True})
+            return envelope({"pos": world.status["pos"]})
+
+        world.control = fake_control
+        world.move_effect = fake_move
+        res = SurvivalSkills(world).execute("water_escape", {})
+        self.assertTrue(res.success, res)
+        self.assertTrue(res.data["escaped_water"])
+        self.assertTrue(any(c.get("jump") for c in control_calls))
+        self.assertEqual(res.data["pos"], [1.5, 63.0, 0.5])
+
+    def test_water_escape_falls_back_to_directional_swim_hop_when_shore_move_stalls(self):
+        world = World()
+        world.ground = "water"
+        world.status.update({"pos": [0.5, 62.0, 0.5], "in_water": True, "submerged": False, "on_ground": False})
+        world.set_block([1, 62, 0], "grass_block")
+        world.set_block([1, 63, 0], "air")
+        world.set_block([1, 64, 0], "air")
+        control_calls = []
+
+        def fake_control(**kwargs):
+            control_calls.append(kwargs)
+            world.calls.append(("control", kwargs))
+            world.status.update({"pos": [1.5, 63.0, 0.5], "in_water": False, "submerged": False, "on_ground": True})
+            return envelope({"ok": True})
+
+        world.control = fake_control
+        world.move_effect = Mock(side_effect=APIError("stalled", "stuck at shoreline edge"))
+        res = SurvivalSkills(world).execute("water_escape", {})
+        self.assertTrue(res.success, res)
+        self.assertEqual(res.data["stage"], "shore_swim")
+        self.assertTrue(any(c.get("forward") and c.get("jump") for c in control_calls))
+
+    def test_water_escape_disconnect_keeps_action_unknown_without_stop(self):
+        world = World()
+        world.ground = "water"
+        world.status.update({"pos": [0.5, 62.0, 0.5], "in_water": True, "submerged": False, "on_ground": False})
+        world.set_block([1, 62, 0], "grass_block")
+        world.set_block([1, 63, 0], "air")
+        world.set_block([1, 64, 0], "air")
+        world.move_effect = Mock(side_effect=APIError("not_connected", "dropped"))
+        res = SurvivalSkills(world).execute("water_escape", {})
+        self.assertFalse(res.success)
+        self.assertEqual(res.error_code, "action_unconfirmed")
+        self.assertEqual(res.data.get("action_state"), "unknown")
+        self.assertNotIn("stop", [c[0] for c in world.calls])
 
 
 if __name__ == "__main__":

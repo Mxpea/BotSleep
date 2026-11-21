@@ -49,6 +49,7 @@ class OpenAIBrain:
         max_tokens: int = 1024,
         timeout_seconds: float = 30,
         tls_version: str = "auto",
+        gate_wait_seconds: float = 60.0,
         request_gate=_AUTO_GATE,
         recorder=None,
     ):
@@ -61,7 +62,7 @@ class OpenAIBrain:
         if tls_version not in ("auto", "1.2"):
             raise LLMError("llm_invalid_config", "Unsupported model TLS version setting")
         self.tls_version = tls_version
-        self.request_gate = (ModelRequestGate(self.base_url, self.api_key, recorder=recorder)
+        self.request_gate = (ModelRequestGate(self.base_url, self.api_key, wait_seconds=max(5.0, float(gate_wait_seconds)), recorder=recorder)
                              if request_gate is _AUTO_GATE else request_gate)
 
     @property
