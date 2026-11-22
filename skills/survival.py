@@ -580,8 +580,27 @@ class SurvivalSkills:
         self._overworld(before)
         if before.get("in_lava") or before.get("on_fire"):
             raise _Failure("unsafe", "Cannot run water escape while in lava or fire")
-        is_dry = lambda st: not st.get("in_water") and not st.get("submerged")
-        if is_dry(before):
+        def is_settled_dry(st):
+            if st.get("in_water") or st.get("submerged"):
+                return False
+            # Jumping upward over water temporarily clears in_water while
+            # airborne (on_ground=False); require landed ground contact when exposed.
+            if "on_ground" in st and st.get("on_ground") is not None:
+                return st.get("on_ground") is True
+            return True
+
+        def _confirm_dry_landing():
+            nonlocal cur
+            if is_settled_dry(cur):
+                return True
+            if not cur.get("in_water") and not cur.get("submerged") and cur.get("on_ground") is False:
+                time.sleep(0.25)
+                cur = self._status(context)
+                return is_settled_dry(cur)
+            return False
+
+        cur = before
+        if _confirm_dry_landing():
             return {"pos": before["pos"], "escaped_water": True, "stage": "already_dry", "progress_made": True}
 
         fatal_or_unknown = {
@@ -590,7 +609,6 @@ class SurvivalSkills:
             "cancelled", "dead", "not_ready", "dimension_changed", "interrupted",
             "busy", "life_changed", "lifecycle_changed", "unsafe_state",
         }
-        cur = before
 
         def swim_step(**kw):
             nonlocal cur
@@ -619,7 +637,7 @@ class SurvivalSkills:
             if not swim_step(jump=True, ms=700, wait=True):
                 break
             up_pulses += 1
-            if is_dry(cur):
+            if _confirm_dry_landing():
                 context["navigation_verified"] = True
                 return {"pos": cur["pos"], "escaped_water": True, "stage": "surfaced_dry", "progress_made": True}
 
@@ -694,20 +712,23 @@ class SurvivalSkills:
                     if getattr(exc, "code", None) in fatal_or_unknown:
                         raise
                 cur = self._status(context)
-                if is_dry(cur):
+                if _confirm_dry_landing():
                     context["navigation_verified"] = True
                     return {"pos": cur["pos"], "target": [tx, ty, tz], "escaped_water": True, "stage": "shore_move", "progress_made": True}
             # Direct bank lip swim-hop when Mineflayer move_to stalls at shoreline edge
             if math.hypot(tx + 0.5 - cur["pos"][0], tz + 0.5 - cur["pos"][2]) <= 6.5:
+                step_before_h = list(cur["pos"])
                 yaw = math.atan2(-(tx + 0.5 - cur["pos"][0]), -(tz + 0.5 - cur["pos"][2]))
                 swim_step(forward=True, jump=True, yaw=yaw, pitch=0.0, ms=850, wait=True)
-                if is_dry(cur):
+                if _confirm_dry_landing():
                     context["navigation_verified"] = True
                     return {"pos": cur["pos"], "target": [tx, ty, tz], "escaped_water": True, "stage": "shore_swim", "progress_made": True}
-                break
+                if math.hypot(cur["pos"][0] - step_before_h[0], cur["pos"][2] - step_before_h[2]) >= 0.5:
+                    break
 
         # Phase 3: fallback directional swim toward wider shore or cardinal headings
-        if is_dry(cur) is False and (cur["pos"] == before["pos"] or math.dist(cur["pos"], before["pos"]) < 0.8):
+        moved_since_start = math.hypot(cur["pos"][0] - before["pos"][0], cur["pos"][2] - before["pos"][2])
+        if not is_settled_dry(cur) and moved_since_start < 0.6:
             yaw = float(cur.get("yaw", 0.0) or 0.0)
             if callable(getattr(self.client, "get_blocks", None)):
                 try:
@@ -720,15 +741,23 @@ class SurvivalSkills:
                     if getattr(exc, "code", None) in fatal_or_unknown:
                         raise
             swim_step(forward=True, jump=True, yaw=yaw, pitch=0.0, ms=900, wait=True)
-            if is_dry(cur):
+            if _confirm_dry_landing():
                 context["navigation_verified"] = True
                 return {"pos": cur["pos"], "escaped_water": True, "stage": "swim_dry", "progress_made": True}
+            # If pressing straight toward bank moved <0.35m horizontally (steep cliff/overhang), swim laterally to skirt it.
+            if math.hypot(cur["pos"][0] - before["pos"][0], cur["pos"][2] - before["pos"][2]) < 0.35:
+                step_idx = int((context.get("recovery_context") or {}).get("steps", 0) or 0)
+                lateral_yaw = yaw + (math.pi / 2 if step_idx % 2 == 0 else -math.pi / 2)
+                swim_step(forward=True, jump=True, yaw=lateral_yaw, pitch=0.0, ms=900, wait=True)
+                if _confirm_dry_landing():
+                    context["navigation_verified"] = True
+                    return {"pos": cur["pos"], "escaped_water": True, "stage": "swim_dry", "progress_made": True}
 
         context["navigation_verified"] = True
         moved_h = math.hypot(cur["pos"][0] - before["pos"][0], cur["pos"][2] - before["pos"][2])
-        rose = cur["pos"][1] - before["pos"][1]
+        surfaced = bool(before.get("submerged") and not cur.get("submerged"))
         gained_air = cur.get("oxygen", 20) > before.get("oxygen", 20)
-        progress_made = moved_h >= 1.2 or rose >= 0.8 or gained_air
+        progress_made = moved_h >= 0.8 or surfaced or gained_air
         raise _Failure(
             "still_in_water",
             "Moved toward shoreline or air; still in water",
@@ -1214,6 +1243,7 @@ class SurvivalSkills:
             visited = {cell for cell, _ in entries}
             search["nodes"] = len(visited)
             queue = deque(entries)
+            best_partial = None
             directions = sorted(((1, 0), (-1, 0), (0, 1), (0, -1)),
                                 key=lambda delta: delta[0] * dx + delta[1] * dz, reverse=True)
             while queue:
@@ -1267,6 +1297,10 @@ class SurvivalSkills:
                             continue
                         if len(visited) >= 64:
                             search["termination"] = "node_budget"
+                            if best_partial is not None:
+                                _, b_point, b_route = best_partial
+                                search["termination"] = "partial_progress"
+                                return b_point, b_route
                             return None, None
                         support = safe_cell(cell, temporary_leaves=True)
                         if not support or (allow_deep_drop and step_y < -3 and support not in self.SUPPORT - self.RETREAT_TRUNKS):
@@ -1303,12 +1337,24 @@ class SurvivalSkills:
                                 if outcome["edge_start"]:
                                     route[0] = list(origin)
                                 return point, route
+                            if (not escaping and horizontal >= norm + 0.5
+                                    and math.hypot(point[0] - origin[0], point[2] - origin[2]) >= 0.9):
+                                p_route = [[c[0] + 0.5, c[1], c[2] + 0.5] for c in next_path]
+                                if outcome["edge_start"]:
+                                    p_route[0] = list(origin)
+                                score = (horizontal - norm, len(p_route))
+                                if best_partial is None or score > best_partial[0]:
+                                    best_partial = (score, point, p_route)
                             search["distance_rejections"] += 1
                         queue.append((cell, next_path))
                         # A two-block lower floor can coexist with a floor one
                         # block above the source; inspect that upper alternative.
                         if step_y != -2:
                             break
+            if best_partial is not None:
+                _, b_point, b_route = best_partial
+                search["termination"] = "partial_progress"
+                return b_point, b_route
             return None, None
 
         if before.get("on_ground") is not True:

@@ -134,29 +134,32 @@ to scan forward ~200 blocks for villages, chests, crafting tables, oasis/border 
 surface caves. Once context.last_scout_report exists AND you have logs/planks/pickaxe or visible
 trees, do NOT call scout again; ONLY call scout again if you still hold 0 logs/planks/pickaxe
 and see no logs nearby, OR if gather(logs) escalated with bounded_local_recovery_exhausted due to
-unreachable/steep terrain (call scout ONCE to relocate). Do NOT craft stone_axe or stone_sword
-early when operator_goal targets iron/diamond speedrun: craft wooden_pickaxe -> gather(cobblestone,
-count=11) -> stone_pickaxe + furnace, then go straight to raw_iron. When context.operator_goal asks
-for iron/diamond gear and stone_pickaxe >= 1 with status.food >= 16 and status.health >= 16, IGNORE
-optional daily_tasks (food_reserve, food_production, shelter, bed, base_site, storage, fuel_reserve,
-wood_reserve, furnace, maintain) EVEN AFTER a task escalation/failure: do NOT hunt animals, cook food,
-farm, chop extra wood reserves, or smelt charcoal (wooden planks/logs already smelt iron and mining
-finds coal). Call run_survival_task(task="gather", resource="raw_iron", count=24) IMMEDIATELY (it
-ensures spare stone pickaxes, prefers natural caves/water ravines and sets up an in-cave furnace camp
-to smelt iron, using branch mining only as fallback). Do NOT craft any iron_pickaxe yet during
-cave/raw_iron mining so server dig uses cheap stone_pickaxe instead of wasting iron durability on stone.
+unreachable/steep terrain (call scout ONCE to relocate). Always use unprefixed recipe names for
+"stick", "crafting_table", "furnace", "wooden_pickaxe", "stone_pickaxe" (NEVER wood-prefixed like
+"spruce_sticks"); once logs/planks >= 3, call run_survival_task(task="craft", item="wooden_pickaxe",
+count=1) directly (it crafts planks, sticks, and the table automatically). Do NOT call
+run_survival_task(task="recover_drops") unless item entities are visible nearby (death far away
+cannot be walked back). Do NOT craft stone_axe or extra duplicate tools early when operator_goal
+targets iron/diamond/nether speedrun: craft wooden_pickaxe -> gather(cobblestone, count=11) ->
+stone_pickaxe + furnace (and stone_sword if hostiles are near), then go straight to raw_iron.
+When context.operator_goal asks for iron/diamond gear and stone_pickaxe >= 1 with status.food >= 14
+and status.health >= 16, IGNORE optional daily_tasks (food_reserve, food_production, shelter, bed,
+base_site, storage, fuel_reserve, wood_reserve, furnace, maintain) EVEN AFTER a task
+escalation/failure: do NOT hunt animals, cook food, farm, chop extra wood reserves, or smelt
+charcoal (wooden planks/logs already smelt iron and mining finds coal). Call
+run_survival_task(task="gather", resource="raw_iron", count=12) IMMEDIATELY (it ensures spare stone
+pickaxes, prefers natural caves/water ravines and descends safely to Y=16, protecting you from
+night surface mobs). Do NOT craft any iron_pickaxe yet during raw_iron mining.
 2) Iron decision gate: once raw_iron, iron_ingot, or iron_tools completes, inspect current
 iron_ingot, iron_pickaxe, armor slots, offhand, food and reserves to decide the next goal
 yourself, STILL ignoring optional daily_tasks (food_reserve, shelter, wood_reserve, bed, furnace, maintain)
-while status.food >= 16 and status.health >= 16:
+while status.food >= 14 and status.health >= 16:
 Smelt remaining raw_iron into iron_ingot via run_survival_task(task="smelt", item="iron_ingot", count=...)
-first (it deploys 2-3 parallel furnaces automatically when >= 8 raw_iron), craft bucket (3) +
-shield (1) (and run run_survival_task(task="iron_armor") if you hold >= 32 iron_ingot spare for full
-armor + pickaxes). Do NOT waste iron or turns on iron_axe or iron_sword before diamonds. Craft 2-3
-iron_pickaxe right BEFORE calling run_survival_task(task="gather", resource="diamond", count=3).
-Once you hold >= 2 iron_pickaxe (and bucket/shield if crafted), either call
-run_survival_task(task="gather", resource="diamond", count=3) when your goal asks for diamonds
-and status.food >= 14 and status.health >= 16, OR proceed directly to the Nether portal gate!
+first, then craft bucket (3) + shield (1, if >= 7 iron) + iron_pickaxe (3). Craft iron_armor only
+if you already hold >= 24 iron_ingot spare. Do NOT waste iron or turns on iron_axe before Nether/diamonds.
+Once you hold >= 1 iron_pickaxe and >= 1 bucket (plus flint_and_steel or gravel), EITHER call
+run_survival_task(task="gather", resource="diamond", count=3) if you hold >= 2 iron_pickaxe and plenty
+of time/food, OR proceed directly to scout(lava)/nether_portal to enter the Nether quickly!
 3) Food, Village/Chest & Lava/Nether gate: NEVER starve or ignore low food. If status.food <= 14
 and safe edible food in counts is 0, call run_survival_task(task="food", count=8) before deep
 mining (it crafts hay_block/wheat->bread, harvests crops, loots village chests, cooks meat and hunts

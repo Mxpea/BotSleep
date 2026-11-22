@@ -724,21 +724,21 @@ class AutonomousTaskController:
             return self._row_decision(current)
         if item == "iron_ingot" and counts.get("raw_iron", 0) >= 8:
             existing_furnaces = self.daily._safe_rows(obs, {"furnace"}, context=context)
-            desired_furnaces = 3 if counts.get("raw_iron", 0) >= 16 else 2
+            desired_furnaces = 2 if counts.get("raw_iron", 0) >= 12 else 1
             has_fuel = any(counts.get(f, 0) >= 1 for f in ("coal", "charcoal")) or (
                 sum(counts.get(n, 0) for n in PLANK_NAMES)
                 + 4 * sum(counts.get(n, 0) for n in LOG_NAMES)
             ) >= 6
             if (len(existing_furnaces) < desired_furnaces and has_fuel
-                    and (counts.get("furnace", 0) >= 1 or counts.get("cobblestone", 0) >= 8)):
-                if counts.get("furnace", 0) >= 1:
-                    placed = self.daily._place("furnace", obs, self._data["task"], context)
-                    if placed:
-                        return self._row_decision(placed)
-                else:
-                    crafted = self._craft("furnace", 1, obs, context, depth + 1)
-                    if crafted:
-                        return crafted
+                    and counts.get("furnace", 0) == 0 and counts.get("cobblestone", 0) >= 8):
+                crafted = self._craft("furnace", 1, obs, context, depth + 1)
+                if crafted:
+                    return crafted
+            if (len(existing_furnaces) < desired_furnaces and has_fuel
+                    and counts.get("furnace", 0) >= 1):
+                placed = self.daily._place("furnace", obs, self._data["task"], context)
+                if placed:
+                    return self._row_decision(placed)
         if current:
             return self._row_decision(current)
         # A job is a place to inspect, never permission to transfer again.
@@ -1109,7 +1109,11 @@ class AutonomousTaskController:
             pending_dm = self._data.pop("pending_deep_mine", None)
             self._data["pending_deep_mine"] = None
             res_key = (pending_dm or {}).get("resource")
-            if res_key and res_key not in self._data["deep_mine_ores"]:
+            interrupted = (
+                result.error_code in {"cancelled", "safety_interrupted", "retreat_required", "near_hostile", "dead", "not_ready", "action_unconfirmed"}
+                or data.get("stop_reason") in {"cancelled", "safety_interrupted"}
+            )
+            if res_key and (result.success is True or not interrupted) and res_key not in self._data["deep_mine_ores"]:
                 self._data["deep_mine_ores"] = (self._data["deep_mine_ores"] + [res_key])[-8:]
         elif decision.goal == "scout_surface" and result.success is True:
             self._data["scout_completed"] = True
@@ -1152,7 +1156,7 @@ class AutonomousTaskController:
         if result.success is not True or no_motion:
             self._data["local_failures"] += 1
             self._data["local_recoveries"] += 1
-            target = self.rules._pos(data.get("target")) or self.rules._pos(decision.args.get("pos"))
+            target = None if decision.goal == "deep_mine" else (self.rules._pos(data.get("target")) or self.rules._pos(decision.args.get("pos")))
             if target:
                 cooldown = 90 if code in (PATH_FAILURES | {"timeout"}) else 30
                 self._data["blocked"][self.rules._key(target)] = time.time() + cooldown

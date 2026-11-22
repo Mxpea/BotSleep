@@ -1029,13 +1029,18 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                 or (isinstance(status.get("oxygen"), (int, float)) and float(status.get("oxygen", 20)) <= 12)
             )
         )
+        hostile_limit = (
+            min(5.0, self._safety_rules._threat_distance(hostile.get("name")))
+            if decision is not None and decision.goal == "deep_mine" and status.get("health", 20) >= 16
+            else self._safety_rules._threat_distance(hostile.get("name"))
+        )
         danger = (not status.get("alive") or status.get("in_lava") or status.get("on_fire")
                   or submerged_danger or (status.get("in_water") and not deep_mine_active)
                   or status.get("health", 20) <= self.settings["low_health_threshold"] and not (food_turn or local_recovery_turn or relaxed_stable)
                   or permit is not None and not relaxed_stable
                   or combat_changed
                   or (not combat_action and isinstance(hostile.get("dist"), (int, float))
-                      and hostile["dist"] <= self._safety_rules._threat_distance(hostile.get("name"))))
+                      and hostile["dist"] <= hostile_limit))
         if danger:
             self._cancel.set()
             if planning:

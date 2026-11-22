@@ -1053,6 +1053,17 @@ class AutonomousTaskTests(unittest.TestCase):
         self.assertTrue(ctrl.confirm_completion(nether_obs))
         self.assertEqual(ctrl.snapshot()["status"], "completed")
 
+    def test_interrupted_deep_mine_does_not_blacklist_ore_for_retry(self):
+        obs = world({"stone_pickaxe": 3, "cobblestone": 12, "oak_log": 4})
+        ctrl = self.start({"task": "gather", "resource": "raw_iron", "count": 12}, obs=obs)
+        ctx = {"deep_mining_enabled": True}
+        first = ctrl.next_action(obs, ctx)
+        self.assertEqual((first.name, first.goal), ("gather_resource", "deep_mine"))
+        ctrl.record_result(first, SkillResult(False, "Workflow cancelled", {"stop_reason": "cancelled"}, "cancelled"), obs, ctx)
+        self.assertNotIn("raw_iron", ctrl.state()["deep_mine_ores"])
+        retry = ctrl.next_action(obs, ctx)
+        self.assertEqual((retry.name, retry.goal), ("gather_resource", "deep_mine"))
+
 
 if __name__ == "__main__":
     unittest.main()

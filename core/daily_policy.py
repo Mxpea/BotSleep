@@ -105,7 +105,8 @@ class DailySafetyPolicy:
         if status.get("in_vehicle"):
             return "vehicle", self._wait("Leave the vehicle before daily tasks", "recover")
         if status.get("on_ground") is not True and not status.get("is_sleeping"):
-            return "unstable", self._wait("Wait for stable footing", "recover", 1)
+            footing_wait = 0.3 if self.rules._dangerous_hostiles(observation, status["pos"]) else 1
+            return "unstable", self._wait("Wait for stable footing", "recover", footing_wait)
         hostiles = self.rules._dangerous_hostiles(observation, status["pos"])
         if hostiles:
             combat = combat_options(observation)

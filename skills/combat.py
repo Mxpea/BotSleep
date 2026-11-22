@@ -18,7 +18,7 @@ TIERS = ("netherite", "diamond", "iron", "stone", "copper", "wooden", "golden")
 MELEE = frozenset(tier + suffix for tier in TIERS for suffix in ("_sword", "_axe"))
 MIN_HEALTH_SHIELD = 14
 MIN_HEALTH_UNSHIELDED = 18
-MIN_HEALTH_EASY_MELEE = 12
+MIN_HEALTH_EASY_MELEE = 8
 MIN_FOOD = 8
 MELEE_RANGE = 2.8
 RANGED_MIN = 6
@@ -111,7 +111,8 @@ def combat_options(observation: dict, entity_id: int | None = None, expected_nam
     min_hp = MIN_HEALTH_SHIELD if shield else (MIN_HEALTH_EASY_MELEE if easy_melee_ok else MIN_HEALTH_UNSHIELDED)
     if hp < min_hp or food < MIN_FOOD:
         return denied("insufficient_health_or_food")
-    danger_radius = max(8, threat_radius) if starter_defense else 8
+    distance = math.dist(origin, target["pos"])
+    danger_radius = max(8, threat_radius) if starter_defense else (4 if easy_melee_ok and distance <= MELEE_RANGE else 8)
     if any(r["id"] != target["id"] and r.get("type") == "hostile"
            and math.dist(origin, r["pos"]) <= (
                hostile_threat_radius(r["name"], danger_radius) if starter_defense else danger_radius)
@@ -123,7 +124,6 @@ def combat_options(observation: dict, entity_id: int | None = None, expected_nam
         limit = hostile_threat_radius(nearest.get("name"), danger_radius)
         if type(gap) in (int, float) and 0 <= gap <= limit:
             return denied("other_hostile_reported")
-    distance = math.dist(origin, target["pos"])
     if distance > RANGED_MAX or abs(origin[1] - target["pos"][1]) > 2:
         return denied("target_out_of_range")
     ranged = next((name for name in ("bow", "crossbow") if name in names and "arrow" in names), None)
@@ -132,7 +132,7 @@ def combat_options(observation: dict, entity_id: int | None = None, expected_nam
         mode, weapon = "ranged", ranged
     elif target["name"] == "creeper":
         mode = "withdraw"  # API does not expose fuse/charged state; no blind melee.
-    elif melee and 1.5 <= distance <= MELEE_RANGE:
+    elif melee and (1.5 if starter_defense else 0.0) <= distance <= MELEE_RANGE:
         mode, weapon = "melee", melee[0]
     elif distance < 2:
         mode = "withdraw"

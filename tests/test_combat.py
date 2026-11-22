@@ -626,3 +626,19 @@ class CombatClientTests(unittest.TestCase):
         res = combat_options(obs)
         self.assertTrue(res["allowed"], res)
         self.assertEqual(res["mode"], "melee")
+
+    def test_combat_options_allows_close_easy_melee_under_1_5_blocks_and_at_9_hp(self):
+        obs = {
+            "fresh": True, "inventory_fresh": True,
+            "status": {"ready": True, "alive": True, "busy": None, "health": 9, "food": 16,
+                       "dimension": "overworld", "gamemode": "survival", "on_ground": True,
+                       "pos": [0.5, 64, 0.5], "offhand": None},
+            "inventory": [{"name": "stone_sword", "count": 1}],
+            "entities": [
+                {"id": 9, "name": "zombie", "type": "hostile", "pos": [1.4, 64, 0.5]},
+                {"id": 10, "name": "zombie", "type": "hostile", "pos": [7.0, 64, 0.5]},
+            ],
+        }
+        res = combat_options(obs)
+        self.assertTrue(res["allowed"], res)
+        self.assertEqual(res["mode"], "melee")

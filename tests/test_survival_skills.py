@@ -1422,6 +1422,61 @@ class WaterEscapeTests(unittest.TestCase):
         self.assertEqual(res.data.get("action_state"), "unknown")
         self.assertNotIn("stop", [c[0] for c in world.calls])
 
+    def test_water_escape_airborne_jump_over_water_does_not_claim_dry_escape(self):
+        world = World()
+        world.ground = "water"
+        world.status.update({"pos": [0.5, 61.0, 0.5], "in_water": True, "submerged": False, "on_ground": False})
+        world.set_block([1, 62, 0], "grass_block")
+        world.set_block([1, 63, 0], "air")
+        world.set_block([1, 64, 0], "air")
+
+        def fake_control(**kwargs):
+            world.calls.append(("control", kwargs))
+            # Jump puts bot briefly airborne above water, then gravity drops it back into water.
+            world.status.update({"pos": [0.5, 63.4, 0.5], "in_water": False, "submerged": False, "on_ground": False})
+            return envelope({"ok": True})
+
+        statuses = []
+        orig_get_status = world.get_status
+
+        def sequenced_status(**kwargs):
+            res = orig_get_status(**kwargs)
+            statuses.append(len(statuses))
+            if not world.status["in_water"] and world.status["on_ground"] is False and len(statuses) >= 3:
+                world.status.update({"pos": [0.5, 61.5, 0.5], "in_water": True, "submerged": False, "on_ground": False})
+            return orig_get_status(**kwargs)
+
+        world.control = fake_control
+        world.move_effect = Mock(side_effect=APIError("stalled", "stuck"))
+        with patch("skills.survival.time.sleep"):
+            with patch.object(world, "get_status", side_effect=sequenced_status):
+                res = SurvivalSkills(world).execute("water_escape", {})
+        self.assertFalse(res.success)
+        self.assertEqual(res.error_code, "still_in_water")
+        self.assertFalse(res.data.get("progress_made"))
+
+    def test_retreat_from_partial_progress_avoids_spurious_failure_when_short_of_8_blocks(self):
+        world = World()
+        world.status.update({"pos": [0.5, 64.0, 0.5], "on_ground": True})
+        # Wall off at x=2 so only x=1 (+1.0m, horizontal=3.5 < anchor_horizontal+2=4.5) is reachable.
+        for z in (-2, -1, 0, 1, 2):
+            for dy in (0, 1):
+                world.set_block([2, 64 + dy, z], "stone")
+        world.set_block([-1, 64, 0], "stone")
+        world.set_block([-1, 65, 0], "stone")
+        world.set_block([0, 64, -1], "stone")
+        world.set_block([0, 65, -1], "stone")
+        world.set_block([0, 64, 1], "stone")
+        world.set_block([0, 65, 1], "stone")
+        world.set_block([1, 64, -1], "stone")
+        world.set_block([1, 65, -1], "stone")
+        world.set_block([1, 64, 1], "stone")
+        world.set_block([1, 65, 1], "stone")
+        with patch.object(world, "get_entities", return_value=[{"id": 11, "name": "zombie", "type": "hostile", "pos": [-2.0, 64.0, 0.5]}]):
+            res = SurvivalSkills(world).execute("retreat_from", {"pos": [-2.0, 64.0, 0.5], "distance": 8})
+        self.assertTrue(res.success, res)
+        self.assertEqual(res.data["terrain_search"]["termination"], "partial_progress")
+
 
 if __name__ == "__main__":
     unittest.main()

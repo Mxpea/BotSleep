@@ -3125,6 +3125,8 @@ class MineShaftSkill(BaseSkill):
             })
             if not recommended_mining_bands(parsed_targets, net_after) or (res.data or {}).get("stop_reason") == "target_reached":
                 stop_reason = "target_reached"
+            elif res.error_code in {"cancelled", "safety_interrupted", "dead", "not_ready", "not_connected", "action_unconfirmed"}:
+                stop_reason = str(res.error_code)
             elif res.error_code == "return_home_requested":
                 stop_reason = "return_home"
             elif (res.data or {}).get("stop_reason") in {"band_complete", "branch_done"}:
