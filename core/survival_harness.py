@@ -826,6 +826,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                     self._model_failures = 0
                     self._llm_retry_after = 0.0
                     self._model_blocked = None
+                    self.context.pop("last_planner_rejection", None)
                     self._model_feedback = not starter_recovery
                     if self._cancel.is_set():
                         return decision, SkillResult(False, "Paused while the model was planning; no action sent", error_code="cancelled"), observation
@@ -1252,13 +1253,21 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                     transient_model_error = False
                 fatal_model_error = result.error_code == "llm_http_error" and not transient_model_error
                 if result.error_code and result.error_code.startswith("llm_") and result.error_code != "llm_busy" and transient_model_error:
-                    self._model_failures += 1
-                    schedule = self._llm_retry_schedule()
-                    delay = float(schedule[min(self._model_failures - 1, len(schedule) - 1)])
-                    retry_after = result.data.get("retry_after") if isinstance(result.data, dict) else None
-                    if isinstance(retry_after, (int, float)) and not isinstance(retry_after, bool) and retry_after > 0:
-                        delay = max(delay, min(256.0, float(retry_after)))
-                    self._llm_retry_after = time.monotonic() + delay
+                    if daily_planner_recoverable:
+                        delay = 1.0
+                        self.context["last_planner_rejection"] = {
+                            "code": result.error_code,
+                            "message": result.message,
+                            "hint": "Previous proposal was rejected; choose a DIFFERENT allowed tool or argument.",
+                        }
+                    else:
+                        self._model_failures += 1
+                        schedule = self._llm_retry_schedule()
+                        delay = float(schedule[min(self._model_failures - 1, len(schedule) - 1)])
+                        retry_after = result.data.get("retry_after") if isinstance(result.data, dict) else None
+                        if isinstance(retry_after, (int, float)) and not isinstance(retry_after, bool) and retry_after > 0:
+                            delay = max(delay, min(256.0, float(retry_after)))
+                        self._llm_retry_after = time.monotonic() + delay
                 if self.daily and result.error_code == "llm_repeated_failure" and hasattr(self.planner, "_failed_actions"):
                     self.planner._failed_actions.clear()
                 if (result.error_code == "llm_context_limit" or context_limit_http) and isinstance(getattr(self.planner, "_turns", None), list):

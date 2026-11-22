@@ -335,7 +335,7 @@ class SurfaceScoutSkill(BaseSkill):
             return True
         if prefer_wood and findings["wood"]:
             return True
-        if len(findings["ores"]) >= 2:
+        if len(findings["ores"]) >= 2 and not prefer_wood:
             return True
         return False
 

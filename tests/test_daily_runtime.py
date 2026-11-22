@@ -509,6 +509,43 @@ class DailyRuntimeTests(unittest.TestCase):
         self.assertFalse([call for call in self.world.calls if call[0] == "place"])
         self.assertIsNone(harness.planner._pending)
 
+    def test_daily_planner_rejection_records_hint_without_escalating_network_backoff(self):
+        self.world.counts = {"furnace": 1}
+        harness, endpoint = self.make_harness([
+            tool_response("craft_item", {"item": "furnace", "count": 1}, "bad_furnace_1"),
+            tool_response("wait", {"seconds": 1}, "ok_2"),
+        ])
+        first = self.step(harness)
+        self.assertEqual(first.error_code, "llm_no_progress")
+        self.assertEqual(harness._model_failures, 0)
+        self.assertEqual(harness._llm_retry_after, 0.0)
+        self.assertFalse(harness.paused)
+        self.assertIn("last_planner_rejection", harness.context)
+        self.assertIn("furnace", harness.context["last_planner_rejection"]["message"])
+        second = self.step(harness)
+        self.assertTrue(second.success, second)
+        self.assertNotIn("last_planner_rejection", harness.context)
+        sent_second = self.prompt(endpoint.requests[1])
+        self.assertIn("last_planner_rejection", sent_second["context"])
+
+    def test_empty_found_wood_keeps_scout_allowed_until_3_calls(self):
+        harness, endpoint = self.make_harness([
+            tool_response("craft_item", {"item": "stick", "count": 4}, "noop_1"),
+        ])
+        harness.planner._scout_calls = 1
+        visible, _, _ = harness.planner._request_catalog(
+            {"last_scout_report": {"found_wood": [], "estimated_reach": 48.0}},
+            harness.collector.collect(),
+        )
+        # craft_item doesn't have task param, test with autonomy enabled:
+        harness.planner.autonomy_enabled = True
+        visible_goal, _, _ = harness.planner._request_catalog(
+            {"last_scout_report": {"found_wood": [], "estimated_reach": 48.0}},
+            harness.collector.collect(),
+        )
+        goal_tool = next(t for t in visible_goal if t["function"]["name"] == "run_survival_task")
+        self.assertIn("scout", goal_tool["function"]["parameters"]["properties"]["task"]["enum"])
+
 
 if __name__ == "__main__":
     unittest.main()

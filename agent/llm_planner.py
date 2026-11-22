@@ -560,7 +560,8 @@ If that goal tool is unavailable, use only the currently advertised tools.
             if len(value) > schema.get("maxLength", math.inf) or (schema.get("pattern") and not re.fullmatch(schema["pattern"], value)):
                 raise LLMError("llm_invalid_arguments", "Tool string argument has an invalid format or length")
         if "enum" in schema and value not in schema["enum"]:
-            raise LLMError("llm_invalid_arguments", "Tool argument is not an allowed value")
+            allowed = ", ".join(map(str, schema["enum"][:16]))
+            raise LLMError("llm_invalid_arguments", f"Tool argument value '{value}' is not allowed; allowed values: {allowed}")
 
     @staticmethod
     def _json_arguments(raw):
@@ -700,8 +701,8 @@ If that goal tool is unavailable, use only the currently advertised tools.
             ready_for_lava_scout = any(counts.get(k, 0) > 0 for k in ("bucket", "water_bucket", "iron_pickaxe", "flint_and_steel"))
             known_lava = bool(report.get("found_lava"))
             no_wood_yet = (
-                "found_logs" in report
-                and not report.get("found_logs")
+                (("found_wood" in report and not report.get("found_wood"))
+                 or ("found_logs" in report and not report.get("found_logs")))
                 and not any(
                     k.endswith(("_log", "_planks", "_pickaxe")) and int(v or 0) > 0
                     for k, v in counts.items()
@@ -884,7 +885,7 @@ If that goal tool is unavailable, use only the currently advertised tools.
             request_tools, routing, repair_task_id = self._request_catalog(context, observation)
             allowed_names = frozenset(tool["function"]["name"] for tool in request_tools)
             allowed_schemas = {tool["function"]["name"]: copy.deepcopy(tool["function"]["parameters"]) for tool in request_tools}
-            prompt_context = {key: context[key] for key in ("blocked_targets", "explore_index", "failures", "last_result",
+            prompt_context = {key: context[key] for key in ("blocked_targets", "explore_index", "failures", "last_result", "last_planner_rejection",
                                                           "last_scout_report", "death_count", "spawn", "remaining_steps", "remaining_seconds",
                                                           "daily_tasks", "action_hints", "memory", "survival_constraints", "competition", "playbook", "task_execution") if key in context}
             if routing.get("mode") == "goal" and isinstance(prompt_context.get("action_hints"), list):

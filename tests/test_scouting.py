@@ -153,6 +153,18 @@ class SurfaceScoutSkillTests(unittest.TestCase):
         self.assertGreaterEqual(len(res.data["found_lava"]), 4)
         self.assertEqual(res.data["hops_completed"], 2)
 
+    def test_prefer_wood_does_not_abort_early_on_surface_ores(self):
+        world = SimScoutWorld(pos=(0.5, 64.0, 0.5))
+        world.world_blocks = [
+            {"name": "iron_ore", "pos": [2, 60, 0]},
+            {"name": "copper_ore", "pos": [3, 60, 0]},
+            {"name": "oak_log", "pos": [110, 64, 0]},
+        ]
+        res = SurfaceScoutSkill(world).execute(scan_radius=48, hop_distance=55.0, max_hops=4, prefer_wood=True)
+        self.assertTrue(res.success, res)
+        self.assertEqual(res.data["early_stop_reason"], "wood_found")
+        self.assertGreaterEqual(res.data["hops_completed"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()
