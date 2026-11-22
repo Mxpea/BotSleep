@@ -154,6 +154,9 @@ first (it deploys 2-3 parallel furnaces automatically when >= 8 raw_iron), craft
 shield (1) (and run run_survival_task(task="iron_armor") if you hold >= 32 iron_ingot spare for full
 armor + pickaxes). Do NOT waste iron or turns on iron_axe or iron_sword before diamonds. Craft 2-3
 iron_pickaxe right BEFORE calling run_survival_task(task="gather", resource="diamond", count=3).
+Once you hold >= 2 iron_pickaxe (and bucket/shield if crafted), immediately call
+run_survival_task(task="gather", resource="diamond", count=3) instead of detouring to coal, logs,
+or extra iron_axe/iron_sword tools unless an escalation explicitly requires fuel or wood.
 NEVER call run_survival_task(task="furnace") — "furnace" is NOT a valid task enum; held furnaces
 are automatically placed by run_survival_task(task="smelt", item="iron_ingot", ...) or in-cave camps.
 NEVER call craft(furnace) if inventory already holds >= 1 furnace (even if not yet placed in world);
@@ -230,6 +233,11 @@ If that goal tool is unavailable, use only the currently advertised tools.
         self._task_repair_uses = {}
         self._scout_calls = 0
         self._world_mutation_nonce = 0
+
+    def close(self):
+        close_brain = getattr(self.brain, "close", None)
+        if callable(close_brain):
+            close_brain()
 
     @staticmethod
     def _limit(settings, key, default, minimum, maximum):
@@ -486,7 +494,7 @@ If that goal tool is unavailable, use only the currently advertised tools.
                 if isinstance(body, dict) and "observation" in body:
                     body["observation"] = self._snapshot(body["observation"], historical=True)
                     body.pop("context", None)
-                    options = {"separators": (",", ":")} if self.objective == "competition" else {}
+                    options = {"separators": (",", ":")} if self.objective in {"daily", "competition"} else {}
                     message["content"] = json.dumps(body, ensure_ascii=False, allow_nan=False, **options)
         self._turns.append(compact)
         self._turns = self._turns[-self.max_history_turns:]
@@ -895,8 +903,26 @@ If that goal tool is unavailable, use only the currently advertised tools.
                 compact_context["competition"] = competition_context
             # Staged choices and fresh evidence must survive intact. JSON
             # whitespace is dispensable; the hard wire-byte budget still applies.
-            json_options = {"separators": (",", ":")} if self.objective == "competition" else {}
-            turn.append({"role": "user", "content": json.dumps(self._redact({"observation": self._snapshot(observation),
+            snapshot = self._snapshot(observation)
+            if routing.get("mode") == "goal":
+                snapshot.pop("placement_candidates", None)
+                snapshot.pop("safe_stand_candidates", None)
+                if isinstance(snapshot.get("blocks"), list):
+                    trimmed = []
+                    counts_by_cat = {}
+                    for row in snapshot["blocks"]:
+                        name = row.get("name", "") if isinstance(row, dict) else ""
+                        if name.endswith("_leaves") or name == "vine":
+                            continue
+                        cat = "station" if name in {"crafting_table", "furnace", "smoker", "blast_furnace", "chest", "barrel"} or name.endswith("_bed") else "other"
+                        if cat == "other":
+                            counts_by_cat[name] = counts_by_cat.get(name, 0) + 1
+                            if counts_by_cat[name] > 3:
+                                continue
+                        trimmed.append(row)
+                    snapshot["blocks"] = trimmed
+            json_options = {"separators": (",", ":")} if self.objective in {"daily", "competition"} else {}
+            turn.append({"role": "user", "content": json.dumps(self._redact({"observation": snapshot,
                         "progress": self.progress(observation), "context": compact_context}), ensure_ascii=False, allow_nan=False,
                         **json_options)})
             for attempt in range(self.max_repair_attempts + 1):
@@ -967,7 +993,7 @@ If that goal tool is unavailable, use only the currently advertised tools.
         feedback = self._redact({"result": self._compact_value(payload),
                                 "observation": self._snapshot(observation or {}, historical=True)})
         try:
-            options = {"separators": (",", ":")} if self.objective == "competition" else {}
+            options = {"separators": (",", ":")} if self.objective in {"daily", "competition"} else {}
             content = json.dumps(feedback, ensure_ascii=False, allow_nan=False, **options)
         except (TypeError, ValueError, OverflowError):
             raise LLMError("llm_invalid_feedback", "Tool feedback is not a finite JSON result") from None

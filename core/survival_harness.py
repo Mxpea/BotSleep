@@ -1146,6 +1146,12 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                     delay = 0
                 elif retreat_replan or local_replan:
                     delay = RETREAT_WAIT_SECONDS
+                elif result.error_code == "llm_busy":
+                    # Contention on the shared cross-process ModelRequestGate is not a game
+                    # or target failure; keep retries short and avoid climbing to 60s.
+                    username = str(self.settings.get("username") or "")
+                    jitter = (sum(ord(ch) for ch in username) % 7) * 0.25
+                    delay = round(1.0 + jitter, 2)
                 else:
                     self.failures += 1
                     key = self._target(decision) if decision.name != "retreat_from" else "retreat_from"
@@ -1154,6 +1160,9 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                     if counts[key] >= self.settings["max_target_failures"]:
                         self.context.setdefault("blocked_until", {})[key] = time.time() + self.settings["target_cooldown_seconds"]
                     delay = min(60, self.settings["retry_seconds"] * 2 ** min(self.failures - 1, 4))
+                    retry_after = result.data.get("retry_after") if isinstance(result.data, dict) else None
+                    if isinstance(retry_after, (int, float)) and not isinstance(retry_after, bool) and retry_after > 0:
+                        delay = max(delay, min(60.0, float(retry_after)))
                 uncertain_action = _uncertain_result(result) and decision.name != "observe"
                 http_status = result.data.get("http_status")
                 transient_model_error = (result.error_code in {"llm_timeout", "llm_network_error", "llm_busy"}
@@ -1255,6 +1264,9 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                 self.tick(automatic=False)
             if self._model_worker:
                 self._model_worker.close(self.last_observation)
+            close_planner = getattr(self.planner, "close", None)
+            if callable(close_planner):
+                close_planner()
             if self.memory:
                 self.memory.close()
             self._closed = True

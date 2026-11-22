@@ -173,18 +173,50 @@ class MinecraftAgentClient:
     def _action_timeout(self, deadline_seconds: float) -> float:
         return max(self.timeout_seconds, deadline_seconds + self.ACTION_MARGIN_SECONDS)
 
-    def login(self, max_wait_seconds: float = 15) -> Dict[str, Any]:
+    def close(self) -> None:
+        """Close the underlying HTTP keep-alive session."""
+        session = getattr(self, "_session", None)
+        if session is not None:
+            session.close()
+
+    def login(
+        self,
+        max_wait_seconds: float = 15,
+        *,
+        retry_rate_limit: bool = False,
+        max_login_attempts: int = 3,
+    ) -> Dict[str, Any]:
         """Log in and return a ready status; clean up the session on failure."""
         max_wait_seconds = self._positive(max_wait_seconds, "max_wait_seconds")
+        attempts = max(1, int(max_login_attempts)) if retry_rate_limit else 1
         if self.token:
             self.logout()
         try:
-            data = self._request("POST", "auth/login", payload={"username": self.username, "password": self.password}, authenticated=False)
-            token = data.get("token")
+            deadline = time.monotonic() + max_wait_seconds
+            data = None
+            for attempt in range(attempts):
+                try:
+                    data = self._request(
+                        "POST",
+                        "auth/login",
+                        payload={"username": self.username, "password": self.password},
+                        authenticated=False,
+                    )
+                    break
+                except APIError as error:
+                    if (not retry_rate_limit or attempt + 1 >= attempts
+                            or error.code not in {"rate_limited", "routing_unavailable"}):
+                        raise
+                    wait_s = error.details.get("retry_after_s") if isinstance(error.details, dict) else None
+                    sleep_s = float(wait_s) if isinstance(wait_s, (int, float)) and wait_s > 0 else 2.0
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise
+                    time.sleep(min(remaining, min(65.0, sleep_s + 0.25)))
+            token = data.get("token") if isinstance(data, dict) else None
             if not isinstance(token, str) or not token:
                 raise APIError("invalid_response", "Login response has no token")
             self.token = token
-            deadline = time.monotonic() + max_wait_seconds
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:

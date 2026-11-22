@@ -6,12 +6,15 @@ Connects to any OpenAI-compatible API endpoint (OpenAI, DeepSeek, Qwen, Ollama, 
 from typing import List, Dict, Any, Optional
 import re
 import ssl
+import threading
 import requests
 from requests.adapters import HTTPAdapter
 
 from core.model_gate import ModelGateError, ModelRequestGate
 
 _AUTO_GATE = object()
+_ORIG_REQUESTS_POST = requests.post
+_ORIG_REQUESTS_SESSION = requests.Session
 
 
 class LLMError(Exception):
@@ -64,6 +67,25 @@ class OpenAIBrain:
         self.tls_version = tls_version
         self.request_gate = (ModelRequestGate(self.base_url, self.api_key, wait_seconds=max(5.0, float(gate_wait_seconds)), recorder=recorder)
                              if request_gate is _AUTO_GATE else request_gate)
+        self._session_lock = threading.Lock()
+        self._session: Optional[requests.Session] = None
+
+    def _get_session(self) -> requests.Session:
+        with self._session_lock:
+            if self._session is None:
+                session = requests.Session()
+                if self.tls_version == "1.2":
+                    session.mount("https://", _TLS12Adapter())
+                self._session = session
+            return self._session
+
+    def close(self) -> None:
+        with self._session_lock:
+            if self._session is not None:
+                try:
+                    self._session.close()
+                finally:
+                    self._session = None
 
     @property
     def headers(self) -> Dict[str, str]:
@@ -115,12 +137,19 @@ class OpenAIBrain:
             # Do not follow redirects or retry: each response is one billed request.
             options = {"headers": self.headers, "json": payload, "timeout": self.timeout_seconds,
                        "allow_redirects": False}
-            if self.tls_version == "1.2":
-                with requests.Session() as session:
-                    session.mount("https://", _TLS12Adapter())
-                    resp = session.post(url, **options)
-            else:
+            post_patched = requests.post is not _ORIG_REQUESTS_POST
+            session_patched = requests.Session is not _ORIG_REQUESTS_SESSION
+            if self.tls_version == "1.2" and (session_patched or not post_patched):
+                if session_patched:
+                    with requests.Session() as session:
+                        session.mount("https://", _TLS12Adapter())
+                        resp = session.post(url, **options)
+                else:
+                    resp = self._get_session().post(url, **options)
+            elif post_patched:
                 resp = requests.post(url, **options)
+            else:
+                resp = self._get_session().post(url, **options)
         except requests.Timeout:
             raise LLMError("llm_timeout", "Model request timed out") from None
         except requests.RequestException:
@@ -129,6 +158,14 @@ class OpenAIBrain:
             raise LLMError("llm_cancelled", "Model response arrived after cancellation")
         if not 200 <= resp.status_code < 300:
             details = {"http_status": resp.status_code}
+            retry_after = resp.headers.get("Retry-After") if hasattr(resp, "headers") and resp.headers else None
+            if isinstance(retry_after, str):
+                try:
+                    parsed_retry = float(retry_after.strip())
+                except ValueError:
+                    parsed_retry = None
+                if parsed_retry is not None and 0 < parsed_retry <= 120:
+                    details["retry_after"] = parsed_retry
             # Recognize context failures without retaining arbitrary provider
             # bodies, headers, URLs or any text that might echo credentials.
             if resp.status_code == 400:

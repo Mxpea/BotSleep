@@ -638,6 +638,49 @@ class BrainTransportTests(unittest.TestCase):
         self.assertTrue(adapter._tls_context.check_hostname)
         self.assertNotIn("verify", session.post.call_args.kwargs)
 
+    def test_openai_brain_reuses_persistent_http_session_and_closes_cleanly(self):
+        brain = OpenAIBrain(api_key="k", tls_version="1.2", request_gate=None)
+        s1 = brain._get_session()
+        s2 = brain._get_session()
+        self.assertIs(s1, s2)
+        self.assertIsInstance(s1.adapters["https://"], _TLS12Adapter)
+        brain.close()
+        self.assertIsNone(brain._session)
+
+    def test_goal_mode_choose_compacts_json_and_prunes_uncallable_atomic_fields(self):
+        class StubBrain:
+            def __init__(self):
+                self.requests = []
+
+            def chat_completion(self, messages, tools=None, cancel_event=None):
+                self.requests.append(messages)
+                return response("wait", {"seconds": 1}, "goal_mode")
+
+        brain = StubBrain()
+        planner = LLMSurvivalPlanner({"enabled": True}, {"objective": "daily"}, brain=brain)
+        obs = {
+            "fresh": True, "stale": False, "observation_scope": "full",
+            "inventory_fresh": True, "terrain_fresh": True,
+            "status": {"ready": True, "alive": True, "busy": None, "gamemode": "survival",
+                       "dimension": "overworld", "pos": [0.5, 64, 0.5], "health": 20, "food": 20, "is_day": True},
+            "counts": {"oak_log": 2}, "inventory": [{"name": "oak_log", "count": 2}],
+            "blocks": [
+                {"name": "oak_leaves", "pos": [1, 65, 0], "can_see": True},
+                {"name": "oak_log", "pos": [2, 64, 0], "can_see": True},
+                {"name": "crafting_table", "pos": [1, 64, 0], "can_see": True},
+            ],
+            "placement_candidates": [{"pos": [1, 64, 1], "support": "grass_block"}],
+            "safe_stand_candidates": [{"pos": [1.5, 64, 1.5], "support": "grass_block"}],
+        }
+        decision = planner.choose(obs, {})
+        self.assertEqual(decision.name, "wait")
+        raw_content = brain.requests[0][-1]["content"]
+        self.assertNotIn(", \"", raw_content)  # Compact JSON separators used in daily goal mode.
+        sent_obs = json.loads(raw_content)["observation"]
+        self.assertNotIn("placement_candidates", sent_obs)
+        self.assertNotIn("safe_stand_candidates", sent_obs)
+        self.assertEqual([b["name"] for b in sent_obs["blocks"]], ["crafting_table", "oak_log"])
+
 
 if __name__ == "__main__":
     unittest.main()

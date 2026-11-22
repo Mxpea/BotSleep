@@ -453,6 +453,24 @@ class LLMRuntimeTests(unittest.TestCase):
             self.assertNotIn(value, raw)
         self.assertNotIn("Bearer fake-", raw)
 
+    def test_llm_busy_gate_contention_uses_short_jittered_backoff_without_counting_failure(self):
+        from agent.brain import LLMError
+        from debug.logger import FlightRecorder
+        records = []
+        recorder = FlightRecorder(self.temp.name, enabled=False, sink=records.append)
+        endpoint = self.endpoint([tool_response("wait", {"seconds": 1}, "ok")])
+        harness = self.harness(endpoint, recorder=recorder, max_steps=8, retry_seconds=5)
+        with patch.object(harness.planner.brain.request_gate, "request",
+                          side_effect=LLMError("llm_busy", "Another local request still owns the model slot")):
+            result = self.finish(harness, automatic=True)
+        self.assertEqual(result.error_code, "llm_busy")
+        self.assertEqual(harness.failures, 0)
+        self.assertFalse(harness.paused)
+        retries = [r["data"] for r in records if r["event"] == "MODEL_RETRY_SCHEDULED"]
+        self.assertEqual(len(retries), 1)
+        self.assertGreaterEqual(retries[0]["retry_seconds"], 1.0)
+        self.assertLessEqual(retries[0]["retry_seconds"], 2.75)
+
 
 if __name__ == "__main__":
     unittest.main()
