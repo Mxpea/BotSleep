@@ -707,7 +707,7 @@ If that goal tool is unavailable, use only the currently advertised tools.
                     k.endswith(("_log", "_planks", "_pickaxe")) and int(v or 0) > 0
                     for k, v in counts.items()
                 )
-                and self._scout_calls < 3
+                and self._scout_calls < 6
             )
             if not (ready_for_lava_scout and not known_lava) and not no_wood_yet:
                 for tool in tools:
@@ -778,7 +778,7 @@ If that goal tool is unavailable, use only the currently advertised tools.
             raise LLMError("llm_unsafe_action", "Placing or eating requires an item in the current inventory")
         if name == "retreat_from" and not any(isinstance(e, dict) and e.get("type") == "hostile" and
                                                self.rules._pos(e.get("pos")) == pos for e in observation.get("entities") or []):
-            raise LLMError("llm_unsafe_action", "Retreat requires an observed hostile position")
+            raise LLMError("llm_unsafe_action", "Retreat requires an observed hostile position; choose run_survival_task(gather/craft/smelt/scout/nether_portal) or wait when no enemy is present")
         if name == "auto_sleep" and not (status.get("is_sleeping") or status.get("is_day") is False or status.get("thundering") is True):
             raise LLMError("llm_unsafe_action", "Sleep requires night, a storm or an existing sleep")
         if name == "goal_complete" and not self.progress(observation)["starter_goal_complete"]:
@@ -819,6 +819,11 @@ If that goal tool is unavailable, use only the currently advertised tools.
                 and name == "run_survival_task" and args.get("task") == "craft"
                 and args.get("item") == "crafting_table" and counts.get("crafting_table", 0) >= 1):
             raise LLMError("llm_no_progress", "Inventory already holds >= 1 crafting_table; run craft/smelt/tools goals directly instead of crafting another crafting_table.")
+        offhand_name = (status.get("offhand") or {}).get("name") if isinstance(status.get("offhand"), dict) else None
+        if (self.objective in {"daily", "competition"}
+                and name == "run_survival_task" and args.get("task") == "craft"
+                and args.get("item") == "shield" and (counts.get("shield", 0) >= 1 or offhand_name == "shield")):
+            raise LLMError("llm_no_progress", "Shield is already owned or equipped in offhand; proceed with bucket, flint_and_steel, iron_pickaxe, or nether_portal.")
         decision = Decision(name, args, reason, goal)
         failure = self._failed_actions.get(self._signature(decision))
         if failure and self._unchanged_failure(failure, observation, decision):

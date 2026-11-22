@@ -200,6 +200,13 @@ class WorkflowGuard:
         try:
             response = fn(*args, **kwargs)
         except APIError as exc:
+            if exc.code == "dig_unconfirmed" and "it is still there" in str(exc).lower():
+                raise WorkflowStepError(
+                    "gather_unverified",
+                    str(exc),
+                    blocker_type="verification_failed",
+                    data={"api_details": exc.details},
+                ) from None
             if (exc.code in UNKNOWN_ERROR_CODES or exc.code == "not_connected"
                     or (isinstance(exc.details, dict) and exc.details.get("action_state") == "unknown")):
                 self.fail_uncertain(
@@ -218,6 +225,13 @@ class WorkflowGuard:
             code = str(err.get("code") or "api_error")
             msg = str(err.get("message") or "Write action rejected by API")
             details = err.get("details") or {}
+            if code == "dig_unconfirmed" and "it is still there" in msg.lower():
+                raise WorkflowStepError(
+                    "gather_unverified",
+                    msg,
+                    blocker_type="verification_failed",
+                    data={"api_details": details},
+                )
             if (code in UNKNOWN_ERROR_CODES or code == "not_connected"
                     or (isinstance(details, dict) and details.get("action_state") == "unknown")):
                 self.fail_uncertain(code, msg, {"action_state": "unknown", "api_details": details})

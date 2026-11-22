@@ -571,6 +571,33 @@ class DailyRuntimeTests(unittest.TestCase):
         self.assertIsNone(harness.journal.state.get("pending"))
         self.assertNotIn("retreat_recovery", harness.context)
 
+    def test_offhand_shield_blocks_duplicate_shield_craft_and_inspect_container_recovers(self):
+        self.world.status["offhand"] = {"name": "shield", "count": 1}
+        self.world.block([2, 64, 0], "chest")
+        harness, _ = self.make_harness([
+            tool_response("run_survival_task", {"task": "craft", "item": "shield", "count": 1}, "dup_shield"),
+            tool_response("inspect_container", {"pos": [2, 64, 0]}, "peek"),
+        ])
+        harness.planner.autonomy_enabled = True
+        dup = self.step(harness)
+        self.assertEqual(dup.error_code, "llm_no_progress")
+        self.assertFalse(harness.paused)
+        harness.planner.autonomy_enabled = False
+        with patch.object(
+            harness.skills,
+            "execute",
+            return_value=SkillResult(
+                False,
+                "Container peek interrupted before verification",
+                {"executed": True, "action_state": "unknown", "recovery_error": "interrupted"},
+                "action_unconfirmed",
+            ),
+        ):
+            peek = self.step(harness)
+        self.assertEqual(peek.error_code, "action_unconfirmed")
+        self.assertFalse(harness.paused)
+        self.assertIsNone(harness.journal.state.get("pending"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -187,6 +187,15 @@ class PortalUnknownBoundaryTests(unittest.TestCase):
         self.assertIs(skill.build_portal(), failure)
         skill._execute_portal_site.assert_called_once()
 
+    def test_dig_unconfirmed_still_there_raises_retryable_verification_error(self):
+        from skills.action_workflow import WorkflowGuard, WorkflowStepError
+        client = Mock()
+        client.dig.side_effect = APIError("dig_unconfirmed", "dig_unconfirmed: server did not confirm breaking stone; it is still there")
+        guard = WorkflowGuard(client, timeout_seconds=10)
+        with self.assertRaises(WorkflowStepError) as caught:
+            guard.write(client.dig, [0, 64, 0])
+        self.assertEqual(caught.exception.code, "gather_unverified")
+
 
 if __name__ == "__main__":
     unittest.main()

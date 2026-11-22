@@ -1204,7 +1204,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                 elif decision.name == "water_escape" and local_replan:
                     delay = 0
                 elif retreat_replan or local_replan:
-                    delay = RETREAT_WAIT_SECONDS
+                    delay = 0 if result.error_code == "retreat_interrupted" else RETREAT_WAIT_SECONDS
                 elif result.error_code == "llm_busy":
                     # Contention on the shared cross-process ModelRequestGate is not a game
                     # or target failure; keep retries short and avoid climbing to 60s.
@@ -1223,11 +1223,16 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                     if isinstance(retry_after, (int, float)) and not isinstance(retry_after, bool) and retry_after > 0:
                         delay = max(delay, min(256.0, float(retry_after)))
                 uncertain_action = _uncertain_result(result) and decision.name != "observe"
-                if (self.daily and uncertain_action and decision.name == "retreat_from"
-                        and result.error_code == "action_unconfirmed"
+                if (self.daily and uncertain_action
                         and isinstance(result.data, dict)
-                        and result.data.get("cleanup_skipped") == "navigation_unknown"
-                        and result.data.get("recovery_error") in {"interrupted", "action_unconfirmed"}
+                        and result.data.get("cleanup_skipped") != "disconnected_unknown"
+                        and ((decision.name == "retreat_from"
+                              and result.error_code == "action_unconfirmed"
+                              and result.data.get("cleanup_skipped") == "navigation_unknown"
+                              and result.data.get("recovery_error") in {"interrupted", "action_unconfirmed"})
+                             or (decision.name == "inspect_container"
+                                 and result.error_code == "action_unconfirmed"
+                                 and result.data.get("recovery_error") != "cancelled"))
                         and not self._cancel.is_set()):
                     try:
                         probe = self.client.get_status(timeout_seconds=2.0)
