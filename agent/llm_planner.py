@@ -99,18 +99,16 @@ while status.food >= 14 and status.health >= 16:
 Smelt remaining raw_iron into iron_ingot via run_survival_task(task="smelt", item="iron_ingot", count=...)
 first, then craft bucket (3) + shield (1, if >= 7 iron) + iron_pickaxe (3). Craft iron_armor only
 if you already hold >= 24 iron_ingot spare. Do NOT waste iron or turns on iron_axe before Nether/diamonds.
-Once you hold >= 1 iron_pickaxe and >= 1 bucket (plus flint_and_steel or gravel), EITHER call
-run_survival_task(task="gather", resource="diamond", count=3) if you hold >= 2 iron_pickaxe and plenty
-of time/food, OR proceed directly to scout(lava)/nether_portal to enter the Nether quickly!
+Once you hold >= 1 iron_pickaxe and >= 1 bucket (and >= 1 iron_ingot for flint_and_steel),
+proceed DIRECTLY to run_survival_task(task="nether_portal") to enter the Nether quickly!
+Do NOT wait to gather gravel/flint or craft flint_and_steel manually — `nether_portal` itself mines/places
+gravel for flint, crafts flint_and_steel, fills water_bucket, finds lava/obsidian, casts/ignites the
+portal, and walks into `the_nether`. (Only mine `diamond` first if explicitly requested.)
 3) Food, Village/Chest & Lava/Nether gate: NEVER starve or ignore low food. If status.food <= 14
 and safe edible food in counts is 0, call run_survival_task(task="food", count=8) before deep
 mining (it crafts hay_block/wheat->bread, harvests crops, loots village chests, cooks meat and hunts
-animals up to 24 blocks). For Nether entry: once holding stone_pickaxe+ (or iron/diamond pickaxe) and
-basic iron supplies (or bucket + cobblestone >= 10), you may call run_survival_task(task="scout")
-when holding bucket/iron_pickaxe without known lava pools to locate lava/villages/chests, or call
-run_survival_task(task="nether_portal") which gathers water_bucket, mines/places gravel for flint,
-crafts flint_and_steel, searches outward for lava pools or uses 10 obsidian, builds/ignites the
-Nether portal and walks inside until dimension switches to the_nether.
+animals up to 24 blocks). For Nether entry: once holding bucket >= 1 and iron_ingot >= 1 (or
+flint_and_steel >= 1), call run_survival_task(task="nether_portal") directly without extra mining.
 NEVER call run_survival_task(task="furnace") — "furnace" is NOT a valid task enum; held furnaces
 are automatically placed by run_survival_task(task="smelt", item="iron_ingot", ...) or in-cave camps.
 NEVER call craft(furnace) if inventory already holds >= 1 furnace (even if not yet placed in world);
@@ -831,7 +829,11 @@ If that goal tool is unavailable, use only the currently advertised tools.
         single_item = args.get("item")
         if (self.objective in {"daily", "competition"}
                 and name == "run_survival_task" and args.get("task") == "craft"
-                and single_item in {"stone_sword", "stone_axe", "wooden_pickaxe", "wooden_sword", "wooden_axe", "bucket"}
+                and single_item == "flint_and_steel" and counts.get("flint", 0) == 0):
+            raise LLMError("llm_no_progress", "No flint in inventory; call run_survival_task(task='nether_portal') directly (it obtains flint from gravel, crafts flint_and_steel, casts and enters the Nether portal).")
+        if (self.objective in {"daily", "competition"}
+                and name == "run_survival_task" and args.get("task") == "craft"
+                and single_item in {"stone_sword", "stone_axe", "wooden_pickaxe", "wooden_sword", "wooden_axe", "bucket", "furnace"}
                 and counts.get(single_item, 0) >= 1):
             raise LLMError("llm_no_progress", f"Inventory already holds >= 1 {single_item}; proceed with gather(raw_iron), smelt(iron_ingot), iron_tools, flint_and_steel, or nether_portal.")
         decision = Decision(name, args, reason, goal)

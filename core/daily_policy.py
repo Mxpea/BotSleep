@@ -555,13 +555,13 @@ class DailySafetyPolicy:
         status = observation["status"]
         food_rec = (context or {}).get("food_recovery") or {}
         if (self.sleep_policy != "opportunistic" or food_rec.get("needs_ai") is not True
-                or not 4 < status["health"] <= self.low_health or status["food"] >= 18
+                or not 0 < status["health"] <= self.low_health or status["food"] >= 18
                 or status.get("on_ground") is not True):
             return False
         footing = self._footing(observation)
         if footing is not None and footing.get("name") in TREE_SUPPORTS:
             return False
-        return not any(distance <= max(12, self.threat_radius) for distance, _ in self.rules._hostiles(observation, status["pos"]))
+        return not any(distance <= self.threat_radius for distance, _ in self.rules._hostiles(observation, status["pos"]))
 
     def choose(self, observation, baseline_decision, task_board=None, context=None):
         scenario, forced = self._basics(observation, context)

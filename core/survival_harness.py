@@ -1172,7 +1172,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
             if (self.daily and not result.success and uncertain_action
                     and isinstance(result.data, dict)
                     and result.data.get("cleanup_skipped") != "disconnected_unknown"
-                    and ((decision.name == "retreat_from"
+                    and ((decision.name in {"retreat_from", "canopy_escape"}
                           and result.error_code == "action_unconfirmed"
                           and result.data.get("cleanup_skipped") == "navigation_unknown"
                           and result.data.get("recovery_error") in {
@@ -1192,6 +1192,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                         retreat_recovered = True
                         result.data["action_state"] = "verified_idle"
                         self.context.pop("retreat_recovery", None)
+                        self.context.pop("canopy_recovery", None)
                         retreat_recover_delay = 0.25
                         self._record("WARN", "RETREAT_INTERRUPTION_RECOVERED", {
                             "pos": st.get("pos"),
@@ -1308,11 +1309,14 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                             delay = max(delay, min(256.0, float(retry_after)))
                         self._llm_retry_after = time.monotonic() + delay
                 if self.daily and result.error_code == "llm_repeated_failure" and hasattr(self.planner, "_failed_actions"):
-                    self.planner._failed_actions = {
-                        sig: entry
-                        for sig, entry in self.planner._failed_actions.items()
-                        if entry.get("decision") and entry["decision"].name == "run_survival_task"
-                    }
+                    if self.failures >= 2:
+                        self.planner._failed_actions.clear()
+                    else:
+                        self.planner._failed_actions = {
+                            sig: entry
+                            for sig, entry in self.planner._failed_actions.items()
+                            if entry.get("decision") and entry["decision"].name == "run_survival_task"
+                        }
                 if (result.error_code == "llm_context_limit" or context_limit_http) and isinstance(getattr(self.planner, "_turns", None), list):
                     turns = self.planner._turns
                     self.planner._turns = turns[-2:] if len(turns) > 2 else []

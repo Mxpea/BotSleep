@@ -763,6 +763,10 @@ class DailyPolicyTests(unittest.TestCase):
         self.assertIsNone(opp.choose(food_blocked, self.baseline, context=ctx_food))
         self.assertTrue(opp.constraints(food_blocked, ctx_food)["model_allowed"])
         self.assertIsNone(opp.validate(action("move_to", pos=[4, 64, 0]), food_blocked, ctx_food))
+        # Distant hostile (dist 10 > threat_radius 8) must not freeze low-health opportunistic recovery.
+        distant_hostile = observed(health=3, food=10)
+        distant_hostile["entities"] = [{"id": 21, "type": "hostile", "name": "zombie", "pos": [10.5, 64.0, 0.5]}]
+        self.assertIsNone(opp.choose(distant_hostile, self.baseline, context=ctx_food))
 
         boxed_obs = observed(health=18, food=18)
         boxed_obs["entities"] = [{"id": 22, "type": "hostile", "name": "spider", "pos": [6.0, 64.0, 0.5]}]

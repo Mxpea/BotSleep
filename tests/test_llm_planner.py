@@ -770,6 +770,24 @@ class BrainTransportTests(unittest.TestCase):
         )
         self.assertLess(req_evt[3]["context_bytes"], unfolded_bytes)
 
+    def test_daily_craft_flint_and_steel_without_flint_redirects_to_nether_portal(self):
+        class StubBrain:
+            def chat_completion(self, messages, tools=None, cancel_event=None):
+                return response("run_survival_task", {"task": "craft", "item": "flint_and_steel"})
+
+        planner = LLMSurvivalPlanner({"enabled": True}, {"objective": "daily"}, brain=StubBrain())
+        obs = {
+            "fresh": True, "stale": False, "observation_scope": "full",
+            "inventory_fresh": True, "terrain_fresh": True,
+            "status": {"ready": True, "alive": True, "busy": None, "gamemode": "survival",
+                       "dimension": "overworld", "pos": [0.5, 64, 0.5], "health": 20, "food": 20, "is_day": True},
+            "counts": {"iron_ingot": 3, "bucket": 1, "iron_pickaxe": 1}, "inventory": [], "blocks": [],
+        }
+        with self.assertRaises(LLMError) as caught:
+            planner.choose(obs, {})
+        self.assertEqual(caught.exception.code, "llm_no_progress")
+        self.assertIn("nether_portal", str(caught.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
