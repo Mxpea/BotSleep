@@ -3,10 +3,12 @@
 Connects to any OpenAI-compatible API endpoint (OpenAI, DeepSeek, Qwen, Ollama, etc.).
 """
 
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
+import json
 import re
 import ssl
 import threading
+import time
 import requests
 from requests.adapters import HTTPAdapter
 
@@ -69,15 +71,35 @@ class OpenAIBrain:
                              if request_gate is _AUTO_GATE else request_gate)
         self._session_lock = threading.Lock()
         self._session: Optional[requests.Session] = None
+        self.last_request_meta: Dict[str, Any] = {}
 
-    def _get_session(self) -> requests.Session:
+    def _get_session_with_state(self) -> Tuple[requests.Session, bool]:
         with self._session_lock:
+            reused = self._session is not None
             if self._session is None:
                 session = requests.Session()
                 if self.tls_version == "1.2":
                     session.mount("https://", _TLS12Adapter())
                 self._session = session
-            return self._session
+            return self._session, reused
+
+    def _get_session(self) -> requests.Session:
+        return self._get_session_with_state()[0]
+
+    def _send_post(self, url: str, options: Dict[str, Any]) -> Tuple[Any, bool]:
+        post_patched = requests.post is not _ORIG_REQUESTS_POST
+        session_patched = requests.Session is not _ORIG_REQUESTS_SESSION
+        if self.tls_version == "1.2" and (session_patched or not post_patched):
+            if session_patched:
+                with requests.Session() as session:
+                    session.mount("https://", _TLS12Adapter())
+                    return session.post(url, **options), False
+            session, reused = self._get_session_with_state()
+            return session.post(url, **options), reused
+        if post_patched:
+            return requests.post(url, **options), False
+        session, reused = self._get_session_with_state()
+        return session.post(url, **options), reused
 
     def close(self) -> None:
         with self._session_lock:
@@ -133,27 +155,33 @@ class OpenAIBrain:
             payload["parallel_tool_calls"] = False
 
         url = self.base_url if self.base_url.endswith("/chat/completions") else f"{self.base_url}/chat/completions"
+        payload_bytes = len(json.dumps(payload, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8"))
+        started = time.monotonic()
+        session_reused = False
         try:
             # Do not follow redirects or retry: each response is one billed request.
             options = {"headers": self.headers, "json": payload, "timeout": self.timeout_seconds,
                        "allow_redirects": False}
-            post_patched = requests.post is not _ORIG_REQUESTS_POST
-            session_patched = requests.Session is not _ORIG_REQUESTS_SESSION
-            if self.tls_version == "1.2" and (session_patched or not post_patched):
-                if session_patched:
-                    with requests.Session() as session:
-                        session.mount("https://", _TLS12Adapter())
-                        resp = session.post(url, **options)
-                else:
-                    resp = self._get_session().post(url, **options)
-            elif post_patched:
-                resp = requests.post(url, **options)
-            else:
-                resp = self._get_session().post(url, **options)
+            resp, session_reused = self._send_post(url, options)
         except requests.Timeout:
+            self.last_request_meta = {
+                "session_reused": session_reused, "payload_bytes": payload_bytes,
+                "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+            }
+            self.close()
             raise LLMError("llm_timeout", "Model request timed out") from None
         except requests.RequestException:
+            self.last_request_meta = {
+                "session_reused": session_reused, "payload_bytes": payload_bytes,
+                "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+            }
+            self.close()
             raise LLMError("llm_network_error", "Model endpoint could not be reached") from None
+        self.last_request_meta = {
+            "session_reused": session_reused, "payload_bytes": payload_bytes,
+            "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+            "http_status": int(resp.status_code),
+        }
         if cancel_event is not None and cancel_event.is_set():
             raise LLMError("llm_cancelled", "Model response arrived after cancellation")
         if not 200 <= resp.status_code < 300:

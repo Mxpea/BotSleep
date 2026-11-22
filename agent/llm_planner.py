@@ -503,10 +503,59 @@ If that goal tool is unavailable, use only the currently advertised tools.
         # requests JSON uses ASCII escaping; count that wire representation.
         return len(json.dumps({"messages": messages, "tools": self.tool_definitions if tools is None else tools}, allow_nan=False).encode("utf-8"))
 
+    def _fold_message(self, message):
+        if message.get("role") != "tool" or not isinstance(message.get("content"), str):
+            return copy.deepcopy(message)
+        try:
+            body = json.loads(message["content"])
+        except (ValueError, TypeError, KeyError):
+            return copy.deepcopy(message)
+        if not isinstance(body, dict):
+            return copy.deepcopy(message)
+        folded = {}
+        result = body.get("result")
+        if isinstance(result, dict):
+            data = result.get("data")
+            data_compact_len = len(json.dumps(data, ensure_ascii=False, separators=(",", ":"), allow_nan=False)) if isinstance(data, dict) else 0
+            if not isinstance(data, dict) or data_compact_len <= 240:
+                folded["result"] = copy.deepcopy(result)
+            else:
+                compact_result = {}
+                for key in ("success", "error_code"):
+                    if key in result and result[key] is not None:
+                        compact_result[key] = result[key]
+                if isinstance(result.get("message"), str) and result["message"]:
+                    compact_result["message"] = result["message"][:160]
+                keep_keys = ("gained", "crafted", "smelted", "equipped", "action_state",
+                             "task", "task_execution", "status", "goal", "retreat_complete", "steps_executed", "completed")
+                compact_data = {key: copy.deepcopy(data[key]) for key in keep_keys if key in data}
+                if compact_data:
+                    compact_result["data"] = compact_data
+                folded["result"] = compact_result
+        observation = body.get("observation")
+        if isinstance(observation, dict):
+            status = observation.get("status")
+            if isinstance(status, dict):
+                anchor = {key: copy.deepcopy(status[key]) for key in ("dimension", "pos", "is_day") if key in status}
+                if anchor:
+                    folded["observation"] = {"status": anchor}
+        if not folded:
+            return copy.deepcopy(message)
+        updated = copy.deepcopy(message)
+        updated["content"] = json.dumps(self._redact(folded), ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+        return updated
+
+    def _rendered_turns(self):
+        if self.objective not in {"daily", "competition"} or len(self._turns) <= 2:
+            return copy.deepcopy(self._turns)
+        older = [[self._fold_message(message) for message in turn] for turn in self._turns[:-2]]
+        return older + copy.deepcopy(self._turns[-2:])
+
     def _messages(self, turn, tools=None):
         before = len(self._turns)
         while True:
-            messages = [{"role": "system", "content": self.system_prompt}] + self.history + copy.deepcopy(turn)
+            history = [message for rendered in self._rendered_turns() for message in rendered]
+            messages = [{"role": "system", "content": self.system_prompt}] + history + copy.deepcopy(turn)
             size = self._request_bytes(messages, tools)
             if size <= self.MAX_REQUEST_BYTES:
                 if before != len(self._turns):
@@ -521,7 +570,7 @@ If that goal tool is unavailable, use only the currently advertised tools.
     @property
     def history(self):
         """A copy of completed transactions; pending calls never appear unpaired."""
-        return copy.deepcopy([message for turn in self._turns for message in turn])
+        return [message for rendered in self._rendered_turns() for message in rendered]
 
     @classmethod
     def _validate(cls, value, schema):
@@ -875,6 +924,16 @@ If that goal tool is unavailable, use only the currently advertised tools.
                     prompt_context["action_hints"] = filtered_hints
                 else:
                     prompt_context.pop("action_hints", None)
+            if routing.get("mode") == "goal" and isinstance(prompt_context.get("daily_tasks"), dict):
+                board = dict(prompt_context["daily_tasks"])
+                tasks = board.get("tasks")
+                if isinstance(tasks, list):
+                    done = [row.get("id") for row in tasks if isinstance(row, dict) and row.get("status") == "completed" and row.get("id")]
+                    pending_rows = [row for row in tasks if not (isinstance(row, dict) and row.get("status") == "completed")]
+                    board["tasks"] = pending_rows
+                    if done:
+                        board["completed_ids"] = done
+                    prompt_context["daily_tasks"] = board
             prompt_context["failed_actions"] = [{"action": failure["decision"].name, "args": failure["decision"].args,
                                                   "error_code": failure["code"]}
                                                  for failure in list(self._failed_actions.values())[-8:]
@@ -931,6 +990,7 @@ If that goal tool is unavailable, use only the currently advertised tools.
                 self._record("INFO", "LLM_REQUEST", {"model": _setting(self.settings, "model", ""),
                                                      "attempt": attempt, "messages": messages, "tools": request_tools,
                                                      "context_bytes": self._request_bytes(messages, request_tools), "history_turns": len(self._turns),
+                                                     "goal_mode": routing["mode"] == "goal",
                                                      "tool_mode": routing["mode"], "atomic_repair_remaining": routing["atomic_repair_remaining"]})
                 request_started = time.monotonic()
                 try:
@@ -939,8 +999,15 @@ If that goal tool is unavailable, use only the currently advertised tools.
                     raise
                 except Exception:
                     raise LLMError("llm_request_error", "Model request failed before a usable response") from None
-                self._record("INFO", "LLM_RESPONSE", {"attempt": attempt, "response": response,
-                                                      "elapsed_ms": round((time.monotonic() - request_started) * 1000, 1)})
+                meta = getattr(self.brain, "last_request_meta", None)
+                response_event = {"attempt": attempt, "response": response,
+                                  "elapsed_ms": round((time.monotonic() - request_started) * 1000, 1)}
+                if isinstance(meta, dict):
+                    if "session_reused" in meta:
+                        response_event["session_reused"] = bool(meta["session_reused"])
+                    if "payload_bytes" in meta:
+                        response_event["payload_bytes"] = meta["payload_bytes"]
+                self._record("INFO", "LLM_RESPONSE", response_event)
                 self._undelivered_result = False
                 self._check_cancel(cancel_event)
                 try:

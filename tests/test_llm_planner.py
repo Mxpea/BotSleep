@@ -681,6 +681,95 @@ class BrainTransportTests(unittest.TestCase):
         self.assertNotIn("safe_stand_candidates", sent_obs)
         self.assertEqual([b["name"] for b in sent_obs["blocks"]], ["crafting_table", "oak_log"])
 
+    def test_openai_brain_tracks_session_reuse_and_resets_dirty_session_on_network_error(self):
+        brain = OpenAIBrain("https://example.invalid/v1", "k", "m", request_gate=None)
+        fake_session = Mock()
+        fake_session.post.side_effect = [
+            Mock(status_code=200, headers={}, json=Mock(return_value=response())),
+            Mock(status_code=200, headers={}, json=Mock(return_value=response())),
+            requests.ConnectionError("reset"),
+        ]
+        with patch.object(brain, "_get_session_with_state", side_effect=[
+            (fake_session, False),
+            (fake_session, True),
+            (fake_session, True),
+        ]):
+            brain.chat_completion([{"role": "user", "content": "hi"}])
+            self.assertFalse(brain.last_request_meta["session_reused"])
+            self.assertGreater(brain.last_request_meta["payload_bytes"], 0)
+            brain.chat_completion([{"role": "user", "content": "hi2"}])
+            self.assertTrue(brain.last_request_meta["session_reused"])
+            brain._session = fake_session
+            with self.assertRaises(LLMError) as caught:
+                brain.chat_completion([{"role": "user", "content": "hi3"}])
+            self.assertEqual(caught.exception.code, "llm_network_error")
+            self.assertIsNone(brain._session)
+            fake_session.close.assert_called_once()
+            self.assertEqual(fake_session.post.call_count, 3)
+
+    def test_daily_mode_folds_older_tool_history_and_trims_completed_daily_tasks(self):
+        class StubBrain:
+            def __init__(self):
+                self.requests = []
+                self.step = 0
+                self.last_request_meta = {"session_reused": True, "payload_bytes": 1234}
+
+            def chat_completion(self, messages, tools=None, cancel_event=None):
+                self.requests.append(copy.deepcopy(messages))
+                self.step += 1
+                return response("wait", {"seconds": 1}, f"call_{self.step}")
+
+        brain = StubBrain()
+        recorder = Recorder()
+        planner = LLMSurvivalPlanner({"enabled": True, "model": "m", "max_history_turns": 8},
+                                     {"objective": "daily"}, recorder=recorder, brain=brain)
+        base_obs = {
+            "fresh": True, "stale": False, "observation_scope": "full",
+            "inventory_fresh": True, "terrain_fresh": True,
+            "status": {"ready": True, "alive": True, "busy": None, "gamemode": "survival",
+                       "dimension": "overworld", "pos": [0.5, 64, 0.5], "health": 20, "food": 20, "is_day": True},
+            "counts": {f"item_{i}": i + 1 for i in range(25)},
+            "inventory": [], "blocks": [{"name": "oak_log", "pos": [2, 64, 0], "can_see": True}],
+        }
+        ctx = {
+            "daily_tasks": {
+                "phase": "mining",
+                "active_task_id": "gather_iron",
+                "tasks": [
+                    {"id": "gather_wood", "status": "completed", "priority": 1, "missing": []},
+                    {"id": "craft_stone_pick", "status": "completed", "priority": 2, "missing": []},
+                    {"id": "gather_iron", "status": "in_progress", "priority": 3, "missing": ["raw_iron:4"]},
+                ],
+            }
+        }
+        for idx in range(7):
+            decision = planner.choose(base_obs, ctx)
+            heavy_data = {"gained": {"oak_log": 1}, "steps": [{"x": n, "y": 64, "z": n} for n in range(50)]}
+            planner.observe_result(decision, SkillResult(True, f"Step {idx} done", heavy_data), base_obs)
+        planner.choose(base_obs, ctx)
+        last_messages = brain.requests[-1]
+        tool_msgs = [m for m in last_messages if m["role"] == "tool"]
+        self.assertEqual(len(tool_msgs), 7)
+        oldest_body = json.loads(tool_msgs[0]["content"])
+        newest_body = json.loads(tool_msgs[-1]["content"])
+        self.assertNotIn("steps", oldest_body["result"]["data"])
+        self.assertEqual(oldest_body["result"]["data"]["gained"], {"oak_log": 1})
+        self.assertNotIn("counts", oldest_body["observation"])
+        self.assertIn("steps", newest_body["result"]["data"])
+        latest_user = json.loads(last_messages[-1]["content"])
+        self.assertEqual(latest_user["context"]["daily_tasks"]["completed_ids"], ["gather_wood", "craft_stone_pick"])
+        self.assertEqual([row["id"] for row in latest_user["context"]["daily_tasks"]["tasks"]], ["gather_iron"])
+        self.assertFalse(any(evt[2] == "LLM_HISTORY_COMPACTED" for evt in recorder.events))
+        req_evt = next(evt for evt in reversed(recorder.events) if evt[2] == "LLM_REQUEST")
+        resp_evt = next(evt for evt in reversed(recorder.events) if evt[2] == "LLM_RESPONSE")
+        self.assertTrue(req_evt[3]["goal_mode"])
+        self.assertTrue(resp_evt[3]["session_reused"])
+        self.assertEqual(resp_evt[3]["payload_bytes"], 1234)
+        unfolded_bytes = planner._request_bytes(
+            [{"role": "system", "content": planner.system_prompt}] + [m for t in planner._turns for m in t] + [last_messages[-1]]
+        )
+        self.assertLess(req_evt[3]["context_bytes"], unfolded_bytes)
+
 
 if __name__ == "__main__":
     unittest.main()
