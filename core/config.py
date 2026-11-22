@@ -74,7 +74,9 @@ DEFAULTS: Dict[str, Any] = {
     "llm": {"enabled": False, "base_url": "http://127.0.0.1:8000/v1", "api_key": "",
             "model": "qwen3.6-35b-a3b", "temperature": 0.3, "max_tokens": 2048,
             "timeout_seconds": 60, "max_history_turns": 10, "max_repair_attempts": 1,
-            "tls_version": "auto"},
+            "tls_version": "auto", "gate_wait_seconds": 600,
+            "recover_uncertain_transport": True,
+            "retry_backoff_seconds": [4, 16, 32, 64, 128, 256]},
     "mining": {
         "targets": {
             "iron": {"count": 24, "min_tool": "stone_pickaxe"},
@@ -352,6 +354,17 @@ def _validate(config: Dict[str, Any], config_dir: Path) -> None:
             raise ConfigError(f"llm.{key} must be an integer between {low} and {high}")
     if llm["tls_version"] not in ("auto", "1.2"):
         raise ConfigError("llm.tls_version must be auto or the string 1.2")
+    _positive(llm["gate_wait_seconds"], "llm.gate_wait_seconds")
+    if llm["gate_wait_seconds"] > 3600:
+        raise ConfigError("llm.gate_wait_seconds must not exceed 3600")
+    _boolean(llm["recover_uncertain_transport"], "llm.recover_uncertain_transport")
+    backoff = llm["retry_backoff_seconds"]
+    if not isinstance(backoff, list) or not 1 <= len(backoff) <= 12:
+        raise ConfigError("llm.retry_backoff_seconds must be a list of 1 to 12 positive numbers")
+    for entry in backoff:
+        _positive(entry, "llm.retry_backoff_seconds entry")
+        if entry > 600:
+            raise ConfigError("llm.retry_backoff_seconds entries must not exceed 600")
 
     mining = _mapping(config["mining"], "mining")
     if set(mining) - set(DEFAULTS["mining"]):

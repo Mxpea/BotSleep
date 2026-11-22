@@ -114,7 +114,7 @@ class DailyRuntimeTests(unittest.TestCase):
         self.world = RuntimeDailyWorld()
         self.index = 0
 
-    def make_harness(self, replies=None, *, state_dir=None, timeout=1):
+    def make_harness(self, replies=None, *, state_dir=None, timeout=1, recover_uncertain_transport=True):
         self.index += 1
         settings = {**copy.deepcopy(DEFAULTS["survival"]), "objective": "daily",
             "autonomy": {"enabled": False},  # This fixture verifies individual native atomic calls.
@@ -124,10 +124,20 @@ class DailyRuntimeTests(unittest.TestCase):
         if replies is not None:
             endpoint = FakeChatEndpoint(replies)
             self.addCleanup(endpoint.close)
-            gate = ModelRequestGate(endpoint.base_url, "offline-model-key", directory=Path(self.temp.name) / "gates")
-            brain = OpenAIBrain(endpoint.base_url, "offline-model-key", "offline-model", timeout_seconds=timeout, request_gate=gate)
-            planner = LLMSurvivalPlanner({"enabled": True, "model": "offline-model", "api_key": "offline-model-key",
-                "max_repair_attempts": 0}, settings, brain=brain)
+            gate = ModelRequestGate(
+                endpoint.base_url, "offline-model-key", directory=Path(self.temp.name) / "gates",
+                auto_recover_uncertain=recover_uncertain_transport,
+            )
+            brain = OpenAIBrain(
+                endpoint.base_url, "offline-model-key", "offline-model",
+                timeout_seconds=timeout, recover_uncertain_transport=recover_uncertain_transport,
+                request_gate=gate,
+            )
+            planner = LLMSurvivalPlanner(
+                {"enabled": True, "model": "offline-model", "api_key": "offline-model-key",
+                 "max_repair_attempts": 0, "recover_uncertain_transport": recover_uncertain_transport},
+                settings, brain=brain,
+            )
         harness = SurvivalHarness(self.world, settings, DEFAULTS["sleep"], planner=planner)
         self.assertIsInstance(harness.collector, DailyObservationCollector)
         self.assertIsInstance(harness.skills, DailySurvivalSkills)
@@ -417,7 +427,9 @@ class DailyRuntimeTests(unittest.TestCase):
         self.assertEqual(len([call for call in self.world.calls if call[0] == "place"]), 1)
 
     def test_uncertain_model_http_blocks_new_requests_but_local_eating_and_retreat_continue(self):
-        harness, endpoint = self.make_harness([tool_response("wait", {"seconds": 1})], timeout=.05)
+        harness, endpoint = self.make_harness(
+            [tool_response("wait", {"seconds": 1})], timeout=.05, recover_uncertain_transport=False,
+        )
         endpoint.release.clear()
         result = self.step(harness)
         self.assertEqual(result.error_code, "llm_request_uncertain")

@@ -144,14 +144,17 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
         self._active_decision = None
         self._active_relaxed_work = None
         self._next_attempt = 0.0
+        self._llm_retry_after = 0.0
         self._next_monitor = 0.0
         self._next_idle_monitor = 0.0
         self._started = time.monotonic()
         self._saw_observation = False
         self._death_awaiting_marker = False
         self._budget_exhausted = False
+        self._manual_step = False
         self.steps = 0
         self.failures = 0
+        self._model_failures = 0
         terminal_competition = bool(self.competition and self.competition.snapshot().get("phase") == "completed")
         self.finished = terminal_competition
         self.completed = terminal_competition
@@ -347,7 +350,9 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
         self._paused = False
         self.pause_reason = None
         self.failures = 0
+        self._model_failures = 0
         self._next_attempt = 0
+        self._llm_retry_after = 0.0
         self._task_resume_requested = True
         gate = getattr(getattr(self.planner, "brain", None), "request_gate", None)
         if self._model_blocked and gate and gate.snapshot().get("state") == "idle":
@@ -355,6 +360,22 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
         # A previous intention is evidence, never an instruction to replay.
         self._record("INFO", "RESUMED", {"reobserve": True})
         return True
+
+    def _llm_retry_schedule(self):
+        settings = getattr(self.planner, "settings", None)
+        raw = settings.get("retry_backoff_seconds") if isinstance(settings, dict) else None
+        if isinstance(raw, (list, tuple)) and raw:
+            values = [float(item) for item in raw if type(item) in (int, float) and item > 0]
+            if values:
+                return tuple(values)
+        return (4.0, 16.0, 32.0, 64.0, 128.0, 256.0)
+
+    def _recover_uncertain_transport(self):
+        settings = getattr(self.planner, "settings", None)
+        if isinstance(settings, dict) and "recover_uncertain_transport" in settings:
+            return bool(settings["recover_uncertain_transport"])
+        brain = getattr(self.planner, "brain", None)
+        return bool(getattr(brain, "recover_uncertain_transport", True))
 
     def pause(self, reason="user_requested"):
         self._paused = True
@@ -374,7 +395,11 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
     def request_step(self):
         if not self.resume():
             return False
-        return self._start()
+        self._manual_step = True
+        started = self._start()
+        if not started:
+            self._manual_step = False
+        return started
 
     def request_sleep(self):
         if not self.resume():
@@ -766,9 +791,25 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                 elif (opening := self._local_opening(observation)) is not None:
                     decision = opening
                 else:
-                    if self._model_blocked:
+                    if self._model_blocked and not self._recover_uncertain_transport():
                         decision = Decision("wait", {"seconds": 5}, "Model request outcome is uncertain; local safety remains active", "observe")
                         return decision, SkillResult(True, decision.reason, {"waiting": True, "model_blocked": self._model_blocked}), observation
+                    now_mono = time.monotonic()
+                    if (not self._manual_step and self._next_attempt > 0
+                            and not (self._model_worker and self._model_worker.pending)
+                            and now_mono < self._llm_retry_after):
+                        remaining = max(0.0, self._llm_retry_after - now_mono)
+                        decision = Decision(
+                            "wait",
+                            {"seconds": min(5, max(1, math.ceil(remaining)))},
+                            "Waiting for AI API retry backoff; local safety remains active",
+                            "observe",
+                        )
+                        return decision, SkillResult(
+                            True,
+                            decision.reason,
+                            {"waiting": True, "llm_backoff_seconds": round(remaining, 1)},
+                        ), observation
                     self._phase("thinking")
                     before_life = self._life_marker(observation)
                     try:
@@ -782,6 +823,9 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                         if self._cancel.is_set():
                             return decision, SkillResult(False, "Planning cancelled; no action sent", {"executed": False}, "cancelled"), observation
                         return decision, SkillResult(True, decision.reason, {"waiting": True, "model_pending": True}), observation
+                    self._model_failures = 0
+                    self._llm_retry_after = 0.0
+                    self._model_blocked = None
                     self._model_feedback = not starter_recovery
                     if self._cancel.is_set():
                         return decision, SkillResult(False, "Paused while the model was planning; no action sent", error_code="cancelled"), observation
@@ -1103,6 +1147,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                 decision = Decision("observe", {}, "Cancelled", "observe")
                 result, observation = SkillResult(False, "Cancelled", error_code="cancelled"), None
             self._future = None
+            self._manual_step = False
             self._active_decision = None
             self._active_relaxed_work = None
             if self._model_feedback:
@@ -1175,30 +1220,67 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                     delay = min(60, self.settings["retry_seconds"] * 2 ** min(self.failures - 1, 4))
                     retry_after = result.data.get("retry_after") if isinstance(result.data, dict) else None
                     if isinstance(retry_after, (int, float)) and not isinstance(retry_after, bool) and retry_after > 0:
-                        delay = max(delay, min(60.0, float(retry_after)))
+                        delay = max(delay, min(256.0, float(retry_after)))
                 uncertain_action = _uncertain_result(result) and decision.name != "observe"
-                http_status = result.data.get("http_status")
-                transient_model_error = (result.error_code in {"llm_timeout", "llm_network_error", "llm_busy"}
-                    or (result.error_code == "llm_http_error" and isinstance(http_status, int)
-                        and (http_status in {408, 425, 429} or 500 <= http_status < 600)))
-                fatal_model_error = result.error_code == "llm_http_error" and not transient_model_error
+                http_status = result.data.get("http_status") if isinstance(result.data, dict) else None
+                context_limit_http = (http_status == 400 and isinstance(result.data, dict)
+                                      and result.data.get("context_limit") is True)
+                recover_uncertain = self._recover_uncertain_transport()
                 model_uncertain = result.error_code in {"llm_request_uncertain", "llm_gate_corrupt"}
+                if model_uncertain and recover_uncertain and result.error_code == "llm_request_uncertain":
+                    gate = getattr(getattr(self.planner, "brain", None), "request_gate", None)
+                    if gate is not None:
+                        try:
+                            gate.acknowledge_provider_idle()
+                        except Exception:
+                            pass
+                    model_uncertain = False
+                    self._model_blocked = None
+                transient_http = (result.error_code == "llm_http_error" and (
+                    (isinstance(http_status, int) and (http_status in {408, 425, 429} or 500 <= http_status < 600))
+                    or context_limit_http))
+                daily_planner_recoverable = (self.daily and result.error_code in {
+                    "llm_no_tool_call", "llm_multiple_tool_calls", "llm_invalid_arguments",
+                    "llm_unsafe_action", "llm_no_progress", "llm_repeated_failure"})
+                transient_model_error = (
+                    result.error_code in {"llm_timeout", "llm_network_error", "llm_busy",
+                                          "llm_invalid_response", "llm_request_error", "llm_context_limit",
+                                          "llm_request_uncertain"}
+                    or transient_http or daily_planner_recoverable
+                )
+                if result.error_code == "llm_request_uncertain" and model_uncertain:
+                    transient_model_error = False
+                fatal_model_error = result.error_code == "llm_http_error" and not transient_model_error
+                if result.error_code and result.error_code.startswith("llm_") and result.error_code != "llm_busy" and transient_model_error:
+                    self._model_failures += 1
+                    schedule = self._llm_retry_schedule()
+                    delay = float(schedule[min(self._model_failures - 1, len(schedule) - 1)])
+                    retry_after = result.data.get("retry_after") if isinstance(result.data, dict) else None
+                    if isinstance(retry_after, (int, float)) and not isinstance(retry_after, bool) and retry_after > 0:
+                        delay = max(delay, min(256.0, float(retry_after)))
+                    self._llm_retry_after = time.monotonic() + delay
+                if self.daily and result.error_code == "llm_repeated_failure" and hasattr(self.planner, "_failed_actions"):
+                    self.planner._failed_actions.clear()
+                if (result.error_code == "llm_context_limit" or context_limit_http) and isinstance(getattr(self.planner, "_turns", None), list):
+                    turns = self.planner._turns
+                    self.planner._turns = turns[-2:] if len(turns) > 2 else []
                 if self.daily and model_uncertain:
                     self._model_blocked = result.error_code
                     self._record("WARN", "MODEL_BLOCKED_SAFETY_ACTIVE", {"code": result.error_code})
                 starter_blocked = not self.daily and result.error_code == "llm_repeated_failure"
-                if (uncertain_action or fatal_model_error or starter_blocked
-                    or result.error_code in FATAL | {"death_limit", "internal", "internal_error", "llm_invalid_config", "llm_record_error", "llm_missing_feedback", "llm_request_uncertain", "llm_gate_corrupt"}
-                    or (not retreat_replan and not local_replan and not combat_replan and not task_replan and not transient_model_error
-                        and self.failures >= self.settings["max_consecutive_failures"])):
+                pause_on_limit = (not self.daily and not retreat_replan and not local_replan
+                                  and not combat_replan and not task_replan and not transient_model_error
+                                  and self.failures >= self.settings["max_consecutive_failures"])
+                if (uncertain_action or fatal_model_error or starter_blocked or (model_uncertain and not self.daily)
+                    or result.error_code in FATAL | {"death_limit", "internal", "internal_error", "llm_invalid_config",
+                                                     "llm_record_error", "llm_missing_feedback"}
+                    or pause_on_limit):
                     self._paused = True
                     self.pause_reason = result.error_code or "repeated_failures"
-                    if self.daily and model_uncertain and not uncertain_action:
-                        self._paused = False
-                        self.pause_reason = None
                 if transient_model_error:
                     self._record("WARN", "MODEL_RETRY_SCHEDULED", {"code": result.error_code, "http_status": http_status,
-                                 "retry_seconds": delay, "consecutive_failures": self.failures})
+                                 "retry_seconds": delay, "consecutive_failures": self.failures,
+                                 "consecutive_model_failures": self._model_failures})
                 # Dig recovery already made a bounded stop attempt, including
                 # when that attempt failed. Do not block the main tick with a
                 # second default-timeout request; the unknown result stays paused.

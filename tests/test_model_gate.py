@@ -101,5 +101,66 @@ class ModelGateTests(unittest.TestCase):
         self.assertNotIn("private-key", ledger)
         self.assertNotIn("example.invalid", ledger)
 
+    def test_global_concurrency_serializes_distinct_credentials_in_fifo_order(self):
+        gate_a = ModelRequestGate("https://a.invalid/v1", "key-a", directory=self.temporary.name, wait_seconds=5)
+        gate_b = ModelRequestGate("https://b.invalid/v1", "key-b", directory=self.temporary.name, wait_seconds=5)
+        order = []
+        active = 0
+        peak = 0
+        errors = []
+        first_entered = threading.Event()
+        second_queued = threading.Event()
+
+        def worker_a():
+            nonlocal active, peak
+            try:
+                with gate_a.request():
+                    active += 1
+                    peak = max(peak, active)
+                    order.append("a_start")
+                    first_entered.set()
+                    second_queued.wait(2)
+                    time.sleep(0.08)
+                    order.append("a_end")
+                    active -= 1
+            except Exception as exc:
+                errors.append(exc)
+
+        def worker_b():
+            nonlocal active, peak
+            try:
+                first_entered.wait(2)
+                second_queued.set()
+                with gate_b.request():
+                    active += 1
+                    peak = max(peak, active)
+                    order.append("b_start")
+                    time.sleep(0.02)
+                    order.append("b_end")
+                    active -= 1
+            except Exception as exc:
+                errors.append(exc)
+
+        t1 = threading.Thread(target=worker_a)
+        t2 = threading.Thread(target=worker_b)
+        t1.start()
+        t2.start()
+        t1.join(4)
+        t2.join(4)
+        self.assertFalse(errors)
+        self.assertEqual(peak, 1)
+        self.assertEqual(order, ["a_start", "a_end", "b_start", "b_end"])
+
+    def test_auto_recover_uncertain_releases_slot_and_recovers_stale_inflight(self):
+        gate = self.gate(auto_recover_uncertain=True)
+        with self.assertRaises(TransportTimeout):
+            with gate.request():
+                raise TransportTimeout()
+        self.assertEqual(gate.snapshot()["state"], "idle")
+        gate._write({"state": "inflight", "pid": 99999999, "started_at": 1})
+        with gate.request():
+            pass
+        self.assertEqual(gate.snapshot()["state"], "idle")
+
 
 if __name__ == "__main__": unittest.main()

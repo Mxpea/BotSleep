@@ -54,7 +54,9 @@ class OpenAIBrain:
         max_tokens: int = 1024,
         timeout_seconds: float = 30,
         tls_version: str = "auto",
-        gate_wait_seconds: float = 60.0,
+        gate_wait_seconds: float = 600.0,
+        recover_uncertain_transport: bool = True,
+        global_concurrency: bool = True,
         request_gate=_AUTO_GATE,
         recorder=None,
     ):
@@ -67,8 +69,19 @@ class OpenAIBrain:
         if tls_version not in ("auto", "1.2"):
             raise LLMError("llm_invalid_config", "Unsupported model TLS version setting")
         self.tls_version = tls_version
-        self.request_gate = (ModelRequestGate(self.base_url, self.api_key, wait_seconds=max(5.0, float(gate_wait_seconds)), recorder=recorder)
-                             if request_gate is _AUTO_GATE else request_gate)
+        self.recover_uncertain_transport = bool(recover_uncertain_transport)
+        self.global_concurrency = bool(global_concurrency)
+        self.request_gate = (
+            ModelRequestGate(
+                self.base_url,
+                self.api_key,
+                wait_seconds=max(5.0, float(gate_wait_seconds)),
+                recorder=recorder,
+                global_concurrency=self.global_concurrency,
+                auto_recover_uncertain=self.recover_uncertain_transport,
+            )
+            if request_gate is _AUTO_GATE else request_gate
+        )
         self._session_lock = threading.Lock()
         self._session: Optional[requests.Session] = None
         self._session_last_used: float = 0.0
@@ -143,6 +156,8 @@ class OpenAIBrain:
             raise LLMError(error.code, str(error), error.details) from None
         except LLMError as error:
             if error.code in {"llm_timeout", "llm_network_error"}:
+                if self.recover_uncertain_transport:
+                    raise
                 details = {"transport_error": error.code, "executed": False}
                 if isinstance(error.details, dict) and error.details.get("exception_type"):
                     details["exception_type"] = error.details["exception_type"]

@@ -1249,7 +1249,7 @@ class SurvivalSkills:
             search["nodes"] = len(visited)
             queue = deque(entries)
             best_partial = None
-            node_cap = 64
+            node_cap = 96 if escaping else 64
             directions = sorted(((1, 0), (-1, 0), (0, 1), (0, -1)),
                                 key=lambda delta: delta[0] * dx + delta[1] * dz, reverse=True)
             while queue:
@@ -1278,7 +1278,7 @@ class SurvivalSkills:
                 ordered = directions if escaping else sorted(directions, key=lambda delta: threat_score(
                     [current[0] + delta[0] + .5, current[1], current[2] + delta[1] + .5]), reverse=True)
                 step_ys = (
-                    (0, -1, -2, -3, -4, -5, 1)
+                    ((0, -1, -2, -3, -4, -5, 1) if before["health"] >= 16 else (0, -1, -2, -3, -4, 1))
                     if allow_deep_drop
                     else ((0, -1, -2, -3, 1) if (escaping and before["health"] > 10)
                           else ((0, -1, 1, -2) if (not escaping and not leaf_start) else (0, -1, -2, 1)))
@@ -1425,7 +1425,7 @@ class SurvivalSkills:
                 # verified non-destructive relay may still be available.
                 search["clearing_skipped"] = "read_budget"
         if (escaping and target is None and planned_path is None and not relay_candidates
-                and self._number(before.get("health", 0), "health", 0, 1024) >= 16):
+                and self._number(before.get("health", 0), "health", 0, 1024) >= 12):
             try:
                 final_target, planned_path = terrain_fallback(allow_deep_drop=True)
                 if planned_path:

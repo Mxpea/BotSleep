@@ -179,7 +179,10 @@ If that goal tool is unavailable, use only the currently advertised tools.
             model=_setting(settings, "model", ""), temperature=_setting(settings, "temperature", 0.3),
             max_tokens=_setting(settings, "max_tokens", 2048),
             timeout_seconds=_setting(settings, "timeout_seconds", 60),
-            tls_version=_setting(settings, "tls_version", "auto"), recorder=recorder)
+            tls_version=_setting(settings, "tls_version", "auto"),
+            gate_wait_seconds=_setting(settings, "gate_wait_seconds", 600.0),
+            recover_uncertain_transport=bool(_setting(settings, "recover_uncertain_transport", True)),
+            recorder=recorder)
         self._turns = []
         self._pending = None
         self._failed_actions = {}
