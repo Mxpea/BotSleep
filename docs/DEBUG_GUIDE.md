@@ -1,6 +1,6 @@
 # 调试、日志与实服靶场
 
-更新：2026-11-15，源码基线 `3801be9`。普通运行方式见 [README.md](../README.md)，本轮结果及历史证据见 [TESTING.md](TESTING.md)。
+更新：2026-11-22。普通运行方式见 [README.md](../README.md)，本轮结果及历史证据见 [TESTING.md](TESTING.md)。
 
 ## 聊天调试入口
 
@@ -29,6 +29,30 @@ FlightRecorder 把显式发布事件写入配置的日志目录，路径相对�
 游戏 pending 必须先重新观察、核验，不自动重放；`--resume` 不解除模型未知锁。只有确认远端模型已空闲后才能使用 `--acknowledge-model-idle`，不能因本地超时或取消就试探解锁。停止回执不是动作结束证据，清理失败也不应跳过登出。详细契约见 [SURVIVAL.md](SURVIVAL.md) 和 [DAILY_SURVIVAL.md](DAILY_SURVIVAL.md)。
 
 `debug.monitor.enabled: true` 提供默认 `127.0.0.1:18930` 的只读网页，只消费已发布事件并脱敏、限制缓存。它显示阶段、任务、模型槽、response.model 和执行结果，不是远程控制台，也不重试动作或清锁。门户 PortalTelemetryRecorder 主动读游戏并导出 JSON，是另一条开发记录路径，未接入该事件面板；见 [MONITORING.md](MONITORING.md)。
+
+## 常见踩坑与排查清单（开发者必读）
+
+结合端侧实服日志（如 `flight_20261122.jsonl`）和多 Bot 联调复盘，调试和跑测时务必注意以下 4 类高频陷阱：
+
+1. **误用 `starter` 模式与默认严格睡眠策略**
+   - **现象**：上下文刚到 30KB 就频繁触发 `LLM_HISTORY_COMPACTED`（丢弃历史轮次）；没有 `AutonomousTaskController` 和 `SurfaceScoutSkill`，机器人退化为大量小步 `move_to`，容易被实体碰撞箱卡住或尝试徒手挖圆石失败；若遇黑夜/雷暴且无床，会连续输出 `SAFETY_OVERRIDE`（`wait(5)`）原地空转。
+   - **规避**：生存长时间运行/联调必须使用 `agent.mode: survival`、`survival.objective: daily`（或命令行 `--mode survival --objective daily`），并在配置中设置 `survival.sleep_policy: "opportunistic"`。
+
+2. **端侧 `llm.timeout_seconds` 过小与 `ModelRequestGate` `uncertain` 锁死**
+   - **现象**：端侧模型在高上下文字节（实测曾达 ~28.9KB）下推理耗时会超过 20s（如 21.08s），超时后触发 `llm_timeout` 并写入持久化的 `MODEL_REQUEST_UNCERTAIN` 状态；此后简单重启程序会在 15ms 内再次报错拒跑，因为重启不会自动清除 `uncertain` 锁（防止幽灵并发请求）。
+   - **规避与恢复**：保持 `llm.timeout_seconds >= 60`（与 `core/config.py` 默认值一致）；若遇 Windows/代理 TLS 握手异常可显式配置 `llm.tls_version: "1.2"`。一旦触发 `MODEL_REQUEST_UNCERTAIN`，**先确认远端模型服务端已无在途请求**，再使用 `--acknowledge-model-idle` 明确确认空闲后恢复（需续跑检查点时配合 `--resume`）。
+
+3. **沿用多端口脚本而非 `mc-agent-api >= 1.3.13` 单端口多 Bot 架构**
+   - **现象**：过去为每个 Bot 启动 `18901..18909` 一排端口既繁琐又不符合新版多 Bot 进程隔离规范。`mc-agent-api >= 1.3.13`（当前基线 `1.3.19`）已在单端口（默认 `http://127.0.0.1:18900/api/v1`）内按 Bot 隔离运行实例。
+   - **规避**：多 Bot 统一使用 `scripts/multi_bot_runner.py`（支持 `--start-api`、`--spread`、`--dry-run`），指向同一 `mc_api.base_url` 并为每个 Bot 分配独立的 `state_dir`、`world_id`、`session_file`、日志目录与只读监控端口（`18931+`）；错峰登录会自动处理 `429 rate_limited`（`retry_after_s`）与 `503 routing_unavailable`。
+
+4. **多 Bot 模型门禁争用（`llm_busy`）与飞行日志速查**
+   - **现象**：多进程同时请求同一个模型服务时，受 `ModelRequestGate` 串行保护，后发进程会收到 `llm_busy`。当前 harness 已将其与真正故障分离（不累加 `failures`，仅做 `1.0..2.5s` 带用户名抖动的短退避），不应强行并发绕过门禁。
+   - **日志速查**：排查 `logs/flight_*.jsonl` 时重点检索：
+     - `LLM_REQUEST`：查看 `context_bytes` 与 `history_turns` 是否逼近限额（`starter` 为 30000B，`competition` 为 48000B）；
+     - `LLM_HISTORY_COMPACTED`：确认是否因上下文过大连续丢弃历史；
+     - `MODEL_REQUEST_UNCERTAIN`：定位超时或断连瞬间（`elapsed_ms`），按第 2 条人工确认空闲后再解锁；
+     - `SAFETY_OVERRIDE`：排查是否因夜间无床或门禁阻塞导致停滞。
 
 ## 默认离线回归
 
