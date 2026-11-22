@@ -1011,7 +1011,7 @@ class AutonomousTaskController:
                 or not self.safety_policy.allows_relaxed(decision, relaxed_policy, observation))):
             self.interrupt("no_stationary_step_for_relaxed_work")
             return None
-        if decision is None and not (task == "food" and status.get("food", 0) >= 16 and status.get("health", 0) >= 16 and self._recent_hunt_failures() >= 2):
+        if decision is None and not (task == "nether_portal" and self._data.get("portal_attempted")) and not (task == "food" and status.get("food", 0) >= 16 and status.get("health", 0) >= 16 and self._recent_hunt_failures() >= 2):
             decision = self._explore(obs, local)
         if decision is None:
             self._escalate("no_safe_local_action_or_unavailable_prerequisite")
