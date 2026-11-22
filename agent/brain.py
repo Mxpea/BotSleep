@@ -143,9 +143,12 @@ class OpenAIBrain:
             raise LLMError(error.code, str(error), error.details) from None
         except LLMError as error:
             if error.code in {"llm_timeout", "llm_network_error"}:
+                details = {"transport_error": error.code, "executed": False}
+                if isinstance(error.details, dict) and error.details.get("exception_type"):
+                    details["exception_type"] = error.details["exception_type"]
                 raise LLMError("llm_request_uncertain",
                                "Model transport ended without a complete response; confirm provider idle before another request",
-                               {"transport_error": error.code, "executed": False}) from None
+                               details) from None
             raise
 
     def _chat_completion(self, messages, tools=None, *, cancel_event=None):
@@ -173,20 +176,22 @@ class OpenAIBrain:
             options = {"headers": self.headers, "json": payload, "timeout": self.timeout_seconds,
                        "allow_redirects": False}
             resp, session_reused = self._send_post(url, options)
-        except requests.Timeout:
+        except requests.Timeout as exc:
             self.last_request_meta = {
                 "session_reused": session_reused, "payload_bytes": payload_bytes,
                 "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+                "exception_type": type(exc).__name__,
             }
             self.close()
-            raise LLMError("llm_timeout", "Model request timed out") from None
-        except requests.RequestException:
+            raise LLMError("llm_timeout", "Model request timed out", {"exception_type": type(exc).__name__}) from None
+        except requests.RequestException as exc:
             self.last_request_meta = {
                 "session_reused": session_reused, "payload_bytes": payload_bytes,
                 "elapsed_ms": round((time.monotonic() - started) * 1000, 1),
+                "exception_type": type(exc).__name__,
             }
             self.close()
-            raise LLMError("llm_network_error", "Model endpoint could not be reached") from None
+            raise LLMError("llm_network_error", "Model endpoint could not be reached", {"exception_type": type(exc).__name__}) from None
         self.last_request_meta = {
             "session_reused": session_reused, "payload_bytes": payload_bytes,
             "elapsed_ms": round((time.monotonic() - started) * 1000, 1),

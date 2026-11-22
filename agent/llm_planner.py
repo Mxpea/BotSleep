@@ -954,8 +954,8 @@ If that goal tool is unavailable, use only the currently advertised tools.
                 board = dict(prompt_context["daily_tasks"])
                 tasks = board.get("tasks")
                 if isinstance(tasks, list):
-                    done = [row.get("id") for row in tasks if isinstance(row, dict) and row.get("status") == "completed" and row.get("id")]
-                    pending_rows = [row for row in tasks if not (isinstance(row, dict) and row.get("status") == "completed")]
+                    done = [row.get("id") for row in tasks if isinstance(row, dict) and row.get("status") in {"completed", "satisfied"} and row.get("id")]
+                    pending_rows = [row for row in tasks if not (isinstance(row, dict) and row.get("status") in {"completed", "satisfied"})]
                     board["tasks"] = pending_rows
                     if done:
                         board["completed_ids"] = done
@@ -1002,7 +1002,7 @@ If that goal tool is unavailable, use only the currently advertised tools.
                         cat = "station" if name in {"crafting_table", "furnace", "smoker", "blast_furnace", "chest", "barrel"} or name.endswith("_bed") else "other"
                         if cat == "other":
                             counts_by_cat[name] = counts_by_cat.get(name, 0) + 1
-                            if counts_by_cat[name] > 3:
+                            if counts_by_cat[name] > 1 or len(trimmed) >= 16:
                                 continue
                         trimmed.append(row)
                     snapshot["blocks"] = trimmed
