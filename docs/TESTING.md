@@ -1,5 +1,22 @@
 # 配置、客户端、生存、赛事与监控验证
 
+## 端侧 API 9-Bot 并行进地狱调试与阻断说明（2026-11-23）
+
+基线为 `develop-tianya/api-model-opt`（提交 `4e7b9a7`、`c432674`、`3a483bf`、`3de226f`、`e900c65`、`3354b71`、`0779f21` 与 `scripts/multi_bot_runner.py` 散布点隔离改动）。Windows / Python 3.12，使用 Leaves 1.21.11（`difficulty=easy`）与 `mc-agent-api`（未改动其源码），通过 `scripts/multi_bot_runner.py` 启动 9 个 Bot 并行连接默认端侧 API（`https://api.nju-aia.com/v1`，`model: default`，实际返回模型为 `qwen3.6-35b-a3b`）进行实服压测。
+
+- **已落地功能与实服问题修复**：
+  - 探索、砂砾采燧石、宝箱拾取、干草块做面包与地狱门搭建/进门链路（`skills/survival.py`、`core/autonomous_tasks.py`、`core/autonomy_runtime.py`、`core/survival_harness.py`、`agent/llm_planner.py`）。
+  - 夜间战斗与保活优化：扩大 `Easy` 敌对怪识别与低血近战阈值、`water_escape` 水中窒息绕过冷却与落地确认、多重威胁 `BFS` 回退放宽、深矿中断不误拉黑矿脉且 `raw_iron` 双熔炉并发、`PermissionError` (`WinError 5`) 状态写入重试、`deep_mine("cobblestone")` 地表遮挡回退、prompt 精简与连接空闲回收。
+  - 多 Bot 启动散布防撞与逐个 `/spawnpoint` 隔离（`scripts/multi_bot_runner.py`）。
+- **离线验证（截至最后一次代码提交 `0779f21`，含文档更新后复跑验证）**：
+  - `BOTSLEEP_RUN_LIVE_TESTS=0 .\.venv\Scripts\python.exe -B -m unittest discover -s tests -q` 通过 `1583` 项（跳过 `10` 项，未运行实服套件）。
+- **实服 6 轮 9-Bot 压测进展（`nether_bench_v1`–`v6`）**：
+  - 从早期落水卡死、夜战暴毙与状态写盘冲突逐步收敛到 `v5` 阶段 **0/9 死亡**、以及 `v6` **8/9 存活**（仅 `bot_1` 被骷髅击杀 1 次）；`v2` 中 `bot_3` 已完成 `deep_mine` 并启动 2 炉烧 `raw_iron`。
+  - **已观察残余问题**：`v6` 中 `bot_3` 在高树冠（约 `[-2017.3, 73.0, 13.5]`）发生 `canopy_escape` 退避失败循环（连续 `198` 步冷却等待）。
+- **当前硬阻断（尚未达成 `< 1.3h` 且 `> 50%` 进地狱目标）**：
+  - `v2`、`v4`、`v5`、`v6` 均被上游端侧 LLM 链路稳定性打断：`v2` 出现 `llm_network_error`（耗时 `39975.1ms`）；`v4` 出现 `llm_network_error`（`17:15:25.122Z -> 17:15:56.458Z` / `31.34s`，总耗时 `40600.5ms`）；`v5` 出现 `SSLError`（`32.29s`，`elapsed_ms: 40250.6`）；`v6` 出现 `ConnectionError`（`17:47:31.239Z -> 17:48:35.483Z` / `64.24s`，`elapsed_ms: 67821.0`）。
+  - 按 `AGENTS.md` 与 `core/model_gate.py` 强制约束，传输超时或连接中断会触发跨进程共享凭据的持久化 `"uncertain"` 状态锁，严禁自动重试或程序侧擅自清锁，因此每次触发后全部 9 个 Bot 均立即停机等待人工核查。
+
 ## 原计划被软限制挡住后的续做（2026-11-21）
 
 基线为 `dev-aure 064989a` 加本地改动。Windows / Python 3.12，用 Leaves Java 1.21.11 和官方 mc-agent-api 1.3.14 启动独立测试存档。用控制台在靶场准备站位、材料和时间，以固定工具调用响应复现拦截时机，实际方块和库存通过游戏 API 核验。

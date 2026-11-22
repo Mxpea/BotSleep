@@ -176,9 +176,23 @@ def _prepare_and_spread(
                     rcon.command(f"xp set {bot_name} 0 levels")
                     rcon.command(f"xp set {bot_name} 0 points")
                     rcon.command(f"effect clear {bot_name}")
-                    candidates = [(gx, gz), (4000, 0), (-4000, 0), (0, 4000), (0, -4000)]
+                    candidates = [
+                        (gx, gz),
+                        (gx + 500, gz + 500),
+                        (gx - 500, gz - 500),
+                        (6000, 0),
+                        (-6000, 0),
+                        (0, 6000),
+                        (0, -6000),
+                        (6000, 6000),
+                        (-6000, -6000),
+                        (6000, -6000),
+                        (-6000, 6000),
+                    ]
                     st_after: Dict[str, Any] = {}
                     for cx, cz in candidates:
+                        if any(math.hypot(cx - p[0], cz - p[2]) < min_dist for p in positions.values()):
+                            continue
                         for mr in (32, 256):
                             resp = rcon.command(f"spreadplayers {cx} {cz} 5 {mr} false {bot_name}")
                             if "Spread" in resp:
