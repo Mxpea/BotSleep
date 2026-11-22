@@ -642,3 +642,19 @@ class CombatClientTests(unittest.TestCase):
         res = combat_options(obs)
         self.assertTrue(res["allowed"], res)
         self.assertEqual(res["mode"], "melee")
+
+    def test_combat_footing_accepts_ore_floor_and_dirt_path_surface(self):
+        from unittest.mock import Mock
+        client = Mock()
+        blocks = {
+            (0, 63, 0): {"name": "dirt", "properties": {}},
+            (0, 64, 0): {"name": "dirt_path", "properties": {}},
+            (0, 65, 0): {"name": "air", "properties": {}},
+            (1, 63, 0): {"name": "iron_ore", "properties": {}},
+            (1, 64, 0): {"name": "air", "properties": {}},
+            (1, 65, 0): {"name": "air", "properties": {}},
+        }
+        client.get_block.side_effect = lambda pos, **kw: {"ok": True, "result": blocks.get(tuple(pos), {"name": "air", "properties": {}})}
+        skills = CombatSkills(client)
+        skills._footing({"cancel": None, "deadline": time.monotonic() + 5, "block_reads": 0}, [0.5, 64.9375, 0.5])
+        skills._footing({"cancel": None, "deadline": time.monotonic() + 5, "block_reads": 0}, [1.5, 64.0, 0.5])

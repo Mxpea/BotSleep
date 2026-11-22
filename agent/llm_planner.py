@@ -815,6 +815,10 @@ If that goal tool is unavailable, use only the currently advertised tools.
         if ((name == "craft_item" and args.get("item") == "furnace")
                 or (name == "run_survival_task" and args.get("task") == "craft" and args.get("item") == "furnace")) and counts.get("furnace", 0) >= 1:
             raise LLMError("llm_no_progress", "Inventory already holds >= 1 furnace; do not craft another furnace or use craft_item to place it. Proceed with gather(raw_iron), iron_tools, or smelt(iron_ingot).")
+        if (self.objective in {"daily", "competition"}
+                and name == "run_survival_task" and args.get("task") == "craft"
+                and args.get("item") == "crafting_table" and counts.get("crafting_table", 0) >= 1):
+            raise LLMError("llm_no_progress", "Inventory already holds >= 1 crafting_table; run craft/smelt/tools goals directly instead of crafting another crafting_table.")
         decision = Decision(name, args, reason, goal)
         failure = self._failed_actions.get(self._signature(decision))
         if failure and self._unchanged_failure(failure, observation, decision):

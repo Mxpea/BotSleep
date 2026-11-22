@@ -190,8 +190,11 @@ def _prepare_and_spread(
                         (-6000, 6000),
                     ]
                     st_after: Dict[str, Any] = {}
+                    remaining_anchors = [a for a in anchors[idx:]]
                     for cx, cz in candidates:
-                        if any(math.hypot(cx - p[0], cz - p[2]) < min_dist for p in positions.values()):
+                        if any(math.hypot(cx - p[0], cz - p[2]) < (min_dist + 300.0) for p in positions.values()):
+                            continue
+                        if (cx, cz) != (gx, gz) and any(math.hypot(cx - ax, cz - az) < (min_dist + 300.0) for ax, az in remaining_anchors):
                             continue
                         for mr in (32, 256):
                             resp = rcon.command(f"spreadplayers {cx} {cz} 5 {mr} false {bot_name}")

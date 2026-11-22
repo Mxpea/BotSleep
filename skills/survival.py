@@ -36,6 +36,10 @@ class SurvivalSkills:
     RETREAT_PASSABLE = AIR | {
         "short_grass", "tall_grass", "short_dry_grass", "tall_dry_grass",
         "fern", "large_fern", "leaf_litter", "wildflowers", "bush", "firefly_bush", "cactus_flower",
+        "pink_petals", "dead_bush", "dandelion", "poppy", "blue_orchid", "allium", "azure_bluet",
+        "red_tulip", "orange_tulip", "white_tulip", "pink_tulip", "oxeye_daisy", "cornflower",
+        "lily_of_the_valley", "sunflower", "lilac", "rose_bush", "peony",
+        "brown_mushroom", "red_mushroom", "torch", "wall_torch", "sugar_cane",
         "vine", "glow_lichen", "hanging_roots", "moss_carpet", "pale_moss_carpet",
         "pale_hanging_moss", "eyeblossom", "open_eyeblossom", "closed_eyeblossom", "snow",
     }
@@ -1567,9 +1571,23 @@ class SurvivalSkills:
                     and not any(status.get(key) for key in ("in_water", "in_lava", "on_fire", "submerged")))
 
         try:
-            observed = self._status(context)
-            if (not stable(observed) or observed["health"] >= before["health"]
-                    or not safe_cell(feet(observed["pos"]), temporary_leaves=True)):
+            while True:
+                observed = self._status(context)
+                if (observed.get("last_death") != before.get("last_death")
+                        or observed["health"] >= before["health"]
+                        or any(observed.get(key) for key in ("in_water", "in_lava", "on_fire", "submerged"))):
+                    return None
+                if stable(observed):
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                delay = min(0.12, remaining)
+                if context.get("cancel") is not None:
+                    context["cancel"].wait(delay)
+                else:
+                    time.sleep(delay)
+            if not safe_cell(feet(observed["pos"]), temporary_leaves=True):
                 return None
             final = self._status(context)
             if (stable(final) and time.monotonic() <= deadline

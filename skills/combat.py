@@ -241,14 +241,27 @@ class CombatSkills(SurvivalSkills):
     def _feet(pos):
         return tuple(math.floor(v + .0001) for v in pos)
 
+    COMBAT_EXTRA_SUPPORT = frozenset({
+        "dirt_path", "farmland", "stone_bricks", "mossy_cobblestone", "obsidian", "crying_obsidian",
+        "netherrack", "basalt", "blackstone", "smooth_basalt",
+        "coal_ore", "iron_ore", "copper_ore", "gold_ore", "redstone_ore", "lapis_ore", "diamond_ore", "emerald_ore",
+        "deepslate_coal_ore", "deepslate_iron_ore", "deepslate_copper_ore", "deepslate_gold_ore", "deepslate_diamond_ore",
+    })
+    SUNKEN_SURFACE_SUPPORT = frozenset({"dirt_path", "farmland", "soul_sand", "mud"})
+
     def _footing(self, context, pos):
         """Known dry floor and full player-width body clearance; never leaves."""
         y = math.floor(pos[1] + .0001)
+        support_blocks = self.SUPPORT | self.COMBAT_EXTRA_SUPPORT
+        sunken_top = (pos[1] - y) >= 0.8
         for x in range(math.floor(pos[0] - .3 + 1e-5), math.floor(pos[0] + .3 - 1e-5) + 1):
             for z in range(math.floor(pos[2] - .3 + 1e-5), math.floor(pos[2] + .3 - 1e-5) + 1):
                 for dy in (-1, 0, 1):
                     block = self._block([x, y + dy, z], context)
-                    allowed = self.SUPPORT if dy == -1 else self.RETREAT_PASSABLE
+                    allowed = support_blocks if dy == -1 else (
+                        self.RETREAT_PASSABLE | self.SUNKEN_SURFACE_SUPPORT if (dy == 0 and sunken_top)
+                        else self.RETREAT_PASSABLE
+                    )
                     if block["name"] not in allowed or not self._safe_block(block):
                         raise _Failure("unsafe_footing", "Combat needs known dry solid footing and body clearance",
                                        {"blocker": [x, y + dy, z], "block": block["name"]})

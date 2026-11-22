@@ -546,6 +546,31 @@ class DailyRuntimeTests(unittest.TestCase):
         goal_tool = next(t for t in visible_goal if t["function"]["name"] == "run_survival_task")
         self.assertIn("scout", goal_tool["function"]["parameters"]["properties"]["task"]["enum"])
 
+    def test_daily_retreat_interruption_action_unconfirmed_recovers_when_status_is_idle(self):
+        harness, _ = self.make_harness([tool_response("wait", {"seconds": 1}, "after_recover")])
+        self.world.entities = [{"id": 9, "name": "skeleton", "type": "hostile", "pos": [-3, 64, .5]}]
+        self.world.status["nearest_hostile"] = {"name": "skeleton", "dist": 3.5}
+        with patch.object(
+            harness.skills,
+            "execute",
+            return_value=SkillResult(
+                False,
+                "Navigation write was interrupted before verification",
+                {
+                    "executed": True,
+                    "action_state": "unknown",
+                    "cleanup_skipped": "navigation_unknown",
+                    "recovery_error": "interrupted",
+                },
+                "action_unconfirmed",
+            ),
+        ):
+            res = self.step(harness)
+        self.assertEqual(res.error_code, "action_unconfirmed")
+        self.assertFalse(harness.paused)
+        self.assertIsNone(harness.journal.state.get("pending"))
+        self.assertNotIn("retreat_recovery", harness.context)
+
 
 if __name__ == "__main__":
     unittest.main()

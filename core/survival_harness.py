@@ -1223,6 +1223,23 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                     if isinstance(retry_after, (int, float)) and not isinstance(retry_after, bool) and retry_after > 0:
                         delay = max(delay, min(256.0, float(retry_after)))
                 uncertain_action = _uncertain_result(result) and decision.name != "observe"
+                if (self.daily and uncertain_action and decision.name == "retreat_from"
+                        and result.error_code == "action_unconfirmed"
+                        and isinstance(result.data, dict)
+                        and result.data.get("cleanup_skipped") == "navigation_unknown"
+                        and result.data.get("recovery_error") in {"interrupted", "action_unconfirmed"}
+                        and not self._cancel.is_set()):
+                    try:
+                        probe = self.client.get_status(timeout_seconds=2.0)
+                        st = probe.get("result") if isinstance(probe, dict) else None
+                        if isinstance(st, dict) and st.get("ready") is True and st.get("alive") is True and not st.get("busy"):
+                            uncertain_action = False
+                            result.data["action_state"] = "verified_idle"
+                            self.context.pop("retreat_recovery", None)
+                            delay = min(delay, 0.25)
+                            self._record("WARN", "RETREAT_INTERRUPTION_RECOVERED", {"pos": st.get("pos"), "recovery_error": result.data.get("recovery_error")})
+                    except APIError:
+                        pass
                 http_status = result.data.get("http_status") if isinstance(result.data, dict) else None
                 context_limit_http = (http_status == 400 and isinstance(result.data, dict)
                                       and result.data.get("context_limit") is True)
@@ -1334,7 +1351,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
             self._next_attempt = time.monotonic() + delay
             self.phase = "paused" if self.paused else "complete" if self.completed else "waiting"
             # Keep uncertain intentions for explicit recovery after a restart.
-            keep_pending = ((_uncertain_result(result) and decision.name != "observe")
+            keep_pending = ((_uncertain_result(result) and decision.name != "observe"
+                             and result.data.get("action_state") != "verified_idle")
                             or (self.task_controller and self._task_snapshot().get("status") == "unknown")
                             or (decision.name in {"observe", "wait"} and (observation is None
                                 or not observation["status"].get("ready") or observation["status"].get("busy"))))
