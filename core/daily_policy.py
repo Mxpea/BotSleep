@@ -94,7 +94,7 @@ class DailySafetyPolicy:
             cooled = bool(water_state.get("exhausted")) or (
                 type(water_state.get("retry_after")) in (int, float) and water_state["retry_after"] > time.time()
             )
-            if status.get("in_water") and not cooled:
+            if status.get("in_water") and (status.get("submerged") or not cooled):
                 return "water_escape", Decision(
                     "water_escape",
                     {},
@@ -110,8 +110,10 @@ class DailySafetyPolicy:
         hostiles = self.rules._dangerous_hostiles(observation, status["pos"])
         if hostiles:
             combat = combat_options(observation)
+            ranged_close = any(row.get("name") in RANGED_HOSTILES and dist <= 6.5 for dist, _, row in hostiles)
             ranged = any(row.get("name") in RANGED_HOSTILES for _, _, row in hostiles)
-            if combat.get("allowed") is True and (not ranged or combat.get("shield") is True):
+            close_melee = combat.get("allowed") is True and combat.get("mode") == "melee" and combat.get("distance", 9) <= 2.8 and not ranged_close
+            if combat.get("allowed") is True and (not ranged or combat.get("shield") is True or close_melee):
                 target = combat["target"]
                 return "combat", Decision("fight_hostile", {"entity_id": target["id"], "expected_name": target["name"]},
                     "Take one locally verified defensive step, then observe again", "safety")

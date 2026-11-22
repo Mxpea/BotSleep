@@ -16,6 +16,7 @@ from core.domain import finite_number, parse_pos
 
 RETREAT_REPLAN = {"unsafe", "path_not_found", "no_path", "move_unverified", "retreat_unverified"}
 RETREAT_WAIT_SECONDS = 5
+RETREAT_COOLDOWN_WAIT_SECONDS = 2
 RETREAT_SEARCH_COOLDOWN = 30
 
 
@@ -104,7 +105,7 @@ class RetreatController:
         if recovery.get("retry_after", 0) > time.time() and not self.changed(observation, threat, recovery):
             return Decision(
                 "wait",
-                {"seconds": RETREAT_WAIT_SECONDS},
+                {"seconds": RETREAT_COOLDOWN_WAIT_SECONDS},
                 "No verified retreat route; observe again before the bounded search cooldown expires",
                 "safety",
             )

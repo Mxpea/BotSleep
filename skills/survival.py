@@ -628,7 +628,7 @@ class SurvivalSkills:
 
         # Phase 1: swim straight up if submerged or losing air, as long as overhead is safe.
         up_pulses = 0
-        while (cur.get("submerged") or cur.get("oxygen", 20) < 16) and up_pulses < 3:
+        while (cur.get("submerged") or cur.get("oxygen", 20) < 16) and up_pulses < (8 if cur.get("submerged") else 3):
             fx = math.floor(cur["pos"][0] + 1e-4)
             fy = math.floor(cur["pos"][1] + 1e-4)
             fz = math.floor(cur["pos"][2] + 1e-4)
@@ -704,7 +704,7 @@ class SurvivalSkills:
         shore_supports.sort(key=lambda p: (0 if p[1] <= cy + 1 else 1, math.hypot(p[0] + 0.5 - cur["pos"][0], p[2] + 0.5 - cur["pos"][2])))
         for tx, ty, tz in shore_supports[:3]:
             dist = math.hypot(tx + 0.5 - cur["pos"][0], tz + 0.5 - cur["pos"][2])
-            if dist <= 16.0:
+            if dist <= 16.0 and not cur.get("submerged"):
                 context["navigation_write"] = True
                 context["navigation_verified"] = False
                 try:
@@ -1049,7 +1049,7 @@ class SurvivalSkills:
                              "radius": row["radius"], "origin_margin": round(math.dist(origin, row["pos"]) - row["radius"], 3)}
                             for row in threats[:8]], "all_threats_evaluated": True}
 
-        def threat_safe(point, previous=None, baseline=None):
+        def threat_safe(point, previous=None, baseline=None, *, allow_distant_secondary=False):
             if escaping:
                 return True
             baseline = origin if baseline is None else baseline
@@ -1060,6 +1060,8 @@ class SurvivalSkills:
                 # retain their actual 3D danger circles, including shooters.
                 gap = (lambda p: math.hypot(p[0] - row["pos"][0], p[2] - row["pos"][2])) if row["primary"] else (lambda p: math.dist(p, row["pos"]))
                 initial, prior, current = gap(baseline), gap(previous), gap(point)
+                if allow_distant_secondary and not row["primary"] and initial >= 7.5 and current >= 7.5:
+                    continue
                 # The API rounds coordinates. Allow at most 0.1 of uncertainty,
                 # never cumulative deterioration along a route.
                 if ((initial > row["radius"] and current <= row["radius"])
@@ -1230,7 +1232,7 @@ class SurvivalSkills:
             source["state"] = "edge_entry_verified" if entries else "no_verified_edge_entry"
             return entries
 
-        def terrain_fallback(allow_deep_drop=False):
+        def terrain_fallback(allow_deep_drop=False, allow_distant_secondary=False):
             nonlocal best_partial
             search.update(used=True, termination="no_safe_destination")
             entries = starting_entries()
@@ -1297,7 +1299,7 @@ class SurvivalSkills:
                         if not safe_height_band(point):
                             search["height_guard_rejections"] += 1
                             continue
-                        if not threat_safe(point, current_point):
+                        if not threat_safe(point, current_point, allow_distant_secondary=allow_distant_secondary):
                             search["multi_threat_rejections"] = search.get("multi_threat_rejections", 0) + 1
                             continue
                         if len(visited) >= node_cap:
@@ -1383,6 +1385,23 @@ class SurvivalSkills:
                 search["termination"] = "partial_progress"
             else:
                 search["termination"] = "read_budget"
+        relaxed_secondary = False
+        if not escaping and target is None and search.get("multi_threat_rejections", 0) > 0:
+            relaxed_secondary = True
+            read_limit = min(240, max(read_limit, search["block_reads"] + 64))
+            try:
+                final_target, planned_path = terrain_fallback(allow_distant_secondary=True)
+                if planned_path:
+                    target = planned_path[1]
+            except _Failure as error:
+                if error.code != "retreat_budget_exhausted":
+                    raise
+                if best_partial is not None:
+                    _, final_target, planned_path = best_partial
+                    target = planned_path[1]
+                    search["termination"] = "partial_progress"
+                else:
+                    search["termination"] = "read_budget"
         if (escaping and final_target is None and not outcome["edge_start"]
                 and not any(row[0] > .5 for row in relay_candidates)):
             read_limit = 253  # Leave three reads for confirming the one clearing write.
@@ -1442,7 +1461,7 @@ class SurvivalSkills:
                 if type(distance_now) in (int, float) and math.isfinite(distance_now) and distance_now <= limit:
                     raise _Failure("near_hostile", "A hostile appeared at the final canopy movement check", evidence())
             if not escaping:
-                if not threat_safe(target, baseline=status["pos"]):
+                if not threat_safe(target, baseline=status["pos"], allow_distant_secondary=relaxed_secondary):
                     raise _Failure("unsafe", "Latest position makes the retreat step approach another threat", evidence())
                 if isinstance(nearest, dict) and nearest:
                     gap = nearest.get("dist")
@@ -1478,7 +1497,8 @@ class SurvivalSkills:
         check_escape_threats(before, target)
         if not escaping:
             refresh_retreat_threats()
-            if not all(threat_safe(point, prior) for prior, point in zip(planned_path, planned_path[1:])):
+            if not all(threat_safe(point, prior, allow_distant_secondary=relaxed_secondary)
+                       for prior, point in zip(planned_path, planned_path[1:])):
                 raise _Failure("unsafe", "A hostile changed the checked retreat corridor before movement", evidence())
             outcome["threat_assessment"]["target_score"] = list(threat_score(target))
         try:

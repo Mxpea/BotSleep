@@ -748,10 +748,11 @@ class DailyPolicyTests(unittest.TestCase):
         # Submerged WITH in_water=True also allows water_escape (live bot state).
         submerged_wet = observed(in_water=True, submerged=True, on_ground=False)
         self.assertEqual(self.policy.choose(submerged_wet, self.baseline).name, "water_escape")
-        # Exhausted recovery falls back to environment_hazard wait.
+        # Exhausted recovery falls back to environment_hazard wait unless head is actively submerged.
         exhausted_ctx = {"water_recovery": {"exhausted": True}}
         self.assertEqual(self.policy.choose(obs, self.baseline, context=exhausted_ctx).name, "wait")
         self.assertEqual(self.policy.constraints(obs, context=exhausted_ctx)["scenario"], "environment_hazard")
+        self.assertEqual(self.policy.choose(submerged_wet, self.baseline, context=exhausted_ctx).name, "water_escape")
 
 
 if __name__ == "__main__":
