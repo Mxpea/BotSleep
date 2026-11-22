@@ -190,6 +190,11 @@ def _prepare_and_spread(
                         if st_after and not st_after.get("in_water") and (st_after.get("pos") or [0, 0, 0])[1] >= 62.0:
                             break
                     pos = st_after.get("pos") or status.get("pos")
+                    if pos and len(pos) >= 3:
+                        rcon.command(
+                            f"spawnpoint {bot_name} {int(math.floor(float(pos[0])))} "
+                            f"{int(math.ceil(float(pos[1])))} {int(math.floor(float(pos[2])))}"
+                        )
                 else:
                     pos = status.get("pos")
                 client.save_session(api_cfg["session_file"])

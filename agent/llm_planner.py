@@ -751,9 +751,19 @@ If that goal tool is unavailable, use only the currently advertised tools.
         tools = copy.deepcopy([tool for tool in self.tool_definitions if tool["function"]["name"] in normal])
         if self._scout_calls >= 1 and isinstance(context.get("last_scout_report"), dict):
             counts = (observation.get("counts") or {}) if isinstance(observation, dict) else {}
+            report = context.get("last_scout_report") or {}
             ready_for_lava_scout = any(counts.get(k, 0) > 0 for k in ("bucket", "water_bucket", "iron_pickaxe", "flint_and_steel"))
-            known_lava = bool((context.get("last_scout_report") or {}).get("found_lava"))
-            if not (ready_for_lava_scout and not known_lava):
+            known_lava = bool(report.get("found_lava"))
+            no_wood_yet = (
+                "found_logs" in report
+                and not report.get("found_logs")
+                and not any(
+                    k.endswith(("_log", "_planks", "_pickaxe")) and int(v or 0) > 0
+                    for k, v in counts.items()
+                )
+                and self._scout_calls < 3
+            )
+            if not (ready_for_lava_scout and not known_lava) and not no_wood_yet:
                 for tool in tools:
                     if tool["function"]["name"] == "run_survival_task":
                         task_prop = tool["function"]["parameters"]["properties"].get("task")

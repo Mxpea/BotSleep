@@ -71,16 +71,26 @@ class OpenAIBrain:
                              if request_gate is _AUTO_GATE else request_gate)
         self._session_lock = threading.Lock()
         self._session: Optional[requests.Session] = None
+        self._session_last_used: float = 0.0
         self.last_request_meta: Dict[str, Any] = {}
 
     def _get_session_with_state(self) -> Tuple[requests.Session, bool]:
         with self._session_lock:
+            now = time.monotonic()
+            # Recycle keep-alive sockets idle >20s so upstream proxies do not drop them mid-request.
+            if self._session is not None and (now - self._session_last_used) > 20.0:
+                try:
+                    self._session.close()
+                except Exception:
+                    pass
+                self._session = None
             reused = self._session is not None
             if self._session is None:
                 session = requests.Session()
                 if self.tls_version == "1.2":
                     session.mount("https://", _TLS12Adapter())
                 self._session = session
+            self._session_last_used = now
             return self._session, reused
 
     def _get_session(self) -> requests.Session:

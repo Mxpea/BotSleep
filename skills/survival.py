@@ -34,7 +34,8 @@ class SurvivalSkills:
     PICKAXES = frozenset(tier + "_pickaxe" for tier in ("wooden", "copper", "stone", "iron", "golden", "diamond", "netherite"))
     AIR = frozenset({"air", "cave_air", "void_air"})
     RETREAT_PASSABLE = AIR | {
-        "short_grass", "tall_grass", "fern", "large_fern", "leaf_litter",
+        "short_grass", "tall_grass", "short_dry_grass", "tall_dry_grass",
+        "fern", "large_fern", "leaf_litter", "wildflowers", "bush", "firefly_bush", "cactus_flower",
         "vine", "glow_lichen", "hanging_roots", "moss_carpet", "pale_moss_carpet",
         "pale_hanging_moss", "eyeblossom", "open_eyeblossom", "closed_eyeblossom", "snow",
     }
@@ -991,12 +992,13 @@ class SurvivalSkills:
                   "solid_nodes": 0, "distance_rejections": 0, "height_guard_rejections": 0}
         # Up to five fresh swept-body/support reads before a two-block drop,
         # plus three actual landing reads afterwards.
-        read_limit = 208 if escaping else 248  # Reserve a bounded fresh clearing proof when needed.
+        read_limit = 208 if escaping else 160  # Bound combat retreat reads while preserving canopy/multi-hop fixture coverage.
         planned_path = None
         target = None
         final_target = None
         edge_sweeps = {}
         relay_candidates = []
+        best_partial = None
         outcome = {"origin": origin, "threat_pos": None if escaping else threat, "target": None,
                    "executed": False, "moved": 0, "planned_path": None,
                    "terrain_search": search, "blocked_cells": [], "retreat_complete": False,
@@ -1229,6 +1231,7 @@ class SurvivalSkills:
             return entries
 
         def terrain_fallback(allow_deep_drop=False):
+            nonlocal best_partial
             search.update(used=True, termination="no_safe_destination")
             entries = starting_entries()
             if not entries:
@@ -1244,6 +1247,7 @@ class SurvivalSkills:
             search["nodes"] = len(visited)
             queue = deque(entries)
             best_partial = None
+            node_cap = 64
             directions = sorted(((1, 0), (-1, 0), (0, 1), (0, -1)),
                                 key=lambda delta: delta[0] * dx + delta[1] * dz, reverse=True)
             while queue:
@@ -1274,7 +1278,8 @@ class SurvivalSkills:
                 step_ys = (
                     (0, -1, -2, -3, -4, -5, 1)
                     if allow_deep_drop
-                    else ((0, -1, -2, -3, 1) if (escaping and before["health"] > 10) else (0, -1, -2, 1))
+                    else ((0, -1, -2, -3, 1) if (escaping and before["health"] > 10)
+                          else ((0, -1, 1, -2) if (not escaping and not leaf_start) else (0, -1, -2, 1)))
                 )
                 min_dy = -12 if escaping else -6
                 for sx, sz in ordered:
@@ -1295,7 +1300,7 @@ class SurvivalSkills:
                         if not threat_safe(point, current_point):
                             search["multi_threat_rejections"] = search.get("multi_threat_rejections", 0) + 1
                             continue
-                        if len(visited) >= 64:
+                        if len(visited) >= node_cap:
                             search["termination"] = "node_budget"
                             if best_partial is not None:
                                 _, b_point, b_route = best_partial
@@ -1372,7 +1377,12 @@ class SurvivalSkills:
         except _Failure as error:
             if error.code != "retreat_budget_exhausted":
                 raise
-            search["termination"] = "read_budget"
+            if best_partial is not None:
+                _, final_target, planned_path = best_partial
+                target = planned_path[1]
+                search["termination"] = "partial_progress"
+            else:
+                search["termination"] = "read_budget"
         if (escaping and final_target is None and not outcome["edge_start"]
                 and not any(row[0] > .5 for row in relay_candidates)):
             read_limit = 253  # Leave three reads for confirming the one clearing write.
@@ -1440,7 +1450,7 @@ class SurvivalSkills:
                     if type(gap) in (int, float) and math.isfinite(gap) and gap <= limit:
                         matches = [row for row in threats if (nearest.get("id") is not None and row["id"] == nearest["id"])
                                    or (nearest.get("id") is None and row["name"] == nearest.get("name"))]
-                        if not any(abs(math.dist(status["pos"], row["pos"]) - gap) <= .75 for row in matches):
+                        if not any(abs(math.dist(status["pos"], row["pos"]) - gap) <= 1.8 for row in matches):
                             raise _Failure("unsafe", "Latest hostile summary changed after the retreat threat scan", evidence())
             if status.get("last_death") != before.get("last_death") or status["health"] < before["health"]:
                 raise _Failure("safety_changed", "Life or health changed while inspecting the retreat corridor", evidence())

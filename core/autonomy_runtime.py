@@ -215,7 +215,7 @@ class AutonomyRuntime:
             targets = {"coal": {"count": count, "min_tool": "wooden_pickaxe"}}
         else:
             targets = {
-                "iron": {"count": max(count, 24), "min_tool": "stone_pickaxe"},
+                "iron": {"count": max(count, 10), "min_tool": "stone_pickaxe"},
             }
         # Never abort a resource expedition solely because the player lacks torches or scaffold blocks yet.
         deep_home_thresholds = {
@@ -226,14 +226,14 @@ class AutonomyRuntime:
         status_pos = (observation.get("status") or {}).get("pos") if isinstance(observation, dict) else None
         self._discard_mining_clutter(status_pos=status_pos)
 
-        remaining = 1200.0 if resource == "diamond" else 780.0 if resource == "raw_iron" else 540.0
+        remaining = 900.0 if resource == "diamond" else 420.0 if resource == "raw_iron" else 360.0
         if hasattr(self, "_remaining_budget"):
             try:
                 remaining = max(60.0, float(self._remaining_budget().get("remaining_seconds", remaining)) - 30.0)
             except Exception:
                 pass
-        total_t = min(1140.0 if resource == "diamond" else 750.0 if resource == "raw_iron" else 540.0, max(90.0, remaining))
-        band_t = min(960.0 if resource == "diamond" else 640.0 if resource == "raw_iron" else 460.0, max(75.0, total_t * 0.85))
+        total_t = min(900.0 if resource == "diamond" else 420.0 if resource == "raw_iron" else 360.0, max(90.0, remaining))
+        band_t = min(750.0 if resource == "diamond" else 340.0 if resource == "raw_iron" else 300.0, max(75.0, total_t * 0.85))
 
         state_root = Path(str(self.settings.get("state_dir") or "runtime/survival"))
         memory = MemoryEngine(str(state_root / "deep_mine_memory"))
