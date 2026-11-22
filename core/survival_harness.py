@@ -661,6 +661,12 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
             for key in ("canopy_recovery", "food_recovery", "local_footing", "cautious_bootstrap", "cautious_bootstrap_basis"):
                 self.context.pop(key, None)
             self._record("WARN", "DIMENSION_CHANGED", {"from": old_dimension, "to": dimension})
+        if dimension in {"the_nether", "minecraft:the_nether"}:
+            if not self.context.get("nether_entered"):
+                elapsed = round(time.monotonic() - self._started, 1)
+                self.context["nether_entered"] = True
+                self.context["nether_entered_at_seconds"] = elapsed
+                self._record("INFO", "NETHER_ENTERED", {"dimension": dimension, "elapsed_seconds": elapsed})
         if dimension:
             self.context["last_dimension"] = dimension
         death = status.get("last_death")
@@ -890,6 +896,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                     result = self._run_task_equip_loadout(decision, observation)
                 elif self._task_child and decision.goal == "nether_portal" and decision.name == "move_to":
                     result = self._run_task_nether_portal(decision, observation)
+                elif self._task_child and decision.goal in {"nether_portal_water", "nether_portal_gravel"} and decision.name == "move_to":
+                    result = self._run_task_wide_find(decision, observation, "water" if decision.goal == "nether_portal_water" else "gravel")
                 else:
                     runner = resolve_skill_runner(self, decision.name)
                     result = runner.execute(decision.name, decision.args, cancel_event=self._cancel, **options)

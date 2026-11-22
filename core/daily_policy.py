@@ -76,6 +76,8 @@ class DailySafetyPolicy:
             return "not_ready", self._wait("The bot is not ready and alive", "observe")
         if status.get("busy"):
             return "busy", self._wait("The backend action is still active", "observe", 1)
+        if status.get("dimension") in {"the_nether", "minecraft:the_nether"}:
+            return "unsafe_dimension", self._wait("Bot is safely in the Nether; hold position without wandering into hazards", "observe", 10)
         if status.get("dimension") not in {"overworld", "minecraft:overworld"}:
             return "unsafe_dimension", self._wait("Daily survival is limited to the overworld")
         if status.get("gamemode") != "survival":
@@ -497,7 +499,8 @@ class DailySafetyPolicy:
             if self._meal(observation):
                 scenario, allowed, radius, model = "food_available", ["eat_food", "wait"], 0, False
                 reason = "Existing safe food has priority"
-            elif (status["health"] <= self.low_health and status["food"] < 18 and not self._night(status)
+            elif (status["health"] <= self.low_health and status["food"] < 18
+                  and (not self._night(status) or self.sleep_policy == "opportunistic")
                   and self._food_options(observation, low_health=True)):
                 scenario, allowed, radius, model = "low_health", sorted(FOOD_ACTIONS - {"inspect_container"}), 2, False
                 reason = "Perform one directly verified nearby food action locally, then observe inventory"
@@ -547,7 +550,7 @@ class DailySafetyPolicy:
         if meal:
             return meal
         status = observation["status"]
-        if status["health"] <= self.low_health and status["food"] < 18 and not self._night(status):
+        if status["health"] <= self.low_health and status["food"] < 18 and (not self._night(status) or self.sleep_policy == "opportunistic"):
             foods = self._food_options(observation, low_health=True, task_board=task_board)
             if foods:
                 return foods[0]
@@ -596,7 +599,8 @@ class DailySafetyPolicy:
             return None if self._food_valid(decision, observation) else "food_not_available_or_unsafe"
         if self._meal(observation):
             return "existing_food_has_priority"
-        if (status["health"] <= self.low_health and status["food"] < 18 and not self._night(status)
+        if (status["health"] <= self.low_health and status["food"] < 18
+                and (not self._night(status) or self.sleep_policy == "opportunistic")
                 and self._food_valid(decision, observation, low_health=True)):
             return None
         if self._canopy(observation, context):
@@ -604,7 +608,8 @@ class DailySafetyPolicy:
         if decision.name == "canopy_escape":
             return "canopy_support_unverified"
         if status["health"] <= self.low_health:
-            if status["food"] < 18 and not self._night(status) and self._food_valid(decision, observation, low_health=True):
+            if (status["food"] < 18 and (not self._night(status) or self.sleep_policy == "opportunistic")
+                    and self._food_valid(decision, observation, low_health=True)):
                 return None
             search = self._food_search(observation, context) if status["food"] < 18 else None
             if search and decision.name == search.name and decision.args == search.args:

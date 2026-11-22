@@ -37,6 +37,10 @@ SURFACE_ORE_TYPES: Tuple[str, ...] = (
     "deepslate_iron_ore",
     "copper_ore",
 )
+LAVA_TYPES: Tuple[str, ...] = ("lava",)
+VILLAGE_MARKER_TYPES: frozenset = frozenset({"bell", "hay_block", "composter", "lectern", "blast_furnace", "smoker", *BED_NAMES})
+CHEST_TYPES: frozenset = frozenset({"chest", "barrel"})
+PORTAL_RELIC_TYPES: frozenset = frozenset({"obsidian", "crying_obsidian", "gilded_blackstone"})
 FOOD_BLOCK_TYPES: Tuple[str, ...] = (
     "wheat",
     "carrots",
@@ -78,26 +82,30 @@ class SurfaceScoutSkill(BaseSkill):
         hop_distance: float = 55.0,
         max_hops: int = 3,
         prefer_wood: bool = True,
+        goal_focus: str = "auto",
         min_food: float = 14.0,
         max_food_drop: float = 2.0,
         attempt: int = 0,
         timeout_seconds: float = 55.0,
         cancel_event: Optional[threading.Event] = None,
     ) -> SkillResult:
-        """Scan forward from current position up to ~200 blocks; stop early on finds or stamina drop."""
+        """Scan forward from current position up to ~200+ blocks; stop early on target finds or stamina drop."""
         scan_r = max(16, min(64, int(scan_radius)))
         hop_d = max(16.0, min(64.0, float(hop_distance)))
-        hops_limit = max(1, min(4, int(max_hops)))
+        hops_limit = max(1, min(6, int(max_hops)))
+        focus = str(goal_focus or "auto").lower()
         guard = WorkflowGuard(
             self.client,
             cancel_event=cancel_event,
             timeout_seconds=max(10.0, float(timeout_seconds)),
-            max_reads=300,
+            max_reads=360,
             allow_damage=True,
         )
 
         findings: Dict[str, Dict[Tuple[int, int, int], Dict[str, Any]]] = {
             "structures": {},
+            "chests": {},
+            "lava": {},
             "ores": {},
             "wood": {},
             "food": {},
@@ -118,8 +126,8 @@ class SurfaceScoutSkill(BaseSkill):
             cur_pos = list(origin)
             self._scan_checkpoint(guard, cur_pos, dim, scan_r, findings, origin=origin)
 
-            if self._should_stop_early(findings, prefer_wood=prefer_wood):
-                early_stop_reason = self._discovery_reason(findings)
+            if self._should_stop_early(findings, prefer_wood=prefer_wood, goal_focus=focus):
+                early_stop_reason = self._discovery_reason(findings, goal_focus=focus)
             else:
                 headings = self._pick_headings(cur_pos, attempt=attempt)
                 heading_idx = 0
@@ -150,8 +158,8 @@ class SurfaceScoutSkill(BaseSkill):
                     cur_pos = parse_pos(cur_st.get("pos")) or cur_pos
                     waypoints.append([round(cur_pos[0], 2), round(cur_pos[1], 2), round(cur_pos[2], 2)])
                     self._scan_checkpoint(guard, cur_pos, dim, scan_r, findings, origin=origin)
-                    if self._should_stop_early(findings, prefer_wood=prefer_wood):
-                        early_stop_reason = self._discovery_reason(findings)
+                    if self._should_stop_early(findings, prefer_wood=prefer_wood, goal_focus=focus):
+                        early_stop_reason = self._discovery_reason(findings, goal_focus=focus)
                         break
 
             max_dist = max([math.dist(origin, wp) for wp in waypoints] or [0.0]) + scan_r
@@ -192,11 +200,13 @@ class SurfaceScoutSkill(BaseSkill):
 
     @staticmethod
     def _pick_headings(origin: Sequence[float], *, attempt: int = 0) -> List[Tuple[float, float]]:
-        # Deterministic spread across runs without circling back on origin.
-        base = (math.floor(abs(origin[0])) + math.floor(abs(origin[2])) + max(0, int(attempt))) % 4
-        ring = ((1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0))
-        ordered = [ring[(base + offset) % 4] for offset in (0, 1, 3)]
-        return ordered
+        # Spread across 8 outward bearings without circling back on origin.
+        ring = (
+            (1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0),
+            (0.707, 0.707), (-0.707, 0.707), (-0.707, -0.707), (0.707, -0.707),
+        )
+        base = (math.floor(abs(origin[0])) + math.floor(abs(origin[2])) + max(0, int(attempt)) * 3) % len(ring)
+        return [ring[(base + offset) % len(ring)] for offset in (0, 2, 6, 1)]
 
     def _advance_hop(self, guard: WorkflowGuard, cur_pos: Sequence[float], tx: float, tz: float) -> float:
         move_timeout_ms = int(min(18000, max(5000, guard.remaining_timeout(18.0) * 800)))
@@ -230,6 +240,13 @@ class SurfaceScoutSkill(BaseSkill):
     ) -> None:
         self._query_blocks(guard, STRUCTURE_AND_ORE_TYPES, scan_r, findings, cur_pos, dim, origin=origin)
         self._query_blocks(guard, WOOD_FOOD_STICK_TYPES, scan_r, findings, cur_pos, dim, origin=origin)
+        self._query_blocks(guard, LAVA_TYPES, scan_r, findings, cur_pos, dim, origin=origin)
+        if self.memory is not None and len(findings["lava"]) >= 4:
+            pts = [row["pos"] for row in findings["lava"].values()]
+            anchor = min(pts, key=lambda p: math.dist(cur_pos, p))
+            cluster = sum(1 for p in pts if math.dist(anchor, p) <= 12.0)
+            if cluster >= 4:
+                self.memory.record_landmark(name="lava_pool", category="hazard_resource", pos=list(anchor), dimension=dim)
         try:
             entities = guard.read(self.client.get_entities, radius=scan_r, timeout_seconds=guard.remaining_timeout(5.0))
         except WorkflowStepError:
@@ -285,9 +302,13 @@ class SurfaceScoutSkill(BaseSkill):
                 if origin is not None and name in local_workstations and math.hypot(key[0] - origin[0], key[2] - origin[2]) <= 16.0:
                     continue
                 findings["structures"][key] = entry
+                if name in CHEST_TYPES:
+                    findings["chests"][key] = entry
                 if self.memory is not None and name in {"chest", "barrel", "furnace", "blast_furnace", "smoker", "crafting_table", *BED_NAMES}:
                     category = "container" if name in {"chest", "barrel"} else "bed" if name in BED_NAMES else "crafting"
                     self.memory.record_landmark(name=name, category=category, pos=list(key), dimension=dim)
+            elif name == "lava":
+                findings["lava"][key] = entry
             elif name in SURFACE_ORE_TYPES:
                 findings["ores"][key] = entry
             elif name in SurvivalSkills.LOGS:
@@ -302,8 +323,15 @@ class SurfaceScoutSkill(BaseSkill):
         findings: Dict[str, Dict[Tuple[int, int, int], Dict[str, Any]]],
         *,
         prefer_wood: bool,
+        goal_focus: str = "auto",
     ) -> bool:
-        if findings["structures"] or findings["villagers"]:
+        if goal_focus == "lava":
+            has_portal = any(row.get("name") in PORTAL_RELIC_TYPES for row in findings["structures"].values())
+            return len(findings["lava"]) >= 4 or has_portal
+        if goal_focus in {"village", "chest"}:
+            has_village_marker = any(row.get("name") in VILLAGE_MARKER_TYPES for row in findings["structures"].values())
+            return bool(findings["chests"] or findings["villagers"] or has_village_marker)
+        if findings["structures"] or findings["villagers"] or len(findings["lava"]) >= 4:
             return True
         if prefer_wood and findings["wood"]:
             return True
@@ -312,9 +340,19 @@ class SurfaceScoutSkill(BaseSkill):
         return False
 
     @staticmethod
-    def _discovery_reason(findings: Dict[str, Dict[Tuple[int, int, int], Dict[str, Any]]]) -> str:
+    def _discovery_reason(
+        findings: Dict[str, Dict[Tuple[int, int, int], Dict[str, Any]]],
+        *,
+        goal_focus: str = "auto",
+    ) -> str:
+        if goal_focus == "lava" and len(findings["lava"]) >= 4:
+            return "lava_pool_found"
+        if goal_focus in {"village", "chest"} and findings["chests"]:
+            return "chest_or_village_found"
         if findings["structures"] or findings["villagers"]:
             return "structure_or_village_found"
+        if len(findings["lava"]) >= 4:
+            return "lava_pool_found"
         if findings["wood"]:
             return "wood_found"
         if len(findings["ores"]) >= 2:
@@ -333,14 +371,20 @@ class SurfaceScoutSkill(BaseSkill):
     ) -> Dict[str, Any]:
         sorted_cat = lambda name: sorted(findings[name].values(), key=lambda r: math.dist(origin, r["pos"]))[:6]
         structures = sorted_cat("structures")
+        chests = sorted_cat("chests")
+        lava = sorted_cat("lava")
         villagers = sorted_cat("villagers")
         wood = sorted_cat("wood")
         ores = sorted_cat("ores")
         food = sorted_cat("food")
         dead_bush = sorted_cat("dead_bush")
         highlights: List[str] = []
+        if chests:
+            highlights.append(f"{len(chests)} chests")
         if structures or villagers:
             highlights.append(f"{len(structures)} structure blocks/{len(villagers)} villagers")
+        if lava:
+            highlights.append(f"{len(lava)} lava cells")
         if wood:
             highlights.append(f"{len(wood)} logs")
         if ores:
@@ -354,8 +398,10 @@ class SurfaceScoutSkill(BaseSkill):
             "hops_completed": max(0, len(waypoints) - 1),
             "estimated_reach": estimated_reach,
             "early_stop_reason": early_stop_reason,
-            "aborted_empty": not bool(structures or villagers or wood or ores),
+            "aborted_empty": not bool(structures or villagers or wood or ores or lava or chests),
             "found_structures": structures,
+            "found_chests": chests,
+            "found_lava": lava,
             "found_villagers": villagers,
             "found_wood": wood,
             "found_ores": ores,

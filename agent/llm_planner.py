@@ -154,9 +154,18 @@ first (it deploys 2-3 parallel furnaces automatically when >= 8 raw_iron), craft
 shield (1) (and run run_survival_task(task="iron_armor") if you hold >= 32 iron_ingot spare for full
 armor + pickaxes). Do NOT waste iron or turns on iron_axe or iron_sword before diamonds. Craft 2-3
 iron_pickaxe right BEFORE calling run_survival_task(task="gather", resource="diamond", count=3).
-Once you hold >= 2 iron_pickaxe (and bucket/shield if crafted), immediately call
-run_survival_task(task="gather", resource="diamond", count=3) instead of detouring to coal, logs,
-or extra iron_axe/iron_sword tools unless an escalation explicitly requires fuel or wood.
+Once you hold >= 2 iron_pickaxe (and bucket/shield if crafted), either call
+run_survival_task(task="gather", resource="diamond", count=3) when your goal asks for diamonds
+and status.food >= 14 and status.health >= 16, OR proceed directly to the Nether portal gate!
+3) Food, Village/Chest & Lava/Nether gate: NEVER starve or ignore low food. If status.food <= 14
+and safe edible food in counts is 0, call run_survival_task(task="food", count=8) before deep
+mining (it crafts hay_block/wheat->bread, harvests crops, loots village chests, cooks meat and hunts
+animals up to 24 blocks). For Nether entry: once holding stone_pickaxe+ (or iron/diamond pickaxe) and
+basic iron supplies (or bucket + cobblestone >= 10), you may call run_survival_task(task="scout")
+when holding bucket/iron_pickaxe without known lava pools to locate lava/villages/chests, or call
+run_survival_task(task="nether_portal") which gathers water_bucket, mines/places gravel for flint,
+crafts flint_and_steel, searches outward for lava pools or uses 10 obsidian, builds/ignites the
+Nether portal and walks inside until dimension switches to the_nether.
 NEVER call run_survival_task(task="furnace") — "furnace" is NOT a valid task enum; held furnaces
 are automatically placed by run_survival_task(task="smelt", item="iron_ingot", ...) or in-cave camps.
 NEVER call craft(furnace) if inventory already holds >= 1 furnace (even if not yet placed in world);
@@ -738,11 +747,15 @@ If that goal tool is unavailable, use only the currently advertised tools.
                     {"mode": "atomic_repair", "atomic_repair_remaining": remaining}, task_id)
         tools = copy.deepcopy([tool for tool in self.tool_definitions if tool["function"]["name"] in normal])
         if self._scout_calls >= 1 and isinstance(context.get("last_scout_report"), dict):
-            for tool in tools:
-                if tool["function"]["name"] == "run_survival_task":
-                    task_prop = tool["function"]["parameters"]["properties"].get("task")
-                    if isinstance(task_prop, dict) and isinstance(task_prop.get("enum"), list) and "scout" in task_prop["enum"]:
-                        task_prop["enum"] = [name for name in task_prop["enum"] if name != "scout"]
+            counts = (observation.get("counts") or {}) if isinstance(observation, dict) else {}
+            ready_for_lava_scout = any(counts.get(k, 0) > 0 for k in ("bucket", "water_bucket", "iron_pickaxe", "flint_and_steel"))
+            known_lava = bool((context.get("last_scout_report") or {}).get("found_lava"))
+            if not (ready_for_lava_scout and not known_lava):
+                for tool in tools:
+                    if tool["function"]["name"] == "run_survival_task":
+                        task_prop = tool["function"]["parameters"]["properties"].get("task")
+                        if isinstance(task_prop, dict) and isinstance(task_prop.get("enum"), list) and "scout" in task_prop["enum"]:
+                            task_prop["enum"] = [name for name in task_prop["enum"] if name != "scout"]
         return (tools, {"mode": mode, "atomic_repair_remaining": 0}, None)
 
     def _decision(self, message, observation, context, allowed_names=None, allowed_schemas=None):

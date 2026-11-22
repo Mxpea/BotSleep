@@ -67,7 +67,7 @@ class DailySurvivalGoals:
     def _action(name, args, reason, goal):
         return {"name": name, "args": args, "reason": reason, "goal": goal}
 
-    def _safe_rows(self, observation, names=None, entities=False, context=None):
+    def _safe_rows(self, observation, names=None, entities=False, context=None, *, max_distance=16):
         origin = self._pos(observation["status"].get("pos"))
         if origin is None:
             return []
@@ -76,7 +76,7 @@ class DailySurvivalGoals:
         found = []
         for row in rows:
             pos = self._pos(row.get("pos"))
-            if pos is None or math.dist(origin, pos) > 16 or (names is not None and row.get("name") not in names):
+            if pos is None or math.dist(origin, pos) > max_distance or (names is not None and row.get("name") not in names):
                 continue
             if self.rules._key(pos) in blocked:
                 continue
@@ -299,9 +299,16 @@ class DailySurvivalGoals:
                 return self._action(workspace.name, workspace.args, workspace.reason, "food_reserve") if workspace.name != "wait" else None
             return self._action("craft_item", {"item": "bread", "count": min(64, counts["wheat"] // 3)},
                                 "Turn held wheat into a verified food reserve", "food_reserve")
+        if counts.get("hay_block", 0) >= 1:
+            return self._action("craft_item", {"item": "wheat", "count": 9},
+                                "Convert village hay_block into wheat for bread", "food_reserve")
         cooked = self._smelt(set(SAFE_FOOD), observation, counts, "food_reserve", context)
         if cooked:
             return cooked
+        for row in self._safe_rows(observation, {"hay_block"}, context=context, max_distance=24):
+            if row.get("can_dig") is not False:
+                return self._action("gather_block", {"pos": row["pos"], "expected_name": "hay_block"},
+                                    "Harvest village hay_block for emergency/sustainable bread supply", "food_reserve")
         for row in self._safe_rows(observation, set(CROPS), context=context):
             age = (row.get("properties") or {}).get("age")
             if type(age) is int and age >= CROPS[row["name"]][0]:
@@ -320,11 +327,11 @@ class DailySurvivalGoals:
                                         "Acquire food from one observed passive animal", "food_reserve")
         return None
 
-    def _can_hunt(self, observation, counts, row):
+    def _can_hunt(self, observation, counts, row, *, max_distance=8):
         status = observation["status"]
         return (status.get("health", 0) >= 12 and status.get("food", 0) >= 10
                 and any(count and (name.endswith("_axe") or name.endswith("_sword")) for name, count in counts.items())
-                and math.dist(status["pos"], row["pos"]) <= 8)
+                and math.dist(status["pos"], row["pos"]) <= max_distance)
 
     def _containers(self, observation, context=None):
         dimension = observation["status"].get("dimension")

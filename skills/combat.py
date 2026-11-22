@@ -10,11 +10,15 @@ from . import SkillResult
 from .survival import SurvivalSkills, _Failure
 
 
-HOSTILES = frozenset({"skeleton", "zombie", "creeper"})
+HOSTILES = frozenset({
+    "skeleton", "zombie", "creeper", "spider", "cave_spider",
+    "husk", "drowned", "stray", "zombie_villager", "bogged", "witch", "slime", "pillager",
+})
 TIERS = ("netherite", "diamond", "iron", "stone", "copper", "wooden", "golden")
 MELEE = frozenset(tier + suffix for tier in TIERS for suffix in ("_sword", "_axe"))
 MIN_HEALTH_SHIELD = 14
 MIN_HEALTH_UNSHIELDED = 18
+MIN_HEALTH_EASY_MELEE = 12
 MIN_FOOD = 8
 MELEE_RANGE = 2.8
 RANGED_MIN = 6
@@ -93,14 +97,20 @@ def combat_options(observation: dict, entity_id: int | None = None, expected_nam
         food = SurvivalSkills._number(status.get("food"), "food", 0, 20)
     except (KeyError, TypeError, AttributeError, _Failure):
         return denied("invalid_observation")
-    if hp < (MIN_HEALTH_SHIELD if shield else MIN_HEALTH_UNSHIELDED) or food < MIN_FOOD:
-        return denied("insufficient_health_or_food")
+    melee = melee_weapon(inventory, prefer_tier=starter_defense)
     targets = [r for r in rows if r["name"] in HOSTILES and r.get("type") == "hostile"
                and (entity_id is None or r["id"] == entity_id)
                and (expected_name is None or r["name"] == expected_name)]
     if not targets:
+        if hp < MIN_HEALTH_UNSHIELDED or food < MIN_FOOD:
+            return denied("insufficient_health_or_food")
         return denied("target_not_observed")
     target = min(targets, key=lambda r: math.dist(origin, r["pos"]))
+    easy_melee_ok = (not starter_defense and melee is not None
+                     and target["name"] in {"zombie", "husk", "drowned", "spider", "zombie_villager", "slime"})
+    min_hp = MIN_HEALTH_SHIELD if shield else (MIN_HEALTH_EASY_MELEE if easy_melee_ok else MIN_HEALTH_UNSHIELDED)
+    if hp < min_hp or food < MIN_FOOD:
+        return denied("insufficient_health_or_food")
     danger_radius = max(8, threat_radius) if starter_defense else 8
     if any(r["id"] != target["id"] and r.get("type") == "hostile"
            and math.dist(origin, r["pos"]) <= (
@@ -117,7 +127,6 @@ def combat_options(observation: dict, entity_id: int | None = None, expected_nam
     if distance > RANGED_MAX or abs(origin[1] - target["pos"][1]) > 2:
         return denied("target_out_of_range")
     ranged = next((name for name in ("bow", "crossbow") if name in names and "arrow" in names), None)
-    melee = melee_weapon(inventory, prefer_tier=starter_defense)
     mode, weapon = None, None
     if ranged and (8 if target["name"] == "creeper" else RANGED_MIN) <= distance <= RANGED_MAX:
         mode, weapon = "ranged", ranged

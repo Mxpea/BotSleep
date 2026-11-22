@@ -613,3 +613,16 @@ class CombatClientTests(unittest.TestCase):
             for kwargs in ({"ms": 3001}, {"hit": 0}, {"yaw": float("nan")}, {"back": 1}):
                 with self.assertRaises(APIError): client.control(**kwargs)
             request.assert_not_called()
+
+    def test_combat_options_supports_expanded_easy_melee_mobs_at_12_hp(self):
+        obs = {
+            "fresh": True, "inventory_fresh": True,
+            "status": {"ready": True, "alive": True, "busy": None, "health": 13, "food": 16,
+                       "dimension": "overworld", "gamemode": "survival", "on_ground": True,
+                       "pos": [0.5, 64, 0.5], "offhand": None},
+            "inventory": [{"name": "iron_sword", "count": 1}],
+            "entities": [{"id": 9, "name": "husk", "type": "hostile", "pos": [2.4, 64, 0.5]}],
+        }
+        res = combat_options(obs)
+        self.assertTrue(res["allowed"], res)
+        self.assertEqual(res["mode"], "melee")

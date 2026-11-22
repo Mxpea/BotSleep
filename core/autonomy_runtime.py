@@ -6,6 +6,7 @@ of game writes. Each child uses the ordinary harness journal and skill checks.
 
 import copy
 import math
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -311,13 +312,19 @@ class AutonomyRuntime:
         prefer_wood = sum(counts.get(n, 0) for n in (*LOG_NAMES, *PLANK_NAMES)) == 0
         raw_r = decision.args.get("scan_radius", 48) if isinstance(decision.args, dict) else 48
         scan_r = max(48, min(64, int(raw_r))) if isinstance(raw_r, int) and raw_r >= 32 else 48
+        goal_focus = (
+            "lava"
+            if any(counts.get(k, 0) > 0 for k in ("bucket", "water_bucket", "iron_pickaxe", "flint_and_steel"))
+            else "auto"
+        )
         attempt = int(self.context.get("scout_attempts", 0))
         self.context["scout_attempts"] = attempt + 1
         res = SurfaceScoutSkill(self.client, memory=memory).execute(
             scan_radius=scan_r,
             hop_distance=55.0,
-            max_hops=3,
+            max_hops=4,
             prefer_wood=prefer_wood,
+            goal_focus=goal_focus,
             attempt=attempt,
             cancel_event=getattr(self, "_cancel", None),
         )
@@ -338,8 +345,145 @@ class AutonomyRuntime:
         data = dict(res.data or {}) if isinstance(res.data, dict) else {}
         return SkillResult(bool(res.success), str(res.message), data, res.error_code)
 
-    def _run_task_nether_portal(self, decision, observation):
+    def _run_task_wide_find(self, decision, observation, resource_type: str):
+        find_fn = getattr(self.client, "find_blocks", None) or getattr(self.client, "get_blocks", None)
+        origin = ((observation.get("status") or {}).get("pos") if isinstance(observation, dict) else None)
+        if not callable(find_fn) or not isinstance(origin, (list, tuple)) or len(origin) != 3:
+            return SkillResult(False, f"Cannot search wide {resource_type}", {"executed": False}, "search_unavailable")
+        try:
+            rows = find_fn(types=[resource_type], radius=64, limit=32) or []
+        except Exception:
+            rows = []
+        pts = [
+            row.get("pos") for row in rows
+            if isinstance(row, dict) and isinstance(row.get("pos"), (list, tuple)) and len(row["pos"]) == 3
+        ]
+        if not pts:
+            return SkillResult(False, f"No {resource_type} found within 64 blocks", {"executed": False}, f"no_{resource_type}_found")
+        pts.sort(key=lambda p: (0 if abs(float(p[1]) - float(origin[1])) <= 6 else 1, math.dist(origin, p)))
+        target = pts[0]
+        from skills.survival import SurvivalSkills
+        return SurvivalSkills(self.client).execute(
+            "move_to",
+            {"pos": [int(target[0]), int(target[1]) + 1, int(target[2])], "range": 3},
+            cancel_event=getattr(self, "_cancel", None),
+        )
+
+    def _enter_lit_portal(self):
+        find_fn = getattr(self.client, "find_blocks", None) or getattr(self.client, "get_blocks", None)
+        portal_pts = []
+        if callable(find_fn):
+            try:
+                rows = find_fn(types=["nether_portal"], radius=24, limit=16) or []
+                portal_pts = [
+                    row["pos"] for row in rows
+                    if isinstance(row, dict) and row.get("name") == "nether_portal"
+                    and isinstance(row.get("pos"), (list, tuple)) and len(row["pos"]) == 3
+                ]
+            except Exception:
+                portal_pts = []
+        if not portal_pts:
+            return None
+        portal_pts.sort(key=lambda p: p[1])
+        target = portal_pts[0]
+        from skills.survival import SurvivalSkills
+        mv = SurvivalSkills(self.client).execute(
+            "move_to",
+            {"pos": [float(target[0]) + 0.5, float(target[1]), float(target[2]) + 0.5], "range": 0.6},
+            cancel_event=getattr(self, "_cancel", None),
+        )
+        if (isinstance(mv.data, dict) and mv.data.get("action_state") == "unknown") or mv.error_code == "action_unconfirmed":
+            return mv
+        deadline = time.monotonic() + 12.0
+        cancel = getattr(self, "_cancel", None)
+        while time.monotonic() < deadline:
+            if cancel is not None and cancel.is_set():
+                break
+            try:
+                st_raw = self.client.get_status()
+                st = st_raw.get("result") if isinstance(st_raw, dict) and "result" in st_raw else st_raw
+                if isinstance(st, dict):
+                    dim = st.get("dimension")
+                    if dim in {"the_nether", "minecraft:the_nether"}:
+                        return SkillResult(
+                            True,
+                            "Entered the_nether through verified Nether Portal!",
+                            {"portal_active": True, "nether_entered": True, "dimension": dim, "executed": True},
+                        )
+                    if st.get("alive") is False:
+                        break
+            except Exception:
+                pass
+            time.sleep(0.4)
+        return SkillResult(
+            True,
+            "Standing inside active Nether Portal; awaiting dimension transition",
+            {"portal_active": True, "nether_entered": False, "portal_skill": True, "executed": True},
+        )
+
+    def _build_obsidian_portal_on_land(self, observation):
+        counts = (observation.get("counts") or {}) if isinstance(observation, dict) else {}
+        if counts.get("obsidian", 0) < 10 or counts.get("flint_and_steel", 0) < 1:
+            return None
+        from core.structure_spec import NETHER_PORTAL_SPEC, find_structure_sites, transform_rel_pos
         from skills.portal_speedrun import NetherPortalSpeedrunSkill
+        status = (observation.get("status") or {}) if isinstance(observation, dict) else {}
+        bot_pos = status.get("pos")
+        if not isinstance(bot_pos, (list, tuple)) or len(bot_pos) != 3:
+            return None
+        sites = find_structure_sites(
+            NETHER_PORTAL_SPEC,
+            [float(v) for v in bot_pos],
+            lambda pos: self.client.get_block(pos[0], pos[1], pos[2]),
+            radius=12,
+            max_results=4,
+        )
+        bx, by, bz = int(math.floor(bot_pos[0])), int(math.floor(bot_pos[1])), int(math.floor(bot_pos[2]))
+        candidates = sites or [{"origin": [bx + 2, by, bz], "orientation": "north"}]
+        skill = NetherPortalSpeedrunSkill(self.client)
+        for site in candidates:
+            origin = site["origin"]
+            orient = site.get("orientation", "north")
+            frame_rels = sorted(
+                {c.rel_pos for c in NETHER_PORTAL_SPEC.cells if c.stage in {"base", "frame"} and "obsidian" in c.accepted},
+                key=lambda r: (r[1], r[0], r[2]),
+            )
+            ok_all = True
+            for rel in frame_rels:
+                wp = transform_rel_pos(rel, origin, orient, integer=True)
+                try:
+                    cur = (self.client.get_block(wp[0], wp[1], wp[2]).get("result") or {}).get("name")
+                    if cur == "obsidian":
+                        continue
+                    res = self.client.place_block("obsidian", wp[0], wp[1], wp[2])
+                    if not isinstance(res, dict) or not res.get("ok"):
+                        ok_all = False
+                        break
+                except Exception:
+                    ok_all = False
+                    break
+            if ok_all:
+                base_wp = transform_rel_pos((1, -1, 0), origin, orient, integer=True)
+                try:
+                    self.client.equip("flint_and_steel", slot="hand")
+                    self.client.interact(pos=base_wp, item="flint_and_steel", face=[0, 1, 0])
+                    time.sleep(0.3)
+                    rep = skill.inspect_portal(origin, orientation=orient, include_scaffold=False)
+                    if rep.get("portal_active"):
+                        return SkillResult(True, "Built and ignited Nether Portal using held obsidian!", {"portal_active": True, "structure_verified": True, "executed": True})
+                except Exception:
+                    pass
+        return None
+
+    def _run_task_nether_portal(self, decision, observation):
+        from core.memory import MemoryEngine
+        from skills.portal_speedrun import NetherPortalSpeedrunSkill
+        from skills.scouting import SurfaceScoutSkill
+
+        entered_existing = self._enter_lit_portal()
+        if entered_existing is not None:
+            entered_existing.data["portal_skill"] = True
+            return entered_existing
 
         skill = NetherPortalSpeedrunSkill(self.client)
         res = skill.build_portal(
@@ -349,40 +493,87 @@ class AutonomyRuntime:
         )
         data = dict(res.data or {}) if isinstance(res.data, dict) else {}
         if not res.success and res.error_code == "no_portal_site_found":
-            # Scan wider radius (up to 64 blocks) for lava pools, approach once, and retry cleanly.
-            find_fn = getattr(self.client, "find_blocks", None) or getattr(self.client, "get_blocks", None)
-            origin = ((observation.get("status") or {}).get("pos") if isinstance(observation, dict) else None)
-            if callable(find_fn) and isinstance(origin, (list, tuple)) and len(origin) == 3:
-                try:
-                    rows = find_fn(types=["lava"], radius=64, limit=32) or []
-                    pts = [
-                        row.get("pos")
-                        for row in rows
-                        if isinstance(row, dict) and isinstance(row.get("pos"), (list, tuple)) and len(row.get("pos")) == 3
-                    ]
-                    if pts:
-                        nearest = min(pts, key=lambda p: math.dist(origin, p))
-                        if math.dist(origin, nearest) > 12.0:
-                            from skills.survival import SurvivalSkills
-                            mv = SurvivalSkills(self.client).execute(
-                                "move_to",
-                                {"pos": [int(nearest[0]), int(nearest[1]) + 1, int(nearest[2])], "range": 5},
-                                cancel_event=getattr(self, "_cancel", None),
+            obsidian_try = self._build_obsidian_portal_on_land(observation)
+            if obsidian_try is not None and obsidian_try.success:
+                res = obsidian_try
+                data = dict(res.data or {})
+            else:
+                find_fn = getattr(self.client, "find_blocks", None) or getattr(self.client, "get_blocks", None)
+                origin = ((observation.get("status") or {}).get("pos") if isinstance(observation, dict) else None)
+                approached = False
+                if callable(find_fn) and isinstance(origin, (list, tuple)) and len(origin) == 3:
+                    try:
+                        rows = find_fn(types=["lava"], radius=64, limit=64) or []
+                        pts = [
+                            row.get("pos")
+                            for row in rows
+                            if isinstance(row, dict) and isinstance(row.get("pos"), (list, tuple)) and len(row["pos"]) == 3
+                        ]
+                        if pts:
+                            best = max(
+                                pts,
+                                key=lambda p: (sum(1 for q in pts if math.dist(p, q) <= 6.0), -math.dist(origin, p)),
                             )
-                            if (isinstance(mv.data, dict) and mv.data.get("action_state") == "unknown") or mv.error_code == "action_unconfirmed":
-                                return mv
-                            res = skill.build_portal(
-                                timeout_seconds=180.0,
-                                allow_damage=True,
-                                cancel_event=getattr(self, "_cancel", None),
-                            )
-                            data = dict(res.data or {}) if isinstance(res.data, dict) else {}
-                except Exception:
-                    pass
+                            if math.dist(origin, best) > 12.0:
+                                from skills.survival import SurvivalSkills
+                                mv = SurvivalSkills(self.client).execute(
+                                    "move_to",
+                                    {"pos": [int(best[0]), int(best[1]) + 1, int(best[2])], "range": 5},
+                                    cancel_event=getattr(self, "_cancel", None),
+                                )
+                                if (isinstance(mv.data, dict) and mv.data.get("action_state") == "unknown") or mv.error_code == "action_unconfirmed":
+                                    return mv
+                                approached = bool(mv.success)
+                                res = skill.build_portal(
+                                    timeout_seconds=180.0,
+                                    allow_damage=True,
+                                    cancel_event=getattr(self, "_cancel", None),
+                                )
+                                data = dict(res.data or {}) if isinstance(res.data, dict) else {}
+                    except Exception:
+                        pass
+                if not res.success and not approached:
+                    state_root = Path(str(self.settings.get("state_dir") or "runtime/survival"))
+                    memory = MemoryEngine(str(state_root / "scout_memory"))
+                    attempt = int(self.context.get("lava_scout_attempts", 0))
+                    self.context["lava_scout_attempts"] = attempt + 1
+                    scout_res = SurfaceScoutSkill(self.client, memory=memory).execute(
+                        scan_radius=64,
+                        hop_distance=56.0,
+                        max_hops=4,
+                        prefer_wood=False,
+                        goal_focus="lava",
+                        attempt=attempt,
+                        timeout_seconds=70.0,
+                        cancel_event=getattr(self, "_cancel", None),
+                    )
+                    sdata = dict(scout_res.data or {}) if isinstance(scout_res.data, dict) else {}
+                    if scout_res.success:
+                        self.context["last_scout_report"] = copy.deepcopy(sdata)
+                    lava_pts = [r["pos"] for r in (sdata.get("found_lava") or []) if isinstance(r, dict) and isinstance(r.get("pos"), list)]
+                    if lava_pts:
+                        from skills.survival import SurvivalSkills
+                        best = lava_pts[0]
+                        mv = SurvivalSkills(self.client).execute(
+                            "move_to",
+                            {"pos": [int(best[0]), int(best[1]) + 1, int(best[2])], "range": 5},
+                            cancel_event=getattr(self, "_cancel", None),
+                        )
+                        if (isinstance(mv.data, dict) and mv.data.get("action_state") == "unknown") or mv.error_code == "action_unconfirmed":
+                            return mv
+                        res = skill.build_portal(
+                            timeout_seconds=180.0,
+                            allow_damage=True,
+                            cancel_event=getattr(self, "_cancel", None),
+                        )
+                        data = dict(res.data or {}) if isinstance(res.data, dict) else {}
         data["portal_skill"] = True
         data.setdefault("executed", bool(res.success or data.get("writes", 0) > 0))
         if res.success:
             data.setdefault("portal_active", True)
+            entered = self._enter_lit_portal()
+            if entered is not None:
+                data.update({k: v for k, v in (entered.data or {}).items() if k in ("nether_entered", "dimension", "portal_active")})
         return SkillResult(bool(res.success), str(res.message), data, res.error_code)
 
     def _task_next(self, observation, *, relaxed_policy=None):

@@ -398,8 +398,10 @@ class DailyObservationCollector(ObservationCollector):
         if "busy" not in status or status["busy"] is not None and status["busy"] is not False:
             raise APIError("observation_changed", "Backend idle state is unknown")
         self._collect_footing(observation, cancel_event)
-        for types in (("iron_ore", "deepslate_iron_ore", "chest", "barrel", "smoker", "blast_furnace"),
-                      ("wheat", "carrots", "potatoes", "beetroots", "farmland", "grass_block", "dirt")):
+        for types in (("iron_ore", "deepslate_iron_ore", "chest", "barrel", "smoker", "blast_furnace",
+                       "obsidian", "crying_obsidian", "nether_portal", "gravel"),
+                      ("wheat", "carrots", "potatoes", "beetroots", "farmland", "hay_block",
+                       "sweet_berry_bush", "grass_block", "dirt")):
             self._check_cancel(cancel_event)
             rows = self.client.get_blocks(radius=self.radius, types=list(types), limit=48)
             self._check_cancel(cancel_event)
