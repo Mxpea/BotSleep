@@ -15,7 +15,8 @@ survival:
   campaign: false                          # true with objective=daily and intent=speedrun enables the dragon route.
   projection: timber_house                  # Local preset in data/projections. An empty string selects the compact shelter.
   objective: "starter"                     # starter, daily, competition (requires llm.enabled; no chat debug).
-  continuous: true                         # Daily survival keeps running across deaths and overall budgets.
+  continuous: true                         # Daily survival treats global budgets as planning advice.
+  risk_policy: "guarded"                    # advisory lets daily goals consider tactical risks and continue.
   sleep_policy: "opportunistic"            # opportunistic (sleep only if nearby bed exists; thunder/night no-bed keeps working) or strict.
   disable_deep_mining: false               # True keeps ore collection local and skips deep expeditions.
   operator_goal: ""                        # Optional current user goal (<=1000 visible characters); safety still wins.

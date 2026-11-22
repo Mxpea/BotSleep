@@ -169,11 +169,14 @@ class SurvivalSkills:
         self._check(context)
         if status.get("alive") is False:
             raise _Failure("dead", "Bot is dead")
+        if status.get("ready") is False:
+            raise _Failure("not_ready", "Bot must be ready and alive")
         try:
             health = self._number(status.get("health"), "health", 0, 1024)
             position = self._pos(status.get("pos"))
         except _Failure:
-            raise _Failure("invalid_response", "Status has invalid health or position") from None
+            raise _Failure("invalid_response", "Status has invalid health or position",
+                           {"status_read_unavailable": True}) from None
         if health <= 0:
             raise _Failure("dead", "Bot is dead")
         if status.get("ready") is not True or status.get("alive") is not True:
@@ -2054,5 +2057,8 @@ class SurvivalSkills:
                     data["cleanup"] = "stop_requested"
                 except Exception as cleanup_error:
                     data["cleanup_error"] = getattr(cleanup_error, "code", "internal_error")
+            if (name == "retreat_from" and not context.get("write_sent") and not context["acted"]
+                    and data.get("action_state") != "unknown"):
+                data.update(executed=False, action_state="not_executed")
             data.setdefault("executed", context.get("write_sent") is True)
             return SkillResult(False, str(error), data, code)

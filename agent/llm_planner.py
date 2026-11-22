@@ -69,8 +69,11 @@ commands, teleports, material grants, arbitrary code, player combat or chat tool
 Build a sustainable overworld routine: food, tools, fuel, smelting, bed, small shelter,
 storage, safe drop recovery and maintenance. The local task board describes verified
 progress and missing prerequisites; prioritize urgent food and safety over projects.
-Use gather(resource=logs) for wood. wood_reserve is a board row. When
-context.mainline is present, repair the displayed chapter and its prerequisites.
+Gather with run_survival_task(task="gather", resource="logs", count=8).
+Explore with run_survival_task(task="scout", distance=64). The harness selects routes and targets.
+Use context.budget_advice.remaining_seconds to choose shorter goals as time runs low.
+Use context.mainline to pick the next milestone or recover its prerequisites.
+When survival_constraints.scenario is risk_advisory, weigh the listed risks and choose a useful goal.
 When available, prefer run_survival_task for one useful bounded goal instead of
 requesting an atomic action for every block or recipe. The executor finds resources
 and prerequisites, performs fresh safety/side-effect checks, and runs ordinary child
@@ -202,6 +205,9 @@ class LLMSurvivalPlanner:
             self.MAX_REQUEST_BYTES = 48000
         self.tool_definitions = tools_for_objective(self.objective)
         self.autonomy_enabled = survival_settings.get("autonomy", {}).get("enabled", True) is True
+        self.advisory = (self.objective == "daily" and survival_settings.get("risk_policy") == "advisory"
+                         and survival_settings.get("intent", "survival") == "survival"
+                         and survival_settings.get("campaign") is not True)
         self.tool_schemas = {tool["function"]["name"]: tool["function"]["parameters"] for tool in self.tool_definitions}
         self.system_prompt = (COMPETITION_SYSTEM_PROMPT if self.objective == "competition"
                               else DAILY_SYSTEM_PROMPT if self.objective == "daily" else SYSTEM_PROMPT)
@@ -643,8 +649,10 @@ If that goal tool is unavailable, use only the currently advertised tools.
         local_only = {"retreat_from"} if combat_goal else {"retreat_from", "fight_hostile"}
         tools = [tool for tool in tools if tool["function"]["name"] not in local_only]
         mainline = context.get("mainline")
-        if (self.objective != "daily" or not isinstance(mainline, dict) or not mainline.get("fresh")
-                or not isinstance(mainline.get("goal"), dict) or routing["mode"] in {"cautious_bootstrap", "emergency_food"}):
+        strategy_repair = self.advisory and (context.get("task_execution") or {}).get("status") == "needs_ai"
+        if (strategy_repair or self.objective != "daily" or not isinstance(mainline, dict) or not mainline.get("fresh")
+                or not isinstance(mainline.get("goal"), dict) or routing["mode"] in {"cautious_bootstrap", "emergency_food"}
+                or (context.get("survival_constraints") or {}).get("scenario") == "risk_advisory"):
             return tools, routing, repair_id
         goal = mainline["goal"]
         tools = copy.deepcopy(tools)
@@ -718,7 +726,7 @@ If that goal tool is unavailable, use only the currently advertised tools.
             normal.update(self._repair_actions(task, observation))
             mode = "atomic_repair"
         tools = [tool for tool in self.tool_definitions if tool["function"]["name"] in normal]
-        if isinstance(context.get("last_scout_report"), dict):
+        if not self.advisory and isinstance(context.get("last_scout_report"), dict):
             tools = copy.deepcopy(tools)
             for tool in tools:
                 if tool["function"]["name"] == "run_survival_task":
@@ -846,6 +854,8 @@ If that goal tool is unavailable, use only the currently advertised tools.
         allowed = {required} if required else set()
         if (required and required not in args) or ({"resource", "item"} & set(args)) - allowed:
             raise LLMError("llm_invalid_arguments", "gather requires only resource; craft/smelt require only target item; other tasks accept neither")
+        if "distance" in args and task != "scout":
+            raise LLMError("llm_invalid_arguments", "Only scout accepts distance. Gather accepts resource and count.")
         status = observation.get("status") or {}
         if (observation.get("fresh") is not True or observation.get("stale") is True
                 or observation.get("observation_scope", "full") != "full"
@@ -903,7 +913,7 @@ If that goal tool is unavailable, use only the currently advertised tools.
             allowed_names = frozenset(tool["function"]["name"] for tool in request_tools)
             allowed_schemas = {tool["function"]["name"]: copy.deepcopy(tool["function"]["parameters"]) for tool in request_tools}
             prompt_context = {key: context[key] for key in ("blocked_targets", "explore_index", "failures", "last_result",
-                                                          "last_scout_report", "death_count", "spawn", "remaining_steps", "remaining_seconds",
+                                                          "last_scout_report", "death_count", "spawn", "remaining_steps", "remaining_seconds", "budget_advice",
                                                           "daily_tasks", "action_hints", "memory", "survival_constraints", "competition", "playbook", "task_execution", "mainline") if key in context}
             if routing.get("mode") == "goal" and isinstance(prompt_context.get("action_hints"), list):
                 # In goal mode atomic tools like place_item/move_to are hidden; drop uncallable hints so small models do not emulate them with unrelated craft calls.
@@ -1053,6 +1063,7 @@ its executor verifies child steps without model calls and returns one terminal s
 Use context.task_execution progress; unknown/active tasks cannot be replaced or replayed.
 gather needs resource; craft/smelt need target OUTPUT item; others accept neither.
 count is new output for gather/craft/smelt, current reserve for food. No positions/queues.
+Scout takes distance in blocks. Use budget_advice.remaining_seconds to prefer short goals when time is scarce.
 terrain_summary.nearest_pos is diagnostic only; gathering/clearing requires an exact observation.blocks match.
 Read context.competition. During selection, tasks lists only choices unlocked by current evidence.
 Choose select_task(goal_id) from selectable_goal_ids; if there are no choices, use wait.

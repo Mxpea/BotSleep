@@ -1,7 +1,9 @@
 """Native function tools for implemented, locally verified survival actions."""
 
-from skills.survival import SurvivalSkills
 import copy
+
+from core.domain import SCOUT_DEFAULT_DISTANCE, SCOUT_MAX_DISTANCE, SCOUT_MIN_DISTANCE
+from skills.survival import SurvivalSkills
 
 
 def _position(integer=False):
@@ -184,12 +186,14 @@ def tools_for_objective(objective="starter"):
     entity_id = {"type": "integer", "minimum": 0}
     def add(name, description, properties, required=None):
         tools.append(_tool(name, description, properties, tuple(properties) if required is None else required))
-    add("run_survival_task", "Choose one bounded goal. The executor finds prerequisites and verifies each step locally. Shelter supplies its own wood, workstation, walls, roof and door. Scout surveys the surface within a travel budget. Iron armor crafts and equips missing pieces. Gather takes a resource, craft/smelt take the output item, and other goals take neither. The final summary reports completion, interrupted work or an exhausted budget.",
+    add("run_survival_task", "Choose one bounded goal. The executor finds prerequisites and verifies each step locally. Shelter supplies its own wood, workstation, walls, roof and door. Scout takes distance in blocks. Gather takes resource and count. The harness handles movement, mining, pickup, and inventory checks. Craft/smelt take the output item. The final summary reports completion, interrupted work or an exhausted budget.",
         {"task": {"type": "string", "enum": list(SURVIVAL_TASK_NAMES)},
          "resource": {"type": "string", "enum": list(SURVIVAL_TASK_RESOURCES)},
          "item": {**_ITEM, "description": "Desired craft/smelt output; bone_meal uses held bones only."},
          "count": {"type": "integer", "minimum": 1, "maximum": 64, "default": 8,
                    "description": "Desired new output for gather/craft/smelt; current food reserve target for food."},
+         "distance": {"type": "integer", "minimum": SCOUT_MIN_DISTANCE, "maximum": SCOUT_MAX_DISTANCE,
+                      "default": SCOUT_DEFAULT_DISTANCE, "description": "Requested horizontal waypoint distance in blocks. Scout can stop early."},
          "radius": {"type": "integer", "minimum": 4, "maximum": 64, "default": 32}}, ("task",))
     add("fight_hostile", "Perform one bounded defensive step against an observed skeleton, zombie or creeper. The skill selects shield/no-shield handling and rechecks life, target and terrain. A hit, block or missing target is not a verified kill; never chase unknown enemies.",
         {"entity_id": entity_id, "expected_name": {"type": "string", "enum": ["skeleton", "zombie", "creeper"]}})

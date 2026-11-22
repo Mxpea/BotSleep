@@ -42,6 +42,9 @@ class ContinuousRecovery:
         self._record("WARN", "CONTINUOUS_RETRY", {"code": code, "retry_seconds": delay,
                      "pending": bool(self.journal.state.get("pending"))})
 
+    def _has_interrupted_intent(self):
+        return bool(self.journal.state.get("pending") or (self._task_snapshot() or {}).get("status") == "unknown")
+
     def _reobserve_interrupted(self):
         """Abandon an interrupted intent without opening a GUI or replaying a write."""
         pending = copy.deepcopy(self.journal.state.get("pending"))
@@ -49,7 +52,11 @@ class ContinuousRecovery:
         # inventory/block/entity/status reads are appropriate for this barrier.
         observation = ObservationCollector(self.client, self.settings["scan_radius"]).collect(self._cancel)
         status = observation["status"]
-        if (not observation.get("fresh") or status.get("ready") is not True or status.get("alive") is not True
+        if (observation.get("fresh") is not True or observation.get("stale") is True
+                or observation.get("observation_scope", "full") != "full"
+                or observation.get("inventory_fresh") is False or observation.get("terrain_fresh") is False
+                or not isinstance(observation.get("counts"), dict)
+                or status.get("ready") is not True or status.get("alive") is not True
                 or status.get("gamemode") != "survival" or status.get("dimension") not in {"overworld", "minecraft:overworld"}
                 or "busy" not in status or status["busy"] not in (False, None)
                 or self._cancel.is_set() or pending != self.journal.state.get("pending")):
@@ -89,6 +96,13 @@ class ContinuousRecovery:
             if self._safety_rules._pos(pos) is not None:
                 self.context.setdefault("blocked_until", {})[self._safety_rules._key(pos)] = (
                     time.time() + self.settings["target_cooldown_seconds"])
+        if (isinstance(original, dict) and original.get("goal") == "food_recovery"
+                and original.get("name") in {"position_for_task", "clear_food_headroom"}):
+            food = self.context.get("food_recovery")
+            if isinstance(food, dict):
+                food.pop("unknown", None)
+                cell = [math.floor(value + .0001) for value in status["pos"]]
+                food["visited"] = ([row for row in food.get("visited", []) if row != cell] + [cell])[-8:]
         canopy = self.context.get("canopy_recovery") or {}
         if canopy.get("unknown") and isinstance(original, dict) and original.get("name") in {"retreat_from", "canopy_escape"}:
             self.context.pop("canopy_recovery", None)
@@ -96,7 +110,8 @@ class ContinuousRecovery:
         self._record("WARN", "CONTINUOUS_INTENT_ABANDONED", {"decision": original, "task_id": task.get("task_id"),
             "prior_result": self.journal.state.get("last_result"), "pos": status["pos"], "generation": self.context["life_generation"]})
         return SkillResult(True, "Current game state observed; plan again without crediting the previous action",
-                           {"executed": False, "reobserved": True, "original_action_confirmed": False}), observation
+                           {"executed": False, "reobserved": True, "original_action_confirmed": False,
+                            "task_abandoned": task_cancelled}), observation
 
     def _matches_abandoned_action(self, decision, observation):
         old = self.context.get("last_abandoned_action") or {}

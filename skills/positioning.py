@@ -8,13 +8,18 @@ with range=0; only the independently observed final cell/centre can pass.
 import math
 import time
 
-from core.block_geometry import PASS_THROUGH
+from core.block_geometry import PASS_THROUGH, trace_block_visibility
+from core.client import APIError
+from core.domain import FOOD_HEADROOM_BLOCKS, food_headroom_ready
 from .daily_survival import DailySurvivalSkills
 from .survival import _Failure
 
 
 class PositioningSkills(DailySurvivalSkills):
-    ARGUMENTS = {"position_for_task": ({"pos"}, {"pos"})}
+    ARGUMENTS = {
+        "position_for_task": ({"pos"}, {"pos"}),
+        "clear_food_headroom": ({"pos", "expected_name"}, {"pos", "expected_name"}),
+    }
     MAX_READS = 96
     READ_SECONDS = 20
     HALF_WIDTH = .36  # Player .3, rounded position .05 and a small margin.
@@ -221,9 +226,20 @@ class PositioningSkills(DailySurvivalSkills):
             allowed = self.SUPPORT - self.RETREAT_TRUNKS if key in support else PASS_THROUGH
             if (key in support and key in body or block["name"] not in allowed
                     or not self._safe_block(block)):
+                # A rounded source at nominal wall contact may step away
+                # from the wall if the destination clears the full margin.
+                projected = [target[0], origin[1], target[2]]
+                if (not landing and key in body and key not in support
+                        and block["name"] in self.SUPPORT - self.RETREAT_TRUNKS
+                        and self._safe_block(block)
+                        and self.leaves_start_margin(origin, projected,
+                            (key[0] if axis == 2 else source[0], key[2] if axis == 0 else source[2]))):
+                    continue
                 raise _Failure("unsafe_route", "Terrain step lacks full solid support or complete body clearance",
                                {"blocked_cell": list(key), "block": block["name"]})
-        return {"support": support, "body": body, "observed": observed}
+        return {"support": support, "body": body, "observed": observed,
+                "rounded_origin": any(key in body and block["name"] not in PASS_THROUGH
+                                      for key, block in observed.items())}
 
     def _step_threats(self, origin, target, context, *, entities=None):
         if entities is None:
@@ -298,10 +314,13 @@ class PositioningSkills(DailySurvivalSkills):
         evidence = context["retreat_evidence"]
         # Everything after the single write is observation. A missing or
         # interrupted landing never authorizes stop, replay, or a second move.
-        deadline = min(context["position_deadline"], time.monotonic() + 1.5)
-        context["position_deadline"] = deadline
         settling_started = time.monotonic()
-        diagnostics = {"budget_seconds": 1.5, "poll_seconds": .1, "status_samples": 0,
+        extended_readback = (evidence.get("night_home_step") is True
+                             or before["health"] <= 4 and evidence.get("terrain_step"))
+        budget = 6.0 if extended_readback else 1.5
+        deadline = min(context["position_deadline"], settling_started + budget)
+        context["position_deadline"] = deadline
+        diagnostics = {"budget_seconds": budget, "poll_seconds": .1, "status_samples": 0,
                        "motion_wait_samples": 0, "first": None, "last": None}
         evidence["landing_observation"] = diagnostics
         previous = None
@@ -461,6 +480,67 @@ class PositioningSkills(DailySurvivalSkills):
         context["navigation_observe_only"] = True
         self._daily_action(context, self.client.move_to, *target, range=0, timeout_ms=8000, validate=validate)
         return self._settled_position(target, before, context)
+
+    def _clear_food_headroom(self, args, context):
+        pos = self._pos(args["pos"], block=True)
+        name = self._item(args["expected_name"])
+        if name not in FOOD_HEADROOM_BLOCKS:
+            raise _Failure("unsafe_target", "Food recovery can only clear known dirt headroom")
+        before = self._prepare(context)
+        origin = before["pos"]
+        source = self._cell(origin)
+        if (pos[1] != source[1] + 1 or abs(pos[0] - source[0]) + abs(pos[2] - source[2]) != 1):
+            raise _Failure("unsafe_target", "Food recovery needs one adjacent head block")
+        target = [pos[0] + .5, source[1], pos[2] + .5]
+
+        def verify(current):
+            self._step_stable(current, before)
+            if current["pos"] != origin or not food_headroom_ready(current):
+                raise _Failure("safety_changed", "Food headroom needs the same stable critical-health daylight stance")
+            self._gather_guard(pos, name, current, context)
+            self._step_threats(origin, target, context)
+            # Verify the proposed corridor with only this exact block omitted.
+            # The next cycle still reads the real corridor before moving.
+            y = source[1]
+            for x, z in self._columns(origin, target):
+                ground = self._block([x, y - 1, z], context)
+                if ground["name"] not in self.SUPPORT - self.RETREAT_TRUNKS or not self._safe_block(ground):
+                    raise _Failure("unsafe_route", "Food recovery corridor lacks solid support")
+                for dy in (0, 1):
+                    cell = [x, y + dy, z]
+                    if cell == pos:
+                        continue
+                    block = self._block(cell, context)
+                    if block["name"] not in PASS_THROUGH or not self._safe_block(block):
+                        raise _Failure("unsafe_route", "Food recovery has another body obstruction", {"blocked_cell": cell})
+            sight = trace_block_visibility(origin, pos, lambda point: self._block(point, context), max_queries=16, max_distance=3)
+            if sight["visible"] is not True:
+                raise _Failure("target_occluded", "Food recovery head block is not visible")
+            final = self._status(context)
+            self._step_stable(final, before)
+            if final["pos"] != origin or not food_headroom_ready(final):
+                raise _Failure("safety_changed", "Food recovery stance changed during preflight")
+
+        context["retreat_evidence"].update(target=pos, expected_name=name)
+        context["navigation_observe_only"] = True
+        try:
+            self._daily_action(context, self.client.dig, pos, collect=False, validate=verify)
+        except (APIError, _Failure) as error:
+            if not context["retreat_evidence"]["executed"] or error.code not in self.UNKNOWN:
+                raise
+            raise _Failure("action_unconfirmed", "Uncertain food headroom dig",
+                           {"action_state": "unknown", "cleanup_skipped": "navigation_unknown",
+                            "recovery_error": error.code}) from error
+        try:
+            current = self._status(context)
+            self._step_stable(current, before)
+            if self._block(pos, context)["name"] not in self.AIR:
+                raise _Failure("headroom_not_removed", "Head block remains after the write")
+        except Exception as error:
+            raise _Failure("action_unconfirmed", "Food headroom dig could not be verified",
+                           {"action_state": "unknown", "cleanup_skipped": "navigation_unknown",
+                            "recovery_error": getattr(error, "code", "internal_error")}) from None
+        return self._verified(context, cleared=name, block_removed=True, pos=pos)
 
     def _position_for_task(self, args, context):
         target = self._pos(args["pos"])

@@ -17,14 +17,14 @@ class TerrainLandingSettleTests(unittest.TestCase):
     def writes(world):
         return [row for row in world.calls if row[0] in {"move", "stop", "dig", "place", "control"}]
 
-    def run_samples(self, world, target, samples, *, read_limit=96, entity_effect=None):
+    def run_samples(self, world, target, samples, *, read_limit=96, entity_effect=None, settle_budget=1.5):
         now = [100.]
         sleeps = []
         status_reads = [0]
         original = world.get_status
         def status(**kwargs):
             if self.writes(world):
-                self.assertLessEqual(kwargs["timeout_seconds"], 1.5)
+                self.assertLessEqual(kwargs["timeout_seconds"], settle_budget)
                 update = samples[min(status_reads[0], len(samples) - 1)]
                 status_reads[0] += 1
                 world.status.update(copy.deepcopy(update))
@@ -69,13 +69,36 @@ class TerrainLandingSettleTests(unittest.TestCase):
             world.block([x, 66, 10], "grass_block")
         result, sleeps, reads = self.run_samples(world, [-3.5, 67, 10.5], [
             {"speed": None, "velocity": None, "on_ground": True, "held_controls": None, "jumping": False},
-            {"speed": 0, "velocity": [0, 0, 0]}])
+            {"speed": 0, "velocity": [0, 0, 0]}], settle_budget=6.0)
         self.assertTrue(result.success, result)
         evidence = result.data["landing_observation"]
         self.assertEqual(evidence["first"]["waiting_for"], ["motion_sample"])
         self.assertTrue(result.data["night_home_step"])
         self.assertTrue(result.data["landing_stable"])
         self.assertGreaterEqual(reads, 4)
+
+    def test_night_step_accepts_slow_landing_readback_with_one_write(self):
+        from test_daily_skills import DailyWorld
+        world = DailyWorld()
+        world.status.update(pos=[-4.5, 67, 10.5], is_day=False, time_of_day=17657, thundering=False,
+                            speed=0, velocity=[0, 0, 0])
+        for x in (-5, -4):
+            world.block([x, 66, 10], "grass_block")
+        now = [100.]
+        original = world.get_block
+
+        def delayed_block(pos, **kwargs):
+            if self.writes(world):
+                now[0] += .45
+            return original(pos, **kwargs)
+
+        world.get_block = delayed_block
+        with patch("skills.positioning.time.monotonic", side_effect=lambda: now[0]):
+            result = PositioningSkills(world).execute("position_for_task", {"pos": [-3.5, 67, 10.5]})
+        self.assertTrue(result.success, result)
+        self.assertEqual(result.data["landing_observation"]["budget_seconds"], 6.0)
+        self.assertGreater(result.data["landing_observation"]["elapsed_seconds"], 1.5)
+        self.assertEqual([row[0] for row in self.writes(world)], ["move"])
 
     def test_null_motion_does_not_hide_a_new_shooter_or_certify_a_persistent_reset(self):
         for danger in (True, False):

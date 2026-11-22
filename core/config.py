@@ -36,6 +36,7 @@ DEFAULTS: Dict[str, Any] = {
         "campaign": False,
         "projection": "timber_house",
         "continuous": False,
+        "risk_policy": "guarded",
         "sleep_policy": "opportunistic",
         "disable_deep_mining": False,
         "operator_goal": "",
@@ -233,6 +234,8 @@ def _validate(config: Dict[str, Any], config_dir: Path) -> None:
     if survival["objective"] not in {"starter", "daily", "competition"}:
         raise ConfigError("survival.objective must be starter, daily or competition")
     _boolean(survival["continuous"], "survival.continuous")
+    if survival["risk_policy"] not in ("guarded", "advisory"):
+        raise ConfigError("survival.risk_policy must be guarded or advisory")
     _boolean(survival["campaign"], "survival.campaign")
     if not isinstance(survival["projection"], str):
         raise ConfigError("survival.projection must be a preset name or an empty string")

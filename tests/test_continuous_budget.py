@@ -3,6 +3,8 @@ import tempfile
 import time
 import unittest
 
+from unittest.mock import patch
+
 from core.config import DEFAULTS
 from core.survival_harness import SurvivalHarness
 from test_task_harness import TaskWorld
@@ -68,6 +70,20 @@ class ContinuousBudgetTests(unittest.TestCase):
                 break
         self.assertEqual(self.world.counts.get("oak_log"), 1)
         self.assertEqual(runner.snapshot()["death_count"], 2)
+
+    def test_advisory_clock_survives_restart_and_can_reach_zero_without_stopping(self):
+        self.settings["max_runtime_seconds"] = 60
+        with patch("core.survival_harness.time.time", return_value=1000):
+            runner = self.harness()
+            self.assertEqual(runner.snapshot()["budget_advice"]["remaining_seconds"], 60)
+            runner.close()
+        with patch("core.survival_harness.time.time", return_value=1045):
+            restarted = self.harness()
+            self.assertEqual(restarted.snapshot()["budget_advice"]["remaining_seconds"], 15)
+        with patch("core.survival_harness.time.time", return_value=1061):
+            self.assertEqual(restarted.snapshot()["budget_advice"]["remaining_seconds"], 0)
+            self.assertIsNone(restarted._remaining_budget()["remaining_seconds"])
+            self.assertFalse(restarted.finished)
 
     def test_manual_pause_remains_in_force_beyond_old_global_limits(self):
         runner = self.harness()

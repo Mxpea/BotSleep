@@ -80,6 +80,7 @@ SKILL_SPECS = (
 # Local procedural children are executable capabilities, not model tools.
 # Keep them out of SKILL_SPECS and all public objective/tool catalogues.
 INTERNAL_SKILL_SPECS = (
+    SkillSpec("clear_food_headroom", _DAILY_COMP, "positioning_skills", checks_destination=True),
     SkillSpec("plan_shelter_preparation", _DAILY_COMP, "shelter_preparation_skills", checks_destination=False),
     SkillSpec("prepare_shelter_step", _DAILY_COMP, "shelter_preparation_skills", checks_destination=True),
     # A stair step derives its exact dig or movement from a freshly inspected

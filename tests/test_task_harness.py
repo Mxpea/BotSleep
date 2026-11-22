@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from agent.llm_planner import LLMSurvivalPlanner
+from agent.survival_planner import Decision
 from core.client import APIError
 from core.config import DEFAULTS
 from core.block_geometry import trace_block_visibility
@@ -225,6 +226,7 @@ class TaskHarnessTests(unittest.TestCase):
         self.assertTrue(result["success"])
         self.assertEqual(result["data"]["task_execution"]["progress"], {"current":6,"target":6,"unit":"logs"})
         self.assertEqual(harness.snapshot()["task_execution"]["steps"], 4)
+        self.assertEqual(sum(row["event"] == "TASK_INVENTORY_READBACK" for row in self.events(harness)), 4)
         self.assertIsNone(harness.journal.state["pending"])
 
     def test_opt_in_local_opening_uses_existing_controller_without_model_feedback(self):
@@ -378,7 +380,7 @@ class TaskHarnessTests(unittest.TestCase):
             with self.subTest(change=change):
                 partial=copy.deepcopy(complete)
                 partial.update(change,fresh=True,observation_scope="full")
-                with patch.object(harness,"_observe",return_value=partial):
+                with patch("core.continuous_recovery.ObservationCollector.collect", return_value=partial):
                     self.assertTrue(harness.resume())
                     self.assertFalse(self.cycle(harness).success)
                 self.assertTrue(harness.paused)
@@ -531,6 +533,36 @@ class TaskHarnessTests(unittest.TestCase):
         self.assertEqual(len([call for call in self.world.calls if call[0] == "dig"]), 11)
         self.assertEqual(len(brain.requests), 1)
         self.assertEqual([row["tool_call_id"] for row in self.feedback(harness.planner)], ["starter_set"])
+
+    def test_advisory_food_exhaustion_reaches_model_and_completes_a_batch(self):
+        self.settings.update(risk_policy="advisory", continuous=True)
+        self.settings["autonomy"].update(max_steps=1, max_seconds=1)
+        self.world.status.update(health=4, food=17)
+        self.logs(2)
+        harness, brain = self.harness(response("run_survival_task",
+            {"task": "gather", "resource": "logs", "count": 2}, "recover_wood"))
+        harness._recovery_state("food_recovery", {"status": self.world.status}).update(steps=8, needs_ai=True)
+        self.assertTrue(self.cycle(harness).data.get("accepted"))
+        harness.task_controller._data["started_at"] -= 2
+        self.until(harness, lambda: harness.snapshot()["task_execution"]["status"] == "completed")
+        self.assertEqual(sum(n for name, n in self.world.counts.items() if name.endswith("_log")), 2)
+        self.assertEqual(len(brain.requests), 1)
+        context = json.loads(brain.requests[0]["messages"][-1]["content"])["context"]
+        self.assertIn("low_health", context["survival_constraints"]["risks"])
+        self.assertIn("remaining_seconds", context["budget_advice"])
+
+    def test_rejected_food_clear_does_not_spend_an_attempt(self):
+        self.world.status.update(health=4, food=11)
+        harness, _ = self.harness()
+        obs = harness.collector.collect()
+        state = harness._recovery_state("food_recovery", obs)
+        state["steps"] = 7
+        decision = Decision("clear_food_headroom", {"pos": [1, 65, 0], "expected_name": "dirt"},
+                            "Try locally verified headroom", "food_recovery")
+        result = SkillResult(False, "Fresh stance changed", {"executed": False}, "safety_changed")
+        harness._local_recovery_result(decision, result, obs)
+        self.assertEqual(state["steps"], 7)
+        self.assertIsNot(state.get("needs_ai"), True)
 
     def test_low_health_bootstrap_crafts_from_near_trunk_without_implicit_pickup_path(self):
         self.world = ForestWorld()
@@ -870,6 +902,8 @@ class TaskHarnessTests(unittest.TestCase):
             self.assertEqual(Path(scout_self.memory.data_dir).parent, harness.journal.directory)
             self.assertGreater(kwargs["timeout_seconds"], 0)
             self.assertLessEqual(kwargs["timeout_seconds"], 20)
+            self.assertEqual(kwargs["distance"], 96)
+            self.assertEqual(kwargs["max_hops"], 2)
             return SkillResult(True, "Scout found village", {
                 "executed": True,
                 "estimated_reach": 112.0,
@@ -878,7 +912,7 @@ class TaskHarnessTests(unittest.TestCase):
                 "found_structures": [{"name": "chest", "pos": [60, 64, 0]}],
             })
 
-        harness, brain = self.harness(response("run_survival_task", {"task": "scout"}, "scout_goal"))
+        harness, brain = self.harness(response("run_survival_task", {"task": "scout", "distance": 96}, "scout_goal"))
         harness.settings["max_runtime_seconds"] = 20
         with patch("skills.scouting.SurfaceScoutSkill.execute", new=fake_scout):
             self.cycle(harness)
@@ -892,6 +926,19 @@ class TaskHarnessTests(unittest.TestCase):
         self.assertIn("last_scout_report", harness.context)
         harness._update_lifecycle({**self.world.status, "alive": False})
         self.assertNotIn("last_scout_report", harness.context)
+
+    def test_expired_advice_still_allows_one_scout_hop(self):
+        self.settings.update(continuous=True, risk_policy="advisory")
+        harness, brain = self.harness(response("run_survival_task", {"task": "scout", "distance": 96}))
+        harness._planning_started_at -= self.settings["max_runtime_seconds"] + 10
+        with patch("skills.scouting.SurfaceScoutSkill.execute", return_value=SkillResult(
+                True, "Scout finished one planned hop", {"waypoint_distance": 64})) as scout:
+            self.cycle(harness)
+            self.until(harness, lambda: harness.snapshot()["task_execution"]["status"] == "completed")
+        self.assertEqual(len(brain.requests), 1)
+        self.assertEqual(scout.call_args.kwargs["max_hops"], 1)
+        self.assertEqual(scout.call_args.kwargs["distance"], 96)
+        self.assertGreater(scout.call_args.kwargs["timeout_seconds"], 12)
 
     def test_nether_portal_task_routes_to_speedrun_skill_with_lava_search_and_completes(self):
         self.world.counts = {"water_bucket": 1, "flint_and_steel": 1, "cobblestone": 16, "iron_pickaxe": 1}

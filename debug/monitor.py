@@ -213,7 +213,7 @@ class EventMonitor:
         self._update_status(record, data, event)
         status = state["status"]
         for key in ("username", "planner", "model", "steps", "busy", "paused", "goal", "phase", "pause_reason",
-                    "objective", "continuous", "death_count", "model_blocked", "model_pending", "pending"):
+                    "objective", "continuous", "death_count", "budget_advice", "model_blocked", "model_pending", "pending"):
             if key in data:
                 run[key] = data[key]
         if status.get("username"):

@@ -11,7 +11,8 @@ import time
 from collections.abc import Mapping
 
 from agent.survival_planner import Decision, SurvivalPlanner
-from core.domain import FOOD_POINTS, LOG_NAMES, PLANK_NAMES, RANGED_HOSTILES, cell_coords, extract_blocks, parse_pos
+from core.domain import (FOOD_HEADROOM_BLOCKS, FOOD_POINTS, LOG_NAMES, PLANK_NAMES, RANGED_HOSTILES,
+                         cell_coords, extract_blocks, food_headroom_ready, parse_pos)
 from core.local_recovery_runtime import TREE_SUPPORTS, has_canopy_support, verified_footing
 from core.policy_relaxation import LOW_HEALTH, NIGHT, allows_atomic, allows_goal
 from core.night_home_route import exterior_step
@@ -38,6 +39,8 @@ class DailySafetyPolicy:
         self.food_threshold = self.rules.food_threshold
         raw_policy = settings.get("sleep_policy", "strict") if isinstance(settings, Mapping) else "strict"
         self.sleep_policy = raw_policy if raw_policy in {"opportunistic", "strict"} else "strict"
+        self.advisory = (settings.get("risk_policy") == "advisory" and settings.get("objective", "daily") == "daily"
+                         and settings.get("intent", "survival") == "survival" and settings.get("campaign") is not True)
 
     @staticmethod
     def _rows(value):
@@ -161,9 +164,13 @@ class DailySafetyPolicy:
         status, context = observation["status"], context or {}
         recovery = context.get("food_recovery") or {}
         steps = recovery.get("steps", 0)
-        if (type(steps) is not int or not 0 <= steps < 8 or recovery.get("needs_ai") is True
-                or recovery.get("cooling_down") is True or self._night(status)
-                or len(self._rows(observation.get("entities"))) >= 40):
+        critical = 0 < status["health"] <= 4
+        night = self._night(status)
+        night_step = critical and self.sleep_policy == "opportunistic" and not self._strict_night_block(observation, status)
+        if (type(steps) is not int or not 0 <= steps < 8 or recovery.get("unknown") is True
+                or recovery.get("needs_ai") is True and not critical
+                or recovery.get("cooling_down") is True or status.get("thundering")
+                or night and not night_step or len(self._rows(observation.get("entities"))) >= 40):
             return None
         footing = self._footing(observation)
         if (footing is None or footing.get("name") not in DailySurvivalSkills.SUPPORT
@@ -182,16 +189,32 @@ class DailySafetyPolicy:
         candidates = []
         for row in self._rows(observation.get("safe_stand_candidates"))[:8]:
             pos = self._point(row.get("pos"))
-            if (pos is None or row.get("support") not in DailySurvivalSkills.SUPPORT
+            if pos is None:
+                continue
+            start, end = self._cell(origin), self._cell(pos)
+            level = abs(pos[1] - origin[1]) <= .1
+            terrace = (critical and abs(pos[1] - origin[1]) == 1
+                       and abs(start[0] - end[0]) + abs(start[2] - end[2]) == 1)
+            if (row.get("support") not in DailySurvivalSkills.SUPPORT
                     or row.get("support") in TREE_SUPPORTS
-                    or abs(pos[1] - origin[1]) > .1 or self._cell(pos) == self._cell(origin)
+                    or not (terrace or level and not night) or start == end
                     or self._cell(pos) in visited or self.rules._key(pos) in excluded
                     or not self._near_safe(pos, observation, 3)):
                 continue
             candidates.append(pos)
         if not candidates:
+            if food_headroom_ready(status):
+                for row in self._rows(observation.get("food_headroom_candidates"))[:4]:
+                    pos = self._point(row.get("pos"))
+                    if pos is None or row.get("name") not in FOOD_HEADROOM_BLOCKS:
+                        continue
+                    start, end = self._cell(origin), self._cell(pos)
+                    if (end[1] == start[1] + 1 and abs(end[0] - start[0]) + abs(end[2] - start[2]) == 1
+                            and self.rules._key(pos) not in excluded and self._near_safe(pos, observation, 2)):
+                        return Decision("clear_food_headroom", {"pos": pos, "expected_name": row["name"]},
+                                        "Clear one adjacent dirt block to open a checked food recovery step", "food_recovery")
             return None
-        target = min(candidates, key=lambda pos: (math.dist(origin, pos), pos))
+        target = min(candidates, key=lambda pos: (abs(pos[1] - origin[1]), math.dist(origin, pos), pos))
         return Decision("position_for_task", {"pos": target},
                         "Food below 18 cannot regenerate health; inspect one fresh ground position within the bounded food search", "food_recovery")
 
@@ -498,11 +521,46 @@ class DailySafetyPolicy:
         return any(row["name"].endswith("_bed") and self._near_safe(row["pos"], observation, 16)
                    and (row.get("properties") or {}).get("occupied") not in (True, "true") for row in self._blocks(observation))
 
+    def risk_advice(self, observation, context=None):
+        """Allow normal planning for tactical risks after local recovery has no next step."""
+        if not self.advisory or not isinstance(observation, dict) or self._partial(observation):
+            return []
+        context = context or {}
+        if self._basics(observation, context)[1] is not None:
+            return []
+        status = observation["status"]
+        if (context.get("pending") or self._meal(observation)
+                or self._canopy(observation, context) or context.get("combat_retreat")
+                or (context.get("retreat_recovery") or {}).get("evacuating")
+                or (context.get("food_recovery") or {}).get("unknown") is True
+                or observation.get("inventory_fresh") is False or observation.get("terrain_fresh") is False
+                or "busy" not in status or status["busy"] not in (False, None)):
+            return []
+        low = status["health"] <= self.low_health
+        hungry = status["food"] <= 6
+        night = self._night(status)
+        if not (low or hungry or night):
+            return []
+        if low and status["food"] < 18 and ((not night and self._food_options(observation, low_health=True))
+                                                  or self._food_search(observation, context)):
+            return []
+        if night and (self.sleep_policy == "strict" or self._bed(observation)):
+            return []
+        footing, entities = self._footing(observation), observation.get("entities")
+        if (footing is None or footing["name"] not in DailySurvivalSkills.SUPPORT - TREE_SUPPORTS
+                or not isinstance(entities, list) or len(entities) >= 40):
+            return []
+        return [name for flag, name in ((low, "low_health"), (hungry, "critical_hunger"), (night, "night")) if flag]
+
     def constraints(self, observation, context=None):
         scenario, forced = self._basics(observation, context)
         allowed, radius, model = None, 32, forced is None
         reason = forced.reason if forced else "Normal bounded daily planning remains subject to local skill verification"
-        if forced is not None:
+        risks = self.risk_advice(observation, context) if forced is None else []
+        if risks:
+            scenario = "risk_advisory"
+            reason = "Prefer short productive actions. Consider food when injured or hungry and shelter if exposed."
+        elif forced is not None:
             allowed, radius = sorted({"wait", forced.name}), 0
         else:
             status = observation["status"]
@@ -529,7 +587,7 @@ class DailySafetyPolicy:
                 elif status["food"] < 18:
                     search = self._food_search(observation, context)
                     scenario = "food_recovery" if search else "food_recovery_blocked"
-                    allowed, radius = (["position_for_task", "wait"], 3) if search else (["wait"], 0)
+                    allowed, radius = ([search.name, "wait"], 3) if search else (["wait"], 0)
                     reason = search.reason if search else "Food recovery is blocked; food below 18 cannot regenerate health and no fresh safe search step remains"
                     if self._partial(observation):
                         scenario, reason = "food_observation_required", "A complete fresh food and ground observation is required; partial safety data cannot prove search exhaustion"
@@ -542,6 +600,8 @@ class DailySafetyPolicy:
         result = {"scenario": scenario, "model_allowed": model, "allowed_actions": allowed,
                 "max_action_distance": radius, "reason": reason,
                 "route_evidence_is_actual_trajectory": False, "shelter_spawn_safety": "unknown"}
+        if risks:
+            result["risks"] = risks
         if scenario == "cautious_bootstrap":
             result.update(allowed_task_resources=["logs"], allowed_craft_items=sorted(BOOTSTRAP_ITEMS), max_task_count=8)
         return result
@@ -568,6 +628,8 @@ class DailySafetyPolicy:
                 return foods[0]
         if self._canopy(observation, context):
             return self._canopy_decision()
+        if self.risk_advice(observation, context):
+            return None
         if self._night(status) and (home := self._return_home(observation)):
             return home
         if status["health"] <= self.low_health:
@@ -619,6 +681,8 @@ class DailySafetyPolicy:
             return None if decision.name == "canopy_escape" and not decision.args else "canopy_escape_required"
         if decision.name == "canopy_escape":
             return "canopy_support_unverified"
+        if self.risk_advice(observation, context) and decision.name != "fight_hostile":
+            return None
         if self._night(status) and (home := self._return_home(observation)):
             return None if decision.name == home.name and decision.args == home.args else "night_requires_verified_sleep_or_shelter_route"
         if status["health"] <= self.low_health:

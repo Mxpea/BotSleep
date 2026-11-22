@@ -1234,6 +1234,14 @@ class SurvivalTests(unittest.TestCase):
         self.world.move_effect = change_dimension
         self.assertEqual(self.skills.execute("move_to", {"pos": [5, 64, 0]}).error_code, "dimension_changed")
 
+    def test_retreat_invalid_preflight_has_no_unknown_write(self):
+        self.world.status["pos"] = None
+        result = self.skills.execute("retreat_from", {"pos": [-3, 64, .5]})
+        self.assertEqual(result.error_code, "invalid_response")
+        self.assertFalse(result.data["executed"])
+        self.assertEqual(result.data["action_state"], "not_executed")
+        self.assertEqual(self.world.writes(), [])
+
     def test_retreat_checks_safe_corridor_and_increases_threat_distance(self):
         result = self.skills.execute("retreat_from", {"pos": [-3, 64, 0.5]})
         self.assertTrue(result.success, result)

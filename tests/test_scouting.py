@@ -77,6 +77,14 @@ class SurfaceScoutSkillTests(unittest.TestCase):
         self.assertEqual(res.data["waypoints"][0], [10.5, 64.0, 20.5])
         self.assertGreater(math.dist(res.data["origin"], res.data["final_pos"]), 150.0)
 
+    def test_uses_requested_travel_and_shortens_the_last_hop(self):
+        world = SimScoutWorld()
+        result = SurfaceScoutSkill(world).execute(distance=96, hop_distance=64, max_hops=2)
+        self.assertTrue(result.success, result)
+        self.assertEqual(world.moves, [[64.5, 64.0, 0.5], [96.5, 64.0, 0.5]])
+        self.assertEqual(result.data["requested_distance"], 96)
+        self.assertEqual(result.data["waypoint_distance"], 96)
+
     def test_stops_immediately_upon_discovering_structure_or_oasis_log(self):
         # Origin chosen so heading is +x: 10+21 = 31 (31 % 4 == 3 -> (-1,0)), pick (0, 64, 0) -> (1, 0).
         world = SimScoutWorld(pos=(0.5, 64.0, 0.5))

@@ -7,7 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from agent.survival_planner import Decision
 from core.client import APIError
@@ -69,6 +69,35 @@ class HarnessTests(unittest.TestCase):
         events = [json.loads(line)["event"] for line in harness.journal.events_path.read_text().splitlines()]
         self.assertIn("DECISION", events)
         self.assertIn("STEP_RESULT", events)
+
+    def test_daily_loading_before_write_reobserves_without_counting_target_failure(self):
+        self.settings.update(objective="daily", max_consecutive_failures=1)
+        harness = self.harness()
+        loading = SkillResult(False, "Backend is loading", {"executed": False}, "not_ready")
+        decision = Decision("retreat_from", {"pos": [2, 64, 0], "distance": 8}, "Retreat", "safety")
+        initial = observation()
+        harness._checkpoint(pending={"decision": {"name": decision.name, "args": decision.args}})
+        with patch.object(harness, "_cycle", return_value=(decision, loading, initial)):
+            self.assertTrue(harness.request_step())
+            self.assertEqual(self.finish(harness).error_code, "not_ready")
+        self.assertFalse(harness.paused)
+        self.assertEqual(harness.failures, 0)
+        self.assertNotIn("retreat_from", harness.context.get("failures", {}))
+        self.assertIsNone(harness.journal.state["pending"])
+        self.client.stop.assert_not_called()
+
+    def test_daily_loading_recovery_still_pauses_at_death_limit(self):
+        self.settings.update(objective="daily", max_deaths=1)
+        harness = self.harness()
+        loading = SkillResult(False, "Backend is loading", error_code="not_ready")
+        read = Decision("observe", {}, "Refresh status", "observe")
+        with patch.object(harness, "_cycle", return_value=(read, loading, None)):
+            self.assertTrue(harness.request_step())
+            harness.context["death_count"] = 1
+            self.assertEqual(self.finish(harness).error_code, "not_ready")
+        self.assertTrue(harness.paused)
+        self.assertEqual(harness.pause_reason, "death_limit")
+        self.client.stop.assert_not_called()
 
     def test_disconnected_fatal_result_updates_monitor_without_heartbeat(self):
         from debug.monitor import EventMonitor

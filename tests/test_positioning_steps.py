@@ -24,6 +24,49 @@ class PositioningStepTests(unittest.TestCase):
     def writes(self, world):
         return [row for row in world.calls if row[0] in {"move", "stop", "dig", "place", "control"}]
 
+    def test_food_headroom_only_clears_one_dirt_block_over_supported_ground(self):
+        for floor in ("stone", "air"):
+            with self.subTest(floor=floor):
+                world, _ = self.world()
+                world.status.update(health=1.33, food=17, is_day=True, time_of_day=1000, thundering=False)
+                world.block([1, 63, 0], floor)
+                world.block([1, 64, 0], "air")
+                world.block([1, 65, 0], "dirt")
+                world.block([1, 66, 0], "dirt")
+
+                def dig(pos, collect=True):
+                    world.calls.append(("dig", pos, collect))
+                    world.block(pos, "air")
+                    return envelope({"dug": "dirt"})
+
+                world.dig = dig
+                result = PositioningSkills(world).execute("clear_food_headroom",
+                    {"pos": [1, 65, 0], "expected_name": "dirt"})
+                if floor == "stone":
+                    self.assertTrue(result.success, result)
+                    self.assertTrue(result.data["block_removed"])
+                    self.assertEqual(self.writes(world), [("dig", [1, 65, 0], False)])
+                else:
+                    self.assertEqual(result.error_code, "unsafe_route", result)
+                    self.assertFalse(self.writes(world))
+
+    def test_headroom_rechecks_game_time_at_the_final_stance(self):
+        world, _ = self.world()
+        world.status.update(health=4, food=17, time_of_day=10999)
+        world.block([1, 64, 0], "air")
+        world.block([1, 65, 0], "dirt")
+        original_read = world.get_block
+
+        def block(pos, **kwargs):
+            if pos == [1, 65, 0]:
+                world.status["time_of_day"] = 11500
+            return original_read(pos, **kwargs)
+
+        world.get_block = block
+        result = PositioningSkills(world).execute("clear_food_headroom", {"pos": [1, 65, 0], "expected_name": "dirt"})
+        self.assertEqual(result.error_code, "safety_changed", result)
+        self.assertEqual(self.writes(world), [])
+
     def test_four_cardinal_directions_up_and_down_are_single_verified_moves(self):
         for direction in ((1, 0), (-1, 0), (0, 1), (0, -1)):
             for dy in (1, -1):
@@ -50,6 +93,18 @@ class PositioningStepTests(unittest.TestCase):
         world.block([-1, 63, -1], "air")
         self.assertFalse(self.run_step(world, target).success)
         self.assertFalse(self.writes(world))
+
+    def test_step_leaves_nominal_wall_contact_without_ignoring_penetration(self):
+        for x, allowed in ((.7, True), (.8, False)):
+            with self.subTest(x=x):
+                world, target = self.world(direction=(0, 1))
+                world.status["pos"] = [x, 64, .5]
+                for z in (0, 1):
+                    for y in (64, 65, 66, 67):
+                        world.block([1, y, z], "stone")
+                result = self.run_step(world, target)
+                self.assertEqual(result.success, allowed, result)
+                self.assertEqual(bool(self.writes(world)), allowed)
 
     def test_diagonal_distant_two_high_and_noninteger_source_are_rejected(self):
         for target in ([1.5, 65, 1.5], [2.5, 65, .5], [1.5, 66, .5], [.5, 65, .5]):
@@ -191,6 +246,25 @@ class PositioningStepTests(unittest.TestCase):
         result = self.run_step(world, target)
         self.assertEqual(result.data["action_state"], "unknown", result)
         self.assertEqual([r[0] for r in self.writes(world)], ["move"])
+
+    def test_critical_terrace_uses_bounded_landing_reads_with_remote_latency(self):
+        world, target = self.world()
+        world.status["health"] = 1.33
+        now = [100.]
+        original = world.get_status
+
+        def status(**kwargs):
+            if self.writes(world):
+                now[0] += .8
+            return original(**kwargs)
+
+        world.get_status = status
+        with patch("skills.positioning.time.monotonic", side_effect=lambda: now[0]):
+            result = self.run_step(world, target)
+        self.assertTrue(result.success, result)
+        self.assertEqual(result.data["landing_observation"]["budget_seconds"], 6.0)
+        self.assertTrue(result.data["landing_stable"])
+        self.assertEqual([row[0] for row in self.writes(world)], ["move"])
 
     def test_postwrite_read_deadline_and_read_budget_are_bounded(self):
         world, target = self.world()

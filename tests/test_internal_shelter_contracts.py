@@ -19,7 +19,7 @@ from test_llm_planner import observation, response
 
 class InternalShelterContractTests(unittest.TestCase):
     def test_internal_names_never_expand_public_catalogs(self):
-        expected = {"plan_shelter_preparation", "prepare_shelter_step"}
+        expected = {"plan_shelter_preparation", "prepare_shelter_step", "clear_food_headroom"}
         self.assertEqual(INTERNAL_SKILLS, expected | {"plan_starter_staircase", "step_starter_staircase"})
         self.assertEqual(internal_skills_for_objective("starter"), set())
         self.assertEqual(internal_skills_for_objective("daily"), INTERNAL_SKILLS)

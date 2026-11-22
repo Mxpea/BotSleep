@@ -100,6 +100,82 @@ class DailyObservationTests(unittest.TestCase):
         self.assertTrue(result["safe_stand_candidates"])
         self.assertIn("armor", result)
 
+    def test_geometry_and_foliage_share_only_the_current_observation(self):
+        pos = [1, 65, 0]
+        first = self.collector.collect()
+        self.assertIn([1.5, 64, 0.5], [row["pos"] for row in first["safe_stand_candidates"]])
+        self.assertEqual(self.client.calls.count(("block", pos)), 1)
+
+        self.client.calls.clear()
+        self.client.blocks[tuple(pos)] = block("oak_leaves", pos, waterlogged=False)
+        second = self.collector.collect()
+        self.assertNotIn([1.5, 64, 0.5], [row["pos"] for row in second["safe_stand_candidates"]])
+        self.assertTrue(any(row["name"] == "oak_leaves" and row["pos"] == pos for row in second["blocks"]))
+        self.assertEqual(self.client.calls.count(("block", pos)), 1)
+
+    def test_craft_readback_reads_only_inventory_and_stance(self):
+        self.client.items = [{"name": "wooden_pickaxe", "count": 1}]
+        result = self.collector.collect_inventory_readback(status())
+        self.assertEqual(result["counts"], {"wooden_pickaxe": 1})
+        self.assertEqual(result["observation_scope"], "inventory")
+        self.assertEqual(self.client.calls, [("inventory",), ("status",)])
+
+    def test_craft_readback_discards_inventory_if_the_player_respawned(self):
+        self.client.status["last_death"] = {"time": 1}
+        with self.assertRaises(APIError) as caught:
+            self.collector.collect_inventory_readback(status())
+        self.assertEqual(caught.exception.code, "observation_changed")
+
+    def test_unarmed_mainline_search_stops_after_two_reachable_logs(self):
+        first = [1, 64, 0]
+        second = [0, 64, 1]
+        third = [-2, 64, 0]
+        stone = [0, 63, -1]
+        rows = [block("oak_log", pos) for pos in (first, second, third)] + [block("stone", stone)]
+        for row in rows:
+            self.client.blocks[tuple(row["pos"])] = {**row, "can_dig": True}
+        collector = DailyObservationCollector(self.client, mainline=True)
+        obs = observation(copy.deepcopy(rows))
+        collector._resource_visibility(obs, None)
+        verified = {tuple(row["pos"]) for row in obs["blocks"] if row.get("can_see") is True}
+        self.assertEqual(verified, {tuple(first), tuple(second)})
+        self.assertNotIn(("block", third), self.client.calls)
+        self.assertNotIn(("block", stone), self.client.calls)
+
+        self.client.calls.clear()
+        obs = observation(copy.deepcopy(rows))
+        obs["counts"]["wooden_pickaxe"] = 1
+        collector._resource_visibility(obs, None)
+        self.assertIn(("block", stone), self.client.calls)
+
+    def test_opening_focus_keeps_searching_when_the_closest_log_is_unreadable(self):
+        first = [1, 64, 0]
+        second = [0, 64, 1]
+        rows = [block("oak_log", pos) for pos in (first, second)]
+        self.client.blocks[tuple(first)] = APIError("not_loaded", "outside loaded world")
+        self.client.blocks[tuple(second)] = {**rows[1], "can_dig": True}
+        collector = DailyObservationCollector(self.client, mainline=True)
+        obs = observation(rows)
+        collector._resource_visibility(obs, None)
+        self.assertNotIn("can_see", rows[0])
+        self.assertTrue(rows[1]["can_see"])
+
+    def test_seed_survey_is_deferred_only_during_healthy_active_wooden_pickaxe_goal(self):
+        for pos in ([1, 64, 0], [0, 64, 1]):
+            row = block("oak_log", pos)
+            self.client.discovered.append(row)
+            self.client.blocks[tuple(pos)] = {**row, "can_dig": True}
+        collector = DailyObservationCollector(self.client, mainline=True)
+        collector.set_context({"task_execution": {"status": "running", "task": "craft",
+                                                 "args": {"item": "wooden_pickaxe"}}})
+        for food in (20, 17):
+            with self.subTest(food=food):
+                self.client.calls.clear()
+                self.client.status["food"] = food
+                collector.collect()
+                seed_scan = ("find", sorted(collector.SEED_PLANTS))
+                self.assertEqual(seed_scan in self.client.calls, food < 18)
+
     def collect(self, obs=None, cancel=None):
         obs = observation() if obs is None else obs
         with patch.object(ObservationCollector, "collect", return_value=copy.deepcopy(obs)):

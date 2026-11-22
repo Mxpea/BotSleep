@@ -330,14 +330,15 @@ class LocalRecoveryRuntime:
             return result.error_code not in {"unauthorized", "invalid_credentials", "death_limit", "dead",
                 "internal", "internal_error", "cancelled", "life_changed", "dimension_changed"}
         canopy = decision.name == "canopy_escape"
-        forage = self.daily and decision.goal == "food_recovery" and decision.name == "position_for_task"
+        forage = self.daily and decision.goal == "food_recovery" and decision.name in {"position_for_task", "clear_food_headroom"}
         if not canopy and not forage:
             return False
         key = "canopy_recovery" if canopy else "food_recovery"
         state = self._recovery_state(key, observation)
         if canopy:
             state["total_steps"] = max(state.get("total_steps", state["steps"]), state["steps"]) + 1
-        state["steps"] += 1
+        if not forage or uncertain or result.data.get("executed") is not False:
+            state["steps"] += 1
         state["reason"] = result.error_code or result.message
         if uncertain:
             state["unknown"] = True

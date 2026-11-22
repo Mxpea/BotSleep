@@ -77,6 +77,7 @@ class SurfaceScoutSkill(BaseSkill):
         scan_radius: int = 48,
         hop_distance: float = 55.0,
         max_hops: int = 3,
+        distance: Optional[float] = None,
         prefer_wood: bool = True,
         min_food: float = 14.0,
         max_food_drop: float = 2.0,
@@ -84,14 +85,17 @@ class SurfaceScoutSkill(BaseSkill):
         timeout_seconds: float = 55.0,
         cancel_event: Optional[threading.Event] = None,
     ) -> SkillResult:
-        """Scan forward from current position up to ~200 blocks; stop early on finds or stamina drop."""
+        """Scan along verified waypoints within the requested horizontal travel."""
         scan_r = max(16, min(64, int(scan_radius)))
         hop_d = max(16.0, min(64.0, float(hop_distance)))
         hops_limit = max(1, min(4, int(max_hops)))
+        travel_limit = hop_d * hops_limit if distance is None else float(distance)
+        if not math.isfinite(travel_limit) or not 0 < travel_limit <= 256:
+            return SkillResult(False, "Scout distance must be between 0 and 256 blocks", error_code="bad_args")
         guard = WorkflowGuard(
             self.client,
             cancel_event=cancel_event,
-            timeout_seconds=max(10.0, float(timeout_seconds)),
+            timeout_seconds=float(timeout_seconds),
             max_reads=300,
             allow_damage=True,
         )
@@ -105,7 +109,8 @@ class SurfaceScoutSkill(BaseSkill):
             "villagers": {},
         }
         waypoints: List[List[float]] = []
-        early_stop_reason = "completed_forward_span"
+        travelled = 0.0
+        early_stop_reason = "completed_forward_span" if hop_d * hops_limit >= travel_limit else "planned_hops_complete"
 
         try:
             st0, origin = self._stance(guard)
@@ -122,7 +127,7 @@ class SurfaceScoutSkill(BaseSkill):
             else:
                 headings = self._pick_headings(cur_pos, attempt=attempt)
                 heading_idx = 0
-                for hop_idx in range(hops_limit):
+                for _ in range(hops_limit):
                     cur_st, cur_pos = self._stance(guard)
                     cur_food = float(cur_st.get("food", 20.0))
                     if cur_food <= float(min_food) or (start_food - cur_food) >= float(max_food_drop):
@@ -132,20 +137,24 @@ class SurfaceScoutSkill(BaseSkill):
                         early_stop_reason = "time_budget_conserved"
                         break
 
+                    stride = min(hop_d, max(0.0, travel_limit - travelled))
+                    if stride <= 4:
+                        break
                     hx, hz = headings[heading_idx % len(headings)]
-                    tx = cur_pos[0] + hx * hop_d
-                    tz = cur_pos[2] + hz * hop_d
+                    tx = cur_pos[0] + hx * stride
+                    tz = cur_pos[2] + hz * stride
                     landing = self._advance_hop(guard, tx, tz)
                     if math.dist(landing, cur_pos) <= .1 and heading_idx + 1 < len(headings):
                         heading_idx += 1
                         hx2, hz2 = headings[heading_idx % len(headings)]
                         cur_pos = landing
-                        landing = self._advance_hop(guard, cur_pos[0] + hx2 * hop_d, cur_pos[2] + hz2 * hop_d)
+                        landing = self._advance_hop(guard, cur_pos[0] + hx2 * stride, cur_pos[2] + hz2 * stride)
                     if math.dist(landing, cur_pos) <= .1:
                         cur_pos = landing
                         early_stop_reason = "terrain_blocked_abort"
                         break
 
+                    travelled += math.hypot(landing[0] - cur_pos[0], landing[2] - cur_pos[2])
                     cur_pos = landing
                     waypoints.append([round(cur_pos[0], 2), round(cur_pos[1], 2), round(cur_pos[2], 2)])
                     self._scan_checkpoint(guard, cur_pos, dim, scan_r, findings, origin=origin)
@@ -167,7 +176,8 @@ class SurfaceScoutSkill(BaseSkill):
                 if report["highlights"]
                 else f"Scout covered ~{report['estimated_reach']} blocks forward with no structures; stopping cleanly to save stamina."
             )
-            return SkillResult(True, msg, data={**report, "executed": guard.writes > 0})
+            return SkillResult(True, msg, data={**report, "requested_distance": travel_limit,
+                "waypoint_distance": round(travelled, 2), "executed": guard.writes > 0})
         except WorkflowUncertainError as exc:
             return SkillResult(
                 False,

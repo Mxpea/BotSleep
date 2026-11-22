@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from agent.daily_survival import DAILY_SKILLS, DailySurvivalGoals
 from agent.survival_planner import Decision, LOG_NAMES, PLANK_NAMES, SAFE_FOOD, WOOD_SPECIES
 from core.daily_policy import DailySafetyPolicy
+from core.domain import SCOUT_DEFAULT_DISTANCE, SCOUT_MAX_DISTANCE, SCOUT_MIN_DISTANCE
 from core.mining_targets import estimate_empty_main_slots
 from core.production_recipes import CRAFT_ITEMS, RECIPES, ingredient_items, plan_craft, wood_inputs
 from core.skill_registry import STARTER_MINING_SKILLS, internal_skills_for_objective
@@ -108,7 +109,7 @@ class AutonomousTaskController:
 
     @staticmethod
     def _args(args):
-        if not isinstance(args, dict) or set(args) - {"task", "resource", "item", "count", "radius"}:
+        if not isinstance(args, dict) or set(args) - {"task", "resource", "item", "count", "radius", "distance"}:
             raise ValueError("Unsupported task arguments")
         task = args.get("task")
         if not isinstance(task, str) or task not in TASKS:
@@ -128,6 +129,13 @@ class AutonomousTaskController:
             value["item"] = args["item"]
         elif "item" in args or "resource" in args:
             raise ValueError("Only gather/craft/smelt accept resource or item")
+        if task == "scout":
+            distance = args.get("distance", SCOUT_DEFAULT_DISTANCE)
+            if type(distance) is not int or not SCOUT_MIN_DISTANCE <= distance <= SCOUT_MAX_DISTANCE:
+                raise ValueError(f"distance must be an integer from {SCOUT_MIN_DISTANCE} to {SCOUT_MAX_DISTANCE}")
+            value["distance"] = distance
+        elif "distance" in args:
+            raise ValueError("Only scout accepts distance")
         return value
 
     def _restore(self, saved):
@@ -530,8 +538,9 @@ class AutonomousTaskController:
         origin = obs["status"]["pos"]
         return Decision(
             "move_to",
-            {"pos": list(origin), "range": 4, "scan_radius": self._data["args"].get("radius", 32)},
-            "Scout forward ~200 blocks for structures, wood, or surface caves",
+            {"pos": list(origin), "range": 4, "scan_radius": self._data["args"]["radius"],
+             "distance": self._data["args"]["distance"]},
+            "Scout forward for structures, wood or surface ores within the requested distance",
             "scout_surface",
         )
 
@@ -1483,7 +1492,8 @@ class AutonomousTaskController:
         if self._generation_changed(context):
             self._escalate("life_or_dimension_changed")
             return None
-        exhausted = self._data["steps"] >= self.limits["max_steps"] or self.remaining_seconds() <= 0
+        exhausted = (not self.safety_policy.advisory and
+                     (self._data["steps"] >= self.limits["max_steps"] or self.remaining_seconds() <= 0))
         self._data["fresh"] = self._fresh(observation)
         status = observation.get("status", {}) if isinstance(observation, dict) else {}
         if (status.get("alive") is False or status.get("dimension") not in (None, self._data["dimension"])
@@ -1512,11 +1522,12 @@ class AutonomousTaskController:
                 Decision("run_survival_task", args, "Revalidate the accepted limited goal", task), observation, context):
             self._escalate("cautious_bootstrap_goal_not_allowed")
             return None
+        advisory = bool(self.safety_policy.risk_advice(observation, context))
         if (status.get("busy") or status.get("gamemode") != "survival" or status.get("on_ground") is not True
-                or self.safety_policy._strict_night_block(observation, status) and relaxed_policy != NIGHT
+                or self.safety_policy._strict_night_block(observation, status) and relaxed_policy != NIGHT and not advisory
                 or not _finite(status.get("health")) or not _finite(status.get("food"))
-                or status["health"] <= self.rules.low_health and not cautious and relaxed_policy != LOW_HEALTH
-                or status["food"] <= 6
+                or status["health"] <= self.rules.low_health and not cautious and relaxed_policy != LOW_HEALTH and not advisory
+                or status["food"] <= 6 and not advisory
                 or any(status.get(k) for k in ("in_water", "in_lava", "on_fire", "submerged", "is_sleeping", "in_vehicle"))
                 or any(distance <= self.rules.threat_radius for distance, _ in self.rules._hostiles(observation, status["pos"]))
                 or isinstance(status.get("nearest_hostile"), dict) and _finite(status["nearest_hostile"].get("dist"))
@@ -1957,6 +1968,8 @@ class AutonomousTaskController:
                 "emergency_interruptions", "ai_escalations", "last_escalation_reason", "reason", "fresh",
                 "updated_at", "steps", "max_steps", "recent_results", "args")
         result = {key: copy.deepcopy(self._data[key]) for key in keys}
+        if self.safety_policy.advisory and self._data["status"] in {"running", "suspended"}:
+            result["suggested_seconds_remaining"] = round(self.remaining_seconds())
         if self._data["task"] == "shelter":
             result["shelter_search"] = self._shelter_search_report()
         if self._mine.target:

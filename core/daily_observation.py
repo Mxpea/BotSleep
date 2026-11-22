@@ -42,10 +42,11 @@ class DailyObservationCollector(ObservationCollector):
             raise APIError("invalid_response", "Daily block coordinates must be integers")
         return [int(v) for v in pos]
 
-    def _read(self, pos, cancel_event):
+    def _read(self, pos, cancel_event, *, read_block=None):
         pos = self._block_pos(pos)
         self._check_cancel(cancel_event)
-        value = self._result(self.client.get_block(pos, timeout_seconds=2))
+        read_block = read_block or self.client.get_block
+        value = self._result(read_block(pos, timeout_seconds=2))
         self._check_cancel(cancel_event)
         if (not isinstance(value.get("name"), str) or not value["name"]
                 or value.get("properties") is not None and not isinstance(value["properties"], dict)
@@ -185,7 +186,7 @@ class DailyObservationCollector(ObservationCollector):
                 current["visibility"] = sight
             self._replace_block(observation, pos, current)
 
-    def _local_foliage(self, observation, cancel_event):
+    def _local_foliage(self, observation, cancel_event, *, read_block=None):
         """Observe neighbouring body cells; this does not authorize removing them."""
         from skills.daily_survival import DailySurvivalSkills
         names = DailySurvivalSkills.FOLIAGE
@@ -195,7 +196,7 @@ class DailyObservationCollector(ObservationCollector):
 
         def read(pos):
             try:
-                return self._read(pos, cancel_event)
+                return self._read(pos, cancel_event, read_block=read_block)
             except APIError as error:
                 if error.code != "not_loaded":
                     raise
@@ -270,6 +271,24 @@ class DailyObservationCollector(ObservationCollector):
             for dx, dy, dz in ((-1, 0, 0), (1, 0, 0), (0, -1, 0), (0, 1, 0), (0, 0, -1), (0, 0, 1)):
                 cell = [x + dx, y + dy, z + dz]
                 self._replace_block(observation, cell, self._read(cell, cancel_event))
+
+    def _resource_visibility(self, observation, cancel_event, *, read_block=None):
+        status = observation["status"]
+        task = self.context.get("task_execution") or {}
+        active = task.get("status") in {"running", "suspended", "needs_ai"}
+        wooden_pickaxe_goal = task.get("task") == "craft" and (task.get("args") or {}).get("item") == "wooden_pickaxe"
+        wood_first = (self.mainline and not self.campaign and (not active or wooden_pickaxe_goal)
+                      and not self.context.get("blocked_targets")
+                      and status.get("dimension") in {"overworld", "minecraft:overworld"}
+                      and status.get("on_ground") is True
+                      and not any(count and name.endswith("_pickaxe") for name, count in observation["counts"].items()))
+        reachable_logs = super()._resource_visibility(observation, cancel_event, read_block=read_block, wood_first=wood_first)
+        health, food = status.get("health"), status.get("food")
+        if (reachable_logs and wooden_pickaxe_goal and task.get("status") == "running"
+                and type(health) in (int, float) and health > self.low_health_threshold
+                and type(food) in (int, float) and food >= 18
+                and status.get("is_day") is True and status.get("thundering") is False):
+            observation["defer_seed_survey"] = True
 
     def _ground_log(self, obs, cancel_event):
         """Inspect a rooted trunk and a short level approach ending in actual hand reach."""
@@ -479,7 +498,8 @@ class DailyObservationCollector(ObservationCollector):
         return result
 
     def collect(self, cancel_event=None, *, inspect_windows=True):
-        observation = super().collect(cancel_event)
+        read_geometry = self._geometry_reader(cancel_event)
+        observation = super().collect(cancel_event, _read_geometry_block=read_geometry)
         status = observation["status"]
         observation["daily_evidence"] = {}
         if status.get("ready") is not True or status.get("alive") is not True or status.get("busy"):
@@ -506,9 +526,10 @@ class DailyObservationCollector(ObservationCollector):
             self._windows(observation, cancel_event)
         if not self.campaign:
             self._farm(observation, cancel_event)
-            self._seed_plants(observation, cancel_event)
+            if not observation.pop("defer_seed_survey", False):
+                self._seed_plants(observation, cancel_event)
         self._food_neighborhoods(observation, cancel_event)
-        self._local_foliage(observation, cancel_event)
+        self._local_foliage(observation, cancel_event, read_block=read_geometry)
         self._ground_log(observation, cancel_event)
         self._home(observation, cancel_event)
         observation["status"] = self._status(status, cancel_event)

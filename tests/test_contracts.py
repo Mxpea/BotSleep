@@ -105,7 +105,8 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertFalse(INTERNAL_SKILLS & (set(starter_tools) | set(competition_tools)))
         self.assertTrue(_KNOWN_SKILLS.issubset(set(daily_tools)))
         self.assertEqual(destination_checked_skills(daily=False), {"move_to", "gather_block", "place_item"})
-        self.assertEqual(len(destination_checked_skills(daily=True)), 25)
+        self.assertEqual(len(destination_checked_skills(daily=True)), 26)
+        self.assertIn("clear_food_headroom", destination_checked_skills(daily=True))
         self.assertNotIn("fight_hostile", destination_checked_skills(daily=True))
         self.assertEqual([len(starter_tools), len(daily_tools), len(competition_tools)], [9, 35, 40])
 
@@ -124,6 +125,7 @@ class ArchitectureContractTests(unittest.TestCase):
         self.assertEqual(resolve_skill_runner(dummy_harness, "gather_materials"), "batch_runner")
         self.assertEqual(resolve_skill_runner(dummy_harness, "set_door"), "door_runner")
         self.assertEqual(resolve_skill_runner(dummy_harness, "position_for_task"), "pos_runner")
+        self.assertEqual(resolve_skill_runner(dummy_harness, "clear_food_headroom"), "pos_runner")
         self.assertEqual(resolve_skill_runner(dummy_harness, "fight_hostile"), "combat_runner")
         self.assertEqual(resolve_skill_runner(dummy_harness, "collect_liquid"), "bucket_runner")
         self.assertEqual(resolve_skill_runner(dummy_harness, "hunt_with_lava"), "bucket_runner")

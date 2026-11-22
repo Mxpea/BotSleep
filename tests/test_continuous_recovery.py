@@ -3,6 +3,7 @@
 import copy
 import json
 import tempfile
+import threading
 import time
 import unittest
 from dataclasses import asdict
@@ -60,6 +61,72 @@ class ContinuousRecoveryTests(unittest.TestCase):
         events = [json.loads(line) for line in self.journal.events_path.read_text(encoding="utf8").splitlines()]
         evidence = next(r["data"] for r in events if r["event"] == "CONTINUOUS_INTENT_ABANDONED")
         self.assertEqual(evidence["prior_result"]["error_code"], "action_unconfirmed")
+
+    def test_explicit_daily_resume_reads_back_the_recorded_night_step_without_replaying_it(self):
+        self.settings["continuous"] = False
+        pos = [1.5, 64, .5]
+        old = Decision("position_for_task", {"pos": pos}, "Old checked night step", "explore")
+        self.journal.update(pending={**self.pending, "decision": asdict(old)}, last_result={
+            "error_code": "action_unconfirmed", "data": {"skill": "position_for_task", "target": pos,
+            "night_home_step": True, "action_state": "unknown"}})
+        h = self.harness()
+        self.assertTrue(h.paused)
+        self.assertTrue(h.resume())
+        with patch.object(self.world, "move_to", side_effect=AssertionError("replayed move")), \
+             patch.object(self.world, "window_view", side_effect=AssertionError("opened a container")):
+            result = self.cycle(h)
+        self.assertTrue(result.data["reobserved"])
+        self.assertFalse(result.data["original_action_confirmed"])
+        self.assertIsNone(h.journal.state["pending"])
+
+    def test_headroom_readback_cannot_clear_intent_from_partial_evidence(self):
+        self.settings["continuous"] = False
+        old = Decision("clear_food_headroom", {"pos": [1, 65, 0], "expected_name": "dirt"},
+                       "Clear one head block", "food_recovery")
+        pending = {**self.pending, "decision": asdict(old)}
+        self.journal.update(pending=pending, context={"food_recovery": {"unknown": True, "steps": 1}})
+        h = self.harness()
+        partial = {"status": self.world.status, "fresh": True, "counts": {}, "observation_scope": "safety"}
+        with patch("core.continuous_recovery.ObservationCollector.collect", return_value=partial):
+            self.assertTrue(h.resume())
+            self.assertFalse(self.cycle(h).success)
+        self.assertEqual(h.journal.state["pending"], pending)
+        self.assertTrue(h.context["food_recovery"]["unknown"])
+        self.assertTrue(h.resume())
+        self.assertTrue(self.cycle(h).data["reobserved"])
+        self.assertIsNone(h.journal.state["pending"])
+        self.assertNotIn("unknown", h.context["food_recovery"])
+        self.assertFalse(any(call[0] in {"move", "dig", "stop", "window"} for call in self.world.calls))
+
+    def test_manual_pause_and_time_budget_cancel_pending_read_without_stop(self):
+        self.settings["continuous"] = False
+        for trigger in ("pause", "time"):
+            with self.subTest(trigger=trigger):
+                self.journal.update(pending=self.pending)
+                h = self.harness()
+                entered, release = threading.Event(), threading.Event()
+
+                def read(cancel):
+                    entered.set()
+                    self.assertTrue(release.wait(2))
+                    raise APIError("cancelled", "Readback interrupted")
+
+                with patch("core.continuous_recovery.ObservationCollector.collect", side_effect=read), \
+                     patch.object(self.world, "stop", wraps=self.world.stop) as stop:
+                    self.assertTrue(h.request_step())
+                    try:
+                        self.assertTrue(entered.wait(1))
+                        if trigger == "pause":
+                            h.pause()
+                        else:
+                            h._started -= self.settings["max_runtime_seconds"] + 1
+                            h.tick()
+                        stop.assert_not_called()
+                    finally:
+                        release.set()
+                    self.assertFalse(self.cycle(h).success)
+                    self.assertEqual(h.journal.state["pending"], self.pending)
+                h.close()
 
     def test_incomplete_readback_keeps_intent_and_rechecks_automatically_after_backoff(self):
         self.journal.update(pending=self.pending)

@@ -56,8 +56,19 @@ class AutonomyRuntime:
             self.context.pop("mainline", None)
         if self.daily and self.settings.get("autonomy", {}).get("enabled", True):
             from core.autonomous_tasks import AutonomousTaskController
-            self.task_controller = AutonomousTaskController(
-                self.settings, saved=self.context.get("autonomous_task"), scope=self.journal.scope)
+            saved = self.context.get("autonomous_task")
+            objective = self.settings["objective"]
+            owner = self.context.get("autonomous_task_objective")
+            if owner is None and saved and saved.get("task_id") and saved["task_id"] == self.context.get("mainline_task_id"):
+                owner = "daily"
+            if (saved and owner and owner != objective and not self.journal.state.get("pending")
+                    and saved.get("status") != "unknown" and not saved.get("pending_digest")):
+                self._record("INFO", "TASK_SCOPE_CHANGED", {"from": owner, "to": objective, "task_id": saved.get("task_id")})
+                saved = None
+                for key in ("autonomous_task", "task_execution", "autonomous_task_objective"):
+                    self.context.pop(key, None)
+                self._checkpoint(context=self.context)
+            self.task_controller = AutonomousTaskController(self.settings, saved=saved, scope=self.journal.scope)
             if self.task_controller.snapshot().get("status") == "unknown":
                 self._paused = True
                 self.pause_reason = "task_outcome_requires_resume"
@@ -144,6 +155,7 @@ class AutonomyRuntime:
     def _save_task(self, event=None):
         if self.task_controller is None:
             return
+        self.context["autonomous_task_objective"] = self.settings["objective"]
         self.context["autonomous_task"] = self.task_controller.state()
         self.context["task_execution"] = self._task_snapshot()
         self._checkpoint(context=self.context)
@@ -209,8 +221,6 @@ class AutonomyRuntime:
 
         try:
             rows = self.client.get_blocks(radius=64, types=sorted(log_names), limit=12)
-            if not rows or not candidates(rows):
-                rows = self.client.get_blocks(radius=128, types=sorted(log_names), limit=24)
         except APIError:
             return None
         waypoints = candidates(rows)
@@ -271,7 +281,9 @@ class AutonomyRuntime:
                    "equip_loadout": (self._run_task_equip_loadout, 30),
                    "nether_portal": (self._run_task_nether_portal, 390)}
         run, cap = runners[decision.goal]
-        available = min(cap, self.task_controller.remaining_seconds())
+        available = cap
+        if not self.daily_policy.advisory:
+            available = min(available, self.task_controller.remaining_seconds())
         global_seconds = self._remaining_budget()["remaining_seconds"]
         if global_seconds is not None:
             available = min(available, global_seconds)
@@ -381,14 +393,21 @@ class AutonomyRuntime:
         memory = MemoryEngine(str(self.journal.directory / "scout_memory"))
         counts = (observation.get("counts") or {}) if isinstance(observation, dict) else {}
         prefer_wood = sum(counts.get(n, 0) for n in (*LOG_NAMES, *PLANK_NAMES)) == 0
-        raw_r = decision.args.get("scan_radius", 48) if isinstance(decision.args, dict) else 48
-        scan_r = max(48, min(64, int(raw_r))) if isinstance(raw_r, int) and raw_r >= 32 else 48
+        distance = decision.args["distance"]
+        max_hops = math.ceil(distance / 64)
+        if self.continuous:
+            # Allow about 18 seconds per hop, including movement and nearby scans.
+            # An expired planning estimate still permits a short attempt.
+            estimated_hops = max(1, self._budget_advice()["remaining_seconds"] // 18)
+            max_hops = min(max_hops, estimated_hops)
+        scan_radius = max(16, decision.args["scan_radius"])
         attempt = int(self.context.get("scout_attempts", 0))
         self.context["scout_attempts"] = attempt + 1
         res = SurfaceScoutSkill(self.client, memory=memory).execute(
-            scan_radius=scan_r,
-            hop_distance=55.0,
-            max_hops=3,
+            scan_radius=scan_radius,
+            hop_distance=64.0,
+            max_hops=max_hops,
+            distance=distance,
             prefer_wood=prefer_wood,
             attempt=attempt,
             timeout_seconds=window.remaining(),
