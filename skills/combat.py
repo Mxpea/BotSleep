@@ -107,7 +107,7 @@ def combat_options(observation: dict, entity_id: int | None = None, expected_nam
         return denied("target_not_observed")
     target = min(targets, key=lambda r: math.dist(origin, r["pos"]))
     easy_melee_ok = (not starter_defense and melee is not None
-                     and target["name"] in {"zombie", "husk", "drowned", "spider", "zombie_villager", "slime"})
+                     and target["name"] in {"zombie", "husk", "drowned", "spider", "cave_spider", "zombie_villager", "slime"})
     min_hp = MIN_HEALTH_SHIELD if shield else (MIN_HEALTH_EASY_MELEE if easy_melee_ok else MIN_HEALTH_UNSHIELDED)
     if hp < min_hp or food < MIN_FOOD:
         return denied("insufficient_health_or_food")

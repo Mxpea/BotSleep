@@ -715,6 +715,10 @@ If that goal tool is unavailable, use only the currently advertised tools.
                         task_prop = tool["function"]["parameters"]["properties"].get("task")
                         if isinstance(task_prop, dict) and isinstance(task_prop.get("enum"), list) and "scout" in task_prop["enum"]:
                             task_prop["enum"] = [name for name in task_prop["enum"] if name != "scout"]
+                            tool["function"]["description"] = (
+                                str(tool["function"].get("description", ""))
+                                + " Note: task='scout' is disabled this turn — do NOT pass 'scout'; choose gather, craft, smelt, starter_tools, iron_tools, food, or nether_portal."
+                            )
         return (tools, {"mode": mode, "atomic_repair_remaining": 0}, None)
 
     def _decision(self, message, observation, context, allowed_names=None, allowed_schemas=None):
@@ -824,6 +828,12 @@ If that goal tool is unavailable, use only the currently advertised tools.
                 and name == "run_survival_task" and args.get("task") == "craft"
                 and args.get("item") == "shield" and (counts.get("shield", 0) >= 1 or offhand_name == "shield")):
             raise LLMError("llm_no_progress", "Shield is already owned or equipped in offhand; proceed with bucket, flint_and_steel, iron_pickaxe, or nether_portal.")
+        single_item = args.get("item")
+        if (self.objective in {"daily", "competition"}
+                and name == "run_survival_task" and args.get("task") == "craft"
+                and single_item in {"stone_sword", "stone_axe", "wooden_pickaxe", "wooden_sword", "wooden_axe", "bucket"}
+                and counts.get(single_item, 0) >= 1):
+            raise LLMError("llm_no_progress", f"Inventory already holds >= 1 {single_item}; proceed with gather(raw_iron), smelt(iron_ingot), iron_tools, flint_and_steel, or nether_portal.")
         decision = Decision(name, args, reason, goal)
         failure = self._failed_actions.get(self._signature(decision))
         if failure and self._unchanged_failure(failure, observation, decision):
