@@ -765,7 +765,7 @@ If that goal tool is unavailable, use only the currently advertised tools.
             if name != "retreat_from" and self.rules._key(pos) in self.rules._blocked(context):
                 raise LLMError("llm_unsafe_action", "The proposed target is in an active failure cooldown")
         if name == "move_to" and math.dist(origin, pos) <= args["range"] + 0.5:
-            raise LLMError("llm_no_progress", "The move target is already inside range; choose a different reachable target, a smaller range, or gather the observed resource directly")
+            raise LLMError("llm_no_progress", "The move target is already inside range; do NOT call move_to here — call run_survival_task(gather/craft/smelt/scout/nether_portal) or harvest directly")
         if name in {"gather_block", "gather_resource", "harvest_crop", "gather_seeds", "clear_foliage"}:
             if not any(b["name"] == args["expected_name"] and list(b["pos"]) == pos for b in blocks):
                 message = ("Gathering/clearing requires an exact name/pos in observation.blocks; "

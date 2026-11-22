@@ -1163,7 +1163,41 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
             self.steps += 1
             self.last_result, self.last_observation = result, observation
             self.context["last_result"] = asdict(result)
-            task_replan = self._task_result(decision, result, observation, uncertain=_uncertain_result(result) and decision.name != "observe",
+            uncertain_action = _uncertain_result(result) and decision.name != "observe"
+            retreat_recovered = False
+            retreat_recover_delay = None
+            if (self.daily and not result.success and uncertain_action
+                    and isinstance(result.data, dict)
+                    and result.data.get("cleanup_skipped") != "disconnected_unknown"
+                    and ((decision.name == "retreat_from"
+                          and result.error_code == "action_unconfirmed"
+                          and result.data.get("cleanup_skipped") == "navigation_unknown"
+                          and result.data.get("recovery_error") in {
+                              "interrupted", "action_unconfirmed", "dead", "life_changed", "not_ready"})
+                         or (decision.name == "inspect_container"
+                             and result.error_code == "action_unconfirmed"
+                             and result.data.get("recovery_error") != "cancelled"))
+                    and not self._cancel.is_set()):
+                try:
+                    probe = self.client.get_status(timeout_seconds=2.0)
+                    st = probe.get("result") if isinstance(probe, dict) else None
+                    is_dead_retreat = result.data.get("recovery_error") in {"dead", "life_changed"}
+                    if isinstance(st, dict) and not st.get("busy") and (
+                        (st.get("ready") is True and st.get("alive") is True) or is_dead_retreat
+                    ):
+                        uncertain_action = False
+                        retreat_recovered = True
+                        result.data["action_state"] = "verified_idle"
+                        self.context.pop("retreat_recovery", None)
+                        retreat_recover_delay = 0.25
+                        self._record("WARN", "RETREAT_INTERRUPTION_RECOVERED", {
+                            "pos": st.get("pos"),
+                            "recovery_error": result.data.get("recovery_error"),
+                            "decision": decision.name,
+                        })
+                except APIError:
+                    pass
+            task_replan = self._task_result(decision, result, observation, uncertain=uncertain_action,
                 fatal=result.error_code in FATAL | {"death_limit", "internal", "internal_error"})
             if self.paused:
                 self._finish_task_feedback(observation, paused=True)
@@ -1222,29 +1256,9 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                     retry_after = result.data.get("retry_after") if isinstance(result.data, dict) else None
                     if isinstance(retry_after, (int, float)) and not isinstance(retry_after, bool) and retry_after > 0:
                         delay = max(delay, min(256.0, float(retry_after)))
-                uncertain_action = _uncertain_result(result) and decision.name != "observe"
-                if (self.daily and uncertain_action
-                        and isinstance(result.data, dict)
-                        and result.data.get("cleanup_skipped") != "disconnected_unknown"
-                        and ((decision.name == "retreat_from"
-                              and result.error_code == "action_unconfirmed"
-                              and result.data.get("cleanup_skipped") == "navigation_unknown"
-                              and result.data.get("recovery_error") in {"interrupted", "action_unconfirmed"})
-                             or (decision.name == "inspect_container"
-                                 and result.error_code == "action_unconfirmed"
-                                 and result.data.get("recovery_error") != "cancelled"))
-                        and not self._cancel.is_set()):
-                    try:
-                        probe = self.client.get_status(timeout_seconds=2.0)
-                        st = probe.get("result") if isinstance(probe, dict) else None
-                        if isinstance(st, dict) and st.get("ready") is True and st.get("alive") is True and not st.get("busy"):
-                            uncertain_action = False
-                            result.data["action_state"] = "verified_idle"
-                            self.context.pop("retreat_recovery", None)
-                            delay = min(delay, 0.25)
-                            self._record("WARN", "RETREAT_INTERRUPTION_RECOVERED", {"pos": st.get("pos"), "recovery_error": result.data.get("recovery_error")})
-                    except APIError:
-                        pass
+                uncertain_action = _uncertain_result(result) and decision.name != "observe" and not retreat_recovered
+                if retreat_recover_delay is not None:
+                    delay = min(delay, retreat_recover_delay)
                 http_status = result.data.get("http_status") if isinstance(result.data, dict) else None
                 context_limit_http = (http_status == 400 and isinstance(result.data, dict)
                                       and result.data.get("context_limit") is True)

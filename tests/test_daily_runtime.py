@@ -598,6 +598,34 @@ class DailyRuntimeTests(unittest.TestCase):
         self.assertFalse(harness.paused)
         self.assertIsNone(harness.journal.state.get("pending"))
 
+    def test_daily_retreat_death_action_unconfirmed_recovers_without_task_unknown_pause(self):
+        harness, _ = self.make_harness([tool_response("wait", {"seconds": 1}, "ok")])
+        harness.task_controller = __import__("core.autonomous_tasks", fromlist=["AutonomousTaskController"]).AutonomousTaskController({**harness.settings, "autonomy": {"enabled": True}})
+        obs = harness.collector.collect()
+        harness.task_controller.start({"task": "gather", "resource": "logs", "count": 4}, obs, harness.context)
+        self.world.entities = [{"id": 9, "name": "skeleton", "type": "hostile", "pos": [-3, 64, .5]}]
+        self.world.status["nearest_hostile"] = {"name": "skeleton", "dist": 3.5}
+        with patch.object(
+            harness.skills,
+            "execute",
+            return_value=SkillResult(
+                False,
+                "Navigation write was interrupted before verification",
+                {
+                    "executed": True,
+                    "action_state": "unknown",
+                    "cleanup_skipped": "navigation_unknown",
+                    "recovery_error": "dead",
+                },
+                "action_unconfirmed",
+            ),
+        ):
+            res = self.step(harness)
+        self.assertEqual(res.error_code, "action_unconfirmed")
+        self.assertFalse(harness.paused)
+        self.assertIsNone(harness.journal.state.get("pending"))
+        self.assertNotEqual(harness.task_controller.snapshot()["status"], "unknown")
+
 
 if __name__ == "__main__":
     unittest.main()
