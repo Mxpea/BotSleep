@@ -122,6 +122,8 @@ class MinecraftAgentClient:
         try:
             response = request_fn(method, url, **kwargs)
         except requests.Timeout:
+            if endpoint in self.READ_RETRY_ENDPOINTS:
+                raise APIError("request_timeout", f"{endpoint} read request timed out") from None
             raise APIError("request_timeout", f"{endpoint} request timed out; server action state is unknown", details={"action_state": "unknown"}) from None
         except requests.ConnectionError:
             # Retry read-only status/block queries once when an idle keep-alive socket resets on Windows.
@@ -134,7 +136,7 @@ class MinecraftAgentClient:
                     self._session = requests.Session()
                     response = self._session.request(method, url, **{**kwargs, "timeout": remaining})
                 except requests.Timeout:
-                    raise APIError("request_timeout", f"{endpoint} request timed out; server action state is unknown", details={"action_state": "unknown"}) from None
+                    raise APIError("request_timeout", f"{endpoint} read request timed out") from None
                 except requests.RequestException:
                     raise APIError("network_error", f"{endpoint} request failed") from None
             else:

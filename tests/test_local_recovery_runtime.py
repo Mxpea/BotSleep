@@ -555,6 +555,22 @@ class LocalRecoveryRuntimeTests(unittest.TestCase):
         self.assertEqual(self.world.status["pos"], [3.5, 67, .5])
         self.assertEqual(brain.requests, [])
 
+    def test_starter_hands_off_old_retreat_to_the_same_canopy_escape(self):
+        self.settings["objective"] = "starter"
+        self.canopy()
+        self.world.status.update(health=20, food=20, is_day=False)
+        harness, brain = self.make_harness()
+        self.saved_evacuation(harness)
+        for _ in range(3):
+            result = self.cycle(harness)
+            self.assertTrue(result.success, result)
+            self.assertEqual(self.last_decision(harness)["name"], "canopy_escape")
+        self.assertNotIn("retreat_recovery", harness.context)
+        self.assertNotIn("canopy_recovery", harness.context)
+        self.assertEqual(self.world.status["pos"], [3.5, 67, .5])
+        self.assertEqual(brain.requests, [])
+        self.assertIsNone(harness.journal.state["pending"])
+
     def saved_evacuation(self, harness):
         harness.context["retreat_recovery"] = {"dimension": "overworld", "evacuating": True,
             "evacuation_origin": list(self.world.status["pos"]), "threat_pos": [10, 64, 0],
@@ -680,6 +696,68 @@ class LocalRecoveryRuntimeTests(unittest.TestCase):
         self.assertEqual(harness.context["retreat_recovery"], expected)
         self.assertEqual(brain.requests, [])
         self.assertFalse(any(row[0] in {"move", "dig", "craft", "place", "stop"} for row in self.world.calls))
+
+    def test_revisited_canopy_cell_refreshes_tail_of_visited_history_to_prevent_pingpong(self):
+        from skills import SkillResult
+        harness, _ = self.make_harness()
+        obs = {
+            "fresh": True,
+            "status": {"pos": [1.5, 70.0, 0.5], "health": 20, "food": 20, "dimension": "overworld"},
+        }
+        state = harness._recovery_state("canopy_recovery", obs)
+        state["visited"] = [[1, 70, 0]] + [[i, 70, 0] for i in range(10, 22)]
+        res = SkillResult(True, "Moved", {"pos": [1.5, 70.0, 0.5], "evacuation_stage": "relay"})
+        harness._local_recovery_result(Decision("canopy_escape", {}, "Step", "safety"), res, obs)
+        opts = harness._canopy_options(obs)
+        self.assertEqual(opts["recent_targets"][-1], [1, 70, 0])
+        self.assertIn([1, 70, 0], opts["excluded_targets"])
+        self.assertEqual(len(opts["recent_targets"]), 8)
+
+    def test_water_recovery_tracks_progress_and_clears_when_dry(self):
+        from skills import SkillResult
+        harness, _ = self.make_harness()
+        wet_obs = {
+            "fresh": True,
+            "status": {"pos": [1.5, 62.0, 0.5], "health": 20, "food": 20, "dimension": "overworld",
+                       "in_water": True, "submerged": False, "on_ground": False, "ready": True, "alive": True},
+        }
+        prog_res = SkillResult(False, "Swimming", {"progress_made": True}, "still_in_water")
+        replan = harness._local_recovery_result(Decision("water_escape", {}, "Swim", "safety"), prog_res, wet_obs)
+        self.assertTrue(replan)
+        self.assertEqual(harness.context["water_recovery"]["steps"], 1)
+        self.assertEqual(harness.context["water_recovery"]["stalled_steps"], 0)
+        dry_obs = {
+            "fresh": True,
+            "inventory_fresh": True,
+            "terrain_fresh": True,
+            "status": {"pos": [2.5, 63.0, 0.5], "health": 20, "food": 20, "dimension": "overworld",
+                       "in_water": False, "submerged": False, "on_ground": True, "ready": True, "alive": True, "busy": None},
+        }
+        harness._prepare_local_recovery(dry_obs)
+        self.assertNotIn("water_recovery", harness.context)
+
+    def test_canopy_recovery_releases_stalled_solid_trunk_after_three_unsafe_retries(self):
+        from skills import SkillResult
+        harness, _ = self.make_harness()
+        obs = {
+            "fresh": True,
+            "inventory_fresh": True,
+            "terrain_fresh": True,
+            "footing_origin": [2021.6, 73.0, -19.5],
+            "footing": {"pos": [2021, 72, -20], "name": "acacia_log", "properties": {}, "fresh": True, "verified": True, "source": "api_verified"},
+            "status": {"pos": [2021.6, 73.0, -19.5], "health": 20, "food": 20, "dimension": "overworld",
+                       "in_water": False, "submerged": False, "on_ground": True, "ready": True, "alive": True},
+            "blocks": [{"pos": [2021, 72, -20], "name": "acacia_log", "fresh": True, "verified": True}],
+        }
+        res = SkillResult(False, "No safe retreat destination", {}, "unsafe")
+        decision = Decision("canopy_escape", {}, "Step", "safety")
+        harness._local_recovery_result(decision, res, obs)
+        self.assertIn("canopy_recovery", harness.context)
+        harness._local_recovery_result(decision, res, obs)
+        self.assertIn("canopy_recovery", harness.context)
+        released = harness._local_recovery_result(decision, res, obs)
+        self.assertTrue(released)
+        self.assertNotIn("canopy_recovery", harness.context)
 
 
 if __name__ == "__main__":

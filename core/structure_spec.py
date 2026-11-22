@@ -24,7 +24,9 @@ ORIENTATION_ALIASES: Dict[str, str] = {
 }
 _FACING_STEPS: Dict[str, int] = {"south": 0, "west": 1, "north": 2, "east": 3}
 
-DEFAULT_REPLACEABLE: FrozenSet[str] = frozenset(AIR | {"short_grass", "tall_grass", "snow", "leaf_litter"})
+DEFAULT_REPLACEABLE: FrozenSet[str] = frozenset(
+    AIR | {"short_grass", "tall_grass", "snow", "leaf_litter", "pale_hanging_moss", "pale_moss_carpet", "moss_carpet", "open_eyeblossom", "closed_eyeblossom"}
+)
 SCAFFOLD_BLOCKS: FrozenSet[str] = frozenset({"cobblestone", "stone", "dirt", "netherrack", "cobbled_deepslate"})
 WOODEN_DOOR_BLOCKS: FrozenSet[str] = frozenset({
     "oak_door",
@@ -67,6 +69,7 @@ SHELTER_GROUND_BLOCKS: FrozenSet[str] = frozenset({
     "cobbled_deepslate",
     "tuff",
     "moss_block",
+    "pale_moss_block",
     "sandstone",
     "red_sandstone",
     "cobblestone",
@@ -109,9 +112,11 @@ CAVE_DIGGABLE_BLOCKS: FrozenSet[str] = frozenset({
     "blackstone",
     "sculk",
     "moss_block",
+    "pale_moss_block",
     "oak_leaves",
     "birch_leaves",
     "spruce_leaves",
+    "pale_oak_leaves",
 })
 SHELTER_CLEARABLE_BLOCKS: FrozenSet[str] = frozenset(
     CAVE_DIGGABLE_BLOCKS
@@ -121,6 +126,7 @@ SHELTER_CLEARABLE_BLOCKS: FrozenSet[str] = frozenset(
         "dark_oak_leaves",
         "mangrove_leaves",
         "cherry_leaves",
+        "pale_oak_leaves",
         "azalea_leaves",
         "flowering_azalea_leaves",
         "snow_block",
@@ -134,7 +140,14 @@ SHELTER_CLEARABLE_BLOCKS: FrozenSet[str] = frozenset(
         "jungle_log",
         "acacia_log",
         "dark_oak_log",
-        "jungle_log",
+        "mangrove_log",
+        "cherry_log",
+        "pale_oak_log",
+        "pale_hanging_moss",
+        "pale_moss_carpet",
+        "moss_carpet",
+        "open_eyeblossom",
+        "closed_eyeblossom",
         "vine",
         "bamboo",
         "bamboo_sapling",
@@ -1714,10 +1727,18 @@ def evaluate_mine_site(
         dist = round(((entry_pos[0] - float(bot_pos[0])) ** 2 + (entry_pos[2] - float(bot_pos[2])) ** 2) ** 0.5, 3)
         elev_diff = abs(float(int_origin[1]) - float(bot_pos[1]))
 
+    overhead_canopy_penalty = 0.0
+    for orel in ((0, 2, -1), (0, 3, -1), (0, 2, 0), (0, 3, 0)):
+        _, oblk = read_rel(orel)
+        oname = str(oblk.get("name") or "unknown")
+        if oname not in DEFAULT_REPLACEABLE:
+            overhead_canopy_penalty += 12.0 if (oname.endswith("_leaves") or oname.endswith("_log")) else 4.0
+
     score = (
         len(floor_patches) * 4.0
         + elev_diff * 1.5
         + dist * 0.45
+        + overhead_canopy_penalty
         - stone_yield * 0.25
         - ore_yield * 0.8
     )
@@ -1745,6 +1766,7 @@ def evaluate_mine_site(
         "workstation_slots": workstation_slots,
         "floor_patches": floor_patches,
         "solid_yield": solid_yield,
+        "under_canopy": overhead_canopy_penalty >= 12.0,
         "stone_yield": stone_yield,
         "ore_yield": ore_yield,
         "distance": dist,
@@ -1785,7 +1807,7 @@ def find_mine_sites(
     matches: List[Dict[str, Any]] = []
     seen_origins = set()
     for dx, dz in ring_offsets:
-        if len(matches) >= max(8, int(max_results) * 3):
+        if sum(1 for m in matches if not m.get("under_canopy")) >= max(8, int(max_results) * 3):
             break
         cx, cz = bx + dx, bz + dz
         candidate_y: Optional[int] = None

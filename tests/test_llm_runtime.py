@@ -132,7 +132,7 @@ class FakeMinecraftClient:
     def get_entities(self, **kwargs):
         return []
 
-    def get_block(self, pos):
+    def get_block(self, pos, *, timeout_seconds=None):
         key = tuple(math.floor(value) for value in pos)
         return envelope({"name": self.blocks.get(key, "dirt" if key[1] < 64 else "air"),
                          "pos": list(key), "diggable": True, "properties": {}})

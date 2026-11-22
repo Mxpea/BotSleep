@@ -136,15 +136,45 @@ prerequisites. Waiting/no-op does not erase a failure. Respect active target coo
 All models share one serialized request slot. Provider uncertainty blocks new calls.
 There is no final goal_complete in daily mode: maintain reserves and facilities,
 inspect changes, eat and sleep when appropriate, and wait briefly when nothing safe
-needs doing. For a custom iron/diamond equipment goal, keep immediate safety and any
-active mainline chapter first. At spawn, if wood and workstations are missing and
-there is no scout report, one scout goal can look for surface resources. Reuse its
-report. With a stone pickaxe and food >= 16, prioritize gather(resource="raw_iron",
-count=8) over optional fuel or wood reserves. Use a held furnace for smelting.
-Inspect current ingots, equipment and food before choosing iron_tools, iron_armor,
-or gather(resource="diamond", count=3). The local mining goal prepares spare picks
-and can attempt a bounded shaft and return if no accessible ore is visible. After
-verifying diamonds in inventory, choose equipment that serves the owner's goal.
+needs doing. Keep immediate safety and any active mainline chapter first. For custom iron/diamond or portal
+goals, organize progression around stage gates and re-evaluate each milestone:
+1) Spawn/early scouting: when newly spawned or lacking wood/structures (e.g., desert/treeless
+plains) and context.last_scout_report is absent, prefer ONE run_survival_task(task="scout")
+to scan forward ~200 blocks for villages, chests, crafting tables, oasis/border trees or
+surface caves. Once context.last_scout_report exists AND you have logs/planks/pickaxe or visible
+trees, do NOT call scout again; ONLY call scout again if you still hold 0 logs/planks/pickaxe
+and see no logs nearby, OR if gather(logs) escalated with bounded_local_recovery_exhausted due to
+unreachable/steep terrain (call scout ONCE to relocate). Do NOT craft stone_axe or stone_sword
+early when operator_goal targets iron/diamond speedrun: craft wooden_pickaxe -> gather(cobblestone,
+count=11) -> stone_pickaxe + furnace, then go straight to raw_iron. When context.operator_goal asks
+for iron/diamond gear and stone_pickaxe >= 1 with status.food >= 16 and status.health >= 16, IGNORE
+optional daily_tasks (food_reserve, food_production, shelter, bed, base_site, storage, fuel_reserve,
+wood_reserve, furnace, maintain) EVEN AFTER a task escalation/failure: do NOT hunt animals, cook food,
+farm, chop extra wood reserves, or smelt charcoal (wooden planks/logs already smelt iron and mining
+finds coal). Call run_survival_task(task="gather", resource="raw_iron", count=24) IMMEDIATELY (it
+ensures spare stone pickaxes, prefers natural caves/water ravines and sets up an in-cave furnace camp
+to smelt iron, using branch mining only as fallback). Do NOT craft any iron_pickaxe yet during
+cave/raw_iron mining so server dig uses cheap stone_pickaxe instead of wasting iron durability on stone.
+2) Iron decision gate: once raw_iron, iron_ingot, or iron_tools completes, inspect current
+iron_ingot, iron_pickaxe, armor slots, offhand, food and reserves to decide the next goal
+yourself, STILL ignoring optional daily_tasks (food_reserve, shelter, wood_reserve, bed, furnace, maintain)
+while status.food >= 16 and status.health >= 16:
+Smelt remaining raw_iron into iron_ingot via run_survival_task(task="smelt", item="iron_ingot", count=...)
+first (it deploys 2-3 parallel furnaces automatically when >= 8 raw_iron), craft bucket (3) +
+shield (1) (and run run_survival_task(task="iron_armor") if you hold >= 32 iron_ingot spare for full
+armor + pickaxes). Do NOT waste iron or turns on iron_axe or iron_sword before diamonds. Craft 2-3
+iron_pickaxe right BEFORE calling run_survival_task(task="gather", resource="diamond", count=3).
+NEVER call run_survival_task(task="furnace") — "furnace" is NOT a valid task enum; held furnaces
+are automatically placed by run_survival_task(task="smelt", item="iron_ingot", ...) or in-cave camps.
+NEVER call craft(furnace) if inventory already holds >= 1 furnace (even if not yet placed in world);
+NEVER call craft(stone_pickaxe/wooden_pickaxe/stone_axe/stone_sword) again if you already own >= 1.
+To smelt iron_ingot from raw_iron, call run_survival_task(task="smelt", item="iron_ingot", count=...) directly.
+3) Diamond & Nether Portal gates: after gathering diamond, craft diamond_pickaxe (and optionally
+diamond_sword or iron_armor if needed). Once diamond milestone completes and operator_goal asks
+for a Nether Portal, call run_survival_task(task="nether_portal") (prepares flint_and_steel,
+water_bucket, and casts+ignites a 4x5 Nether Portal near a lava pool). When coal, raw_iron or diamond
+is absent on the surface and the required pickaxe is ready, run_survival_task launches bounded deep
+mining with surface return.
 Partial results never mean an entire task is complete.
 Return one native tool call, not simulated calls inside text.
 """
@@ -208,6 +238,8 @@ If that goal tool is unavailable, use only the currently advertised tools.
         self._failed_actions = {}
         self._undelivered_result = False
         self._task_repair_uses = {}
+        self._scout_calls = 0
+        self._world_mutation_nonce = 0
 
     @staticmethod
     def _limit(settings, key, default, minimum, maximum):
@@ -408,7 +440,8 @@ If that goal tool is unavailable, use only the currently advertised tools.
                     "hostile_near_target": bool(target_pos) and any(math.dist(target_pos, point) <= self.rules.threat_radius for _, point in hostiles),
                     **{key: copy.deepcopy(status.get(key)) for key in (
                     "health", "food", "ready", "alive", "thundering", "on_ground", "in_water", "in_lava", "on_fire", "submerged")}},
-                "shelter": copy.deepcopy(observation.get("shelter")) if "shelter" in decision.name else None}
+                "shelter": copy.deepcopy(observation.get("shelter")) if "shelter" in decision.name else None,
+                "world_mutation": self._world_mutation_nonce}
 
     def _unchanged_failure(self, failure, observation, decision):
         before, after = failure["state"], self._failure_state(observation, decision)
@@ -430,7 +463,12 @@ If that goal tool is unavailable, use only the currently advertised tools.
                                and old_visibility["blocker"] != new_visibility["blocker"])
             if visibility_changed or blocker_changed:
                 return False
-        return not (moved or changed_cell) and all(before.get(key) == after.get(key) for key in ("dimension", "last_death", "counts", "target", "target_properties", "windows", "entity", "shelter"))
+        return not (moved or changed_cell) and all(before.get(key) == after.get(key) for key in ("dimension", "last_death", "counts", "target", "target_properties", "windows", "entity", "shelter", "world_mutation"))
+
+    def active_failed_decisions(self, observation):
+        """Return failed proposals whose relevant game evidence is unchanged."""
+        return [copy.deepcopy(failure["decision"]) for failure in self._failed_actions.values()
+                if self._unchanged_failure(failure, observation, failure["decision"])]
 
     @staticmethod
     def _signature(decision):
@@ -565,6 +603,7 @@ If that goal tool is unavailable, use only the currently advertised tools.
             "iron_tools": common | {"gather_resource", "inspect_container", "smelt_start", "smelt_collect"},
             "iron_armor": (common - {"clear_foliage"}) | {"gather_resource", "inspect_container", "smelt_start", "smelt_collect", "equip_armor"},
             "scout": {"move_to", "position_for_task", "gather_block", "clear_foliage"},
+            "nether_portal": common | {"collect_liquid", "gather_resource", "move_to"},
             "smelt": common | {"gather_resource", "inspect_container", "smelt_start", "smelt_collect"},
             "food": {"move_to", "position_for_task", "harvest_crop", "hunt_animal", "collect_drops",
                      "inspect_container", "take_items", "smelt_collect", "craft_item"},
@@ -598,7 +637,11 @@ If that goal tool is unavailable, use only the currently advertised tools.
 
     def _request_catalog(self, context, observation=None):
         tools, routing, repair_id = self._base_request_catalog(context, observation)
-        tools = [tool for tool in tools if tool["function"]["name"] not in {"retreat_from", "fight_hostile"}]
+        active = (context.get("competition") or {}).get("active_goal") or {}
+        combat_goal = (self.objective == "competition" and active.get("availability") == "ready"
+                       and "fight_hostile" in (active.get("required_skills") or ()))
+        local_only = {"retreat_from"} if combat_goal else {"retreat_from", "fight_hostile"}
+        tools = [tool for tool in tools if tool["function"]["name"] not in local_only]
         mainline = context.get("mainline")
         if (self.objective != "daily" or not isinstance(mainline, dict) or not mainline.get("fresh")
                 or not isinstance(mainline.get("goal"), dict) or routing["mode"] in {"cautious_bootstrap", "emergency_food"}):
@@ -649,6 +692,10 @@ If that goal tool is unavailable, use only the currently advertised tools.
                     {"mode": "atomic", "atomic_repair_remaining": 0}, None)
         normal = {"run_survival_task", "wait", "eat_food", "auto_sleep", "retreat_from", "fight_hostile",
                   "select_task", "update_progress", "finish_task", "force_exit_task", "end_competition"}
+        if self.objective == "competition":
+            active = (context.get("competition") or {}).get("active_goal") or {}
+            if active.get("id") == "minecraft:story/lava_bucket" and active.get("availability") == "ready":
+                normal.add("collect_liquid")
         task = context.get("task_execution") or {}
         task = task if isinstance(task, dict) else {}
         result = context.get("last_result") or {}
@@ -775,6 +822,9 @@ If that goal tool is unavailable, use only the currently advertised tools.
             if combat.get("allowed") is not True:
                 raise LLMError("llm_unsafe_action", "Combat conditions are not verified: " + combat.get("reason", "unknown"))
         if name == "collect_liquid":
+            active = ((context.get("competition") or {}).get("active_goal") or {}) if self.objective == "competition" else {}
+            if active.get("id") == "minecraft:story/lava_bucket" and args["expected_name"] != "lava":
+                raise LLMError("llm_unsafe_action", "The active lava bucket goal requires lava, not water")
             if counts.get("bucket", 0) < 1 or not any(row["name"] == args["expected_name"] and list(row["pos"]) == args["pos"] for row in blocks):
                 raise LLMError("llm_unsafe_action", "Bucket collection requires an existing empty bucket and a currently observed matching source")
         if name == "hunt_with_lava" and counts.get("lava_bucket", 0) < 1:
@@ -972,6 +1022,11 @@ If that goal tool is unavailable, use only the currently advertised tools.
         self._append_turn(turn)
         self._undelivered_result = True
         self._pending = None
+        if decision.name == "run_survival_task" and (decision.args or {}).get("task") == "scout" and payload.get("success") is True:
+            self._scout_calls += 1
+        if payload.get("success") is True and decision.name in {
+                "clear_foliage", "gather_block", "place_item", "harvest_crop", "build_shelter_step", "canopy_escape"}:
+            self._world_mutation_nonce += 1
         signature = self._signature(decision)
         data = payload.get("data") or {}
         no_motion = decision.name == "move_to" and (data.get("moved") is False or data.get("already_in_range") is True)

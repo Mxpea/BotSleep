@@ -10,7 +10,8 @@ import math
 import time
 from typing import Any, Callable, Dict, Optional
 
-from agent.survival_planner import Decision, RANGED_HOSTILES
+from agent.survival_planner import Decision
+from core.domain import RANGED_HOSTILES
 from core.domain import finite_number, parse_pos
 
 

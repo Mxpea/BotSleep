@@ -1,5 +1,11 @@
 # 配置、客户端、生存、赛事与监控验证
 
+## `dev-ink` 合并 `main`（2026-11-22）
+
+本地基线为 `dev-ink cf0be63` 与 `origin/main c940598`。合入赛事计分路线、浅水自救、洞穴采矿、多炉熔炼、下界门备料与铸门，以及投眼回收。保留通关控制器、受击本地抢占、连续运行恢复和统一木种的建筑投影。木材探路同时遵守目标木种和树列冷却。圆石任务优先勘测短阶梯，有可核验邻格时先换位，仍无入口时才使用有界深矿工作流。深矿完成后按实际选址的出口核对位置。
+
+离线衔接用例核对了先取水再铸门、低血时继续既有的原地制作、赛事仅在已就绪的战斗目标开放有界攻击，以及受击后按实际落脚重新规划。Windows 执行 `python -X utf8 -B -m unittest discover -s tests -v`，2035 项中 2030 项通过，5 项实服专用测试按配置跳过，耗时 178.367 秒。示例配置、原通关配置和监控脚本语法均通过检查。
+
 ## 1.21.11 普通新档实服（2026-11-19）
 
 存档 `botsleep-campaign-live-20261119` 使用正常生成、普通难度、生存模式、自然昼夜和独立端口 `25587`。先由独立观察员加载末地，服务端确认 1 条末影龙，生命值 `200.0f`。随后观察员退出，`CampaignTestBot` 首次决策的背包为 `{}`，启用 `campaign` 和 `continuous`，模型调用数为零。
@@ -186,15 +192,140 @@ Windows 上设置 `BOTSLEEP_RUN_LIVE_TESTS=0`，运行 `python -X utf8 -B -m uni
 
 加入跨目标/重启负缓存、内部天然土块准备及其调度后的完整回归：**1592 项 / 160.881 秒，1587 通过、5 项实服专用跳过**，日志为本机 `.test-runtime/shelter-preparation-final-regression-20261117.log`。命令仍为 `$env:BOTSLEEP_RUN_LIVE_TESTS='0'; python -B -m unittest discover -s tests -q`。172 个受版本管理或待提交 Python 文件 AST 通过，示例/隔离配置有效，`git diff --check` 通过；私有配置、世界、日志没有纳入 Git，mc-agent-api 跟踪源码未修改。准备技能 19 项专项另经独立复审；真实快照缺失邻格时正确拒绝，仍须自然白天补读并做实服验收。
 
-## main 与 dev-aure 本地集成（2026-11-18）
+## 原计划被软限制挡住后的续做（2026-11-21）
 
-基线为 `main 9018f76` 与 `dev-aure 4e0a59e`。沿用主线 `canopy_escape` 和自主任务控制器，不保留并行下降或调度实现。选择性迁入赛事候选投影、单工具请求约束、只读日志补看；可选本地开局复用同一 `starter_tools` 任务入口。
+基线为 `dev-aure 064989a` 加本地改动。Windows / Python 3.12，用 Leaves Java 1.21.11 和官方 mc-agent-api 1.3.14 启动独立测试存档。用控制台在靶场准备站位、材料和时间，以固定工具调用响应复现拦截时机，实际方块和库存通过游戏 API 核验。
 
-Windows / Python 3.12.10，禁用实服用例后运行 `py -3.12 -X utf8 -B -m unittest discover -s tests -v`：**1457 项，1452 通过、5 项实服专用跳过，191.625 秒**。合成卡树场景沿主线恢复落到 Y=88、未请求模型、无残留 pending。赛事全目录仍用于本地评估；模型已验证只收到阶段候选或活动任务详情。示例配置及本地既有配置均通过 `--check-config`。
+| 场景 | 预期与实测 |
+| --- | --- |
+| 模型返回采木目标前入夜 | `sleep_policy: strict` 下继续同一目标。最终轮原地挖除 1 块橡木原木，背包净增 1，目标 `completed`，共消费 1 次固定模型响应。 |
+| 原有制作目标在低血时受阻 | 独立实心落脚点周围无可用觅食路线。生命 6、饥饿 15 时原地制作木板，净增 4，目标 `completed`。 |
+| 模型返回原子制作前入夜 | 原地执行原 `craft_item`，木板净增 4，保留原始工具调用反馈。 |
+| 夜间采木目标旁出现岩浆块 | 返回 `safety_changed`，`executed=false`，原木保持，检查点无 `pending`。 |
 
-合并前主线 `9018f76` 曾在本地真实服务器从 Y=92 经 7 次移动下到 Y=88 草方块，生命/饥饿维持 20，未请求模型；该测试与此次合并后的离线回归是两次独立验证。合并版本未请求真实模型或重跑实服。
+前两轮采木出现方块已挖除、掉落未入包。掉落离开原地拾取范围时仍返回 `gather_unverified` 并保留方块与掉落证据。测试验证了隔离实服的单步状态变化和目标反馈，真实模型推理及长期比赛运行未纳入本次。测试机器人登出，临时服务保存后退出。
 
-最近复核：2026-11-18（Asia/Shanghai），`develop-tianya/ai-iron-diamond-loop`（已提交节点 `db6dbb1`、`28417cf`、`01f22a4`、`8c35c51`、`4eee47e` 及本次文档同步）。
+最终代码关闭实服开关后运行 `py -3.12 -X utf8 -B -m unittest discover -s tests -q`，共 1561 项，1556 通过、5 项跳过。回归覆盖同一目标的多步续做、既有低血开局、延迟入包、执行前发现敌情，以及未知写入保留 `pending`。
+
+## 掉落物与投眼回收（2026-11-21）
+
+在独立临时 Leaves 1.21.11 存档、API 1.3.14 上验证：普通掉落物移动后延迟入包会在短暂稳定窗口内重新读库存并成功确认；末影之眼投掷采样完成后，先等待新眼实体消失/掉落实体落到实心支撑，再通过无敌人走廊的 `collect_drops` 拾取，背包从投掷后的 0 恢复到 1。旧掉落不会被误认，多只新眼/状态变化会放弃回收。临时 API、游戏服和测试账号已退出；原有 G:\ww 进程未修改。定向离线回归 159 项通过。
+
+## 赛事计分项计划覆盖与新增工具路线（2026-11-21）
+
+基线为 `dev-aure 064989a` 加本地变更；规则 JSON 记录的 SHA-256 与本机上游 v2 草案一致。Windows / Python 3.12，`BOTSLEEP_RUN_LIVE_TESTS=0` 下运行 `py -3.12 -X utf8 -B -m unittest discover -s tests -q`：1553 项，1548 通过、5 跳过。示例配置与 `git diff --check` 通过。
+
+回归核对 99 个可能计分项没有遗漏、重复或混入不计分项：13 项有工具路线，86 项只有不可选的蓝图；条件 override 不会解锁缺失能力。新增用例验证钻石和钻石靴候选门禁、铁级镐采集路径的既有覆盖、钻石靴材料净变化、岩浆桶目标进入后才向默认模式开放取液工具，以及弓弩目标根据武器和敌情选择。模拟装入岩浆并未给分；仅服务端证据改变分数。**未运行实服**，不能把新增路线或未接入蓝图算作比赛完成。
+
+## 已持有骨头转骨粉（2026-11-21，未提交改动）
+
+基线 `dev-aure 064989a`。Windows / Python 3.12，禁用实服用例；骨块保护加入前，全套 1546 项，1541 通过、5 跳过。最终版定向回归 `test_autonomous_tasks`、`test_task_harness`、`test_combat`、`test_llm_planner` 共 200 项通过：有骨头原地制作、只认背包增量、缺料不追掉落、有骨块不选择歧义配方，且原生目标调用只反馈一次。实服未运行，验收见 [C01](COMBAT_LIVE_TEST.md)。
+
+## dev-aure 整合基线（2026-11-21 核对）
+
+`dev-aure 064989a` 已包含 `origin/main 27b11d9`。整合后的代码此前在 Windows / Python 3.12、`BOTSLEEP_RUN_LIVE_TESTS=0` 下运行 `py -3.12 -X utf8 -B -m unittest discover -s tests -q`，共 1543 项，1538 通过、5 跳过；示例配置校验通过。本次核对没有改运行代码或重新运行测试。Starter 反击和脱险恢复仍待按 [人工实服手册](COMBAT_LIVE_TEST.md) 验收，不用下文和平难度压测代替。
+
+## Starter 本地自保（2026-11-19）
+
+基线为 `dev-aure 9febf5b` 加本次自保改动。Windows / Python 3.12，设置 `BOTSLEEP_RUN_LIVE_TESTS=0` 后运行 `py -3.12 -X utf8 -B -m unittest discover -s tests`。共 1470 项，1465 项通过，5 项实服专用跳过。新增回归覆盖孤立僵尸单击、武器等级选择、挥击前新增威胁、撤退冷却优先、装备观测失败保留撤退证据、已知失败可重新规划以及未知攻击保留 `pending`。模拟反击全程零模型请求。实服验证待进行。
+
+主线历史复核：2026-11-19（Asia/Shanghai），`develop-tianya/ai-iron-diamond-loop`（合入 `origin/main cab309d` 并包含该分支提交 `e76597b`～`46bae7e` 及当时的文档交接更新）。
+
+## 浅水脱困、多炉批炼与树冠/侦察阻塞修复回归（`e338ea7`、`062d8ef`、`f1d9fe6`）
+
+在 `v2` 与 `v3` 两轮 9 Bot 并行实服暴露出非深矿水域卡死、单炉/逐锭 `smelt_collect(1)` 轮询拖慢、高树干树冠死循环及 `scout` 原点冷却阻塞后，连续完成两轮靶向修复并进行了干净世界 9 Bot 并行验证：
+
+- **Sprint 2 修复（`e338ea7`、`062d8ef`）**：
+  - **非深矿河岸脱困（`water_escape`）**：`skills/survival.py`、`core/daily_policy.py`、`core/local_recovery_runtime.py` 与 `core/survival_harness.py` 新增内部安全技能 `water_escape`，在 `in_water=True` 时优先上浮换气、扫描并登岸干燥地面；`water_recovery` 限制 24 步与停滞退避，离开水域立即清理。
+  - **双/三炉并行烧铁与前置石镐保护**：`core/autonomous_tasks.py` 与 `agent/daily_survival.py` 在 `raw_iron >= 8 / 16` 时部署 2～3 座熔炉，优先扫描并启动全部空闲熔炉再等待；`raw_iron` 深矿前按可用圆石与石块补充至多 3 把 `stone_pickaxe`；`_run_task_deep_mine` 对 `diamond` 跳过浅层地表洞窟直接下探（保留深层溶洞子图）；`DAILY_SYSTEM_PROMPT` 收紧为钻石前跳过 `stone_axe`/`stone_sword`/`iron_axe`/`iron_sword`。
+  - **树冠雪层与陡坡树干列冷却**：`skills/survival.py` 将薄雪 `"snow"` 纳入 `RETREAT_PASSABLE`；`core/autonomous_tasks.py`（修复 `(*PLANK_NAMES, *LOG_NAMES)` 元组拼接）与 `core/autonomy_runtime.py` 对寻路失败的原木排除整根 `(x, z)` 树干列并优先低高差树木。
+- **Sprint 3 修复（`f1d9fe6`）**：
+  - **批炼采集合并（消除 1 锭/次开窗刷屏）**：`agent/daily_survival.py` 的 `_smelt` 在熔炉仍 `burning=True` 且 `input.count > 0`、输出 `< 6` 时延后采集并等待 `10s`（全部燃烧结束或 `output >= 6` 时整批收取）；`core/autonomous_tasks.py` 的 `_smelt` 计入原木折算木板燃料（`4 * logs`），允许仅持原木时立即放置第 2/3 座熔炉并在无煤时一次转换 8 块木板。
+  - **`scout`/`nether_portal` 原点冷却豁免与地下工作台防跑偏**：`core/autonomous_tasks.py` 豁免 `scout_surface` / `nether_portal` 占位 `origin` 坐标的 `blocked` 校验（修复海岸开局首次 `scout` 即报错 `selected_target_is_cooling_down`）；地下合成若近处已有被阻塞工作台则不再触发远距 `scout_logs`。
+  - **高树干 4～5 格安全落差与树干僵局释放**：`skills/survival.py` 的 `canopy_escape` 在常规 `0..-3` 与清叶/中继均无解且 `health >= 16` 时启用 `-4..-5` 格纯实体地面脱困兜底；`core/local_recovery_runtime.py` 在同一 `RETREAT_TRUNKS` 木干位置连续 3 次返回 `unsafe` 时自动释放树冠锁定交回模型寻路。
+
+### 离线回归与静态检查（合入 `origin/main cab309d` + `f1d9fe6` 及本次文档交接基线）
+
+- Python 3.13.7 离线全套（`$env:BOTSLEEP_RUN_LIVE_TESTS='0'; .\.venv\Scripts\python.exe -B -m unittest discover -s tests -q`）：在合入 `origin/main cab309d` 后实跑 **1530 项 / 68.763 秒：1520 通过、10 项跳过（2 项 `test_cave_matrix` 与 3 项 `test_speedrun_portal` 实服专用跳过，5 项 `test_stronghold.EngineTests` 因未安装 ninjabrain JAR 跳过），`OK (skipped=10)`**（仅改文档后将在最终提交前复跑核验）。
+- `compileall -q core skills agent scripts tests`、`main.py --check-config`、`git diff --check` 均通过；相邻 `mc-agent-api` 保持零本地修改。
+
+### 干净世界 9 Bot 并行压测对比（`multi_20261119_v3` @ `062d8ef` & `multi_20261119_v4` @ `f1d9fe6`）
+
+两次测试均在同一本地 Leaves 1.21.11（`difficulty=peaceful`、每次开测前重置 `world*`）、9 个独立 `mc-agent-api`（`18901..18909`）、共享本地串行 `ModelRequestGate`、单 Bot 40 分钟（`2400s` / `768` 步）预算下完成，全部 **0 死亡、0 内部报错锁死、9/9 正常 `rc=2` 退出**。
+
+#### 轮次 v3（`multi_20261119_v3`，`062d8ef`，最小出生间距 `1657.0` 格）
+
+| Bot | 出生点 | 步数 / 死亡 | 关键进展与指标 |
+| --- | --- | --- | --- |
+| **Bot 1** | `[166.5, 127.0, 209.5]` | 122 / 0 | `logs 274s` → `stone_pickaxe 711s` → `furnace 734s` → `raw_iron 2050s (3)` → `iron_ingot 2145s (3)` |
+| **Bot 2** | `[2019.5, 75.0, -19.5]` | 498 / 0 | `[2021.6, 73.0, -19.5]` 金合欢树干无 `-3` 内落脚点，触发 `canopy_escape` `unsafe: 124` + `waits=370` 耗尽时间 |
+| **Bot 3** | `[-1994.5, 102.0, 9.5]` | 131 / 0 | **`24 raw_iron 1430s`** → `24 iron_ingot 1495s..1811s` → `bucket 1832s` → `shield 1883s` → `3 iron_pickaxe 1908s` → `1925s (32.1m)` 起切入 `gather(diamond, 3)`，于 `Y=-54` 采 `244 cobble + 59 cobbled_deepslate` |
+| **Bot 4** | `[26.5, 64.0, 2011.5]` | 125 / 0 | `logs 81s` → `stone_pickaxe 655s` → `furnace 1411s` → `6 coal`（缺铁未炼出） |
+| **Bot 5** | `[-230.5, 96.0, -1881.5]` | 84 / 0 | `logs 68s` → `stone_pickaxe 265s` → `9 coal (surface_caves:target_reached 413s)`；洞内 `craft(furnace)` 因地表工作台冷却反复触发 `selected_target_is_cooling_down` 5 次 |
+| **Bot 6** | `[3989.5, 85.0, 31.5]` | 194 / 0 | 部署 **3 座熔炉**，获取 `8 raw_iron 2252s` → `7 iron_ingot 2321s` → `bucket 2378s` |
+| **Bot 7** | `[2030.5, 119.0, -1993.5]` | 183 / 0 | 浅洞 `surface_caves` 18.9m 内直采 **`24 raw_iron`**（峰值 `29`），**2 炉** `1156s..1636s (480s)` 炼得 `29 iron_ingot` → `3 iron_pickaxe 1793s` → `1804s (30.1m)` 切入 `diamond`，于 `Y=-54` 采 `310 cobble + 108 cobbled_deepslate` |
+| **Bot 8** | `[-2039.5, 63.0, 1892.5]` | 72 / 0 | 海岸开局 **`water_escape` 8/8 成功登岸**（0 水域卡死）；无树海滩 `scout` 因原点冷却触发 `selected_target_is_cooling_down` |
+| **Bot 9** | `[-1884.5, 64.0, -1782.5]` | 101 / 0 | `17 raw_iron 1101s (18.4m)` → **2 炉** `1157s..1478s (321s)` 炼得 `17 iron_ingot` → `3 iron_pickaxe 1630s` → **`1642s (27.4m)` 切入 `diamond`**，于 `Y=-54` 采 **`321 cobbled_deepslate + 107 cobblestone + 4 redstone + 8 lapis + 5 coal`**（超时前尚未撞见钻石矿脉） |
+
+#### 轮次 v4（`multi_20261119_v4`，`f1d9fe6`，最小出生间距 `1792.7` 格）
+
+| Bot | 出生点 | 步数 / 死亡 | 峰值资源与里程碑（含 Sprint 3 修复验证） | 终态与地形原因 |
+| --- | --- | --- | --- | --- |
+| **Bot 1** | `[27.5, 65, -28.5]` | 67 / 0 | — | 红树林根（`mangrove_roots`）地面无可放置工作站点位，`paused=True (llm_repeated_failure)` |
+| **Bot 2** | `[1994.5, 68, 10.5]` | 54 / 0 | `logs 65.2s` → `wooden_pickaxe 150.1s` → `stone_pickaxe 379.0s` → `furnace 502.8s` → `8 coal` | 深矿仅采铜/煤（`0 raw_iron`），模型误反复请求 `smelt` 触发 `paused (budget_exhausted)` |
+| **Bot 3** | `[-1990.5, 69, 0.5]` | 103 / 0 | `water_escape` 完成 `4` 次脱困 | 海岸移动后受浅水/对岸寻路反复失败触发 `paused (llm_repeated_failure)` |
+| **Bot 4** | `[230.5, 75, 2157.5]` | 81 / 0 | `wooden_pickaxe 183.4s` → `stone_pickaxe 631.6s` → `furnace 778.9s` → **`24 raw_iron` + `2 coal`** | 于 `Y=19` 流水处滞留未完成返程烧铁，`paused (observation_changed)` |
+| **Bot 5** | `[-126.5, 71, -2152.5]` | 36 / 0 | `paused=False` | 外部模型端点多次返回 `HTTP 500` 退避重试至 `2400s` |
+| **Bot 6** | `[4009.5, 65, 29.5]` | 142 / 0 | `logs 65.3s` → `wooden_pickaxe 132.2s` → `stone_pickaxe 288.4s` → `furnace 338.5s` → **`24 raw_iron 1107.0s`** → **`17 iron_ingot`（2 炉批炼：`smelt_start=4, smelt_collect=5`）** → `bucket 1298.9s` → `shield 1382.3s` → **`iron_pickaxe 1404.4s (23.4m)`** | **批炼加速验证**：`1404.4s..1607.7s (203.3s)` 仅用 `smelt_start=4 / smelt_collect=5` 完成双炉烧制（较 `v3` `321s–480s` 明显压缩），但模型在 `1622s–2385s` 主动绕去 `iron_axe`/`iron_sword`/`coal`/`logs` 未发起 `gather(diamond)` |
+| **Bot 7** | `[1996.5, 64, -2015.5]` | 31 / 0 | — | 沙漠出生无木，`paused (llm_invalid_arguments)` |
+| **Bot 8** | `[-2248.5, 63, 1774.5]` | 113 / 0 | `logs 98.1s` → `wooden_pickaxe 264.8s` → `stone_pickaxe 501.4s` → `furnace 696.6s` → **`10 raw_iron 963.2s`** → **2 炉 `11 iron_ingot 1084.3s`** → `bucket 2216.5s` → `shield 2246.3s` | 二次深矿获 `24 lapis + 7 raw_copper` 并安全 `on_surface=True` 返程（`paused=False`） |
+| **Bot 9** | `[-2103.5, 64, -2077.5]` | 142 / 0 | **树冠脱困（`canopy=6`）恢复** → `logs 127.0s` → `wooden_pickaxe 549.6s` → `stone_pickaxe 710.1s` → `furnace 735.3s` | 摆脱了 `v3` Bot 2 式 498 步树冠死循环；后续入水淹洞穴（低氧）反复挖掘同块石头触发 `paused (llm_repeated_failure)` |
+
+- **v3 + v4 实服阶段结论**：
+  - `v3`（3/9 到达 `Y=-54` 采钻：`Bot 3/7/9`）与 `v4`（**0 死亡**、`Bot 6` 双炉批炼将 `17` 铁锭耗时压至 `203.3s`、`Bot 9` 脱出树冠至石器/熔炉、`water_escape` 稳定脱岸）验证了矿洞采铁、批炼合并与树冠/浅水止冻的有效性。
+  - **当前未达成项（如实记录）**：40 分钟预算内多地形实服仍为 **`0/9` 获钻、0/9 完成 `nether_portal` 实服搭建**；原因包括（1）`Bot 6` 合出铁镐后大模型主动分心补 `iron_axe`/`iron_sword`/`coal`/`logs` 延误了下探 `Y=-54`；（2）`v3` 下探 `Y=-54` 的 3 个 Bot 于 `27.4m–32.1m` 起步，仅挖得 `59–321` 块深板岩尚未撞见钻石脉；（3）红树林根（`mangrove_roots`）、纯无木沙漠与含水洞穴下模型反复调用同一动作仍是后续提升全地形首小时到达率的主要方向。
+
+---
+
+
+## 9 Bot 并行多地形实服压测与洞穴优先回归（2026-11-19）
+
+本轮围绕“矿洞/含水峡谷优先 + 洞内冶炼、24～32+ 粗铁批量采炼、石器耐久保护、饱食降级抢占、跨进程串行模型门禁、多 Bot 只读超时/扫描止冻”完成实现，并于同一 Peaceful 世界开展 **9 个独立进程并行实测**：
+
+- **实现与止冻修复摘要（`aedae0b`、`92afc02`、`6093ad9`）**：
+  - **矿洞/含水峡谷优先与洞内营地**：`skills/cave_explore.py`、`skills/mining.py` 与 `core/autonomy_runtime.py` 对 `raw_iron`/`coal`/`diamond` 启用洞穴优先阶段（`explore_timeout_seconds: 220.0`、`cave_search_radius=40`、`max_caves=3`），支持水底峡谷在落脚处干燥时入洞、采满 `raw_iron >= 8` 时洞内临时放置工作台/熔炉并把 `iron_ingot` 计入 `raw_iron` 配额，同时将 `raw_iron` 默认采集目标下限提升至 `24`、深层矿井换向采矿；`find_cave_openings` 增加硬超时 `timeout_seconds=15.0`、`max_reads=600`、取消信号检查及径向近优先+地下层优先偏移扫描，避免单洞扫描阻塞。
+  - **石器耐久保护与优先级调整**：`agent/llm_planner.py` 延后 `iron_pickaxe` 制作至成批烧铁之后，以规避上游 `mc-agent-api` `/dig` 自动换用背包内高阶镐导致的提前磨损（不修改 `mc-agent-api` 源码）；`agent/daily_survival.py` 在 `food >= 16 && health >= 16` 时下调 `food_reserve`（95 → 35）与 `wood_reserve`（木 ≥ 2 时 65 → 30）抢占并优先输出非储备任务，`core/autonomous_tasks.py` 为狩猎追击增加 2 次失败快速放弃，减少追羊烤肉死循环；自主模型模式下背包已持有 `furnace` 时不再将 `"furnace"` 推上 `active_task_id`，并允许 0 木/无工具且周边无树时重新向不同方向 `scout`（`skills/scouting.py` 旋转航向）。
+  - **水域容忍与多 Bot 防锁死**：`core/survival_harness.py` 与 `skills/action_workflow.py` 容忍短时入水（`deep_mine`/`scout_surface` 中 `oxygen > 12`、工作流守卫 `oxygen > 10` 自动上浮）；`core/client.py` 对 `READ_RETRY_ENDPOINTS` 超时不再附加 `action_state="unknown"`，`core/survival_harness.py` 对 `observe` 决策不标记 `uncertain`，避免只读超时引发永久挂起；`agent/brain.py` 将多 Bot 共享 `ModelRequestGate` 等待窗口默认设为 `60.0` 秒（保持全链路严格串行不并发请求模型）；多 Bot 实测为每个 Bot 启动独立官方 `mc-agent-api` 进程（端口 `18901..18909`）以消除单 Node 进程事件循环阻塞。
+
+### 离线回归与静态检查（`6093ad9` 基线）
+
+- Python 3.13.7 离线全套（`$env:BOTSLEEP_RUN_LIVE_TESTS='0'; .\.venv\Scripts\python.exe -B -m unittest discover -s tests -q`）：在 `commit 6093ad9` 实跑 **1481 项 / 73.563 秒：1471 通过、10 项跳过（2 项 `test_cave_matrix` 与 3 项 `test_speedrun_portal` 实服专用跳过，5 项 `test_stronghold.EngineTests` 因未安装 ninjabrain JAR 跳过），`OK (skipped=10)`**。
+- `compileall -q core skills agent integrations tests scripts main.py`、`main.py --config config.example.yaml --check-config`、`git diff --check` 均通过；相邻 `mc-agent-api` 工作区保持零本地修改。
+
+### 9 Bot 并行多地形实服压测（`multi_20261119_v2`，commit `6093ad9`）
+
+- **测试环境**：本地 Leaves 1.21.11（`difficulty=peaceful`）、9 个独立官方 `mc-agent-api` 实例（端口 `18901..18909`）、共享本地串行 `ModelRequestGate`、真实模型（日志 `response.model` 实测为 `qwen3.6-35b-a3b`）、单 Bot 预算 40 分钟（`max_runtime_seconds=2400` / `max_steps=768`）；`SleepBot1`～`SleepBot9` 分布于同一世界 9 处不同出生区（最小水平间距 `1969.1` 格，9/9 均为正常超时/步数耗尽退出 `rc=2`，无进程崩溃、无 `v1` 只读超时锁死与 `get_block` 扫描卡死）。
+
+| Bot | 出生点（虚构世界分区） | 步数 / 死亡 | 峰值资源与阶段里程碑（相对开局秒数） | 终态关键库存与观察现象 |
+| --- | --- | --- | --- | --- |
+| **Bot 1** | `[21.5, 85.0, 1.5]` | 150 / 0 | `logs 37s` → `wooden_pickaxe 291s` → `stone_pickaxe 413s` → `furnace 611s` → `24 raw_iron 1759s` → `24 iron_ingot 2114s` → `bucket 2133s` → `shield 2171s` → `iron_pickaxe 2220s` → `iron_axe 2251s` → `iron_sword 2305s` | 余 `12 iron_ingot` + `2 stone_pickaxe` + 6 原木；两次 `surface_caves` 仅见火把/泥土，`Y=16` 矿井采满 24 粗铁后回地面单炉冶炼 |
+| **Bot 2** | `[2002.5, 68.0, 15.5]` | 69 / 0 | `logs 113s` → `wooden_pickaxe 277s` → `stone_pickaxe 424s` → `furnace 569s` → `12 raw_iron 1481s` → `12 iron_ingot 1586s` → `shield 1814s` → `bucket 1849s` | 余 `2 iron_ingot` + `3 stone_pickaxe`；首次 `Y=16` 矿井耗时耗尽预算获 12 粗铁，二轮矿井采得铜矿未及补铁 |
+| **Bot 3** | `[-2021.5, 74.0, -18.5]` | 189 / 0 | `logs 47s` → `wooden_pickaxe 345s` → `stone_pickaxe 368s` → `furnace 640s` | `0 iron`；`Y=16` 矿井返程带回 `136 cobblestone`，后续陡坡采木累计 `path_not_found: 53`、`out_of_reach: 27` |
+| **Bot 4** | `[-0.5, 63.0, 1970.5]` | 768 / 0 | `logs 100s`（1 原木） | `0 iron`；约 `05:59:41` 落入 `Y=62` 河岸水域 `[17.5, 62.0, 1984.6]`，`in_water=True` 无深矿外自救路由，循环 `wait(1)` 765 步至步数耗尽 |
+| **Bot 5** | `[-7.5, 73.0, -2028.5]` | 131 / 0 | `logs 56s` → `wooden_pickaxe 158s` → `stone_pickaxe 361s` → `furnace 421s` → `11 raw_iron 1568s` → `7 iron_ingot 2313s` | 余 `7 iron_ingot + 4 raw_iron`（炉内续炼中）+ `61 raw_copper`；砍树出现 `stalled: 42` 及服务端 `moved wrongly` 告警 |
+| **Bot 6** | `[3981.5, 70.0, 27.8]` | 768 / 0 | `logs 68s`（7 原木） | `0 iron`；约 `06:03:06` 落入 `Y=62` 河岸水域 `[4010.0, 62.0, 29.9]`，循环 `wait(1)` 716 步至步数耗尽 |
+| **Bot 7** | `[2008.5, 63.0, -2026.5]` | 105 / 0 | `logs 246s` → `wooden_pickaxe 503s` → `stone_pickaxe 610s` | `15 coal + 2 raw_iron`；3 处浅洞探查 `target_reached`（含 7 煤）未见大铁脉，二轮矿井刚采 `2 raw_iron` 触达总预算 |
+| **Bot 8** | `[-2028.5, 66.0, 2013.5]` | 122 / 0 | `logs 25s` → `wooden_pickaxe 131s` → `stone_pickaxe 263s` → `24 raw_iron 1167s` → `24 iron_ingot 1505s` → `bucket 1535s` → `shield 1586s` → `iron_pickaxe 1612s` → `3 iron_pickaxe + iron_axe + iron_sword 1814s` → `1839s` 切入 `gather(diamond, 3)` | 终态余 `6 iron_ingot`；该区复用了同一持久化世界中残留工作台/熔炉（`[-1989, 70, 1991]` / `[-1989, 69, 1995]`）；浅洞得 `2 raw_iron` + `Y=16` 矿井 22 粗铁，30m39s 后下探 `Y=-54` 采出 `148 cobbled_deepslate + 101 cobblestone + 4 raw_iron`，40m 超时前尚未见钻石 |
+| **Bot 9** | `[-1987.5, 74.0, -1987.5]` | 141 / 1 | `logs 271s` → `wooden_pickaxe 399s` → `stone_pickaxe 591s` | `0 iron`；开局步入深水于 `Y=48` 溺亡，回世界出生点完成石器后触发 `llm_repeated_failure` 6 次 |
+
+- **实服边界与暴露的 3 项主要瓶颈**：
+  1. **非深矿河岸/浅水自救缺失（3/9 Bot 受阻）**：`Bot 4`、`Bot 6` 与 `Bot 9` 在地表落水（`in_water=True`）时，因非 `deep_mine` 上下文缺乏主动上浮＋向岸边实体方块登岸的脱离原语，导致原地 `wait(1)` 耗尽步数或溺亡。
+  2. **40 分钟内 `0/9` 获钻，速度受串行烧铁与副工具回合拖累**：9/9 均未在 40 分钟内采集到 `diamond` 或进入 `nether_portal` 闭环；且在 600 次只读预算的浅洞扫描下本轮 `surface_caves` 最高仅见 2 粗铁（Bot 8），未在洞内触发 `raw_iron >= 8` 临时营地，主铁源仍依赖 `Y=16` 矿井。单熔炉冶炼 24 铁耗约 `326–343s`、逐轮合成 `stone_axe`/`stone_sword`/`iron_axe`/`iron_sword` 额外消耗模型与采集轮次（如 `Bot 8` 在 `stone_axe`/`stone_sword` 区间 `263s→566s` 与 `iron_axe`/`iron_sword` 区间 `1612s→1781s` 合计耗时 `472s`，近 7.9 分钟），是 `Bot 1` / `Bot 8` 压缩冲钻时间的关键空间。
+  3. **陡坡/稀疏林地寻路卡滞**：`Bot 3` 在陡峭地形砍树累计 `path_not_found: 53`、`out_of_reach: 27`，`Bot 5` 出现 `stalled: 42`。
+
+---
+
+历史复核：2026-11-18（Asia/Shanghai），`develop-tianya/ai-iron-diamond-loop`（已提交节点 `db6dbb1`、`28417cf`、`01f22a4`、`8c35c51`、`4eee47e`）。
 
 ## 和平模式全新存档实服闭环调测（2026-11-18，Run 1～Run 6）
 
@@ -228,18 +359,18 @@ Windows / Python 3.12.10，禁用实服用例后运行 `py -3.12 -X utf8 -B -m u
 - **背包与熔炼修复**：`core/client.py` 封装 `/drop`，`core/autonomy_runtime.py` 在深矿前或背包满时主动丢弃花岗岩、闪长岩、安山岩、深板岩圆石、凝灰岩、沙砾、粗铜、多余圆石等杂物（仅附近已有箱子时入箱）；`skills/daily_survival.py` 修复高 2 格熔炉观察距离与 `inspected_furnace` 单步交接，避免反复 `inspect_container`。
 - **矿井安全与溶洞防卡死**：`skills/mining.py` 对矿井入口 `_wf_prepare_entry` 与阶梯前移增加精确站位与脚下实心核验、`corridor_only` 跳过冗余工作站开挖、`_wf_deep_fishbone` 增加溶洞多向岩石优先级转向与 24 次转向预算，以及 `_retreat_downsampled` 连续 2 次卡滞即提前交由 3D 寻路返程。
 
-### 离线回归与静态检查
+- **离线回归（`e76597b` 基线）**：**1440 项 / 67.756 秒：1430 通过、10 项跳过**，静态检查全通过；相邻 `mc-agent-api` 工作区零改动。
+- **实服阶段验证与未闭环阻塞说明**：Run 4（`iron_pickaxe ~17.2m`）、Run 7（`iron_pickaxe ~25m` 有效 21–22m 随后 `8 iron_ingot`）、Run 10 / Run 12（下探至 `Y=-5` 并安全返回地表 `[-125.7, 63, 412.5]`）；后因本地 MC 服务端离线未在本节点运行整程铁甲/采钻基准，当时标注未完待续。
 
-全部 Python 改动完成后的最终完整回归结果为：**1440 项 / 67.756 秒：1430 通过、10 项跳过（2 项 `test_cave_matrix` 与 3 项 `test_speedrun_portal` 实服专用跳过，5 项 `test_stronghold.EngineTests` 因未安装 ninjabrain JAR 跳过），`OK (skipped=10)`**，命令为 `$env:BOTSLEEP_RUN_LIVE_TESTS='0'; .\.venv\Scripts\python.exe -B -m unittest discover -s tests -v`。`compileall -q main.py agent core skills debug integrations`、`main.py --config config.example.yaml --check-config` 及 `git diff --check` 均通过；相邻 `mc-agent-api` 工作区零改动。
+---
 
-### 实服阶段验证与未闭环阻塞说明
+## main 与 dev-aure 本地集成（2026-11-18）
 
-使用本地 Minecraft 服务端（`127.0.0.1:25565`）、官方 `mc-agent-api` 与远端 LLM 对新存档进行多轮实测，确认到以下阶段表现：
-- **Run 4**：空手开局依次完成 `wooden_pickaxe`（约 1.9m）→ `stone_pickaxe`（约 6.6m）→ `furnace`（约 7.8m）→ `6 raw_iron + 4 coal`（约 14.5m）→ `iron_pickaxe`（约 17.2m）。
-- **Run 7**：空手开局完成 `wooden_pickaxe`（约 2.5m）→ `28 cobblestone`（67.84s）→ `stone_pickaxe`（约 4.3m）→ `furnace`（约 8.0m）→ `4 raw_iron`（约 17.4m，含约 3m 雷雨等待）→ `iron_pickaxe`（总耗时约 25m / 有效约 21–22m），随后到达 `Y=16` 再采 `7 raw_iron + 5 coal` 并冶炼出 `8 iron_ingot`。
-- **Run 10 / Run 12**：完成 `smelt` 铁锭、`iron_tools`（`iron_axe`/`iron_sword`/`shield`/`bucket`）、放置箱子存物后携带铁镐沿矿井下探至深板岩层（Run 10 下至 `Y=-5` 并安全返回地表 `[-125.7, 63, 412.5]`；Run 12 下至 `Y=2.0`）。
+基线为 `main 9018f76` 与 `dev-aure 4e0a59e`。沿用主线 `canopy_escape` 和自主任务控制器，不保留并行下降或调度实现。选择性迁入赛事候选投影、单工具请求约束、只读日志补看；可选本地开局复用同一 `starter_tools` 任务入口。
 
-**阻塞与未完成项**：在后续实测与最终“新存档完整铁套 + `Y=-54` 采钻闭环”基准测试前，本地 Minecraft 服务端与 RCON（`127.0.0.1:25565` / `25575`）离线停止响应，导致最终改版后的新档全程实服基准与实服采钻验收未能运行。因此当前版本**未宣称已实服跑通整套铁甲/钻石提取全闭环**，需在重启 MC 服务端后于独立测试存档复测。
+Windows / Python 3.12.10，禁用实服用例后运行 `py -3.12 -X utf8 -B -m unittest discover -s tests -v`：**1457 项，1452 通过、5 项实服专用跳过，191.625 秒**。合成卡树场景沿主线恢复落到 Y=88、未请求模型、无残留 pending。赛事全目录仍用于本地评估；模型已验证只收到阶段候选或活动任务详情。示例配置及本地既有配置均通过 `--check-config`。
+
+合并前主线 `9018f76` 曾在本地真实服务器从 Y=92 经 7 次移动下到 Y=88 草方块，生命/饥饿维持 20，未请求模型；该测试与此次合并后的离线回归是两次独立验证。合并版本未请求真实模型或重跑实服。
 
 ---
 

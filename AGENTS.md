@@ -15,12 +15,12 @@ BotSleep 基于 mc-agent-api 控制 Minecraft 机器人，采用大模型决策�
 - `skills/portal_speedrun.py`、`skills/crafting.py`、`skills/mining.py` 和 `core/radar.py` 是已合并的独立/调试能力；独立 schema 不等于已绑定模型工具。模型目录为 starter 9、daily 35、competition 40；详见 `docs/SKILL_SPEC.md`。门户主动采样不等于只读 EventMonitor。
 - 根目录 `bot_sleep.py`、`client.py` 是兼容入口，分别复用 `main.py` 和 `core/client.py`，不要再复制实现。
 - `core/survival_harness.py` 串行执行生存任务，`core/survival_state.py` 按 API/账号/world_id 保存检查点；有 pending 意图时不得自动重放。`skills/survival.py` 的动作需要真实状态变化验证。
-- `core/autonomous_tasks.py` 是无模型/客户端 I/O 的有界目标程序；`core/autonomy_runtime.py` 把 `run_survival_task` 接入现有 harness，保留一次原生目标反馈，每个子步骤仍独立 fresh 检查和 pending。默认 14 类目标、128 步/600 秒、4 次连续本地失败/8 次无进展/8 次探索；紧急安全挂起目标，unknown 不重放。只覆盖明确常用配方子集，不能宣称全部配方或全部任务实服通过；见 `docs/AUTONOMOUS_TASKS.md`。
+- `core/autonomous_tasks.py` 是无模型/客户端 I/O 的有界目标程序；`core/autonomy_runtime.py` 把 `run_survival_task` 接入现有 harness，保留一次原生目标反馈，每个子步骤仍独立 fresh 检查和 pending。默认 15 类目标、128 步/600 秒、4 次连续本地失败/8 次无进展/8 次探索；紧急安全挂起目标，unknown 不重放。只覆盖明确常用配方子集，不能宣称全部配方或全部任务实服通过；见 `docs/AUTONOMOUS_TASKS.md`。
 - `core/domain.py`、`core/skill_registry.py` 统一共享值和技能目录，必须保留主线自主任务、战斗与桶类入口；`core/retreat_controller.py` 管分段退避，`core/local_recovery_runtime.py` 管树冠/觅食恢复，不再复制旧控制器。住所采用 `StructureSpec` 四朝向蓝图，默认 north 兼容旧站点；门、床、箱子和返家证据必须使用同一朝向。
 - `skills/action_workflow.py`、独立门户/矿井/洞穴/容器、`core/world_3d.py` 与 `skills/world_navigator.py` 是结构工作流及 3D 探索能力，未默认注册到日常模型或替换地表采集。未知写入必须跨工作流传播，禁止通过新建 guard、换候选、返程或姿态清理追加动作。3D 记忆不替代新鲜观察；持久化调用须显式提供正确服务器、账号、世界和维度作用域。
 - `SurvivalJournal.instance_lock()` 防止同作用域重复启动；`scripts/botctl.py` 只读检查实例、游戏 pending 和模型门禁。会话保持仅由 `--keep-connected` / `mc_api.keep_session_on_exit` 显式开启，competition 默认退出仍登出。
 - autonomy 正常规划采用实际动态工具目录：目标工具与必要安全/赛事管理工具可见，`needs_ai` 后开放原子修复；不只依赖 prompt 的 prefer。9/35/40 是完整注册数，不是每次模型请求的暴露数；禁用 autonomy 保留原单步目录。
-- `core/competition_rules.py` 与 `core/competition_tasks.py` 实现 competition 规则快照、advancement 证据计分、任务状态与终态恢复；只读面板见 `docs/MONITORING.md`。计分以服务端状态为准，条件项须显式 override。当前 45 个明确计分项目中仅 8 个有明确行动计划（含有条件的怪物猎人）；其余目录虽可评估计分但标为 unsupported。不得把离线覆盖说成完整比赛执行验收。
+- `core/competition_rules.py` 与 `core/competition_tasks.py` 管理规则、服务端 advancement 计分、任务状态及恢复。45 个无条件计分项中 13 个已有工具路线；其余 32 个及 54 个条件项在 `core/competition_blueprints.py` 有步骤和能力缺口，但不可选择。条件项计分仍须显式 override。见 `docs/HARNESS_INTERFACES.md`；不得把蓝图或离线回归说成实服执行验收。
 - `skills/combat.py`、`skills/hunting.py`、`skills/buckets.py` 分别实现短步战斗、静止狩猎和受限液体操作。攻击已发、伤害已证实、击杀与实际掉落增量分开；未知副作用保持 pending，不补发 stop/攻击/收桶。`core/survival_playbook.py` 的版本化阶段建议经 `survival.intent` 选择，未绑定的下界/末地技能保持 blocked；参见 `docs/COMBAT_AND_HUNTING.md` 与 `docs/SURVIVAL_PLAYBOOK.md`。
 - 模型只能选择已注册技能；返回后须重新观察并通过本地安全门禁。所有模型请求必须经过 `core/model_gate.py`，禁止并发请求；传输超时/连接中断留下持久化未知状态，不得自动重试或擅自清锁。明确 HTTP 失败可有界退避，不回退为规则采集。`llm.model` 是请求路由，实际模型仅采用 `response.model`，缺失时显示“未确认”。
 

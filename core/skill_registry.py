@@ -128,7 +128,7 @@ def internal_skills_for_objective(objective: str) -> FrozenSet[str]:
 def resolve_skill_runner(harness: Any, skill_name: str) -> Any:
     """Resolve the skill runner instance on SurvivalHarness for a given skill name."""
     spec = SKILL_REGISTRY.get(skill_name)
-    if spec is None or not getattr(harness, "daily", False):
+    if spec is None or (spec.runner_slot != "combat_skills" and not getattr(harness, "daily", False)):
         return harness.skills
     slot = spec.runner_slot
     if slot in {"shelter_skills", "shelter_preparation_skills", "starter_staircase_skills", "batch_skills", "door_skills", "positioning_skills",

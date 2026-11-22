@@ -89,6 +89,44 @@ class AutonomousTaskTests(unittest.TestCase):
         self.controller.record_result(decision, result, self.obs)
         return decision
 
+    def test_bone_meal_crafts_from_held_bone_without_workstation(self):
+        obs = world({"bone_meal": 2})
+        controller = self.start({"task": "craft", "item": "bone_meal", "count": 3}, obs)
+        obs["counts"]["bone"] = 1  # Newly observed inventory, not an entity or a hit receipt.
+        self.assertEqual(self.act().name, "craft_item")
+        self.assertEqual(obs["counts"], {"bone_meal": 5, "bone": 0})
+        self.assertIsNone(controller.next_action(obs))
+        self.assertEqual(controller.snapshot()["status"], "completed")
+
+    def test_bone_meal_reports_remaining_bones_without_chasing_visible_drop(self):
+        obs = world({"bone": 1})
+        obs["entities"] = [{"id": 7, "name": "item", "item": "bonex4", "pos": [2.5, 64, .5]}]
+        controller = self.start({"task": "craft", "item": "bone_meal", "count": 7}, obs)
+        self.assertEqual(self.act().name, "craft_item")
+        self.assertIsNone(controller.next_action(obs))
+        snapshot = controller.snapshot()
+        self.assertEqual(snapshot["status"], "needs_ai")
+        self.assertIn("missing_material: bone x2", snapshot["reason"])
+        self.assertEqual(snapshot["progress"], {"current": 3, "target": 7, "unit": "bone_meal"})
+        self.assertIsNone(controller.state()["pending_digest"])
+
+    def test_bone_meal_leaves_bone_block_untouched_when_recipe_is_ambiguous(self):
+        obs = world({"bone": 1, "bone_block": 1})
+        controller = self.start({"task": "craft", "item": "bone_meal", "count": 3}, obs)
+        self.assertIsNone(controller.next_action(obs))
+        self.assertIn("ambiguous_recipe", controller.snapshot()["reason"])
+        self.assertEqual(obs["counts"], {"bone": 1, "bone_block": 1})
+
+    def test_diamond_boots_use_four_diamonds_and_verify_output(self):
+        obs = world({"diamond": 4})
+        obs["blocks"].append({"name": "crafting_table", "pos": [1, 64, 0], "can_see": True})
+        controller = self.start({"task": "craft", "item": "diamond_boots", "count": 1}, obs)
+        decision = self.act()
+        self.assertEqual((decision.name, decision.args), ("craft_item", {"item": "diamond_boots", "count": 1}))
+        self.assertEqual(obs["counts"], {"diamond": 0, "diamond_boots": 1})
+        self.assertIsNone(controller.next_action(obs))
+        self.assertEqual(controller.snapshot()["status"], "completed")
+
     def test_invalid_arguments_and_unsupported_items_fail_without_mutating_active_goal(self):
         controller = self.start()
         before = controller.state()
@@ -942,6 +980,145 @@ class AutonomousTaskTests(unittest.TestCase):
         controller.record_result(step, SkillResult(False, "Unavailable", {}, "missing_item"), obs)
         self.assertFalse(controller.confirm_completion(obs))
         self.assertEqual(controller.next_action(obs).goal, "equip_loadout")
+
+
+    def test_nether_portal_gathers_water_and_flint_and_steel_then_builds_portal(self):
+        obs = world({"bucket": 1, "iron_ingot": 1, "flint": 1, "cobblestone": 16, "iron_pickaxe": 1})
+        obs["blocks"] = [
+            {"name": "water", "pos": [2, 63, 0], "can_see": True},
+            {"name": "crafting_table", "pos": [1, 64, 0], "can_see": True},
+        ]
+        ctrl = self.start({"task": "nether_portal"}, obs=obs)
+        step1 = ctrl.next_action(obs)
+        self.assertEqual((step1.name, step1.args["expected_name"]), ("collect_liquid", "water"))
+        obs["counts"].pop("bucket", None)
+        obs["counts"]["water_bucket"] = 1
+        ctrl.record_result(step1, SkillResult(True, "Water filled", {"executed": True}), obs)
+
+        step2 = ctrl.next_action(obs)
+        self.assertEqual((step2.name, step2.args["item"]), ("craft_item", "flint_and_steel"))
+        obs["counts"]["flint_and_steel"] = 1
+        ctrl.record_result(step2, SkillResult(True, "Crafted flint_and_steel", {"executed": True}), obs)
+
+        step3 = ctrl.next_action(obs)
+        self.assertEqual((step3.name, step3.goal), ("move_to", "nether_portal"))
+        ctrl.record_result(step3, SkillResult(True, "Portal active", {"portal_active": True, "portal_skill": True}), obs)
+        self.assertTrue(ctrl.confirm_completion(obs))
+        self.assertEqual(ctrl.snapshot()["status"], "completed")
+
+    def test_craft_missing_crafting_table_and_planks_delegates_to_log_gathering(self):
+        obs = world({"cobblestone": 8, "stick": 2, "oak_planks": 3})
+        obs["blocks"] = [{"name": "stone", "pos": [1, 63, 0], "can_see": True}]
+        ctrl = self.start({"task": "craft", "item": "stone_pickaxe", "count": 1}, obs=obs)
+        step = ctrl.next_action(obs, {"remote_log_target": [20, 64, 0]})
+        self.assertIsNotNone(step)
+        self.assertEqual((step.name, step.goal), ("move_to", "scout_logs"))
+
+    def test_smelt_waits_for_residual_burning_furnace_instead_of_exploring(self):
+        obs = world({"raw_iron": 3, "coal": 2})
+        obs["blocks"].append({"name": "furnace", "pos": [1, 64, 0], "can_see": True})
+        obs["furnaces"] = [{
+            "pos": [1, 64, 0],
+            "name": "furnace",
+            "dimension": "overworld",
+            "fresh": True,
+            "verified": True,
+            "source": "inspect_container",
+            "input": {"name": None, "count": 0},
+            "fuel": {"name": None, "count": 0},
+            "output": {"name": None, "count": 0},
+            "burning": True,
+        }]
+        ctrl = self.start({"task": "smelt", "item": "iron_ingot", "count": 3}, obs=obs)
+        step = ctrl.next_action(obs)
+        self.assertIsNotNone(step)
+        self.assertEqual(step.name, "wait")
+
+    def test_gather_diamond_skips_iron_shaft_loop_when_holding_one_iron_pickaxe_and_zero_iron(self):
+        obs = world({"iron_pickaxe": 1, "bucket": 1})
+        ctrl = self.start({"task": "gather", "resource": "diamond", "count": 3}, obs=obs)
+        step = ctrl.next_action(obs, {"deep_mining_enabled": True})
+        self.assertIsNotNone(step)
+        self.assertEqual(step.goal, "deep_mine")
+        self.assertEqual(ctrl.state()["pending_deep_mine"]["resource"], "diamond")
+
+    def test_gather_diamond_crafts_third_iron_pickaxe_when_spare_ingots_held(self):
+        obs = world({"iron_pickaxe": 2, "iron_ingot": 3, "stick": 2})
+        obs["blocks"].append({"name": "crafting_table", "pos": [1, 64, 0], "can_see": True})
+        ctrl = self.start({"task": "gather", "resource": "diamond", "count": 3}, obs=obs)
+        step = ctrl.next_action(obs, {"deep_mining_enabled": True})
+        self.assertIsNotNone(step)
+        self.assertEqual((step.name, step.args["item"]), ("craft_item", "iron_pickaxe"))
+
+    def test_smelt_places_extra_furnace_for_bulk_raw_iron_when_first_is_burning(self):
+        obs = world({"raw_iron": 16, "coal": 3, "furnace": 1})
+        obs["blocks"].append({"name": "furnace", "pos": [1, 64, 0], "can_see": True})
+        obs["furnaces"] = [{
+            "pos": [1, 64, 0], "name": "furnace", "dimension": "overworld",
+            "fresh": True, "verified": True, "source": "inspect_container",
+            "input": {"name": "raw_iron", "count": 8}, "fuel": {"name": "coal", "count": 1},
+            "output": {"name": None, "count": 0}, "burning": True,
+        }]
+        obs["placement_candidates"] = [{"pos": [2, 64, 0], "support": "grass_block"}]
+        ctrl = self.start({"task": "smelt", "item": "iron_ingot", "count": 24}, obs=obs)
+        step = ctrl.next_action(obs, {"smelting_jobs": [{"pos": [1, 64, 0], "dimension": "overworld", "expected_output": "iron_ingot"}]})
+        self.assertIsNotNone(step)
+        self.assertEqual((step.name, step.args["item"], step.args["pos"]), ("place_item", "furnace", [2, 64, 0]))
+
+    def test_raw_iron_mines_visible_surface_stone_for_spare_pickaxes_when_cobble_spent(self):
+        obs = world({"stone_pickaxe": 1, "oak_log": 2})
+        obs["blocks"] = [
+            {"name": "stone", "pos": [2, 64, 0], "can_see": True, "can_dig": True},
+            {"name": "crafting_table", "pos": [1, 64, 0], "can_see": True},
+        ]
+        ctrl = self.start({"task": "gather", "resource": "raw_iron", "count": 24}, obs=obs)
+        step = ctrl.next_action(obs, {"deep_mining_enabled": True})
+        self.assertIsNotNone(step)
+        self.assertEqual((step.name, step.args["expected_name"]), ("gather_block", "stone"))
+
+    def test_gather_logs_excludes_entire_route_failed_trunk_column_and_uses_remote_waypoint(self):
+        obs = world({})
+        obs["blocks"] = [
+            {"name": "oak_log", "pos": [4, 65, 0], "can_see": True, "can_dig": True},
+            {"name": "oak_log", "pos": [4, 66, 0], "can_see": True, "can_dig": True},
+        ]
+        ctrl = self.start({"task": "gather", "resource": "logs", "count": 4}, obs=obs)
+        step1 = ctrl.next_action(obs)
+        self.assertEqual((step1.name, step1.args["pos"]), ("gather_block", [4, 65, 0]))
+        ctrl.record_result(step1, SkillResult(False, "No path", {"target": [4, 65, 0]}, "path_not_found"), obs)
+        step2 = ctrl.next_action(obs, {"remote_log_target": [24.0, 64.0, 0.0]})
+        self.assertIsNotNone(step2)
+        self.assertEqual((step2.name, step2.goal), ("move_to", "scout_logs"))
+
+    def test_smelt_places_extra_furnace_when_only_logs_held_as_fuel(self):
+        obs = world({"raw_iron": 16, "oak_log": 3, "furnace": 1})
+        obs["blocks"].append({"name": "furnace", "pos": [1, 64, 0], "can_see": True})
+        obs["furnaces"] = [{
+            "pos": [1, 64, 0], "name": "furnace", "dimension": "overworld",
+            "fresh": True, "verified": True, "source": "inspect_container",
+            "input": {"name": "raw_iron", "count": 8}, "fuel": {"name": "oak_planks", "count": 4},
+            "output": {"name": None, "count": 0}, "burning": True,
+        }]
+        obs["placement_candidates"] = [{"pos": [2, 64, 0], "support": "grass_block"}]
+        ctrl = self.start({"task": "smelt", "item": "iron_ingot", "count": 24}, obs=obs)
+        step = ctrl.next_action(obs, {"smelting_jobs": [{"pos": [1, 64, 0], "dimension": "overworld", "expected_output": "iron_ingot"}]})
+        self.assertIsNotNone(step)
+        self.assertEqual((step.name, step.args["item"], step.args["pos"]), ("place_item", "furnace", [2, 64, 0]))
+
+    def test_scout_does_not_escalate_cooling_down_when_origin_cell_blocked(self):
+        obs = world({})
+        ctrl = self.start({"task": "scout", "count": 8}, obs=obs)
+        step = ctrl.next_action(obs, {"blocked_targets": {"0,64,0": 9999999999.0}})
+        self.assertIsNotNone(step)
+        self.assertEqual((step.name, step.goal), ("move_to", "scout_surface"))
+
+    def test_craft_does_not_chase_remote_logs_when_existing_table_is_blocked(self):
+        obs = world({"cobblestone": 8})
+        obs["blocks"] = [{"name": "crafting_table", "pos": [2, 67, 0], "can_see": False}]
+        ctrl = self.start({"task": "craft", "item": "furnace", "count": 1}, obs=obs)
+        step = ctrl.next_action(obs, {"blocked_targets": {"2,67,0": 9999999999.0}, "remote_log_target": [24, 64, 0]})
+        self.assertIsNone(step)
+        self.assertEqual(ctrl.snapshot()["status"], "needs_ai")
 
 
 if __name__ == "__main__":

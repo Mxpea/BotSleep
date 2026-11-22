@@ -11,6 +11,7 @@ RECIPES = {
     "crafting_table": ({"planks": 4}, 1), "stick": ({"planks": 2}, 4),
     "furnace": ({"cobblestone": 8}, 1), "chest": ({"planks": 8}, 1),
     "torch": ({"coal": 1, "stick": 1}, 4), "bread": ({"wheat": 3}, 1),
+    "bone_meal": ({"bone": 1}, 3), "diamond_boots": ({"diamond": 4}, 1),
     "shield": ({"planks": 6, "iron_ingot": 1}, 1), "bucket": ({"iron_ingot": 3}, 1),
     "flint_and_steel": ({"iron_ingot": 1, "flint": 1}, 1),
     "blaze_powder": ({"blaze_rod": 1}, 2),
@@ -27,7 +28,7 @@ RECIPES = {
 }
 CRAFT_ITEMS = frozenset(RECIPES)
 
-HAND_RECIPES = frozenset({"stick", "torch", "crafting_table", "flint_and_steel", "blaze_powder", "ender_eye", *PLANK_NAMES})
+HAND_RECIPES = frozenset({"stick", "torch", "crafting_table", "flint_and_steel", "blaze_powder", "ender_eye", "bone_meal", *PLANK_NAMES})
 MAX_PLANNED_BATCHES = 4
 
 

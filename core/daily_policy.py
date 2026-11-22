@@ -7,10 +7,13 @@ promise that the backend will follow that path or that a shelter is monster-proo
 
 import math
 import re
+import time
 from collections.abc import Mapping
 
-from agent.survival_planner import Decision, SurvivalPlanner, RANGED_HOSTILES
-from core.domain import FOOD_POINTS, LOG_NAMES, PLANK_NAMES, cell_coords, extract_blocks, parse_pos
+from agent.survival_planner import Decision, SurvivalPlanner
+from core.domain import FOOD_POINTS, LOG_NAMES, PLANK_NAMES, RANGED_HOSTILES, cell_coords, extract_blocks, parse_pos
+from core.local_recovery_runtime import TREE_SUPPORTS, has_canopy_support, verified_footing
+from core.policy_relaxation import LOW_HEALTH, NIGHT, allows_atomic, allows_goal
 from core.night_home_route import exterior_step
 from skills.daily_survival import DailySurvivalSkills
 from skills.combat import combat_options
@@ -20,7 +23,6 @@ CROP_OUTPUT = {"wheat": (7, "wheat"), "carrots": (7, "carrot"), "potatoes": (7, 
 FOOD_ACTIONS = frozenset({"harvest_crop", "take_items", "inspect_container", "craft_item", "smelt_collect", "collect_drops", "eat_food", "wait"})
 HAZARDS = DailySurvivalSkills.HAZARDS
 BOOTSTRAP_ITEMS = frozenset(PLANK_NAMES) | {"stick", "crafting_table", "wooden_pickaxe", "wooden_sword", "wooden_axe"}
-TREE_SUPPORTS = frozenset(LOG_NAMES) | {name[:-4] + "_wood" for name in LOG_NAMES}
 
 
 class DailySafetyPolicy:
@@ -63,7 +65,7 @@ class DailySafetyPolicy:
         # Never authorize an eat action that the active daily skill rejects.
         return {name: points for name, points in FOOD_POINTS.items() if name in DailySurvivalSkills.FOODS}
 
-    def _basics(self, observation):
+    def _basics(self, observation, context=None):
         if (not isinstance(observation, dict) or observation.get("fresh") is not True
                 or observation.get("stale") is True or not isinstance(observation.get("status"), dict)):
             return "observation_required", self._wait("A fresh complete observation is required", "observe")
@@ -84,7 +86,20 @@ class DailySafetyPolicy:
                 or type(status.get("is_day")) is not bool or type(status.get("thundering")) is not bool
                 or not self.rules._number(status.get("time_of_day")) or not 0 <= status["time_of_day"] < 24000):
             return "observation_required", self._wait("Position, life, food and daytime data must be valid", "observe")
-        if any(status.get(key) for key in ("in_lava", "on_fire", "submerged", "in_water")):
+        if status.get("in_lava") or status.get("on_fire"):
+            return "environment_hazard", self._wait("No environmental rescue route is verified", "recover", 1)
+        if status.get("submerged") or status.get("in_water"):
+            water_state = (context or {}).get("water_recovery") or {}
+            cooled = bool(water_state.get("exhausted")) or (
+                type(water_state.get("retry_after")) in (int, float) and water_state["retry_after"] > time.time()
+            )
+            if status.get("in_water") and not cooled:
+                return "water_escape", Decision(
+                    "water_escape",
+                    {},
+                    "Exit water onto freshly checked dry ground or swim upward for air",
+                    "safety",
+                )
             return "environment_hazard", self._wait("No environmental rescue route is verified", "recover", 1)
         if status.get("in_vehicle"):
             return "vehicle", self._wait("Leave the vehicle before daily tasks", "recover")
@@ -131,45 +146,8 @@ class DailySafetyPolicy:
         shelter = self._shelter(observation)
         return self._bed(observation) or (shelter is not None and shelter.get("inside") is True)
 
-    def _footing(self, observation):
-        """Accept support only while its freshly read origin still matches."""
-        if self._partial(observation):
-            return None
-        status, footing = observation["status"], observation.get("footing")
-        source = self._point(observation.get("footing_origin"))
-        origin = status["pos"]
-        if (not isinstance(footing, dict) or footing.get("fresh") is not True
-                or footing.get("verified") is not True or footing.get("source") != "api_verified"
-                or not isinstance(footing.get("name"), str) or not isinstance(footing.get("properties"), dict)
-                or source is None or self._cell(source) != self._cell(origin) or math.dist(source, origin) > .2):
-            return None
-        pos = self._point(footing.get("pos"))
-        x, y, z = self._cell(origin)
-        return footing if pos == [x, y - 1, z] and DailySurvivalSkills._safe_block(footing) else None
-
-    def _canopy(self, observation, context=None):
-        """A trunk encountered during the same evacuation is not safe ground.
-
-        Logs alone cannot establish a canopy: ordinary placed wooden support
-        must not initiate an escape without existing current-life recovery.
-        """
-        footing = self._footing(observation)
-        props = (footing or {}).get("properties")
-        if footing is None:
-            return False
-        if footing.get("name") in DailySurvivalSkills.RETREAT_LEAVES:
-            return isinstance(props, dict) and (props.get("waterlogged") is False or props.get("waterlogged") == "false")
-        if footing.get("name") not in TREE_SUPPORTS:
-            return False
-        state = (context or {}).get("canopy_recovery")
-        status = observation["status"]
-        if (not isinstance(state, dict) or state.get("dimension") != status.get("dimension")
-                or "life" not in state or state["life"] != status.get("last_death")
-                or self._point(state.get("origin")) is None or state.get("unknown") is True
-                or state.get("retreat_complete") is True or state.get("evacuation_stage") == "ground"):
-            return False
-        steps = state.get("steps")
-        return state.get("evacuating") is True or type(steps) is int and steps > 0
+    _footing = staticmethod(verified_footing)
+    _canopy = staticmethod(has_canopy_support)
 
     def _canopy_decision(self):
         return Decision("canopy_escape", {}, "Current support remains part of the canopy evacuation; take one checked escape step and observe again", "safety")
@@ -234,7 +212,7 @@ class DailySafetyPolicy:
 
     def cautious_bootstrap(self, observation, context=None):
         """Shared pure gate for goal admission and each limited atomic child."""
-        _, forced = self._basics(observation)
+        _, forced = self._basics(observation, context)
         return forced is None and self._meal(observation) is None and self._bootstrap_ready(observation, context)
 
     def _bootstrap_valid(self, decision, observation, context=None):
@@ -521,7 +499,7 @@ class DailySafetyPolicy:
                    and (row.get("properties") or {}).get("occupied") not in (True, "true") for row in self._blocks(observation))
 
     def constraints(self, observation, context=None):
-        scenario, forced = self._basics(observation)
+        scenario, forced = self._basics(observation, context)
         allowed, radius, model = None, 32, forced is None
         reason = forced.reason if forced else "Normal bounded daily planning remains subject to local skill verification"
         if forced is not None:
@@ -569,7 +547,7 @@ class DailySafetyPolicy:
         return result
 
     def choose(self, observation, baseline_decision, task_board=None, context=None):
-        scenario, forced = self._basics(observation)
+        scenario, forced = self._basics(observation, context)
         if forced is not None:
             # Preserve the harness's bounded retreat search cooldown instead of
             # recreating the same unsafe route every observation.
@@ -620,13 +598,13 @@ class DailySafetyPolicy:
             return "invalid_decision"
         if decision.name == "wait":
             return None
-        scenario, forced = self._basics(observation)
+        scenario, forced = self._basics(observation, context)
         if forced is not None:
             if forced.name == "fight_hostile" and decision.name == forced.name and decision.args == forced.args:
                 return None
             if forced.name == "retreat_from" and decision.name == forced.name and self._point(decision.args.get("pos")) == forced.args["pos"]:
                 return None
-            if forced.name == "auto_sleep" and decision.name == "auto_sleep":
+            if forced.name in {"auto_sleep", "water_escape"} and decision.name == forced.name and (forced.name != "water_escape" or not decision.args):
                 return None
             return scenario
         status = observation["status"]
@@ -662,3 +640,52 @@ class DailySafetyPolicy:
             combat = combat_options(observation, decision.args.get("entity_id"), decision.args.get("expected_name"))
             return None if combat.get("allowed") is True else combat.get("reason", "combat_not_verified")
         return None
+
+    def soft_hold(self, safety_decision, observation, context=None):
+        """Identify a relaxation candidate only when local safety would just wait."""
+        if not isinstance(safety_decision, Decision) or safety_decision.name != "wait":
+            return None
+        if not self.relaxation_stance(observation, context):
+            return None
+        status = observation["status"]
+        if safety_decision.goal == "sleep" and self._strict_night_block(observation, status):
+            return NIGHT if status["health"] > self.low_health else None
+        if (safety_decision.goal in {"recover", "food_recovery"} and status["health"] <= self.low_health
+                and status["food"] < 18 and not self._night(status)
+                and not self._food_options(observation, low_health=True)
+                and self._food_search(observation, context) is None):
+            return LOW_HEALTH
+        return None
+
+    def relaxation_stance(self, observation, context=None):
+        """Full observation is a prerequisite, not an execution authorization."""
+        context = context or {}
+        if (not isinstance(observation, dict) or self._partial(observation) or context.get("pending")
+                or context.get("cautious_bootstrap") or (context.get("retreat_recovery") or {}).get("evacuating")
+                or context.get("combat_retreat") or observation.get("inventory_fresh") is False
+                or observation.get("terrain_fresh") is False or self._basics(observation, context)[1] is not None):
+            return False
+        status = observation["status"]
+        footing = self._footing(observation)
+        entities = observation.get("entities")
+        return (status.get("on_ground") is True and status.get("thundering") is False
+                and "busy" in status and status["busy"] in (None, False)
+                and status["health"] > 4 and status["food"] > 6 and self._meal(observation) is None
+                and footing is not None and footing["name"] in DailySurvivalSkills.SUPPORT - TREE_SUPPORTS
+                and isinstance(entities, list) and len(entities) < 40)
+
+    def allows_relaxed(self, decision, mode, observation):
+        """Match the original intent, without authorizing an implicit approach."""
+        if decision.name == "run_survival_task":
+            return allows_goal(decision.args, mode)
+        if not allows_atomic(decision.name, decision.args, mode):
+            return False
+        if decision.name == "craft_item":
+            return True
+        target = self._point(decision.args.get("pos"))
+        origin = observation["status"]["pos"]
+        return (target is not None and math.dist(origin, target) <= 2.8
+                and self._cell(target)[0::2] != self._cell(origin)[0::2]
+                and any(row["pos"] == target and row["name"] == decision.args["expected_name"]
+                        and row.get("can_see") is True and row.get("can_dig", row.get("harvest_tool_ok")) is True
+                        for row in self.rules._blocks(observation)))

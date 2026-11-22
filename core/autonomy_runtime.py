@@ -13,7 +13,7 @@ from agent.brain import LLMError
 from agent.survival_planner import Decision
 from core.build_projection import wood_material
 from core.client import APIError
-from core.domain import LOG_NAMES, PLANK_NAMES, extract_blocks, inventory_counts, parse_pos
+from core.domain import LOG_NAMES, PLANK_NAMES, extract_blocks, finite_number, inventory_counts, parse_pos
 from core.model_gate import ModelGateError
 from core.starter_mining_task import recover_interrupted_mine
 from core.survival_mainline import choose_chapter, mainline_enabled, same_goal
@@ -180,35 +180,61 @@ class AutonomyRuntime:
             "accepted": True, "completed": False, "executed": False,
             "task_id": self._task_snapshot().get("task_id")})
 
-    def _remote_log_waypoint(self, observation, log_names=LOG_NAMES):
-        if any(row.get("name") in log_names for row in extract_blocks(observation)):
-            return None
+    def _remote_log_waypoint(self, observation, log_names=LOG_NAMES, *, blocked=None):
         origin = parse_pos((observation.get("status") or {}).get("pos"))
         if origin is None:
             return None
+        now = time.time()
+        blocked_keys = [key for key, until in (blocked or {}).items() if finite_number(until) and until > now]
+        blocked_xz = set()
+        for bkey in blocked_keys:
+            parts = str(bkey).split(",")
+            if len(parts) == 3:
+                try:
+                    blocked_xz.add((int(parts[0]), int(parts[2])))
+                except ValueError:
+                    pass
+        for row in extract_blocks(observation):
+            if row["name"] not in log_names:
+                continue
+            rpos = row["pos"]
+            if abs(float(rpos[1]) - float(origin[1])) > 3.1:
+                continue
+            if (math.floor(rpos[0]), math.floor(rpos[2])) in blocked_xz:
+                continue
+            return None
+        def candidates(rows):
+            return [row["pos"] for row in extract_blocks({"blocks": rows}) if row["name"] in log_names
+                    and (math.floor(row["pos"][0]), math.floor(row["pos"][2])) not in blocked_xz]
+
         try:
-            rows = self.client.get_blocks(radius=64, types=sorted(log_names), limit=8)
+            rows = self.client.get_blocks(radius=64, types=sorted(log_names), limit=12)
+            if not rows or not candidates(rows):
+                rows = self.client.get_blocks(radius=128, types=sorted(log_names), limit=24)
         except APIError:
             return None
-        candidates = [row["pos"] for row in extract_blocks({"blocks": rows}) if row["name"] in log_names]
-        best = min(candidates, key=lambda pos: math.dist(origin, pos), default=None)
-        if best is None:
+        waypoints = candidates(rows)
+        if not waypoints:
             return None
+        best = min(
+            waypoints,
+            key=lambda p: (0 if abs(float(p[1]) - float(origin[1])) <= 4.0 else 1, math.dist(origin, p)),
+        )
         dist = math.dist(origin, best)
         if dist <= 24.0:
-            return None
-        if dist <= 26.0:
-            return [float(best[0]), float(origin[1]), float(best[2])]
+            if abs(float(best[0]) - float(origin[0])) + abs(float(best[2]) - float(origin[2])) <= 4.0:
+                return None
+            return [float(best[0]), float(best[1]), float(best[2])]
         scale = 24.0 / dist
         return [
             round(float(origin[0]) + (float(best[0]) - float(origin[0])) * scale, 1),
-            float(origin[1]),
+            round(float(origin[1]) + (float(best[1]) - float(origin[1])) * scale, 1),
             round(float(origin[2]) + (float(best[2]) - float(origin[2])) * scale, 1),
         ]
 
     _MINING_CLUTTER_KEEP = (
         ("granite", 0), ("diorite", 0), ("andesite", 0), ("cobbled_deepslate", 0),
-        ("tuff", 0), ("gravel", 0), ("flint", 0), ("leaf_litter", 0),
+        ("tuff", 0), ("gravel", 8), ("flint", 4), ("leaf_litter", 0),
         ("red_mushroom", 0), ("brown_mushroom", 0), ("rotten_flesh", 0),
         ("raw_copper", 0), ("sand", 0), ("dirt", 0), ("cobblestone", 64),
     )
@@ -237,12 +263,13 @@ class AutonomyRuntime:
             counts = after
 
     def _run_task_workflow(self, decision, observation):
-        if (decision.goal in {"deep_mine", "scout_surface"}
+        if (decision.goal in {"deep_mine", "scout_surface", "nether_portal"}
                 and observation["status"].get("dimension") not in {"overworld", "minecraft:overworld"}):
             return SkillResult(False, "Surface expeditions require the overworld", {"executed": False}, "unsafe_dimension")
-        runners = {"deep_mine": (self._run_task_deep_mine, 840),
+        runners = {"deep_mine": (self._run_task_deep_mine, 1140),
                    "scout_surface": (self._run_task_scout, 55),
-                   "equip_loadout": (self._run_task_equip_loadout, 30)}
+                   "equip_loadout": (self._run_task_equip_loadout, 30),
+                   "nether_portal": (self._run_task_nether_portal, 390)}
         run, cap = runners[decision.goal]
         available = min(cap, self.task_controller.remaining_seconds())
         global_seconds = self._remaining_budget()["remaining_seconds"]
@@ -276,8 +303,8 @@ class AutonomyRuntime:
             target_y = max(36, start_surface[1] - 11)
             before_c = observation["counts"].get("cobblestone", 0)
             res = miner.build_mine_shaft(
-                origin=start_surface,
-                radius=18,
+                origin=None,
+                radius=24,
                 branch_length=4,
                 place_workstation=False,
                 return_to_surface=True,
@@ -298,10 +325,16 @@ class AutonomyRuntime:
             # Confirm its position without starting another movement workflow.
             status = guard.check_status()
             pos = parse_pos(status.get("pos"))
-            on_surface = pos is not None and math.dist(pos, start_surface) <= 3
+            anchor = parse_pos(data.get("surface_entry")) or start_surface
+            on_surface = pos is not None and math.dist(pos, anchor) <= 1.6
             surface_chk = {"on_surface": on_surface, "pos": pos}
             data["surface_return"] = surface_chk
-            after_c = guard.read(self.client.get_inventory_counts)
+            raw = guard.read(self.client.inventory, timeout_seconds=guard.remaining_timeout(5))
+            payload = raw.get("result") if isinstance(raw, dict) else None
+            items = payload.get("items") if isinstance(payload, dict) else None
+            if not isinstance(items, list):
+                guard.fail_uncertain("action_unconfirmed", "Mined cobblestone inventory could not be verified")
+            after_c = inventory_counts({"inventory": items})
             gained_cobble = max(0, int(after_c.get("cobblestone", 0)) - before_c)
             if gained_cobble > 0:
                 data.setdefault("gained", {})["cobblestone"] = gained_cobble
@@ -314,24 +347,24 @@ class AutonomyRuntime:
         if resource == "diamond":
             targets = {"diamond": {"count": count, "min_tool": "iron_pickaxe"}}
         elif resource == "raw_iron":
-            targets = {"iron": {"count": max(count, 7), "min_tool": "stone_pickaxe"}}
+            targets = {"iron": {"count": count, "min_tool": "stone_pickaxe"}}
         else:
             targets = {"coal": {"count": count, "min_tool": "wooden_pickaxe"}}
         if self.campaign is not None:
             deep_home_thresholds["min_pickaxe_tool"] = next(iter(targets.values()))["min_tool"]
-        total_t = min(840 if resource == "diamond" else 540, window.remaining())
-        band_t = min(760 if resource == "diamond" else 460, total_t * .9)
+        total_t = min({"diamond": 1140, "raw_iron": 750, "coal": 540}[resource], window.remaining())
+        band_t = min({"diamond": 960, "raw_iron": 640, "coal": 460}[resource], total_t * .85)
         res = miner.mine_targets_from_surface(
             targets=targets,
-            cave_policy={"explore_timeout_seconds": min(65, total_t)},
+            cave_policy={"explore_timeout_seconds": min(220.0, total_t), "allow_tall_cave_subgraph": True},
             home_thresholds=deep_home_thresholds,
             prefer_caves_first=(resource in {"raw_iron", "coal"}),
-            cave_search_radius=24,
-            max_caves=2,
+            cave_search_radius=40,
+            max_caves=3,
             place_workstation=False,
-            rib_length=8 if resource == "diamond" else 6,
-            rib_spacing=4,
-            max_trunk_steps=20 if resource == "diamond" else 16 if resource == "raw_iron" else 10,
+            rib_length=12 if resource in {"diamond", "raw_iron"} else 6,
+            rib_spacing=3 if resource in {"diamond", "raw_iron"} else 4,
+            max_trunk_steps=36 if resource == "diamond" else 28 if resource == "raw_iron" else 10,
             band_timeout_seconds=band_t,
             total_timeout_seconds=total_t,
             cancel_event=window,
@@ -350,11 +383,14 @@ class AutonomyRuntime:
         prefer_wood = sum(counts.get(n, 0) for n in (*LOG_NAMES, *PLANK_NAMES)) == 0
         raw_r = decision.args.get("scan_radius", 48) if isinstance(decision.args, dict) else 48
         scan_r = max(48, min(64, int(raw_r))) if isinstance(raw_r, int) and raw_r >= 32 else 48
+        attempt = int(self.context.get("scout_attempts", 0))
+        self.context["scout_attempts"] = attempt + 1
         res = SurfaceScoutSkill(self.client, memory=memory).execute(
             scan_radius=scan_r,
             hop_distance=55.0,
             max_hops=3,
             prefer_wood=prefer_wood,
+            attempt=attempt,
             timeout_seconds=window.remaining(),
             cancel_event=window,
         )
@@ -376,7 +412,36 @@ class AutonomyRuntime:
         data = dict(res.data or {}) if isinstance(res.data, dict) else {}
         return SkillResult(bool(res.success), str(res.message), data, res.error_code)
 
-    def _task_next(self, observation):
+    def _run_task_nether_portal(self, decision, observation, window):
+        from skills.portal_speedrun import NetherPortalSpeedrunSkill
+        from skills.survival import SurvivalSkills
+
+        skill = NetherPortalSpeedrunSkill(self.client)
+        res = skill.build_portal(timeout_seconds=min(210, window.remaining()), allow_damage=True, cancel_event=window)
+        data = dict(res.data or {})
+        if (not res.success and res.error_code == "no_portal_site_found"
+                and data.get("action_state") != "unknown" and window.remaining() > 1 and not window.is_set()):
+            origin = observation["status"]["pos"]
+            guard = WorkflowGuard(self.client, cancel_event=window, timeout_seconds=window.remaining())
+            rows = guard.read(self.client.find_blocks, types=["lava"], radius=64, limit=32)
+            nearest = min((row["pos"] for row in extract_blocks({"blocks": rows}) if row["name"] == "lava"),
+                          key=lambda pos: math.dist(origin, pos), default=None)
+            if nearest is not None and math.dist(origin, nearest) > 12:
+                x, y, z = map(math.floor, nearest)
+                moved = SurvivalSkills(self.client).execute(
+                    "move_to", {"pos": [x, y + 1, z], "range": 5}, cancel_event=window)
+                if not moved.success:
+                    return moved
+                guard.check_budget()
+                res = skill.build_portal(timeout_seconds=min(180, window.remaining()), allow_damage=True,
+                                         cancel_event=window)
+                data = dict(res.data or {})
+                data["executed"] = True
+        data["portal_skill"] = True
+        data.setdefault("executed", bool(res.success or data.get("writes", 0) > 0))
+        return SkillResult(bool(res.success), str(res.message), data, res.error_code)
+
+    def _task_next(self, observation, *, relaxed_policy=None):
         if not self._task_active():
             return None
         if self.mainline_enabled and not self.journal.state.get("pending"):
@@ -411,10 +476,12 @@ class AutonomyRuntime:
         gathering_wood = args.get("task") == "gather" and args.get("resource") in {"logs", *LOG_NAMES}
         needs_wood = args.get("task") in {"craft", "starter_tools", "shelter", "storage", "bed"} and not any(
             counts.get(name) for name in (*log_names, *plank_names))
-        if ((gathering_wood or needs_wood) and self.task_controller._fresh(observation)
+        if (relaxed_policy is None and (gathering_wood or needs_wood)
+                and self.task_controller._fresh(observation)
                 and not task_ctx.get("cautious_bootstrap")):
-            task_ctx["remote_log_target"] = self._remote_log_waypoint(observation, log_names)
-        decision = self.task_controller.next_action(observation, task_ctx)
+            task_ctx["remote_log_target"] = self._remote_log_waypoint(
+                observation, log_names, blocked=self.task_controller.state().get("blocked"))
+        decision = self.task_controller.next_action(observation, task_ctx, relaxed_policy=relaxed_policy)
         if recovered and self._task_snapshot()["status"] in {"running", "suspended", "completed"}:
             self._record("INFO", "STARTER_MINE_LANDMARK_RECOVERED", {"pos": observation["status"]["pos"],
                          "site": recovered["mine_landmark"]["site"], "original_action_confirmed": False})
@@ -425,6 +492,8 @@ class AutonomyRuntime:
                      "unknown": "TASK_UNKNOWN"}.get(status, "TASK_PROGRESS")
             self._save_task(event)
             self._finish_task_feedback(observation)
+            if relaxed_policy is not None and status == "suspended":
+                return None  # Fall back to the original safety hold.
             return Decision("wait", {"seconds": .25},
                             "Goal boundary reached; next planning uses the recorded task report", "autonomous_task")
         self._task_child = True
@@ -454,6 +523,9 @@ class AutonomyRuntime:
             self.task_controller.record_result(decision, result, observation, context=self.context)
             if not uncertain and not fatal:
                 self.task_controller.confirm_completion(observation, self.context)
+                if (result.data.get("relaxed_policy") and not result.success and result.error_code != "cancelled"
+                        and self._task_active()):
+                    self.task_controller.stop("relaxed_work_failed_replan")
         if uncertain and (child or safety or self._task_active()):
             self.task_controller.stop(result.error_code or "unknown_action", unknown=True)
             result.data.setdefault("cleanup_skipped", "task_unknown")

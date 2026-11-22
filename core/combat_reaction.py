@@ -4,7 +4,7 @@ import math
 import threading
 import time
 
-from agent.survival_planner import RANGED_HOSTILES
+from core.domain import RANGED_HOSTILES
 from core.client import APIError
 
 

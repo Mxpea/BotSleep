@@ -170,6 +170,52 @@ class HarnessTests(unittest.TestCase):
         self.assertIsNone(restarted.journal.state["pending"])
         self.assertEqual(self.skills.execute.call_count, 1)
 
+    def test_repeated_starter_proposal_uses_another_observed_target_or_pauses(self):
+        from agent.llm_planner import LLMSurvivalPlanner
+
+        for alternative in (True, False):
+            with self.subTest(alternative=alternative), tempfile.TemporaryDirectory() as state_dir:
+                self.settings["state_dir"] = state_dir
+                failed = [2, 64, 0]
+                other = [3, 64, 0]
+                obs = observation(on_ground=True, thundering=False)
+                obs["blocks"] = [{"name": "oak_log", "pos": p, "diggable": True, "can_see": True}
+                                 for p in [failed, other] if p == failed or alternative]
+                self.collector.collect.side_effect = lambda *_: copy.deepcopy(obs)
+                brain = Mock()
+                brain.chat_completion.return_value = {"choices": [{"finish_reason": "tool_calls", "message": {
+                    "role": "assistant", "content": None, "tool_calls": [{"id": "gather_log", "type": "function",
+                        "function": {"name": "gather_block", "arguments": json.dumps({
+                            "pos": failed, "expected_name": "oak_log"})}}]}}]}
+                self.planner = LLMSurvivalPlanner({"enabled": True, "model": "fake", "api_key": "fake",
+                                                   "max_repair_attempts": 0}, self.settings, brain=brain)
+                self.skills.reset_mock()
+                self.skills.execute.side_effect = [SkillResult(False, "Unverified", error_code="gather_unverified"),
+                                                   SkillResult(True, "Alternative gathered")]
+                harness = self.harness()
+                try:
+                    harness.request_step()
+                    self.assertEqual(self.finish(harness).error_code, "gather_unverified")
+                    harness._next_attempt = 0
+                    harness.tick()
+                    result = self.finish(harness)
+                    self.assertEqual(brain.chat_completion.call_count, 2)
+                    if alternative:
+                        self.assertTrue(result.success)
+                        self.assertEqual(self.skills.execute.call_count, 2)
+                        self.assertEqual(self.skills.execute.call_args.args[1]["pos"], other)
+                    else:
+                        self.assertTrue(harness.paused)
+                        self.assertEqual(result.error_code, "llm_repeated_failure")
+                        self.assertEqual(self.skills.execute.call_count, 1)
+                        harness._next_attempt = 0
+                        harness.tick()
+                        self.assertEqual(brain.chat_completion.call_count, 2)
+                    self.assertIsNone(harness.journal.state["pending"])
+                    self.assertIsNone(self.planner._pending)
+                finally:
+                    harness.close()
+
     def test_unconfirmed_dig_feedback_is_paired_before_pause_and_replanning(self):
         from agent.llm_planner import LLMSurvivalPlanner
 

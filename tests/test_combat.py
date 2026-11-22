@@ -2,11 +2,16 @@
 
 import copy
 import math
+import tempfile
+import time
 import threading
 import unittest
 from unittest.mock import Mock, patch
 
+from agent.llm_planner import LLMSurvivalPlanner
 from core.client import APIError, MinecraftAgentClient
+from core.config import DEFAULTS
+from core.survival_harness import SurvivalHarness
 from skills.combat import CombatSkills, aim_angles, clear_entity_ray, combat_options
 
 
@@ -413,6 +418,178 @@ class CombatTests(unittest.TestCase):
             self.assertFalse(combat_options(observation)["allowed"])
         observation = self.world.observation(); observation["inventory_fresh"] = False
         self.assertFalse(combat_options(observation)["allowed"])
+
+
+class StarterDefenseTests(unittest.TestCase):
+    def setUp(self):
+        self.world = CombatWorld()
+        self.world.username = "StarterDefenseTest"
+        self.world.base_url = "http://local/api/v1"
+        self.world.entities[0]["name"] = "zombie"
+        self.world.status.update(is_day=False, thundering=False,
+                                 nearest_hostile={"id": 5, "name": "zombie", "dist": 2.2})
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        settings = {**copy.deepcopy(DEFAULTS["survival"]), "objective": "starter", "state_dir": temp.name}
+        self.brain = Mock()
+        planner = LLMSurvivalPlanner({"enabled": True, "model": "fake"}, settings, brain=self.brain)
+        self.harness = SurvivalHarness(self.world, settings, DEFAULTS["sleep"], planner=planner)
+        self.addCleanup(self.harness.close)
+        patcher = patch.object(self.harness.combat_skills, "_wait")
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def run_cycle(self):
+        self.harness.tick()
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            result = self.harness.tick(automatic=False)
+            if result is not None:
+                return result
+            time.sleep(.001)
+        self.fail("Starter defense did not finish")
+
+    def test_isolated_zombie_gets_one_local_counterattack(self):
+        self.assertNotIn("fight_hostile", self.harness.planner.tool_schemas)
+        self.world.status["health"] = 19
+        self.world.counts = {"wooden_sword": 1, "iron_axe": 1}
+        result = self.run_cycle()
+        self.assertTrue(result.success, result)
+        self.assertEqual(result.data["weapon"], "iron_axe")
+        self.assertTrue(result.data["damage_verified"])
+        controls = [row[1] for row in self.world.calls if row[0] == "control"]
+        self.assertEqual([row["hit"] for row in controls], [1])
+        self.assertIsNone(self.harness.journal.state["pending"])
+        self.brain.chat_completion.assert_not_called()
+
+    def test_multiple_threats_and_weak_weapon_with_injury_keep_retreat(self):
+        for extra, weapon, health in (
+                (None, "iron_sword", 19), (None, "wooden_sword", 19),
+                ("zombie", "iron_sword", 20), ("skeleton", "iron_sword", 20)):
+            with self.subTest(extra=extra, weapon=weapon, health=health):
+                current = self.world.observation()
+                current["inventory"] = [{"name": weapon, "count": 1}]
+                current["status"]["health"] = health
+                if extra:
+                    current["entities"].append({"id": 6, "type": "hostile", "name": extra,
+                                                "pos": [14 if extra == "skeleton" else 5, 64, .5]})
+                decision = self.harness._mandatory_safety(current)
+                expected = "fight_hostile" if extra is None and weapon == "iron_sword" else "retreat_from"
+                self.assertEqual(decision.name, expected)
+
+    def test_extra_hostile_at_final_check_blocks_hit(self):
+        scans = 0
+
+        def spawn_extra():
+            nonlocal scans
+            scans += 1
+            if scans == 4:
+                self.world.entities.append({"id": 6, "type": "hostile", "name": "skeleton", "pos": [14, 64, .5]})
+
+        self.world.effects["entities"] = spawn_extra
+        result = self.run_cycle()
+        self.assertEqual(result.error_code, "safety_changed", result)
+        self.assertTrue(result.data["retreat_required"])
+        self.assertFalse(any(row[0] == "control" for row in self.world.calls))
+        self.brain.chat_completion.assert_not_called()
+
+    def test_hostile_reported_after_ray_check_blocks_swing(self):
+        geometry = self.harness.combat_skills._geometry
+        calls = 0
+
+        def report_creeper_after_ray(context, observation, target):
+            nonlocal calls
+            geometry(context, observation, target)
+            calls += 1
+            if calls == 3:
+                self.world.status["nearest_hostile"] = {"id": 6, "name": "creeper", "dist": 1.0}
+
+        with patch.object(self.harness.combat_skills, "_geometry", side_effect=report_creeper_after_ray):
+            result = self.run_cycle()
+        self.assertEqual(result.error_code, "safety_changed", result)
+        self.assertEqual(result.data["reason"], "other_hostile_reported")
+        self.assertFalse(any(row[0] == "control" for row in self.world.calls))
+        self.assertIsNone(self.harness.journal.state["pending"])
+
+    def test_new_enemy_during_preparation_is_handed_back_to_retreat(self):
+        def add_enemy(*args, **kwargs):
+            self.world.entities.append({"id": 6, "type": "hostile", "name": "zombie", "pos": [-2, 64, .5]})
+
+        with patch.object(self.harness.combat_skills, "_wait", side_effect=add_enemy):
+            result = self.run_cycle()
+        self.assertEqual(result.error_code, "retreat_required", result)
+        self.assertIsNone(self.harness.journal.state["pending"])
+        self.assertFalse(any(row[0] == "control" for row in self.world.calls))
+        self.assertEqual(self.harness._mandatory_safety(self.world.observation()).name, "retreat_from")
+
+    def test_read_timeout_before_any_combat_write_keeps_retreat_available(self):
+        def fail_combat_scan():
+            if sum(row[0] == "entities" for row in self.world.calls) == 2:
+                raise APIError("request_timeout", "Combat entity scan timed out")
+
+        self.world.effects["entities"] = fail_combat_scan
+        with patch.object(self.world, "stop", create=True) as stop:
+            result = self.run_cycle()
+            stop.assert_not_called()
+        self.assertEqual(result.error_code, "request_timeout", result)
+        self.assertEqual(result.data["action_state"], "not_executed")
+        self.assertFalse(self.harness.paused)
+        self.assertIsNone(self.harness.journal.state["pending"])
+        self.assertEqual(self.harness._mandatory_safety(self.world.observation()).name, "retreat_from")
+
+    def test_explicit_equip_rejection_keeps_retreat_available(self):
+        with patch.object(self.world, "equip", side_effect=APIError(
+                "missing_item", "The sword is no longer in inventory", 200)):
+            result = self.run_cycle()
+        self.assertEqual(result.error_code, "missing_item", result)
+        self.assertEqual(result.data["action_state"], "not_executed")
+        self.assertFalse(self.harness.paused)
+        self.assertIsNone(self.harness.journal.state["pending"])
+        self.assertEqual(self.harness._mandatory_safety(self.world.observation()).name, "retreat_from")
+
+    def test_retreat_search_cooldown_precedes_counterattack(self):
+        current = self.world.observation()
+        threat = current["entities"][0]["pos"]
+        recovery = self.harness._retreat_state(current, threat)
+        recovery.update(retry_after=time.time() + 20, search_basis={"pos": current["status"]["pos"], "threat_pos": threat})
+        self.assertEqual(self.harness._mandatory_safety(current).name, "wait")
+        self.assertFalse(recovery["evacuating"])
+
+    def test_optional_combat_reads_fail_without_losing_the_retreat_snapshot(self):
+        get_status = self.world.get_status
+        for failed_read in ("inventory", "status"):
+            with self.subTest(failed_read=failed_read):
+                self.world.calls.clear()
+
+                def status(**kwargs):
+                    if failed_read == "status" and ("inventory",) in self.world.calls:
+                        raise APIError("request_timeout", "Status check timed out")
+                    return get_status(**kwargs)
+
+                with patch.object(self.world, "get_status", side_effect=status):
+                    if failed_read == "inventory":
+                        with patch.object(self.world, "inventory", return_value=self.world.ok({"items": None})):
+                            current = self.harness.collector.collect_safety()
+                    else:
+                        current = self.harness.collector.collect_safety()
+                self.assertFalse(current["inventory_fresh"])
+                self.assertEqual(current["combat"]["reason"], "combat_observation_unavailable")
+                self.assertEqual(self.harness._mandatory_safety(current).name, "retreat_from")
+
+    def test_unconfirmed_hit_keeps_pending_and_does_not_replay(self):
+        def lose_reply(kwargs):
+            self.assertEqual(self.harness.journal.state["pending"]["decision"]["name"], "fight_hostile")
+            raise APIError("request_timeout", "Lost attack response")
+
+        self.world.effects["control"] = lose_reply
+        result = self.run_cycle()
+        self.assertEqual(result.data["action_state"], "unknown")
+        self.assertTrue(self.harness.paused)
+        self.assertIsNotNone(self.harness.journal.state["pending"])
+        self.harness._next_attempt = 0
+        self.harness.tick()
+        self.assertEqual(sum(row[0] == "control" for row in self.world.calls), 1)
+        self.brain.chat_completion.assert_not_called()
 
 
 class CombatClientTests(unittest.TestCase):

@@ -62,8 +62,8 @@ def fit_trajectory(positions, sigma_deg=None) -> tuple:
 class EyeObservationCollector:
     """Throw one eye and sample its entity while the blocking use-item call runs.
 
-    Calling capture consumes an eye. It does not move the bot, equip via RCON,
-    navigate to a stronghold, or rely on use_item's potentially misidentified eye.
+    Capture stays stationary until the flight has been sampled. Opt-in recovery
+    can then approach the dropped item along a checked local corridor.
     """
 
     def __init__(self, client, poll_seconds: float = 0.1, duration_seconds: float = 3.5):
@@ -83,7 +83,7 @@ class EyeObservationCollector:
         return [entity for entity in self.client.get_entities(radius=64, types=sorted(EYE_NAMES))
                 if entity.get("name", "").removeprefix("minecraft:") in EYE_NAMES]
 
-    def capture(self, sigma_deg=None) -> dict:
+    def capture(self, sigma_deg=None, *, recover=False) -> dict:
         if sigma_deg is not None:
             EyeThrow(0, 0, 0, sigma_deg)  # Validate before consuming an eye.
         before = self._status()
@@ -103,6 +103,12 @@ class EyeObservationCollector:
         if not any(item.get("name") == "ender_eye" and item.get("count", 0) > 0 for item in items):
             raise ObservationError("inventory has no ender_eye; no item was used")
         existing = {entity["id"] for entity in self._eyes()}
+        if recover:
+            from .recovery import eye_drops, recover_eye
+            drops = self.client.get_entities(radius=24, types=["item"], timeout_seconds=1.5)
+            if len(drops) >= 40:
+                raise ObservationError("drop scan saturated before throw; recovery cannot distinguish a new eye")
+            existing_drops = eye_drops(drops)
         positions = {}
         diagnostics = {"player_before": before["pos"], "dimension": before["dimension"], "samples": []}
         failure = None
@@ -145,6 +151,12 @@ class EyeObservationCollector:
             if math.dist(before["pos"], after["pos"]) > 0.25:
                 raise ObservationError("bot moved during capture; stay still and repeat from a stable position")
             entity_id, samples = next(iter(positions.items()))
+            if recover:
+                try:
+                    diagnostics["recovery"] = recover_eye(
+                        self.client, self._status, before, entity_id, samples[-1], existing_drops, EYE_NAMES)
+                except (RuntimeError, ValueError, OSError) as error:
+                    diagnostics["recovery"] = {"status": "recovery_error", "error_code": getattr(error, "code", None)}
             throw, quality = fit_trajectory(samples, sigma_deg)
             return {"throw": asdict(throw), "entity_id": entity_id, "quality": quality, "diagnostics": diagnostics}
         except (ValueError, ObservationError) as error:

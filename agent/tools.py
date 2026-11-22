@@ -21,7 +21,7 @@ def _tool(name, description, properties, required=()):
 
 _ITEM = {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$", "maxLength": 64}
 SURVIVAL_TASK_NAMES = ("gather", "craft", "smelt", "food", "starter_tools", "iron_tools", "iron_armor", "scout",
-                       "shelter", "bed", "storage", "farm", "recover_drops", "maintenance")
+                       "nether_portal", "shelter", "bed", "storage", "farm", "recover_drops", "maintenance")
 SURVIVAL_TASK_RESOURCES = ("logs", "cobblestone", "coal", "raw_iron", "diamond")
 
 TOOL_DEFINITIONS = [
@@ -187,7 +187,7 @@ def tools_for_objective(objective="starter"):
     add("run_survival_task", "Choose one bounded goal. The executor finds prerequisites and verifies each step locally. Shelter supplies its own wood, workstation, walls, roof and door. Scout surveys the surface within a travel budget. Iron armor crafts and equips missing pieces. Gather takes a resource, craft/smelt take the output item, and other goals take neither. The final summary reports completion, interrupted work or an exhausted budget.",
         {"task": {"type": "string", "enum": list(SURVIVAL_TASK_NAMES)},
          "resource": {"type": "string", "enum": list(SURVIVAL_TASK_RESOURCES)},
-         "item": {**_ITEM, "description": "Desired crafted/smelted OUTPUT item, not an ingredient; executor checks supported recipes."},
+         "item": {**_ITEM, "description": "Desired craft/smelt output; bone_meal uses held bones only."},
          "count": {"type": "integer", "minimum": 1, "maximum": 64, "default": 8,
                    "description": "Desired new output for gather/craft/smelt; current food reserve target for food."},
          "radius": {"type": "integer", "minimum": 4, "maximum": 64, "default": 32}}, ("task",))

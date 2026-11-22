@@ -6,7 +6,8 @@ return history/budget, and PositioningSkills must revalidate the selected route.
 
 import math
 
-from agent.survival_planner import Decision, RANGED_HOSTILES
+from agent.survival_planner import Decision
+from core.domain import RANGED_HOSTILES
 from core.domain import HAZARDS, block_key, blocked_targets, cell_coords, finite_number, parse_pos
 from skills.daily_survival import DailySurvivalSkills
 

@@ -10,13 +10,13 @@
 
 本轮（2026-11-16）接入短步敌对生物防御、源液取桶和受限岩浆狩猎，普通猪牛羊鸡狩猎改为近距站定攻击并核验实际食物收益。日常任务优先补盾和桶，新增纯本地生存/速通阶段建议；这些改动已有离线覆盖，尚不代表本轮真实战斗、岩浆操作或完整速通验收。详见 [战斗与狩猎](docs/COMBAT_AND_HUNTING.md) 和 [阶段建议与未实现边界](docs/SURVIVAL_PLAYBOOK.md)。
 
-日常与赛事模式现在默认使用[目标程序](docs/AUTONOMOUS_TASKS.md)：模型一次指定采集数量、制作产物或维护目标，程序连续寻找前置、执行技能并验证进度。正常模型请求收敛到目标/安全工具；局部恢复耗尽才汇总请求策略调整，避免每挖一块、每做一步都调用模型。已接入 14 类有界目标、应急抢占、检查点和任务监控；当前回归数量、跳过项与实服证据统一见[测试记录](docs/TESTING.md)。
+日常与赛事模式现在默认使用[目标程序](docs/AUTONOMOUS_TASKS.md)：模型一次指定采集数量、制作产物或维护目标，程序连续寻找前置、执行技能并验证进度。正常模型请求收敛到目标/安全工具；局部恢复耗尽才汇总请求策略调整，避免每挖一块、每做一步都调用模型。已接入 15 类有界目标、应急抢占、检查点和任务监控；当前回归数量、跳过项与实服证据统一见[测试记录](docs/TESTING.md)。
 
 2026-11-16 普通地图实测：一次模型请求授权制作木镐，程序连续执行 12 个子步骤，取得 3 根原木并完成木板、木棍、工作台和木镐；两次工作台放置失败均在本地换位置恢复，目标执行期间没有追加模型请求。另补逐步树冠脱困、单叶开口、多敌退避和威胁消失后的生产恢复。此前夜间仍有被骷髅击杀的记录，不能据此宣称完整夜间生存或全部目标已通过实服验收，详见[测试记录](docs/TESTING.md)。
 
 2026-11-17 合并 `develop-tianya/shelter-workflow`：住所蓝图与门、床、箱子布局支持四个朝向，并统一共享技能注册表和撤退控制器；保留主线自主目标、战斗与模型串行门禁。新增结构/门户工作流、3D 世界记忆、洞穴与分层采矿、独立容器操作及实例锁/只读运维工具。深矿和洞穴导航仍为独立调用，未自动替换生存主循环。合并取舍与回归结果见[测试记录](docs/TESTING.md)。
 
-`dev-ink` 已包含 `origin/main cab309d`，保留赛事上下文、模型工具选择和终端监控等主线更新。后续修复住所施工站位、混合木材补门、落叶/短草替换、有界换点选址，以及自然台阶定位；修复树冠重复落点、受伤中断适配和危险未解除却提前结束撤退。隔离普通地图已实测一次采木目标得到 8 根原木，并完成工作台和木镐；夜间避险仍出现死亡，完整住所是否通过以最新[实服记录](docs/TESTING.md)为准。所有适配仅在 BotSleep，未修改 mc-agent-api 源码。
+`dev-ink` 已合并 `origin/main c940598`，保留赛事上下文、模型工具选择和终端监控等主线更新。后续修复住所施工站位、混合木材补门、落叶/短草替换、有界换点选址，以及自然台阶定位；修复树冠重复落点、受伤中断适配和危险未解除却提前结束撤退。隔离普通地图已实测一次采木目标得到 8 根原木，并完成工作台和木镐；夜间避险仍出现死亡，完整住所是否通过以最新[实服记录](docs/TESTING.md)为准。所有适配仅在 BotSleep，未修改 mc-agent-api 源码。
 
 工作台前置现使用新鲜放置候选并避开已核验住所的门道、床位；未知放置不追加停止或重放。住所搜索支持安全邻格短换位并参考有效失败缓存调整方向；台阶落地在既有只读窗口内等待短暂残余运动消退，保留详细诊断和未知结果保护。
 
@@ -68,7 +68,7 @@ Copy-Item config.example.yaml config.yaml
 | sleep（默认） | 找床、接近、交互、等待醒来 | 检查维度、床占用与附近敌人；须观察到入睡到醒来，或服务端 slept 证据与昼夜/雷暴转换。下界、末地拒绝用床。 |
 | survival / starter | 木材、工作台、木镐、圆石及初期工具制作 | 目标为石镐、石斧、石剑和熔炉；以当前背包与设施验证，不以模型自报完成。 |
 | survival / daily | 13 项日常任务，以及有条件的短步防御、取液与狩猎 | 按新鲜状态重算任务；小批采集、施工最多 8 步且逐步复核。5×5 住所只验证结构，不保证照明或完全防怪。 |
-| survival / competition | 模型选择得分目标，沿日常动作目录执行，以服务器 advancement 计分 | 125 项规则目录中有 8 个计分目标的有限行动计划，含有条件的怪物猎人；尚非完整赛事执行器。 |
+| survival / competition | 模型选择得分目标，沿日常动作目录执行，以服务器 advancement 计分 | 125 项规则目录中，99 个可能计分项有任务说明，13 项有现有工具路线；尚非完整赛事执行器。 |
 
 starter、daily 支持规则规划或开启模型规划；competition 要求模型。生存 harness 串行执行技能，模型返回后重新观察并通过本地安全门禁，再按背包、方块或位置变化验证结果。工具调用返回、移动达到容差和实际取得物品是不同证据；离线协议覆盖不等于真实技能成功，更不等于完整生存或比赛完成。
 
@@ -76,9 +76,9 @@ starter、daily 支持规则规划或开启模型规划；competition 要求模�
 
 ### 一次目标授权，程序执行多步
 
-daily/competition 默认启用 `survival.autonomy.enabled`。正常任务规划阶段动态工具目录只暴露目标工具与必要安全/赛事管理工具，模型通过 `run_survival_task` 选择采集、制作、熔炼等 14 类有界目标；目标进入 `needs_ai` 后最多接受 2 次生产原子修复。明确低血/饥饿情境另保留受限食物动作。这是实际请求目录过滤，不只是提示模型优先选目标。`AutonomousTaskController` 根据每轮新鲜观察计算一个子步骤，harness 逐步落盘、执行与验收，不需要每采一块再问模型。正常子步骤不伪造新的模型工具调用，完成、升级询问或未知结果等边界才闭合原始 `tool_call_id`。
+daily/competition 默认启用 `survival.autonomy.enabled`。正常任务规划阶段动态工具目录只暴露目标工具与必要安全/赛事管理工具，模型通过 `run_survival_task` 选择采集、制作、熔炼等 15 类有界目标；目标进入 `needs_ai` 后最多接受 2 次生产原子修复。明确低血/饥饿情境另保留受限食物动作。这是实际请求目录过滤，不只是提示模型优先选目标。`AutonomousTaskController` 根据每轮新鲜观察计算一个子步骤，harness 逐步落盘、执行与验收，不需要每采一块再问模型。正常子步骤不伪造新的模型工具调用，完成、升级询问或未知结果等边界才闭合原始 `tool_call_id`。
 
-默认每个目标最多 128 个子步骤、600 秒，4 次连续本地失败、8 次无进展或 8 次局部探索达到边界后交回明确报告；有界运行另受全局步骤、时长和死亡预算限制。近敌、吃饭、睡眠等本地应急可以挂起原目标，安全后重新观察再规划；未知写入保留 pending，禁止自动重放。关闭 autonomy 后恢复原有单工具模式。常用配方子集不等于独立配方目录的全部覆盖，14 类任务也不代表均已通过普通地图实服验收。契约、配置与限制见 [目标程序](docs/AUTONOMOUS_TASKS.md)。
+默认每个目标最多 128 个子步骤、600 秒，4 次连续本地失败、8 次无进展或 8 次局部探索达到边界后交回明确报告；有界运行另受全局步骤、时长和死亡预算限制。近敌、吃饭、睡眠等本地应急可以挂起原目标，安全后重新观察再规划；未知写入保留 pending，禁止自动重放。关闭 autonomy 后恢复原有单工具模式。常用配方子集不等于独立配方目录的全部覆盖，15 类任务也不代表均已通过普通地图实服验收。契约、配置与限制见 [目标程序](docs/AUTONOMOUS_TASKS.md)。
 
 普通 `daily` 可显式设 `survival.autonomy.local_opening: true`：没有自定义目标且新鲜观察支持工具开局时，harness 用同一任务控制器先启动 `starter_tools`，不需要模型先选；默认关闭，不适用于赛事。树冠脱困由同一主循环的 `canopy_escape` 负责，未落至实心地面时只记中继，不把树干或叶片上的落脚当作脱困完成。
 
@@ -97,7 +97,7 @@ daily/competition 默认启用 `survival.autonomy.enabled`。正常任务规划�
 | `skills/cave_explore.py`、`skills/world_navigator.py`、`skills/ore_harvester.py` | 独立 Python 技能；依托 `core/world_3d.py`（`VoxelWorld3D`）与 `core/pathfinder_3d.py`（3D A*） | 独立程序化 3D 探洞与采矿组件，未进入上述模型目录。 |
 | `skills/container.py`、`skills/shelter.py` | 独立容器存取/熔炼（`ContainerSkill`）与标准庇护所工作流（`ShelterSkill`） | 通过显式 Python 技能接口调用，不替换日常模型工具中的同名槽位。 |
 | `skills/exploration.py` / `ContinuousRadarSkill` | 主入口启用调试并加 `--radar`；提供 `#radar on/off/scan/poi` | 属于调试雷达与空间记录入口，`radar_sweep` 未绑定生存模型。 |
-| `skills/portal_speedrun.py` / `NetherPortalSpeedrunSkill` | 独立 Python 技能与专用实服靶场脚本 | `cast_nether_portal` 未绑定生存模型，也无主入口聊天命令。 |
+| `skills/portal_speedrun.py` / `NetherPortalSpeedrunSkill` | 独立 Python 技能与专用实服靶场脚本 | `run_survival_task(task=nether_portal)` 备料后调用此工作流，核验下界门已点燃后结束目标。 |
 | `skills/stronghold.py` / 要塞计算 | 独立 Python Skill 与 CLI，schema 为 `STRONGHOLD_TOOL_DEFINITION` | `calculate_stronghold` 未进入上述模型目录。 |
 
 全局工具定义或独立 schema 的扩展不等于 harness 已绑定执行器，必须同时核对目录、参数校验和 dispatch。搭高、落地水及高频反射仍未完成，相关占位实现返回成功不能作为真实执行证据。旧 `agent/loop.py` 的 TODO 不代表当前 `main.py` → `SurvivalHarness` 生存主循环未接通。
@@ -106,7 +106,7 @@ daily/competition 默认启用 `survival.autonomy.enabled`。正常任务规划�
 
 规则快照 `data/competition/rules_v2.json` 共 125 项（120 个 advancement 目标、5 个根节点），其中 45 项明确计分、54 项条件待确认、26 项不计分。条件项默认不计分，须通过 `survival.competition.eligibility_overrides` 显式确认；只采纳服务器证据，未知不计分，归一化得分暂为 `null`。
 
-Harness 每次只维护一个活动目标。当前 8 个明确计分目标有有限行动计划，其余可计分项虽能评估和展示，但标为 unsupported、不可选择。怪物猎人的可执行机会须经过战斗门禁；单击或实体消失均不计分。`finish_task` 需 fresh advancement 检测，正常 `end_competition` 需 fresh 全目录检测；未知可记为 unknown，但不能加分。终态持久化后，重启不再调用模型。离线覆盖不能称为完整比赛验收，详见 [赛事接口与限制](docs/HARNESS_INTERFACES.md)。
+Harness 每次只维护一个活动目标。13 个计分目标有现有工具路线，另外 86 项列出前置、触发步骤和缺失能力，但仍标为 `unsupported`、不可选择。近战或远射路线仍须通过战斗门禁；单击、发射回执或实体消失均不计分。`finish_task` 需 fresh advancement 检测，正常 `end_competition` 需 fresh 全目录检测；未知可记为 unknown，但不能加分。终态持久化后，重启不再调用模型。详见 [赛事接口与限制](docs/HARNESS_INTERFACES.md)。
 
 全目录保留在本地计分和监控。模型在任务选择阶段只收到当前证据解锁的简化候选，选中后仅展开活动目标，不重复注入 125 项规则表。
 

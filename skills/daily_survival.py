@@ -15,6 +15,8 @@ from .survival import SurvivalSkills, _Failure
 
 
 class DailySurvivalSkills(SurvivalSkills):
+    PICKUP_DISTANCE = 8
+    PICKUP_SETTLE_SECONDS = 1.4
     PLACEABLE = SurvivalSkills.PLACEABLE | {"barrel", "smoker", "blast_furnace"}
     FOODS = SurvivalSkills.FOODS | {"beef", "porkchop", "rabbit", "mutton", "cod", "salmon", "potato"}
     CROPS = {"wheat": ("wheat", "wheat_seeds"), "carrots": ("carrot", "carrot"),
@@ -65,8 +67,9 @@ class DailySurvivalSkills(SurvivalSkills):
         super().__init__(client)
         self.allow_herd_hunting = allow_herd_hunting
 
-    def execute(self, name, args, cancel_event=None, *, recovery_context=None, cautious=False):
-        result = super().execute(name, args, cancel_event, recovery_context=recovery_context, cautious=cautious)
+    def execute(self, name, args, cancel_event=None, *, recovery_context=None, cautious=False, relaxed_work=None):
+        result = super().execute(name, args, cancel_event, recovery_context=recovery_context, cautious=cautious,
+                                 relaxed_work=relaxed_work)
         if name not in SurvivalSkills.ARGUMENTS:
             result.data.setdefault("executed", False)
             if (not result.success and result.data["executed"] and result.data.get("action_state") != "verified"
@@ -146,6 +149,10 @@ class DailySurvivalSkills(SurvivalSkills):
             context.pop("daily_readonly_operation", None)
 
     def _action(self, context, operation, *args, _validate_status=None, **kwargs):
+        if context.get("relaxed_work") is not None:
+            # Only base craft/dig actions use this path; preserve the real
+            # callable for the stationary write allowlist in SurvivalSkills.
+            return super()._action(context, operation, *args, _validate_status=_validate_status, **kwargs)
         def send(*a, **kw):
             if "retreat_evidence" in context and not context.get("daily_readonly_operation"):
                 context["retreat_evidence"]["executed"] = True
@@ -418,7 +425,8 @@ class DailySurvivalSkills(SurvivalSkills):
         if type(entity_id) is not int or entity_id < 0:
             raise _Failure("bad_args", "entity_id must be a nonnegative integer")
         self._check(context)
-        entities = self.client.get_entities(radius=16, types=["item"] if dropped else None,
+        radius = max(16, self.PICKUP_DISTANCE) if dropped else 16
+        entities = self.client.get_entities(radius=radius, types=["item"] if dropped else None,
                                             **self._read_options(context))
         self._check(context)
         self._read_options(context)  # A late response cannot authorize another write.
@@ -602,13 +610,14 @@ class DailySurvivalSkills(SurvivalSkills):
         status = self._prepare(context)
         entity = self._entity(args["entity_id"], item, context, dropped=True)
         target = [math.floor(v) for v in entity["pos"]]
-        if math.dist(status["pos"], entity["pos"]) > 8:
-            raise _Failure("out_of_range", "Pickup is limited to visible drops within eight blocks")
+        if math.dist(status["pos"], entity["pos"]) > self.PICKUP_DISTANCE:
+            raise _Failure("out_of_range", f"Pickup is limited to visible drops within {self.PICKUP_DISTANCE} blocks")
         before, _ = self._inventory(context)
 
         def site(status):
             fresh = self._entity(args["entity_id"], item, context, dropped=True)
-            if [math.floor(v) for v in fresh["pos"]] != target:
+            if ([math.floor(v) for v in fresh["pos"]] != target
+                    or math.dist(status["pos"], fresh["pos"]) > self.PICKUP_DISTANCE):
                 raise _Failure("target_changed", "The dropped item moved to another cell")
             for dy in (0, 1):
                 if self._block([target[0], target[1] + dy, target[2]], context)["name"] not in self.RETREAT_PASSABLE:
@@ -617,16 +626,65 @@ class DailySurvivalSkills(SurvivalSkills):
             if support["name"] not in self.SUPPORT or not self._safe_block(support):
                 raise _Failure("unsafe", "Pickup requires known solid safe support")
 
-        site(status)
-        self._daily_action(context, self.client.move_to, target[0] + .5, target[1], target[2] + .5,
-                           range=0, timeout_ms=8000, validate=site)
-        after_status = self._prepare(context)
-        after, _ = self._inventory(context)
-        gained = after.get(item, 0) - before.get(item, 0)
+        destination = [entity["pos"][0], target[1], entity["pos"][2]]
+
+        def validate(current):
+            site(current)
+            self._pickup_route(current["pos"], destination, context)
+            final = self._prepare(context)
+            if math.dist(current["pos"], final["pos"]) > .2:
+                raise _Failure("safety_changed", "Pickup origin changed while checking the route")
+            site(final)
+
+        try:
+            self._daily_action(context, self.client.move_to, *destination, range=0, timeout_ms=8000,
+                               stop_on=["hurt", "death"], validate=validate)
+        except _Failure as error:
+            if error.code != "target_changed" or context["retreat_evidence"]["executed"]:
+                raise
+            # A very close item can enter inventory during the preflight reads.
+            after_status = self._prepare(context)
+            after, _ = self._inventory(context)
+            gained = after.get(item, 0) - before.get(item, 0)
+            if gained <= 0:
+                raise
+        else:
+            after_status, gained = self._settle_pickup(item, before.get(item, 0), context)
         data = {"entity_id": args["entity_id"], "item": item, "target": target, "pos": after_status["pos"], "gained": gained}
         if gained <= 0:
             raise _Failure("pickup_unverified", "Approaching the drop produced no verified inventory gain", data)
         return self._verified(context, **data)
+
+    def _pickup_route(self, origin, destination, context):
+        """Extension point for a caller that needs a verified approach corridor."""
+
+    def _settle_pickup(self, item, before, context):
+        deadline = time.monotonic() + self.PICKUP_SETTLE_SECONDS
+        prior = context.get("operation_deadline", math.inf)
+        context["operation_deadline"] = min(deadline, prior)
+        try:
+            for _ in range(7):
+                status = self._prepare(context)
+                counts, _ = self._inventory(context)
+                gained = counts.get(item, 0) - before
+                if gained > 0 or time.monotonic() + .25 >= context["operation_deadline"]:
+                    return status, gained
+                cancel = context.get("cancel")
+                if cancel is None:
+                    time.sleep(.15)
+                else:
+                    cancel.wait(.15)
+            return status, gained
+        except _Failure as error:
+            if error.code == "operation_budget_exhausted":
+                raise _Failure("action_unconfirmed", "Pickup inventory could not be verified before the deadline",
+                               {"action_state": "unknown"}) from error
+            raise
+        finally:
+            if prior == math.inf:
+                context.pop("operation_deadline", None)
+            else:
+                context["operation_deadline"] = prior
 
     def _place_bed(self, args, context):
         return self._place_double(args, context, bed=True)

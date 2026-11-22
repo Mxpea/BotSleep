@@ -90,6 +90,7 @@ class TaskWorld(RuntimeDailyWorld):
         woods = ("oak", "birch", "spruce", "jungle", "acacia", "dark_oak", "mangrove", "cherry", "pale_oak")
         recipes = {**{wood + "_planks": ({wood + "_logs": 1}, 4) for wood in woods},
                    "stick": ({"planks": 2}, 4), "crafting_table": ({"planks": 4}, 1),
+                   "bone_meal": ({"bone": 1}, 3),
                    "wooden_pickaxe": ({"planks": 3, "stick": 2}, 1),
                    "stone_pickaxe": ({"cobblestone": 3, "stick": 2}, 1),
                    "stone_axe": ({"cobblestone": 3, "stick": 2}, 1),
@@ -116,7 +117,7 @@ class TaskWorld(RuntimeDailyWorld):
                     needed -= used
             if needed:
                 raise APIError("missing_ingredients", "Fake game requires real input items")
-        if item not in {"stick", "crafting_table", *(wood + "_planks" for wood in woods)} and not any(row["name"] == "crafting_table"
+        if item not in {"stick", "crafting_table", "bone_meal", *(wood + "_planks" for wood in woods)} and not any(row["name"] == "crafting_table"
                 and math.dist(pos, self.status["pos"]) <= 4 for pos, row in self.blocks.items()):
             raise APIError("missing_workstation", "A placed nearby table is required")
         for name, amount in consumed.items():
@@ -424,6 +425,21 @@ class TaskHarnessTests(unittest.TestCase):
         self.assertFalse(any(call[0] == "dig" for call in self.world.calls))
         self.assertEqual(len(brain.requests), 1)
         self.assertEqual(len(self.feedback(harness.planner)), 1)
+
+
+    def test_bone_meal_goal_finishes_with_one_model_request_and_no_travel(self):
+        self.world.counts["bone"] = 1
+        harness, brain = self.harness(response("run_survival_task",
+            {"task": "craft", "item": "bone_meal", "count": 3}, "bone-meal"))
+        self.assertTrue(self.cycle(harness).data["accepted"])
+        self.until(harness, lambda: harness.snapshot()["task_execution"]["status"] == "completed")
+        self.assertEqual(self.world.counts.get("bone_meal"), 3)
+        self.assertEqual(self.world.counts.get("bone"), 0)
+        self.assertEqual([call for call in self.world.calls if call[0] in {"move", "dig", "craft"}],
+                         [("craft", "bone_meal", 3)])
+        self.assertEqual(len(brain.requests), 1)
+        self.assertEqual([row["tool_call_id"] for row in self.feedback(harness.planner)], ["bone-meal"])
+        self.assertIsNone(harness.journal.state["pending"])
 
     def forest(self):
         self.world = ForestWorld()
@@ -876,6 +892,93 @@ class TaskHarnessTests(unittest.TestCase):
         self.assertIn("last_scout_report", harness.context)
         harness._update_lifecycle({**self.world.status, "alive": False})
         self.assertNotIn("last_scout_report", harness.context)
+
+    def test_nether_portal_task_routes_to_speedrun_skill_with_lava_search_and_completes(self):
+        self.world.counts = {"water_bucket": 1, "flint_and_steel": 1, "cobblestone": 16, "iron_pickaxe": 1}
+        calls = []
+
+        def fake_build_portal(portal_self, **kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return SkillResult(False, "No pool within 36 blocks", {"executed": False}, "no_portal_site_found")
+            return SkillResult(True, "Portal ignited", {"executed": True, "portal_active": True, "structure_verified": True})
+
+        harness, brain = self.harness(response("run_survival_task", {"task": "nether_portal"}, "portal_goal"))
+        with patch("skills.portal_speedrun.NetherPortalSpeedrunSkill.build_portal", new=fake_build_portal), \
+             patch.object(harness.client, "find_blocks", return_value=[{"name": "lava", "pos": [25, 63, 0]}]), \
+             patch("skills.survival.SurvivalSkills.execute", return_value=SkillResult(True, "Moved", {"executed": True})):
+            self.cycle(harness)
+            self.until(harness, lambda: harness.snapshot()["task_execution"]["status"] == "completed")
+        self.assertEqual(len(calls), 2)
+        feedback = self.feedback(harness.planner)
+        payload = json.loads(feedback[0]["content"])
+        self.assertTrue(payload["result"]["success"])
+        self.assertEqual(harness.snapshot()["task_execution"]["progress"]["current"], 1)
+        self.assertEqual(len(brain.requests), 1)
+
+    def test_nether_portal_collects_water_before_delegating_construction(self):
+        self.world.counts = {"bucket": 1, "flint_and_steel": 1, "cobblestone": 16, "iron_pickaxe": 1}
+        self.world.block([2, 64, 0], "water")
+        harness, brain = self.harness(response("run_survival_task", {"task": "nether_portal"}, "portal"))
+
+        def fill(_skill, name, args, **_options):
+            self.assertEqual((name, args), ("collect_liquid", {"pos": [2, 64, 0], "expected_name": "water"}))
+            self.world.counts.pop("bucket")
+            self.world.counts["water_bucket"] = 1
+            return SkillResult(True, "Filled bucket", {"executed": True})
+
+        def build(_skill, **_options):
+            self.assertEqual(self.world.counts["water_bucket"], 1)
+            return SkillResult(True, "Portal ignited", {"executed": True, "portal_active": True})
+
+        with patch("skills.buckets.BucketSkills.execute", autospec=True, side_effect=fill) as collect, \
+             patch("skills.portal_speedrun.NetherPortalSpeedrunSkill.build_portal", autospec=True, side_effect=build) as portal:
+            self.assertTrue(self.cycle(harness).data["accepted"])
+            self.until(harness, lambda: harness.snapshot()["task_execution"]["status"] == "completed")
+        collect.assert_called_once()
+        portal.assert_called_once()
+        self.assertEqual(len(brain.requests), 1)
+
+    def test_cobblestone_deep_mine_passes_origin_none_to_auto_select_clean_site(self):
+        self.world.counts = {"wooden_pickaxe": 1}
+        calls = []
+
+        def fake_build(mine_self, **kwargs):
+            calls.append(kwargs)
+            self.world.counts["cobblestone"] = 12
+            self.world.status["pos"] = [4.5, 64, .5]
+            return SkillResult(True, "Mined cobblestone", {"executed": True, "surface_entry": [4.5, 64, .5]})
+
+        harness, brain = self.harness(response("run_survival_task", {"task": "gather", "resource": "cobblestone", "count": 8}, "cobble"))
+        with patch("skills.starter_staircase.StarterStaircaseSkills.execute", return_value=SkillResult(
+                False, "No verified local stair", {"executed": False}, "no_staircase_site")), \
+             patch.object(harness.task_controller, "_explore", return_value=None), \
+             patch("skills.mining.MineShaftSkill.build_mine_shaft", new=fake_build), \
+             patch("skills.mining.MineShaftSkill._ensure_returned_to_surface") as extra_return:
+            self.cycle(harness)
+            self.until(harness, lambda: harness.snapshot()["task_execution"]["status"] == "completed")
+            extra_return.assert_not_called()
+        self.assertEqual(len(calls), 1)
+        self.assertIsNone(calls[0]["origin"])
+        self.assertEqual(calls[0]["radius"], 24)
+        self.assertEqual(len(brain.requests), 1)
+
+    def test_diamond_deep_mine_skips_surface_caves_and_keeps_deep_subgraph(self):
+        self.world.counts = {"iron_pickaxe": 2}
+        calls = []
+
+        def fake_mine(mine_self, **kwargs):
+            calls.append(kwargs)
+            self.world.counts["diamond"] = 3
+            return SkillResult(True, "Mined diamond", {"executed": True, "stop_reason": "target_reached"})
+
+        harness, _ = self.harness(response("run_survival_task", {"task": "gather", "resource": "diamond", "count": 3}, "diamond"))
+        with patch("skills.mining.MineShaftSkill.mine_targets_from_surface", new=fake_mine):
+            self.cycle(harness)
+            self.until(harness, lambda: harness.snapshot()["task_execution"]["status"] == "completed")
+        self.assertEqual(len(calls), 1)
+        self.assertFalse(calls[0]["prefer_caves_first"])
+        self.assertTrue(calls[0]["cave_policy"]["allow_tall_cave_subgraph"])
 
 
 if __name__=="__main__":
