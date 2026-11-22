@@ -1028,8 +1028,16 @@ class AutonomousTaskController:
         if (decision.goal not in {"scout_surface", "nether_portal", "nether_portal_water", "nether_portal_gravel"}
                 and decision.args.get("pos") is not None
                 and self.rules._key(decision.args["pos"]) in self.rules._blocked(local)):
-            self._escalate("selected_target_is_cooling_down")
-            return None
+            if decision.goal != "deep_mine":
+                alt = self._explore(obs, local)
+                if alt is not None:
+                    decision = alt
+                else:
+                    self._escalate("selected_target_is_cooling_down")
+                    return None
+            else:
+                self._escalate("selected_target_is_cooling_down")
+                return None
         if (decision.goal not in {"scout_surface", "nether_portal", "nether_portal_water", "nether_portal_gravel"} and decision.name == "move_to"
                 and math.dist(origin, decision.args["pos"]) <= decision.args.get("range", 2) + .5):
             decision = self._explore(obs, local)

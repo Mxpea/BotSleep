@@ -102,13 +102,23 @@ class RetreatController:
         if threat is None:
             return decision  # Skill parameter validation still owns malformed input.
         recovery = self.state(observation, threat)
-        if recovery.get("retry_after", 0) > time.time() and not self.changed(observation, threat, recovery):
+        if self.changed(observation, threat, recovery):
+            recovery.pop("retry_after", None)
+            recovery.pop("cooldown_cycles", None)
+            recovery.pop("no_route_exhausted", None)
+            return decision
+        retry_after = recovery.get("retry_after", 0)
+        if retry_after > time.time():
             return Decision(
                 "wait",
                 {"seconds": RETREAT_COOLDOWN_WAIT_SECONDS},
                 "No verified retreat route; observe again before the bounded search cooldown expires",
                 "safety",
             )
+        if retry_after > 0:
+            recovery["cooldown_cycles"] = int(recovery.get("cooldown_cycles", 0)) + 1
+            if recovery["cooldown_cycles"] >= 2 and recovery.get("evacuating") is not True:
+                recovery["no_route_exhausted"] = True
         recovery.pop("retry_after", None)
         return decision
 

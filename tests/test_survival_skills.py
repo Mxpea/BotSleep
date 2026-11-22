@@ -1477,6 +1477,26 @@ class WaterEscapeTests(unittest.TestCase):
         self.assertTrue(res.success, res)
         self.assertEqual(res.data["terrain_search"]["termination"], "partial_progress")
 
+    def test_water_escape_accepts_steps_recovery_context_for_heading_rotation(self):
+        world = World()
+        world.ground = "water"
+        world.status.update({"pos": [0.5, 62.0, 0.5], "in_water": True, "submerged": False, "on_ground": False})
+        yaws = []
+
+        def fake_control(**kwargs):
+            yaws.append(kwargs.get("yaw"))
+            return envelope({"ok": True})
+
+        world.control = fake_control
+        world.move_effect = Mock(side_effect=APIError("stalled", "open water"))
+        with patch("skills.survival.time.sleep"):
+            r0 = SurvivalSkills(world).execute("water_escape", {}, recovery_context={"purpose": "water_escape", "steps": 0})
+            r4 = SurvivalSkills(world).execute("water_escape", {}, recovery_context={"purpose": "water_escape", "steps": 4})
+        self.assertEqual(r0.error_code, "still_in_water")
+        self.assertEqual(r4.error_code, "still_in_water")
+        self.assertGreaterEqual(len(yaws), 2)
+        self.assertNotEqual(yaws[0], yaws[-1])
+
 
 if __name__ == "__main__":
     unittest.main()

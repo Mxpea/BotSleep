@@ -929,6 +929,9 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                 options = {"recovery_context": self._retreat_options(observation, decision)} if decision.name == "retreat_from" else {}
                 if decision.name == "canopy_escape":
                     options["recovery_context"] = self._canopy_options(observation)
+                elif decision.name == "water_escape":
+                    water_steps = int(((self.context.get("water_recovery") or {}).get("steps")) or 0)
+                    options["recovery_context"] = {"purpose": "water_escape", "steps": water_steps}
                 if self._task_child and self.context.get("cautious_bootstrap") is True:
                     options["cautious"] = True
                 if permit is not None:
@@ -1305,7 +1308,11 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                             delay = max(delay, min(256.0, float(retry_after)))
                         self._llm_retry_after = time.monotonic() + delay
                 if self.daily and result.error_code == "llm_repeated_failure" and hasattr(self.planner, "_failed_actions"):
-                    self.planner._failed_actions.clear()
+                    self.planner._failed_actions = {
+                        sig: entry
+                        for sig, entry in self.planner._failed_actions.items()
+                        if entry.get("decision") and entry["decision"].name == "run_survival_task"
+                    }
                 if (result.error_code == "llm_context_limit" or context_limit_http) and isinstance(getattr(self.planner, "_turns", None), list):
                     turns = self.planner._turns
                     self.planner._turns = turns[-2:] if len(turns) > 2 else []

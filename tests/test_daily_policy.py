@@ -754,6 +754,29 @@ class DailyPolicyTests(unittest.TestCase):
         self.assertEqual(self.policy.constraints(obs, context=exhausted_ctx)["scenario"], "environment_hazard")
         self.assertEqual(self.policy.choose(submerged_wet, self.baseline, context=exhausted_ctx).name, "water_escape")
 
+    def test_opportunistic_releases_after_food_or_boxed_retreat_exhausted(self):
+        opp = DailySafetyPolicy({"low_health_threshold": 8, "food_threshold": 16, "threat_radius": 8, "sleep_policy": "opportunistic"})
+        food_blocked = observed(health=6, food=10)
+        wait_strict = self.policy.choose(food_blocked, self.baseline, context={"food_recovery": {"needs_ai": True}})
+        self.assertEqual((wait_strict.name, wait_strict.args.get("seconds")), ("wait", 1))
+        ctx_food = {"food_recovery": {"needs_ai": True}}
+        self.assertIsNone(opp.choose(food_blocked, self.baseline, context=ctx_food))
+        self.assertTrue(opp.constraints(food_blocked, ctx_food)["model_allowed"])
+        self.assertIsNone(opp.validate(action("move_to", pos=[4, 64, 0]), food_blocked, ctx_food))
+
+        boxed_obs = observed(health=18, food=18)
+        boxed_obs["entities"] = [{"id": 22, "type": "hostile", "name": "spider", "pos": [6.0, 64.0, 0.5]}]
+        self.assertEqual(
+            opp.choose(boxed_obs, self.baseline, context={"retreat_recovery": {"no_route_exhausted": True}}),
+            None,
+        )
+        close_obs = observed(health=18, food=18)
+        close_obs["entities"] = [{"id": 23, "type": "hostile", "name": "spider", "pos": [2.5, 64.0, 0.5]}]
+        self.assertEqual(
+            opp.choose(close_obs, self.baseline, context={"retreat_recovery": {"no_route_exhausted": True}}).name,
+            "retreat_from",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

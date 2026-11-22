@@ -751,7 +751,7 @@ class SurvivalSkills:
                 return {"pos": cur["pos"], "escaped_water": True, "stage": "swim_dry", "progress_made": True}
             # If pressing straight toward bank moved <0.35m horizontally (steep cliff/overhang), swim laterally to skirt it.
             if math.hypot(cur["pos"][0] - before["pos"][0], cur["pos"][2] - before["pos"][2]) < 0.35:
-                step_idx = int((context.get("recovery_context") or {}).get("steps", 0) or 0)
+                step_idx = (int((context.get("recovery_context") or {}).get("steps", 0) or 0) // 4) % 4
                 lateral_yaw = yaw + (math.pi / 2 if step_idx % 2 == 0 else -math.pi / 2)
                 swim_step(forward=True, jump=True, yaw=lateral_yaw, pitch=0.0, ms=900, wait=True)
                 if _confirm_dry_landing():
@@ -1708,19 +1708,23 @@ class SurvivalSkills:
             if not isinstance(args, dict) or set(args) - allowed or required - set(args):
                 raise _Failure("bad_args", "Missing or unsupported survival skill arguments")
             if recovery_context is not None:
-                if (name not in {"retreat_from", "canopy_escape"} or not isinstance(recovery_context, dict)
-                        or set(recovery_context) - {"excluded_targets", "evacuating", "evacuation_origin", "purpose", "recent_targets", "threat_radius"}):
+                if (name not in {"retreat_from", "canopy_escape", "water_escape"} or not isinstance(recovery_context, dict)
+                        or set(recovery_context) - {"excluded_targets", "evacuating", "evacuation_origin", "purpose", "recent_targets", "threat_radius", "steps"}):
                     raise _Failure("bad_args", "Unsupported retreat recovery context")
                 excluded = recovery_context.get("excluded_targets", [])
                 recent = recovery_context.get("recent_targets", [])
                 if (not isinstance(excluded, list) or len(excluded) > 8 or not isinstance(recent, list) or len(recent) > 8
                         or type(recovery_context.get("evacuating", False)) is not bool
-                        or recovery_context.get("purpose", "retreat") not in {"retreat", "canopy_escape"}):
+                        or recovery_context.get("purpose", "retreat") not in {"retreat", "canopy_escape", "water_escape"}):
+                    raise _Failure("bad_args", "Invalid retreat recovery context")
+                steps_val = recovery_context.get("steps", 0)
+                if type(steps_val) is not int or steps_val < 0:
                     raise _Failure("bad_args", "Invalid retreat recovery context")
                 context["recovery_context"] = {"excluded_targets": [self._pos(pos, block=True) for pos in excluded],
                                                "evacuating": recovery_context.get("evacuating", False),
                                                "recent_targets": [self._pos(pos, block=True) for pos in recent],
                                                "purpose": recovery_context.get("purpose", "retreat"),
+                                               "steps": steps_val,
                                                "threat_radius": self._number(recovery_context.get("threat_radius", 8), "threat_radius", 1, 64)}
                 if "evacuation_origin" in recovery_context:
                     context["recovery_context"]["evacuation_origin"] = self._pos(recovery_context["evacuation_origin"])

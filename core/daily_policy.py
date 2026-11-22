@@ -117,8 +117,19 @@ class DailySafetyPolicy:
                 target = combat["target"]
                 return "combat", Decision("fight_hostile", {"entity_id": target["id"], "expected_name": target["name"]},
                     "Take one locally verified defensive step, then observe again", "safety")
-            return "near_hostile", Decision("retreat_from", {"pos": hostiles[0][1], "distance": 8},
-                "A hostile is within its danger radius; withdraw through freshly checked terrain instead of waiting exposed", "safety")
+            retreat_rec = (context or {}).get("retreat_recovery") or {}
+            if (self.sleep_policy == "opportunistic" and retreat_rec.get("no_route_exhausted") is True
+                    and status["health"] > 4):
+                if combat.get("allowed") is True:
+                    target = combat["target"]
+                    return "combat", Decision("fight_hostile", {"entity_id": target["id"], "expected_name": target["name"]},
+                        "Take one locally verified defensive step when retreat is boxed in", "safety")
+                if hostiles[0][0] <= 3.5:
+                    return "near_hostile", Decision("retreat_from", {"pos": hostiles[0][1], "distance": 8},
+                        "A hostile is within its danger radius; withdraw through freshly checked terrain instead of waiting exposed", "safety")
+            else:
+                return "near_hostile", Decision("retreat_from", {"pos": hostiles[0][1], "distance": 8},
+                    "A hostile is within its danger radius; withdraw through freshly checked terrain instead of waiting exposed", "safety")
         nearby = status.get("nearest_hostile")
         if isinstance(nearby, dict) and self.rules._number(nearby.get("dist")) and nearby["dist"] <= self.rules._threat_distance(nearby.get("name")):
             return "hostile_position_unknown", self._wait("Nearby hostile has no fresh position for a safe retreat")
@@ -511,7 +522,10 @@ class DailySafetyPolicy:
                 scenario, allowed, radius, model = "canopy_escape", ["canopy_escape", "wait"], 1, False
                 reason = "Canopy support requires one local verified escape step before production or food search"
             elif status["health"] <= self.low_health:
-                scenario, allowed, radius, model = "low_health", ["wait"], 0, False
+                if self._opportunistic_low_health_release(observation, context):
+                    scenario, allowed, radius, model = "low_health", None, None, True
+                else:
+                    scenario, allowed, radius, model = "low_health", ["wait"], 0, False
                 reason = ("Food is below 18: natural regeneration cannot restore health; seek only verified nearby food"
                           if status["food"] < 18 else "Food permits natural regeneration; observe recovery before production")
                 if self._bootstrap_ready(observation, context):
@@ -536,6 +550,18 @@ class DailySafetyPolicy:
         if scenario == "cautious_bootstrap":
             result.update(allowed_task_resources=["logs"], allowed_craft_items=sorted(BOOTSTRAP_ITEMS), max_task_count=8)
         return result
+
+    def _opportunistic_low_health_release(self, observation, context=None):
+        status = observation["status"]
+        food_rec = (context or {}).get("food_recovery") or {}
+        if (self.sleep_policy != "opportunistic" or food_rec.get("needs_ai") is not True
+                or not 4 < status["health"] <= self.low_health or status["food"] >= 18
+                or status.get("on_ground") is not True):
+            return False
+        footing = self._footing(observation)
+        if footing is not None and footing.get("name") in TREE_SUPPORTS:
+            return False
+        return not any(distance <= max(12, self.threat_radius) for distance, _ in self.rules._hostiles(observation, status["pos"]))
 
     def choose(self, observation, baseline_decision, task_board=None, context=None):
         scenario, forced = self._basics(observation, context)
@@ -568,8 +594,10 @@ class DailySafetyPolicy:
                 search = self._food_search(observation, context)
                 if search:
                     return search
-            return self._wait("Food recovery is blocked: food is below 18 and no currently verified safe food is available; waiting cannot regenerate health"
-                              if status["food"] < 18 else "Observe natural regeneration without hunting or gathering", "recover")
+                if self._opportunistic_low_health_release(observation, context):
+                    return None
+                return self._wait("Food recovery is blocked: food is below 18 and no currently verified safe food is available; waiting cannot regenerate health", "recover", 1)
+            return self._wait("Observe natural regeneration without hunting or gathering", "recover")
         if self._strict_night_block(observation, status):
             home = self._return_home(observation)
             if home:
@@ -619,6 +647,8 @@ class DailySafetyPolicy:
                 return None
             if self._bootstrap_valid(decision, observation, context):
                 return None
+            if self._opportunistic_low_health_release(observation, context):
+                return None
             return "low_health_food_only"
         if self._strict_night_block(observation, status):
             home = self._return_home(observation)
@@ -644,7 +674,7 @@ class DailySafetyPolicy:
         if safety_decision.goal == "sleep" and self._strict_night_block(observation, status):
             return NIGHT if status["health"] > self.low_health else None
         if (safety_decision.goal == "recover" and status["health"] <= self.low_health
-                and status["food"] < 18 and not self._night(status)
+                and status["food"] < 18 and (not self._night(status) or self.sleep_policy == "opportunistic")
                 and not self._food_options(observation, low_health=True)
                 and self._food_search(observation, context) is None):
             return LOW_HEALTH
