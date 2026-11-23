@@ -1,8 +1,7 @@
 """One model request per provider credential, including across local processes.
 
-An incomplete transport response leaves a durable uncertainty latch. A client
-timeout cannot prove the provider stopped generating, so waiting or restarting
-must not silently grant another request.
+Known transport errors expire after a retry window; a live local request
+always retains its OS lock, regardless of age.
 """
 
 import hashlib
@@ -26,6 +25,7 @@ class ModelGateError(Exception):
 _THREAD_LOCKS = {}
 _REGISTRY_LOCK = threading.Lock()
 _UNFINISHED = {"llm_timeout", "llm_network_error"}
+TRANSPORT_WINDOW_SECONDS = 30
 
 
 class ModelRequestGate:
@@ -130,9 +130,11 @@ class ModelRequestGate:
     def request(self, cancel_event=None):
         with self._locked(cancel_event):
             previous = self._read()
-            if previous["state"] != "idle":
+            if self._retry_due(previous):
+                self._record("MODEL_TRANSPORT_WINDOW_EXPIRED", {"error_code": previous["error_code"]})
+            elif previous["state"] != "idle":
                 self._record("MODEL_REQUEST_UNCERTAIN", {"reason": "previous_request_not_confirmed_finished"})
-                raise ModelGateError("llm_request_uncertain", "Previous model request may still be running; confirm provider idle before resuming")
+                raise ModelGateError("llm_request_uncertain", "Previous model request has not cleared its gate")
             state = {"state": "inflight", "request_id": uuid.uuid4().hex,
                      "pid": os.getpid(), "started_at": time.time()}
             self._write(state)
@@ -161,6 +163,22 @@ class ModelRequestGate:
             self._write({"state": "idle", "acknowledged_at": time.time(), "reason": "operator_confirmed_provider_idle"})
             self._record("MODEL_IDLE_ACKNOWLEDGED", {"reason": "operator_confirmed_provider_idle"})
 
+    @staticmethod
+    def _retry_due(value):
+        started = value.get("started_at")
+        return (value["state"] == "uncertain" and value.get("error_code") in _UNFINISHED
+                and isinstance(started, (int, float)) and started > 0
+                and time.time() - started >= TRANSPORT_WINDOW_SECONDS)
+
+    def clear_expired_transport(self):
+        with self._locked():
+            if self._retry_due(self._read()):
+                self._write({"state": "idle", "reason": "transport_window_expired"})
+                return True
+            return False
+
     def snapshot(self):
         value = self._read()
+        if self._retry_due(value):
+            return {"state": "idle"}
         return {key: value[key] for key in ("state", "started_at", "finished_at", "error_code") if key in value}

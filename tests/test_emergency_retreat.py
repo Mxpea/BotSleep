@@ -310,6 +310,18 @@ class EmergencyRetreatTests(unittest.TestCase):
         self.assertEqual(options["excluded_targets"], [[-1, 64, 0]])
         self.assertFalse(any(row[0] == "stop" for row in self.client.calls))
 
+    def test_hit_across_cell_boundary_still_selects_retreat(self):
+        self.client.on_entities = lambda: self.client.status.update(pos=[1.2, 64, .5], health=16)
+        observation = self.collector.collect_safety()
+        self.assertFalse(observation["inventory_fresh"])
+        self.assertEqual(SurvivalPlanner().choose(observation).name, "retreat_from")
+
+    def test_spawn_transition_without_world_fields_is_wait_only(self):
+        self.client.status = {"ready": False}
+        observation = self.collector.collect_safety()
+        self.assertEqual(observation["observation_scope"], "safety")
+        self.assertEqual([name for name, _ in self.client.calls], ["status"])
+
     def test_changed_position_life_or_busy_during_short_scan_refuses_action(self):
         for change in ({"pos": [1.1, 64, .5]}, {"pos": [.5, 64.5, .5]}, {"last_death": {"t": 9}},
                        {"dimension": "the_nether"}, {"alive": False}, {"ready": False}, {"busy": "move_to"}):
@@ -327,6 +339,16 @@ class EmergencyRetreatTests(unittest.TestCase):
             self.collector.collect_safety(event)
         self.assertEqual(caught.exception.code, "cancelled")
         self.assertEqual([name for name, _ in self.client.calls], ["status", "entities"])
+
+    def test_first_status_timeout_retries_only_the_initial_read(self):
+        status = self.client.get_status()
+        with patch.object(self.client, "get_status", side_effect=[APIError("request_timeout", "slow"), status, status]) as get:
+            self.collector.collect_safety(force=True)
+        self.assertEqual(get.call_count, 3)
+        with patch.object(self.client, "get_status", side_effect=APIError("request_timeout", "slow")) as get:
+            with self.assertRaises(APIError):
+                self.collector.collect_safety()
+        self.assertEqual(get.call_count, 2)
 
     def test_short_scan_timeouts_share_two_second_total_budget(self):
         with patch("core.survival_state.time.monotonic", side_effect=[0, 0, .5, 1.5, 2.1]):

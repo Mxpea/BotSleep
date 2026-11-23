@@ -1,0 +1,5133 @@
+{
+ "acacia_boat": [
+  {
+   "acacia_planks": 5
+  },
+  1,
+  true
+ ],
+ "acacia_button": [
+  {
+   "acacia_planks": 1
+  },
+  1,
+  false
+ ],
+ "acacia_chest_boat": [
+  {
+   "acacia_boat": 1,
+   "chest": 1
+  },
+  1,
+  false
+ ],
+ "acacia_door": [
+  {
+   "acacia_planks": 6
+  },
+  3,
+  true
+ ],
+ "acacia_fence": [
+  {
+   "acacia_planks": 4,
+   "stick": 2
+  },
+  3,
+  true
+ ],
+ "acacia_fence_gate": [
+  {
+   "acacia_planks": 2,
+   "stick": 4
+  },
+  1,
+  true
+ ],
+ "acacia_hanging_sign": [
+  {
+   "iron_chain": 2,
+   "stripped_acacia_log": 6
+  },
+  6,
+  true
+ ],
+ "acacia_pressure_plate": [
+  {
+   "acacia_planks": 2
+  },
+  1,
+  false
+ ],
+ "acacia_shelf": [
+  {
+   "stripped_acacia_log": 6
+  },
+  6,
+  true
+ ],
+ "acacia_sign": [
+  {
+   "acacia_planks": 6,
+   "stick": 1
+  },
+  3,
+  true
+ ],
+ "acacia_slab": [
+  {
+   "acacia_planks": 3
+  },
+  6,
+  true
+ ],
+ "acacia_stairs": [
+  {
+   "acacia_planks": 6
+  },
+  4,
+  true
+ ],
+ "acacia_trapdoor": [
+  {
+   "acacia_planks": 6
+  },
+  2,
+  true
+ ],
+ "acacia_wood": [
+  {
+   "acacia_log": 4
+  },
+  3,
+  false
+ ],
+ "activator_rail": [
+  {
+   "iron_ingot": 6,
+   "redstone_torch": 1,
+   "stick": 2
+  },
+  6,
+  true
+ ],
+ "amethyst_block": [
+  {
+   "amethyst_shard": 4
+  },
+  1,
+  false
+ ],
+ "andesite": [
+  {
+   "cobblestone": 1,
+   "diorite": 1
+  },
+  2,
+  false
+ ],
+ "andesite_slab": [
+  {
+   "andesite": 3
+  },
+  6,
+  true
+ ],
+ "andesite_stairs": [
+  {
+   "andesite": 6
+  },
+  4,
+  true
+ ],
+ "andesite_wall": [
+  {
+   "andesite": 6
+  },
+  6,
+  true
+ ],
+ "anvil": [
+  {
+   "iron_block": 3,
+   "iron_ingot": 4
+  },
+  1,
+  true
+ ],
+ "armor_stand": [
+  {
+   "smooth_stone_slab": 1,
+   "stick": 6
+  },
+  1,
+  true
+ ],
+ "arrow": [
+  {
+   "feather": 1,
+   "flint": 1,
+   "stick": 1
+  },
+  4,
+  true
+ ],
+ "bamboo_block": [
+  {
+   "bamboo": 9
+  },
+  1,
+  true
+ ],
+ "bamboo_button": [
+  {
+   "bamboo_planks": 1
+  },
+  1,
+  false
+ ],
+ "bamboo_chest_raft": [
+  {
+   "bamboo_raft": 1,
+   "chest": 1
+  },
+  1,
+  false
+ ],
+ "bamboo_door": [
+  {
+   "bamboo_planks": 6
+  },
+  3,
+  true
+ ],
+ "bamboo_fence": [
+  {
+   "bamboo_planks": 4,
+   "stick": 2
+  },
+  3,
+  true
+ ],
+ "bamboo_fence_gate": [
+  {
+   "bamboo_planks": 2,
+   "stick": 4
+  },
+  1,
+  true
+ ],
+ "bamboo_hanging_sign": [
+  {
+   "iron_chain": 2,
+   "stripped_bamboo_block": 6
+  },
+  6,
+  true
+ ],
+ "bamboo_mosaic": [
+  {
+   "bamboo_slab": 2
+  },
+  1,
+  false
+ ],
+ "bamboo_mosaic_slab": [
+  {
+   "bamboo_mosaic": 3
+  },
+  6,
+  true
+ ],
+ "bamboo_mosaic_stairs": [
+  {
+   "bamboo_mosaic": 6
+  },
+  4,
+  true
+ ],
+ "bamboo_pressure_plate": [
+  {
+   "bamboo_planks": 2
+  },
+  1,
+  false
+ ],
+ "bamboo_raft": [
+  {
+   "bamboo_planks": 5
+  },
+  1,
+  true
+ ],
+ "bamboo_shelf": [
+  {
+   "stripped_bamboo_block": 6
+  },
+  6,
+  true
+ ],
+ "bamboo_sign": [
+  {
+   "bamboo_planks": 6,
+   "stick": 1
+  },
+  3,
+  true
+ ],
+ "bamboo_slab": [
+  {
+   "bamboo_planks": 3
+  },
+  6,
+  true
+ ],
+ "bamboo_stairs": [
+  {
+   "bamboo_planks": 6
+  },
+  4,
+  true
+ ],
+ "bamboo_trapdoor": [
+  {
+   "bamboo_planks": 6
+  },
+  2,
+  true
+ ],
+ "beacon": [
+  {
+   "glass": 5,
+   "nether_star": 1,
+   "obsidian": 3
+  },
+  1,
+  true
+ ],
+ "beehive": [
+  {
+   "honeycomb": 3,
+   "planks": 6
+  },
+  1,
+  true
+ ],
+ "beetroot_soup": [
+  {
+   "beetroot": 6,
+   "bowl": 1
+  },
+  1,
+  true
+ ],
+ "birch_boat": [
+  {
+   "birch_planks": 5
+  },
+  1,
+  true
+ ],
+ "birch_button": [
+  {
+   "birch_planks": 1
+  },
+  1,
+  false
+ ],
+ "birch_chest_boat": [
+  {
+   "birch_boat": 1,
+   "chest": 1
+  },
+  1,
+  false
+ ],
+ "birch_door": [
+  {
+   "birch_planks": 6
+  },
+  3,
+  true
+ ],
+ "birch_fence": [
+  {
+   "birch_planks": 4,
+   "stick": 2
+  },
+  3,
+  true
+ ],
+ "birch_fence_gate": [
+  {
+   "birch_planks": 2,
+   "stick": 4
+  },
+  1,
+  true
+ ],
+ "birch_hanging_sign": [
+  {
+   "iron_chain": 2,
+   "stripped_birch_log": 6
+  },
+  6,
+  true
+ ],
+ "birch_pressure_plate": [
+  {
+   "birch_planks": 2
+  },
+  1,
+  false
+ ],
+ "birch_shelf": [
+  {
+   "stripped_birch_log": 6
+  },
+  6,
+  true
+ ],
+ "birch_sign": [
+  {
+   "birch_planks": 6,
+   "stick": 1
+  },
+  3,
+  true
+ ],
+ "birch_slab": [
+  {
+   "birch_planks": 3
+  },
+  6,
+  true
+ ],
+ "birch_stairs": [
+  {
+   "birch_planks": 6
+  },
+  4,
+  true
+ ],
+ "birch_trapdoor": [
+  {
+   "birch_planks": 6
+  },
+  2,
+  true
+ ],
+ "birch_wood": [
+  {
+   "birch_log": 4
+  },
+  3,
+  false
+ ],
+ "black_banner": [
+  {
+   "black_wool": 6,
+   "stick": 1
+  },
+  1,
+  true
+ ],
+ "black_candle": [
+  {
+   "black_dye": 1,
+   "candle": 1
+  },
+  1,
+  false
+ ],
+ "black_concrete_powder": [
+  {
+   "black_dye": 1,
+   "gravel": 4,
+   "sand": 4
+  },
+  8,
+  true
+ ],
+ "black_stained_glass": [
+  {
+   "black_dye": 1,
+   "glass": 8
+  },
+  8,
+  true
+ ],
+ "black_terracotta": [
+  {
+   "black_dye": 1,
+   "terracotta": 8
+  },
+  8,
+  true
+ ],
+ "blackstone_slab": [
+  {
+   "blackstone": 3
+  },
+  6,
+  true
+ ],
+ "blackstone_stairs": [
+  {
+   "blackstone": 6
+  },
+  4,
+  true
+ ],
+ "blackstone_wall": [
+  {
+   "blackstone": 6
+  },
+  6,
+  true
+ ],
+ "blast_furnace": [
+  {
+   "furnace": 1,
+   "iron_ingot": 5,
+   "smooth_stone": 3
+  },
+  1,
+  true
+ ],
+ "blaze_powder": [
+  {
+   "blaze_rod": 1
+  },
+  2,
+  false
+ ],
+ "blue_banner": [
+  {
+   "blue_wool": 6,
+   "stick": 1
+  },
+  1,
+  true
+ ],
+ "blue_candle": [
+  {
+   "blue_dye": 1,
+   "candle": 1
+  },
+  1,
+  false
+ ],
+ "blue_concrete_powder": [
+  {
+   "blue_dye": 1,
+   "gravel": 4,
+   "sand": 4
+  },
+  8,
+  true
+ ],
+ "blue_ice": [
+  {
+   "packed_ice": 9
+  },
+  1,
+  true
+ ],
+ "blue_stained_glass": [
+  {
+   "blue_dye": 1,
+   "glass": 8
+  },
+  8,
+  true
+ ],
+ "blue_terracotta": [
+  {
+   "blue_dye": 1,
+   "terracotta": 8
+  },
+  8,
+  true
+ ],
+ "bone_block": [
+  {
+   "bone_meal": 9
+  },
+  1,
+  true
+ ],
+ "book": [
+  {
+   "leather": 1,
+   "paper": 3
+  },
+  1,
+  false
+ ],
+ "bookshelf": [
+  {
+   "book": 3,
+   "planks": 6
+  },
+  1,
+  true
+ ],
+ "bordure_indented_banner_pattern": [
+  {
+   "paper": 1,
+   "vine": 1
+  },
+  1,
+  false
+ ],
+ "bow": [
+  {
+   "stick": 3,
+   "string": 3
+  },
+  1,
+  true
+ ],
+ "bowl": [
+  {
+   "planks": 3
+  },
+  4,
+  true
+ ],
+ "bread": [
+  {
+   "wheat": 3
+  },
+  1,
+  true
+ ],
+ "brick_slab": [
+  {
+   "bricks": 3
+  },
+  6,
+  true
+ ],
+ "brick_stairs": [
+  {
+   "bricks": 6
+  },
+  4,
+  true
+ ],
+ "brick_wall": [
+  {
+   "bricks": 6
+  },
+  6,
+  true
+ ],
+ "bricks": [
+  {
+   "brick": 4
+  },
+  1,
+  false
+ ],
+ "brown_banner": [
+  {
+   "brown_wool": 6,
+   "stick": 1
+  },
+  1,
+  true
+ ],
+ "brown_candle": [
+  {
+   "brown_dye": 1,
+   "candle": 1
+  },
+  1,
+  false
+ ],
+ "brown_concrete_powder": [
+  {
+   "brown_dye": 1,
+   "gravel": 4,
+   "sand": 4
+  },
+  8,
+  true
+ ],
+ "brown_dye": [
+  {
+   "cocoa_beans": 1
+  },
+  1,
+  false
+ ],
+ "brown_stained_glass": [
+  {
+   "brown_dye": 1,
+   "glass": 8
+  },
+  8,
+  true
+ ],
+ "brown_terracotta": [
+  {
+   "brown_dye": 1,
+   "terracotta": 8
+  },
+  8,
+  true
+ ],
+ "brush": [
+  {
+   "copper_ingot": 1,
+   "feather": 1,
+   "stick": 1
+  },
+  1,
+  true
+ ],
+ "bucket": [
+  {
+   "iron_ingot": 3
+  },
+  1,
+  true
+ ],
+ "bundle": [
+  {
+   "leather": 1,
+   "string": 1
+  },
+  1,
+  false
+ ],
+ "calibrated_sculk_sensor": [
+  {
+   "amethyst_shard": 3,
+   "sculk_sensor": 1
+  },
+  1,
+  true
+ ],
+ "candle": [
+  {
+   "honeycomb": 1,
+   "string": 1
+  },
+  1,
+  false
+ ],
+ "carrot_on_a_stick": [
+  {
+   "carrot": 1,
+   "fishing_rod": 1
+  },
+  1,
+  false
+ ],
+ "cartography_table": [
+  {
+   "paper": 2,
+   "planks": 4
+  },
+  1,
+  true
+ ],
+ "cauldron": [
+  {
+   "iron_ingot": 7
+  },
+  1,
+  true
+ ],
+ "cherry_boat": [
+  {
+   "cherry_planks": 5
+  },
+  1,
+  true
+ ],
+ "cherry_button": [
+  {
+   "cherry_planks": 1
+  },
+  1,
+  false
+ ],
+ "cherry_chest_boat": [
+  {
+   "cherry_boat": 1,
+   "chest": 1
+  },
+  1,
+  false
+ ],
+ "cherry_door": [
+  {
+   "cherry_planks": 6
+  },
+  3,
+  true
+ ],
+ "cherry_fence": [
+  {
+   "cherry_planks": 4,
+   "stick": 2
+  },
+  3,
+  true
+ ],
+ "cherry_fence_gate": [
+  {
+   "cherry_planks": 2,
+   "stick": 4
+  },
+  1,
+  true
+ ],
+ "cherry_hanging_sign": [
+  {
+   "iron_chain": 2,
+   "stripped_cherry_log": 6
+  },
+  6,
+  true
+ ],
+ "cherry_pressure_plate": [
+  {
+   "cherry_planks": 2
+  },
+  1,
+  false
+ ],
+ "cherry_shelf": [
+  {
+   "stripped_cherry_log": 6
+  },
+  6,
+  true
+ ],
+ "cherry_sign": [
+  {
+   "cherry_planks": 6,
+   "stick": 1
+  },
+  3,
+  true
+ ],
+ "cherry_slab": [
+  {
+   "cherry_planks": 3
+  },
+  6,
+  true
+ ],
+ "cherry_stairs": [
+  {
+   "cherry_planks": 6
+  },
+  4,
+  true
+ ],
+ "cherry_trapdoor": [
+  {
+   "cherry_planks": 6
+  },
+  2,
+  true
+ ],
+ "cherry_wood": [
+  {
+   "cherry_log": 4
+  },
+  3,
+  false
+ ],
+ "chest": [
+  {
+   "planks": 8
+  },
+  1,
+  true
+ ],
+ "chest_minecart": [
+  {
+   "chest": 1,
+   "minecart": 1
+  },
+  1,
+  false
+ ],
+ "chiseled_copper": [
+  {
+   "cut_copper_slab": 2
+  },
+  1,
+  false
+ ],
+ "chiseled_deepslate": [
+  {
+   "cobbled_deepslate_slab": 2
+  },
+  1,
+  false
+ ],
+ "chiseled_nether_bricks": [
+  {
+   "nether_brick_slab": 2
+  },
+  1,
+  false
+ ],
+ "chiseled_polished_blackstone": [
+  {
+   "polished_blackstone_slab": 2
+  },
+  1,
+  false
+ ],
+ "chiseled_quartz_block": [
+  {
+   "quartz_slab": 2
+  },
+  1,
+  false
+ ],
+ "chiseled_red_sandstone": [
+  {
+   "red_sandstone_slab": 2
+  },
+  1,
+  false
+ ],
+ "chiseled_resin_bricks": [
+  {
+   "resin_brick_slab": 2
+  },
+  1,
+  false
+ ],
+ "chiseled_sandstone": [
+  {
+   "sandstone_slab": 2
+  },
+  1,
+  false
+ ],
+ "chiseled_stone_bricks": [
+  {
+   "stone_brick_slab": 2
+  },
+  1,
+  false
+ ],
+ "chiseled_tuff": [
+  {
+   "tuff_slab": 2
+  },
+  1,
+  false
+ ],
+ "chiseled_tuff_bricks": [
+  {
+   "tuff_brick_slab": 2
+  },
+  1,
+  false
+ ],
+ "clay": [
+  {
+   "clay_ball": 4
+  },
+  1,
+  false
+ ],
+ "clock": [
+  {
+   "gold_ingot": 4,
+   "redstone": 1
+  },
+  1,
+  true
+ ],
+ "coal": [
+  {
+   "coal_block": 1
+  },
+  9,
+  false
+ ],
+ "coal_block": [
+  {
+   "coal": 9
+  },
+  1,
+  true
+ ],
+ "coarse_dirt": [
+  {
+   "dirt": 2,
+   "gravel": 2
+  },
+  4,
+  false
+ ],
+ "coast_armor_trim_smithing_template": [
+  {
+   "coast_armor_trim_smithing_template": 1,
+   "cobblestone": 1,
+   "diamond": 7
+  },
+  2,
+  true
+ ],
+ "cobbled_deepslate_slab": [
+  {
+   "cobbled_deepslate": 3
+  },
+  6,
+  true
+ ],
+ "cobbled_deepslate_stairs": [
+  {
+   "cobbled_deepslate": 6
+  },
+  4,
+  true
+ ],
+ "cobbled_deepslate_wall": [
+  {
+   "cobbled_deepslate": 6
+  },
+  6,
+  true
+ ],
+ "cobblestone_slab": [
+  {
+   "cobblestone": 3
+  },
+  6,
+  true
+ ],
+ "cobblestone_stairs": [
+  {
+   "cobblestone": 6
+  },
+  4,
+  true
+ ],
+ "cobblestone_wall": [
+  {
+   "cobblestone": 6
+  },
+  6,
+  true
+ ],
+ "comparator": [
+  {
+   "quartz": 1,
+   "redstone_torch": 3,
+   "stone": 3
+  },
+  1,
+  true
+ ],
+ "compass": [
+  {
+   "iron_ingot": 4,
+   "redstone": 1
+  },
+  1,
+  true
+ ],
+ "conduit": [
+  {
+   "heart_of_the_sea": 1,
+   "nautilus_shell": 8
+  },
+  1,
+  true
+ ],
+ "cookie": [
+  {
+   "cocoa_beans": 1,
+   "wheat": 2
+  },
+  8,
+  true
+ ],
+ "copper_bars": [
+  {
+   "copper_ingot": 6
+  },
+  16,
+  true
+ ],
+ "copper_block": [
+  {
+   "copper_ingot": 9
+  },
+  1,
+  true
+ ],
+ "copper_boots": [
+  {
+   "copper_ingot": 4
+  },
+  1,
+  true
+ ],
+ "copper_bulb": [
+  {
+   "blaze_rod": 1,
+   "copper_block": 3,
+   "redstone": 1
+  },
+  4,
+  true
+ ],
+ "copper_chain": [
+  {
+   "copper_ingot": 1,
+   "copper_nugget": 2
+  },
+  1,
+  true
+ ],
+ "copper_chest": [
+  {
+   "chest": 1,
+   "copper_ingot": 8
+  },
+  1,
+  true
+ ],
+ "copper_chestplate": [
+  {
+   "copper_ingot": 8
+  },
+  1,
+  true
+ ],
+ "copper_door": [
+  {
+   "copper_ingot": 6
+  },
+  3,
+  true
+ ],
+ "copper_grate": [
+  {
+   "copper_block": 4
+  },
+  4,
+  true
+ ],
+ "copper_helmet": [
+  {
+   "copper_ingot": 5
+  },
+  1,
+  true
+ ],
+ "copper_lantern": [
+  {
+   "copper_nugget": 8,
+   "copper_torch": 1
+  },
+  1,
+  true
+ ],
+ "copper_leggings": [
+  {
+   "copper_ingot": 7
+  },
+  1,
+  true
+ ],
+ "copper_nugget": [
+  {
+   "copper_ingot": 1
+  },
+  9,
+  false
+ ],
+ "copper_trapdoor": [
+  {
+   "copper_ingot": 4
+  },
+  1,
+  false
+ ],
+ "crafter": [
+  {
+   "crafting_table": 1,
+   "dropper": 1,
+   "iron_ingot": 5,
+   "redstone": 2
+  },
+  1,
+  true
+ ],
+ "crafting_table": [
+  {
+   "planks": 4
+  },
+  1,
+  false
+ ],
+ "creaking_heart": [
+  {
+   "pale_oak_log": 2,
+   "resin_block": 1
+  },
+  1,
+  true
+ ],
+ "creeper_banner_pattern": [
+  {
+   "creeper_head": 1,
+   "paper": 1
+  },
+  1,
+  false
+ ],
+ "crimson_button": [
+  {
+   "crimson_planks": 1
+  },
+  1,
+  false
+ ],
+ "crimson_door": [
+  {
+   "crimson_planks": 6
+  },
+  3,
+  true
+ ],
+ "crimson_fence": [
+  {
+   "crimson_planks": 4,
+   "stick": 2
+  },
+  3,
+  true
+ ],
+ "crimson_fence_gate": [
+  {
+   "crimson_planks": 2,
+   "stick": 4
+  },
+  1,
+  true
+ ],
+ "crimson_hanging_sign": [
+  {
+   "iron_chain": 2,
+   "stripped_crimson_stem": 6
+  },
+  6,
+  true
+ ],
+ "crimson_hyphae": [
+  {
+   "crimson_stem": 4
+  },
+  3,
+  false
+ ],
+ "crimson_pressure_plate": [
+  {
+   "crimson_planks": 2
+  },
+  1,
+  false
+ ],
+ "crimson_shelf": [
+  {
+   "stripped_crimson_stem": 6
+  },
+  6,
+  true
+ ],
+ "crimson_sign": [
+  {
+   "crimson_planks": 6,
+   "stick": 1
+  },
+  3,
+  true
+ ],
+ "crimson_slab": [
+  {
+   "crimson_planks": 3
+  },
+  6,
+  true
+ ],
+ "crimson_stairs": [
+  {
+   "crimson_planks": 6
+  },
+  4,
+  true
+ ],
+ "crimson_trapdoor": [
+  {
+   "crimson_planks": 6
+  },
+  2,
+  true
+ ],
+ "crossbow": [
+  {
+   "iron_ingot": 1,
+   "stick": 3,
+   "string": 2,
+   "tripwire_hook": 1
+  },
+  1,
+  true
+ ],
+ "cut_copper": [
+  {
+   "copper_block": 4
+  },
+  4,
+  false
+ ],
+ "cut_copper_slab": [
+  {
+   "cut_copper": 3
+  },
+  6,
+  true
+ ],
+ "cut_copper_stairs": [
+  {
+   "cut_copper": 6
+  },
+  4,
+  true
+ ],
+ "cut_red_sandstone": [
+  {
+   "red_sandstone": 4
+  },
+  4,
+  false
+ ],
+ "cut_red_sandstone_slab": [
+  {
+   "cut_red_sandstone": 3
+  },
+  6,
+  true
+ ],
+ "cut_sandstone": [
+  {
+   "sandstone": 4
+  },
+  4,
+  false
+ ],
+ "cut_sandstone_slab": [
+  {
+   "cut_sandstone": 3
+  },
+  6,
+  true
+ ],
+ "cyan_banner": [
+  {
+   "cyan_wool": 6,
+   "stick": 1
+  },
+  1,
+  true
+ ],
+ "cyan_candle": [
+  {
+   "candle": 1,
+   "cyan_dye": 1
+  },
+  1,
+  false
+ ],
+ "cyan_concrete_powder": [
+  {
+   "cyan_dye": 1,
+   "gravel": 4,
+   "sand": 4
+  },
+  8,
+  true
+ ],
+ "cyan_stained_glass": [
+  {
+   "cyan_dye": 1,
+   "glass": 8
+  },
+  8,
+  true
+ ],
+ "cyan_terracotta": [
+  {
+   "cyan_dye": 1,
+   "terracotta": 8
+  },
+  8,
+  true
+ ],
+ "dark_oak_boat": [
+  {
+   "dark_oak_planks": 5
+  },
+  1,
+  true
+ ],
+ "dark_oak_button": [
+  {
+   "dark_oak_planks": 1
+  },
+  1,
+  false
+ ],
+ "dark_oak_chest_boat": [
+  {
+   "chest": 1,
+   "dark_oak_boat": 1
+  },
+  1,
+  false
+ ],
+ "dark_oak_door": [
+  {
+   "dark_oak_planks": 6
+  },
+  3,
+  true
+ ],
+ "dark_oak_fence": [
+  {
+   "dark_oak_planks": 4,
+   "stick": 2
+  },
+  3,
+  true
+ ],
+ "dark_oak_fence_gate": [
+  {
+   "dark_oak_planks": 2,
+   "stick": 4
+  },
+  1,
+  true
+ ],
+ "dark_oak_hanging_sign": [
+  {
+   "iron_chain": 2,
+   "stripped_dark_oak_log": 6
+  },
+  6,
+  true
+ ],
+ "dark_oak_pressure_plate": [
+  {
+   "dark_oak_planks": 2
+  },
+  1,
+  false
+ ],
+ "dark_oak_shelf": [
+  {
+   "stripped_dark_oak_log": 6
+  },
+  6,
+  true
+ ],
+ "dark_oak_sign": [
+  {
+   "dark_oak_planks": 6,
+   "stick": 1
+  },
+  3,
+  true
+ ],
+ "dark_oak_slab": [
+  {
+   "dark_oak_planks": 3
+  },
+  6,
+  true
+ ],
+ "dark_oak_stairs": [
+  {
+   "dark_oak_planks": 6
+  },
+  4,
+  true
+ ],
+ "dark_oak_trapdoor": [
+  {
+   "dark_oak_planks": 6
+  },
+  2,
+  true
+ ],
+ "dark_oak_wood": [
+  {
+   "dark_oak_log": 4
+  },
+  3,
+  false
+ ],
+ "dark_prismarine": [
+  {
+   "black_dye": 1,
+   "prismarine_shard": 8
+  },
+  1,
+  true
+ ],
+ "dark_prismarine_slab": [
+  {
+   "dark_prismarine": 3
+  },
+  6,
+  true
+ ],
+ "dark_prismarine_stairs": [
+  {
+   "dark_prismarine": 6
+  },
+  4,
+  true
+ ],
+ "decorated_pot": [
+  {
+   "brick": 4
+  },
+  1,
+  true
+ ],
+ "deepslate_brick_slab": [
+  {
+   "deepslate_bricks": 3
+  },
+  6,
+  true
+ ],
+ "deepslate_brick_stairs": [
+  {
+   "deepslate_bricks": 6
+  },
+  4,
+  true
+ ],
+ "deepslate_brick_wall": [
+  {
+   "deepslate_bricks": 6
+  },
+  6,
+  true
+ ],
+ "deepslate_bricks": [
+  {
+   "polished_deepslate": 4
+  },
+  4,
+  false
+ ],
+ "deepslate_tile_slab": [
+  {
+   "deepslate_tiles": 3
+  },
+  6,
+  true
+ ],
+ "deepslate_tile_stairs": [
+  {
+   "deepslate_tiles": 6
+  },
+  4,
+  true
+ ],
+ "deepslate_tile_wall": [
+  {
+   "deepslate_tiles": 6
+  },
+  6,
+  true
+ ],
+ "deepslate_tiles": [
+  {
+   "deepslate_bricks": 4
+  },
+  4,
+  false
+ ],
+ "detector_rail": [
+  {
+   "iron_ingot": 6,
+   "redstone": 1,
+   "stone_pressure_plate": 1
+  },
+  6,
+  true
+ ],
+ "diamond": [
+  {
+   "diamond_block": 1
+  },
+  9,
+  false
+ ],
+ "diamond_block": [
+  {
+   "diamond": 9
+  },
+  1,
+  true
+ ],
+ "diamond_boots": [
+  {
+   "diamond": 4
+  },
+  1,
+  true
+ ],
+ "diamond_chestplate": [
+  {
+   "diamond": 8
+  },
+  1,
+  true
+ ],
+ "diamond_helmet": [
+  {
+   "diamond": 5
+  },
+  1,
+  true
+ ],
+ "diamond_leggings": [
+  {
+   "diamond": 7
+  },
+  1,
+  true
+ ],
+ "diorite": [
+  {
+   "cobblestone": 2,
+   "quartz": 2
+  },
+  2,
+  false
+ ],
+ "diorite_slab": [
+  {
+   "diorite": 3
+  },
+  6,
+  true
+ ],
+ "diorite_stairs": [
+  {
+   "diorite": 6
+  },
+  4,
+  true
+ ],
+ "diorite_wall": [
+  {
+   "diorite": 6
+  },
+  6,
+  true
+ ],
+ "dispenser": [
+  {
+   "bow": 1,
+   "cobblestone": 7,
+   "redstone": 1
+  },
+  1,
+  true
+ ],
+ "dried_ghast": [
+  {
+   "ghast_tear": 8,
+   "soul_sand": 1
+  },
+  1,
+  true
+ ],
+ "dried_kelp": [
+  {
+   "dried_kelp_block": 1
+  },
+  9,
+  false
+ ],
+ "dried_kelp_block": [
+  {
+   "dried_kelp": 9
+  },
+  1,
+  true
+ ],
+ "dripstone_block": [
+  {
+   "pointed_dripstone": 4
+  },
+  1,
+  false
+ ],
+ "dropper": [
+  {
+   "cobblestone": 7,
+   "redstone": 1
+  },
+  1,
+  true
+ ],
+ "dune_armor_trim_smithing_template": [
+  {
+   "diamond": 7,
+   "dune_armor_trim_smithing_template": 1,
+   "sandstone": 1
+  },
+  2,
+  true
+ ],
+ "emerald": [
+  {
+   "emerald_block": 1
+  },
+  9,
+  false
+ ],
+ "emerald_block": [
+  {
+   "emerald": 9
+  },
+  1,
+  true
+ ],
+ "enchanting_table": [
+  {
+   "book": 1,
+   "diamond": 2,
+   "obsidian": 4
+  },
+  1,
+  true
+ ],
+ "end_crystal": [
+  {
+   "ender_eye": 1,
+   "ghast_tear": 1,
+   "glass": 7
+  },
+  1,
+  true
+ ],
+ "end_rod": [
+  {
+   "blaze_rod": 1,
+   "popped_chorus_fruit": 1
+  },
+  4,
+  false
+ ],
+ "end_stone_brick_slab": [
+  {
+   "end_stone_bricks": 3
+  },
+  6,
+  true
+ ],
+ "end_stone_brick_stairs": [
+  {
+   "end_stone_bricks": 6
+  },
+  4,
+  true
+ ],
+ "end_stone_brick_wall": [
+  {
+   "end_stone_bricks": 6
+  },
+  6,
+  true
+ ],
+ "end_stone_bricks": [
+  {
+   "end_stone": 4
+  },
+  4,
+  false
+ ],
+ "ender_chest": [
+  {
+   "ender_eye": 1,
+   "obsidian": 8
+  },
+  1,
+  true
+ ],
+ "ender_eye": [
+  {
+   "blaze_powder": 1,
+   "ender_pearl": 1
+  },
+  1,
+  false
+ ],
+ "exposed_chiseled_copper": [
+  {
+   "exposed_cut_copper_slab": 2
+  },
+  1,
+  false
+ ],
+ "exposed_copper_bulb": [
+  {
+   "blaze_rod": 1,
+   "exposed_copper": 3,
+   "redstone": 1
+  },
+  4,
+  true
+ ],
+ "exposed_copper_grate": [
+  {
+   "exposed_copper": 4
+  },
+  4,
+  true
+ ],
+ "exposed_cut_copper": [
+  {
+   "exposed_copper": 4
+  },
+  4,
+  false
+ ],
+ "exposed_cut_copper_slab": [
+  {
+   "exposed_cut_copper": 3
+  },
+  6,
+  true
+ ],
+ "exposed_cut_copper_stairs": [
+  {
+   "exposed_cut_copper": 6
+  },
+  4,
+  true
+ ],
+ "eye_armor_trim_smithing_template": [
+  {
+   "diamond": 7,
+   "end_stone": 1,
+   "eye_armor_trim_smithing_template": 1
+  },
+  2,
+  true
+ ],
+ "fermented_spider_eye": [
+  {
+   "brown_mushroom": 1,
+   "spider_eye": 1,
+   "sugar": 1
+  },
+  1,
+  false
+ ],
+ "field_masoned_banner_pattern": [
+  {
+   "bricks": 1,
+   "paper": 1
+  },
+  1,
+  false
+ ],
+ "firework_rocket": [
+  {
+   "gunpowder": 1,
+   "paper": 1
+  },
+  3,
+  false
+ ],
+ "fishing_rod": [
+  {
+   "stick": 3,
+   "string": 2
+  },
+  1,
+  true
+ ],
+ "fletching_table": [
+  {
+   "flint": 2,
+   "planks": 4
+  },
+  1,
+  true
+ ],
+ "flint_and_steel": [
+  {
+   "flint": 1,
+   "iron_ingot": 1
+  },
+  1,
+  false
+ ],
+ "flow_armor_trim_smithing_template": [
+  {
+   "breeze_rod": 1,
+   "diamond": 7,
+   "flow_armor_trim_smithing_template": 1
+  },
+  2,
+  true
+ ],
+ "flower_banner_pattern": [
+  {
+   "oxeye_daisy": 1,
+   "paper": 1
+  },
+  1,
+  false
+ ],
+ "flower_pot": [
+  {
+   "brick": 3
+  },
+  1,
+  true
+ ],
+ "furnace_minecart": [
+  {
+   "furnace": 1,
+   "minecart": 1
+  },
+  1,
+  false
+ ],
+ "glass_bottle": [
+  {
+   "glass": 3
+  },
+  3,
+  true
+ ],
+ "glass_pane": [
+  {
+   "glass": 6
+  },
+  16,
+  true
+ ],
+ "glistering_melon_slice": [
+  {
+   "gold_nugget": 8,
+   "melon_slice": 1
+  },
+  1,
+  true
+ ],
+ "glow_item_frame": [
+  {
+   "glow_ink_sac": 1,
+   "item_frame": 1
+  },
+  1,
+  false
+ ],
+ "glowstone": [
+  {
+   "glowstone_dust": 4
+  },
+  1,
+  false
+ ],
+ "gold_block": [
+  {
+   "gold_ingot": 9
+  },
+  1,
+  true
+ ],
+ "gold_nugget": [
+  {
+   "gold_ingot": 1
+  },
+  9,
+  false
+ ],
+ "golden_apple": [
+  {
+   "apple": 1,
+   "gold_ingot": 8
+  },
+  1,
+  true
+ ],
+ "golden_boots": [
+  {
+   "gold_ingot": 4
+  },
+  1,
+  true
+ ],
+ "golden_carrot": [
+  {
+   "carrot": 1,
+   "gold_nugget": 8
+  },
+  1,
+  true
+ ],
+ "golden_chestplate": [
+  {
+   "gold_ingot": 8
+  },
+  1,
+  true
+ ],
+ "golden_helmet": [
+  {
+   "gold_ingot": 5
+  },
+  1,
+  true
+ ],
+ "golden_leggings": [
+  {
+   "gold_ingot": 7
+  },
+  1,
+  true
+ ],
+ "granite": [
+  {
+   "diorite": 1,
+   "quartz": 1
+  },
+  1,
+  false
+ ],
+ "granite_slab": [
+  {
+   "granite": 3
+  },
+  6,
+  true
+ ],
+ "granite_stairs": [
+  {
+   "granite": 6
+  },
+  4,
+  true
+ ],
+ "granite_wall": [
+  {
+   "granite": 6
+  },
+  6,
+  true
+ ],
+ "gray_banner": [
+  {
+   "gray_wool": 6,
+   "stick": 1
+  },
+  1,
+  true
+ ],
+ "gray_candle": [
+  {
+   "candle": 1,
+   "gray_dye": 1
+  },
+  1,
+  false
+ ],
+ "gray_concrete_powder": [
+  {
+   "gravel": 4,
+   "gray_dye": 1,
+   "sand": 4
+  },
+  8,
+  true
+ ],
+ "gray_stained_glass": [
+  {
+   "glass": 8,
+   "gray_dye": 1
+  },
+  8,
+  true
+ ],
+ "gray_terracotta": [
+  {
+   "gray_dye": 1,
+   "terracotta": 8
+  },
+  8,
+  true
+ ],
+ "green_banner": [
+  {
+   "green_wool": 6,
+   "stick": 1
+  },
+  1,
+  true
+ ],
+ "green_candle": [
+  {
+   "candle": 1,
+   "green_dye": 1
+  },
+  1,
+  false
+ ],
+ "green_concrete_powder": [
+  {
+   "gravel": 4,
+   "green_dye": 1,
+   "sand": 4
+  },
+  8,
+  true
+ ],
+ "green_stained_glass": [
+  {
+   "glass": 8,
+   "green_dye": 1
+  },
+  8,
+  true
+ ],
+ "green_terracotta": [
+  {
+   "green_dye": 1,
+   "terracotta": 8
+  },
+  8,
+  true
+ ],
+ "grindstone": [
+  {
+   "planks": 2,
+   "stick": 2,
+   "stone_slab": 1
+  },
+  1,
+  true
+ ],
+ "hay_block": [
+  {
+   "wheat": 9
+  },
+  1,
+  true
+ ],
+ "heavy_weighted_pressure_plate": [
+  {
+   "iron_ingot": 2
+  },
+  1,
+  false
+ ],
+ "honey_block": [
+  {
+   "honey_bottle": 4
+  },
+  1,
+  false
+ ],
+ "honey_bottle": [
+  {
+   "glass_bottle": 4,
+   "honey_block": 1
+  },
+  4,
+  true
+ ],
+ "honeycomb_block": [
+  {
+   "honeycomb": 4
+  },
+  1,
+  false
+ ],
+ "hopper": [
+  {
+   "chest": 1,
+   "iron_ingot": 5
+  },
+  1,
+  true
+ ],
+ "hopper_minecart": [
+  {
+   "hopper": 1,
+   "minecart": 1
+  },
+  1,
+  false
+ ],
+ "host_armor_trim_smithing_template": [
+  {
+   "diamond": 7,
+   "host_armor_trim_smithing_template": 1,
+   "terracotta": 1
+  },
+  2,
+  true
+ ],
+ "iron_bars": [
+  {
+   "iron_ingot": 6
+  },
+  16,
+  true
+ ],
+ "iron_block": [
+  {
+   "iron_ingot": 9
+  },
+  1,
+  true
+ ],
+ "iron_boots": [
+  {
+   "iron_ingot": 4
+  },
+  1,
+  true
+ ],
+ "iron_chain": [
+  {
+   "iron_ingot": 1,
+   "iron_nugget": 2
+  },
+  1,
+  true
+ ],
+ "iron_chestplate": [
+  {
+   "iron_ingot": 8
+  },
+  1,
+  true
+ ],
+ "iron_door": [
+  {
+   "iron_ingot": 6
+  },
+  3,
+  true
+ ],
+ "iron_helmet": [
+  {
+   "iron_ingot": 5
+  },
+  1,
+  true
+ ],
+ "iron_leggings": [
+  {
+   "iron_ingot": 7
+  },
+  1,
+  true
+ ],
+ "iron_nugget": [
+  {
+   "iron_ingot": 1
+  },
+  9,
+  false
+ ],
+ "iron_trapdoor": [
+  {
+   "iron_ingot": 4
+  },
+  1,
+  false
+ ],
+ "item_frame": [
+  {
+   "leather": 1,
+   "stick": 8
+  },
+  1,
+  true
+ ],
+ "jack_o_lantern": [
+  {
+   "carved_pumpkin": 1,
+   "torch": 1
+  },
+  1,
+  false
+ ],
+ "jukebox": [
+  {
+   "diamond": 1,
+   "planks": 8
+  },
+  1,
+  true
+ ],
+ "jungle_boat": [
+  {
+   "jungle_planks": 5
+  },
+  1,
+  true
+ ],
+ "jungle_button": [
+  {
+   "jungle_planks": 1
+  },
+  1,
+  false
+ ],
+ "jungle_chest_boat": [
+  {
+   "chest": 1,
+   "jungle_boat": 1
+  },
+  1,
+  false
+ ],
+ "jungle_door": [
+  {
+   "jungle_planks": 6
+  },
+  3,
+  true
+ ],
+ "jungle_fence": [
+  {
+   "jungle_planks": 4,
+   "stick": 2
+  },
+  3,
+  true
+ ],
+ "jungle_fence_gate": [
+  {
+   "jungle_planks": 2,
+   "stick": 4
+  },
+  1,
+  true
+ ],
+ "jungle_hanging_sign": [
+  {
+   "iron_chain": 2,
+   "stripped_jungle_log": 6
+  },
+  6,
+  true
+ ],
+ "jungle_pressure_plate": [
+  {
+   "jungle_planks": 2
+  },
+  1,
+  false
+ ],
+ "jungle_shelf": [
+  {
+   "stripped_jungle_log": 6
+  },
+  6,
+  true
+ ],
+ "jungle_sign": [
+  {
+   "jungle_planks": 6,
+   "stick": 1
+  },
+  3,
+  true
+ ],
+ "jungle_slab": [
+  {
+   "jungle_planks": 3
+  },
+  6,
+  true
+ ],
+ "jungle_stairs": [
+  {
+   "jungle_planks": 6
+  },
+  4,
+  true
+ ],
+ "jungle_trapdoor": [
+  {
+   "jungle_planks": 6
+  },
+  2,
+  true
+ ],
+ "jungle_wood": [
+  {
+   "jungle_log": 4
+  },
+  3,
+  false
+ ],
+ "ladder": [
+  {
+   "stick": 7
+  },
+  3,
+  true
+ ],
+ "lantern": [
+  {
+   "iron_nugget": 8,
+   "torch": 1
+  },
+  1,
+  true
+ ],
+ "lapis_block": [
+  {
+   "lapis_lazuli": 9
+  },
+  1,
+  true
+ ],
+ "lapis_lazuli": [
+  {
+   "lapis_block": 1
+  },
+  9,
+  false
+ ],
+ "lead": [
+  {
+   "string": 5
+  },
+  2,
+  true
+ ],
+ "leather": [
+  {
+   "rabbit_hide": 4
+  },
+  1,
+  false
+ ],
+ "leather_boots": [
+  {
+   "leather": 4
+  },
+  1,
+  true
+ ],
+ "leather_chestplate": [
+  {
+   "leather": 8
+  },
+  1,
+  true
+ ],
+ "leather_helmet": [
+  {
+   "leather": 5
+  },
+  1,
+  true
+ ],
+ "leather_horse_armor": [
+  {
+   "leather": 7
+  },
+  1,
+  true
+ ],
+ "leather_leggings": [
+  {
+   "leather": 7
+  },
+  1,
+  true
+ ],
+ "lever": [
+  {
+   "cobblestone": 1,
+   "stick": 1
+  },
+  1,
+  false
+ ],
+ "light_blue_banner": [
+  {
+   "light_blue_wool": 6,
+   "stick": 1
+  },
+  1,
+  true
+ ],
+ "light_blue_candle": [
+  {
+   "candle": 1,
+   "light_blue_dye": 1
+  },
+  1,
+  false
+ ],
+ "light_blue_concrete_powder": [
+  {
+   "gravel": 4,
+   "light_blue_dye": 1,
+   "sand": 4
+  },
+  8,
+  true
+ ],
+ "light_blue_stained_glass": [
+  {
+   "glass": 8,
+   "light_blue_dye": 1
+  },
+  8,
+  true
+ ],
+ "light_blue_terracotta": [
+  {
+   "light_blue_dye": 1,
+   "terracotta": 8
+  },
+  8,
+  true
+ ],
+ "light_gray_banner": [
+  {
+   "light_gray_wool": 6,
+   "stick": 1
+  },
+  1,
+  true
+ ],
+ "light_gray_candle": [
+  {
+   "candle": 1,
+   "light_gray_dye": 1
+  },
+  1,
+  false
+ ],
+ "light_gray_concrete_powder": [
+  {
+   "gravel": 4,
+   "light_gray_dye": 1,
+   "sand": 4
+  },
+  8,
+  true
+ ],
+ "light_gray_stained_glass": [
+  {
+   "glass": 8,
+   "light_gray_dye": 1
+  },
+  8,
+  true
+ ],
+ "light_gray_terracotta": [
+  {
+   "light_gray_dye": 1,
+   "terracotta": 8
+  },
+  8,
+  true
+ ],
+ "light_weighted_pressure_plate": [
+  {
+   "gold_ingot": 2
+  },
+  1,
+  false
+ ],
+ "lightning_rod": [
+  {
+   "copper_ingot": 3
+  },
+  1,
+  true
+ ],
+ "lime_banner": [
+  {
+   "lime_wool": 6,
+   "stick": 1
+  },
+  1,
+  true
+ ],
+ "lime_candle": [
+  {
+   "candle": 1,
+   "lime_dye": 1
+  },
+  1,
+  false
+ ],
+ "lime_concrete_powder": [
+  {
+   "gravel": 4,
+   "lime_dye": 1,
+   "sand": 4
+  },
+  8,
+  true
+ ],
+ "lime_dye": [
+  {
+   "green_dye": 1,
+   "white_dye": 1
+  },
+  2,
+  false
+ ],
+ "lime_stained_glass": [
+  {
+   "glass": 8,
+   "lime_dye": 1
+  },
+  8,
+  true
+ ],
+ "lime_terracotta": [
+  {
+   "lime_dye": 1,
+   "terracotta": 8
+  },
+  8,
+  true
+ ],
+ "lodestone": [
+  {
+   "chiseled_stone_bricks": 8,
+   "iron_ingot": 1
+  },
+  1,
+  true
+ ],
+ "loom": [
+  {
+   "planks": 2,
+   "string": 2
+  },
+  1,
+  false
+ ],
+ "mace": [
+  {
+   "breeze_rod": 1,
+   "heavy_core": 1
+  },
+  1,
+  true
+ ],
+ "magenta_banner": [
+  {
+   "magenta_wool": 6,
+   "stick": 1
+  },
+  1,
+  true
+ ],
+ "magenta_candle": [
+  {
+   "candle": 1,
+   "magenta_dye": 1
+  },
+  1,
+  false
+ ],
+ "magenta_concrete_powder": [
+  {
+   "gravel": 4,
+   "magenta_dye": 1,
+   "sand": 4
+  },
+  8,
+  true
+ ],
+ "magenta_stained_glass": [
+  {
+   "glass": 8,
+   "magenta_dye": 1
+  },
+  8,
+  true
+ ],
+ "magenta_terracotta": [
+  {
+   "magenta_dye": 1,
+   "terracotta": 8
+  },
+  8,
+  true
+ ],
+ "magma_block": [
+  {
+   "magma_cream": 4
+  },
+  1,
+  false
+ ],
+ "magma_cream": [
+  {
+   "blaze_powder": 1,
+   "slime_ball": 1
+  },
+  1,
+  false
+ ],
+ "mangrove_boat": [
+  {
+   "mangrove_planks": 5
+  },
+  1,
+  true
+ ],
+ "mangrove_button": [
+  {
+   "mangrove_planks": 1
+  },
+  1,
+  false
+ ],
+ "mangrove_chest_boat": [
+  {
+   "chest": 1,
+   "mangrove_boat": 1
+  },
+  1,
+  false
+ ],
+ "mangrove_door": [
+  {
+   "mangrove_planks": 6
+  },
+  3,
+  true
+ ],
+ "mangrove_fence": [
+  {
+   "mangrove_planks": 4,
+   "stick": 2
+  },
+  3,
+  true
+ ],
+ "mangrove_fence_gate": [
+  {
+   "mangrove_planks": 2,
+   "stick": 4
+  },
+  1,
+  true
+ ],
+ "mangrove_hanging_sign": [
+  {
+   "iron_chain": 2,
+   "stripped_mangrove_log": 6
+  },
+  6,
+  true
+ ],
+ "mangrove_pressure_plate": [
+  {
+   "mangrove_planks": 2
+  },
+  1,
+  false
+ ],
+ "mangrove_shelf": [
+  {
+   "stripped_mangrove_log": 6
+  },
+  6,
+  true
+ ],
+ "mangrove_sign": [
+  {
+   "mangrove_planks": 6,
+   "stick": 1
+  },
+  3,
+  true
+ ],
+ "mangrove_slab": [
+  {
+   "mangrove_planks": 3
+  },
+  6,
+  true
+ ],
+ "mangrove_stairs": [
+  {
+   "mangrove_planks": 6
+  },
+  4,
+  true
+ ],
+ "mangrove_trapdoor": [
+  {
+   "mangrove_planks": 6
+  },
+  2,
+  true
+ ],
+ "mangrove_wood": [
+  {
+   "mangrove_log": 4
+  },
+  3,
+  false
+ ],
+ "map": [
+  {
+   "compass": 1,
+   "paper": 8
+  },
+  1,
+  true
+ ],
+ "melon": [
+  {
+   "melon_slice": 9
+  },
+  1,
+  true
+ ],
+ "melon_seeds": [
+  {
+   "melon_slice": 1
+  },
+  1,
+  false
+ ],
+ "minecart": [
+  {
+   "iron_ingot": 5
+  },
+  1,
+  true
+ ],
+ "mojang_banner_pattern": [
+  {
+   "enchanted_golden_apple": 1,
+   "paper": 1
+  },
+  1,
+  false
+ ],
+ "moss_carpet": [
+  {
+   "moss_block": 2
+  },
+  3,
+  false
+ ],
+ "mossy_cobblestone_slab": [
+  {
+   "mossy_cobblestone": 3
+  },
+  6,
+  true
+ ],
+ "mossy_cobblestone_stairs": [
+  {
+   "mossy_cobblestone": 6
+  },
+  4,
+  true
+ ],
+ "mossy_cobblestone_wall": [
+  {
+   "mossy_cobblestone": 6
+  },
+  6,
+  true
+ ],
+ "mossy_stone_brick_slab": [
+  {
+   "mossy_stone_bricks": 3
+  },
+  6,
+  true
+ ],
+ "mossy_stone_brick_stairs": [
+  {
+   "mossy_stone_bricks": 6
+  },
+  4,
+  true
+ ],
+ "mossy_stone_brick_wall": [
+  {
+   "mossy_stone_bricks": 6
+  },
+  6,
+  true
+ ],
+ "mud_brick_slab": [
+  {
+   "mud_bricks": 3
+  },
+  6,
+  true
+ ],
+ "mud_brick_stairs": [
+  {
+   "mud_bricks": 6
+  },
+  4,
+  true
+ ],
+ "mud_brick_wall": [
+  {
+   "mud_bricks": 6
+  },
+  6,
+  true
+ ],
+ "mud_bricks": [
+  {
+   "packed_mud": 4
+  },
+  4,
+  false
+ ],
+ "muddy_mangrove_roots": [
+  {
+   "mangrove_roots": 1,
+   "mud": 1
+  },
+  1,
+  false
+ ],
+ "music_disc_5": [
+  {
+   "disc_fragment_5": 9
+  },
+  1,
+  true
+ ],
+ "nether_brick_fence": [
+  {
+   "nether_brick": 2,
+   "nether_bricks": 4
+  },
+  6,
+  true
+ ],
+ "nether_brick_slab": [
+  {
+   "nether_bricks": 3
+  },
+  6,
+  true
+ ],
+ "nether_brick_stairs": [
+  {
+   "nether_bricks": 6
+  },
+  4,
+  true
+ ],
+ "nether_brick_wall": [
+  {
+   "nether_bricks": 6
+  },
+  6,
+  true
+ ],
+ "nether_bricks": [
+  {
+   "nether_brick": 4
+  },
+  1,
+  false
+ ],
+ "nether_wart_block": [
+  {
+   "nether_wart": 9
+  },
+  1,
+  true
+ ],
+ "netherite_block": [
+  {
+   "netherite_ingot": 9
+  },
+  1,
+  true
+ ],
+ "netherite_upgrade_smithing_template": [
+  {
+   "diamond": 7,
+   "netherite_upgrade_smithing_template": 1,
+   "netherrack": 1
+  },
+  2,
+  true
+ ],
+ "note_block": [
+  {
+   "planks": 8,
+   "redstone": 1
+  },
+  1,
+  true
+ ],
+ "oak_boat": [
+  {
+   "oak_planks": 5
+  },
+  1,
+  true
+ ],
+ "oak_button": [
+  {
+   "oak_planks": 1
+  },
+  1,
+  false
+ ],
+ "oak_chest_boat": [
+  {
+   "chest": 1,
+   "oak_boat": 1
+  },
+  1,
+  false
+ ],
+ "oak_door": [
+  {
+   "oak_planks": 6
+  },
+  3,
+  true
+ ],
+ "oak_fence": [
+  {
+   "oak_planks": 4,
+   "stick": 2
+  },
+  3,
+  true
+ ],
+ "oak_fence_gate": [
+  {
+   "oak_planks": 2,
+   "stick": 4
+  },
+  1,
+  true
+ ],
+ "oak_hanging_sign": [
+  {
+   "iron_chain": 2,
+   "stripped_oak_log": 6
+  },
+  6,
+  true
+ ],
+ "oak_pressure_plate": [
+  {
+   "oak_planks": 2
+  },
+  1,
+  false
+ ],
+ "oak_shelf": [
+  {
+   "stripped_oak_log": 6
+  },
+  6,
+  true
+ ],
+ "oak_sign": [
+  {
+   "oak_planks": 6,
+   "stick": 1
+  },
+  3,
+  true
+ ],
+ "oak_slab": [
+  {
+   "oak_planks": 3
+  },
+  6,
+  true
+ ],
+ "oak_stairs": [
+  {
+   "oak_planks": 6
+  },
+  4,
+  true
+ ],
+ "oak_trapdoor": [
+  {
+   "oak_planks": 6
+  },
+  2,
+  true
+ ],
+ "oak_wood": [
+  {
+   "oak_log": 4
+  },
+  3,
+  false
+ ],
+ "observer": [
+  {
+   "cobblestone": 6,
+   "quartz": 1,
+   "redstone": 2
+  },
+  1,
+  true
+ ],
+ "orange_banner": [
+  {
+   "orange_wool": 6,
+   "stick": 1
+  },
+  1,
+  true
+ ],
+ "orange_candle": [
+  {
+   "candle": 1,
+   "orange_dye": 1
+  },
+  1,
+  false
+ ],
+ "orange_concrete_powder": [
+  {
+   "gravel": 4,
+   "orange_dye": 1,
+   "sand": 4
+  },
+  8,
+  true
+ ],
+ "orange_stained_glass": [
+  {
+   "glass": 8,
+   "orange_dye": 1
+  },
+  8,
+  true
+ ],
+ "orange_terracotta": [
+  {
+   "orange_dye": 1,
+   "terracotta": 8
+  },
+  8,
+  true
+ ],
+ "oxidized_chiseled_copper": [
+  {
+   "oxidized_cut_copper_slab": 2
+  },
+  1,
+  false
+ ],
+ "oxidized_copper_bulb": [
+  {
+   "blaze_rod": 1,
+   "oxidized_copper": 3,
+   "redstone": 1
+  },
+  4,
+  true
+ ],
+ "oxidized_copper_grate": [
+  {
+   "oxidized_copper": 4
+  },
+  4,
+  true
+ ],
+ "oxidized_cut_copper": [
+  {
+   "oxidized_copper": 4
+  },
+  4,
+  false
+ ],
+ "oxidized_cut_copper_slab": [
+  {
+   "oxidized_cut_copper": 3
+  },
+  6,
+  true
+ ],
+ "oxidized_cut_copper_stairs": [
+  {
+   "oxidized_cut_copper": 6
+  },
+  4,
+  true
+ ],
+ "packed_ice": [
+  {
+   "ice": 9
+  },
+  1,
+  true
+ ],
+ "packed_mud": [
+  {
+   "mud": 1,
+   "wheat": 1
+  },
+  1,
+  false
+ ],
+ "pale_moss_carpet": [
+  {
+   "pale_moss_block": 2
+  },
+  3,
+  false
+ ],
+ "pale_oak_boat": [
+  {
+   "pale_oak_planks": 5
+  },
+  1,
+  true
+ ],
+ "pale_oak_button": [
+  {
+   "pale_oak_planks": 1
+  },
+  1,
+  false
+ ],
+ "pale_oak_chest_boat": [
+  {
+   "chest": 1,
+   "pale_oak_boat": 1
+  },
+  1,
+  false
+ ],
+ "pale_oak_door": [
+  {
+   "pale_oak_planks": 6
+  },
+  3,
+  true
+ ],
+ "pale_oak_fence": [
+  {
+   "pale_oak_planks": 4,
+   "stick": 2
+  },
+  3,
+  true
+ ],
+ "pale_oak_fence_gate": [
+  {
+   "pale_oak_planks": 2,
+   "stick": 4
+  },
+  1,
+  true
+ ],
+ "pale_oak_hanging_sign": [
+  {
+   "iron_chain": 2,
+   "stripped_pale_oak_log": 6
+  },
+  6,
+  true
+ ],
+ "pale_oak_pressure_plate": [
+  {
+   "pale_oak_planks": 2
+  },
+  1,
+  false
+ ],
+ "pale_oak_shelf": [
+  {
+   "stripped_pale_oak_log": 6
+  },
+  6,
+  true
+ ],
+ "pale_oak_sign": [
+  {
+   "pale_oak_planks": 6,
+   "stick": 1
+  },
+  3,
+  true
+ ],
+ "pale_oak_slab": [
+  {
+   "pale_oak_planks": 3
+  },
+  6,
+  true
+ ],
+ "pale_oak_stairs": [
+  {
+   "pale_oak_planks": 6
+  },
+  4,
+  true
+ ],
+ "pale_oak_trapdoor": [
+  {
+   "pale_oak_planks": 6
+  },
+  2,
+  true
+ ],
+ "pale_oak_wood": [
+  {
+   "pale_oak_log": 4
+  },
+  3,
+  false
+ ],
+ "paper": [
+  {
+   "sugar_cane": 3
+  },
+  3,
+  true
+ ],
+ "pink_banner": [
+  {
+   "pink_wool": 6,
+   "stick": 1
+  },
+  1,
+  true
+ ],
+ "pink_candle": [
+  {
+   "candle": 1,
+   "pink_dye": 1
+  },
+  1,
+  false
+ ],
+ "pink_concrete_powder": [
+  {
+   "gravel": 4,
+   "pink_dye": 1,
+   "sand": 4
+  },
+  8,
+  true
+ ],
+ "pink_stained_glass": [
+  {
+   "glass": 8,
+   "pink_dye": 1
+  },
+  8,
+  true
+ ],
+ "pink_terracotta": [
+  {
+   "pink_dye": 1,
+   "terracotta": 8
+  },
+  8,
+  true
+ ],
+ "piston": [
+  {
+   "cobblestone": 4,
+   "iron_ingot": 1,
+   "planks": 3,
+   "redstone": 1
+  },
+  1,
+  true
+ ],
+ "polished_andesite": [
+  {
+   "andesite": 4
+  },
+  4,
+  false
+ ],
+ "polished_andesite_slab": [
+  {
+   "polished_andesite": 3
+  },
+  6,
+  true
+ ],
+ "polished_andesite_stairs": [
+  {
+   "polished_andesite": 6
+  },
+  4,
+  true
+ ],
+ "polished_basalt": [
+  {
+   "basalt": 4
+  },
+  4,
+  false
+ ],
+ "polished_blackstone": [
+  {
+   "blackstone": 4
+  },
+  4,
+  false
+ ],
+ "polished_blackstone_brick_slab": [
+  {
+   "polished_blackstone_bricks": 3
+  },
+  6,
+  true
+ ],
+ "polished_blackstone_brick_stairs": [
+  {
+   "polished_blackstone_bricks": 6
+  },
+  4,
+  true
+ ],
+ "polished_blackstone_brick_wall": [
+  {
+   "polished_blackstone_bricks": 6
+  },
+  6,
+  true
+ ],
+ "polished_blackstone_bricks": [
+  {
+   "polished_blackstone": 4
+  },
+  4,
+  false
+ ],
+ "polished_blackstone_button": [
+  {
+   "polished_blackstone": 1
+  },
+  1,
+  false
+ ],
+ "polished_blackstone_pressure_plate": [
+  {
+   "polished_blackstone": 2
+  },
+  1,
+  false
+ ],
+ "polished_blackstone_slab": [
+  {
+   "polished_blackstone": 3
+  },
+  6,
+  true
+ ],
+ "polished_blackstone_stairs": [
+  {
+   "polished_blackstone": 6
+  },
+  4,
+  true
+ ],
+ "polished_blackstone_wall": [
+  {
+   "polished_blackstone": 6
+  },
+  6,
+  true
+ ],
+ "polished_deepslate": [
+  {
+   "cobbled_deepslate": 4
+  },
+  4,
+  false
+ ],
+ "polished_deepslate_slab": [
+  {
+   "polished_deepslate": 3
+  },
+  6,
+  true
+ ],
+ "polished_deepslate_stairs": [
+  {
+   "polished_deepslate": 6
+  },
+  4,
+  true
+ ],
+ "polished_deepslate_wall": [
+  {
+   "polished_deepslate": 6
+  },
+  6,
+  true
+ ],
+ "polished_diorite": [
+  {
+   "diorite": 4
+  },
+  4,
+  false
+ ],
+ "polished_diorite_slab": [
+  {
+   "polished_diorite": 3
+  },
+  6,
+  true
+ ],
+ "polished_diorite_stairs": [
+  {
+   "polished_diorite": 6
+  },
+  4,
+  true
+ ],
+ "polished_granite": [
+  {
+   "granite": 4
+  },
+  4,
+  false
+ ],
+ "polished_granite_slab": [
+  {
+   "polished_granite": 3
+  },
+  6,
+  true
+ ],
+ "polished_granite_stairs": [
+  {
+   "polished_granite": 6
+  },
+  4,
+  true
+ ],
+ "polished_tuff": [
+  {
+   "tuff": 4
+  },
+  4,
+  false
+ ],
+ "polished_tuff_slab": [
+  {
+   "polished_tuff": 3
+  },
+  6,
+  true
+ ],
+ "polished_tuff_stairs": [
+  {
+   "polished_tuff": 6
+  },
+  4,
+  true
+ ],
+ "polished_tuff_wall": [
+  {
+   "polished_tuff": 6
+  },
+  6,
+  true
+ ],
+ "powered_rail": [
+  {
+   "gold_ingot": 6,
+   "redstone": 1,
+   "stick": 1
+  },
+  6,
+  true
+ ],
+ "prismarine": [
+  {
+   "prismarine_shard": 4
+  },
+  1,
+  false
+ ],
+ "prismarine_brick_slab": [
+  {
+   "prismarine_bricks": 3
+  },
+  6,
+  true
+ ],
+ "prismarine_brick_stairs": [
+  {
+   "prismarine_bricks": 6
+  },
+  4,
+  true
+ ],
+ "prismarine_bricks": [
+  {
+   "prismarine_shard": 9
+  },
+  1,
+  true
+ ],
+ "prismarine_slab": [
+  {
+   "prismarine": 3
+  },
+  6,
+  true
+ ],
+ "prismarine_stairs": [
+  {
+   "prismarine": 6
+  },
+  4,
+  true
+ ],
+ "prismarine_wall": [
+  {
+   "prismarine": 6
+  },
+  6,
+  true
+ ],
+ "pumpkin_seeds": [
+  {
+   "pumpkin": 1
+  },
+  4,
+  false
+ ],
+ "purple_banner": [
+  {
+   "purple_wool": 6,
+   "stick": 1
+  },
+  1,
+  true
+ ],
+ "purple_candle": [
+  {
+   "candle": 1,
+   "purple_dye": 1
+  },
+  1,
+  false
+ ],
+ "purple_concrete_powder": [
+  {
+   "gravel": 4,
+   "purple_dye": 1,
+   "sand": 4
+  },
+  8,
+  true
+ ],
+ "purple_dye": [
+  {
+   "blue_dye": 1,
+   "red_dye": 1
+  },
+  2,
+  false
+ ],
+ "purple_stained_glass": [
+  {
+   "glass": 8,
+   "purple_dye": 1
+  },
+  8,
+  true
+ ],
+ "purple_terracotta": [
+  {
+   "purple_dye": 1,
+   "terracotta": 8
+  },
+  8,
+  true
+ ],
+ "purpur_block": [
+  {
+   "popped_chorus_fruit": 4
+  },
+  4,
+  false
+ ],
+ "purpur_pillar": [
+  {
+   "purpur_slab": 2
+  },
+  1,
+  false
+ ],
+ "quartz_block": [
+  {
+   "quartz": 4
+  },
+  1,
+  false
+ ],
+ "quartz_bricks": [
+  {
+   "quartz_block": 4
+  },
+  4,
+  false
+ ],
+ "quartz_pillar": [
+  {
+   "quartz_block": 2
+  },
+  2,
+  false
+ ],
+ "rail": [
+  {
+   "iron_ingot": 6,
+   "stick": 1
+  },
+  16,
+  true
+ ],
+ "raiser_armor_trim_smithing_template": [
+  {
+   "diamond": 7,
+   "raiser_armor_trim_smithing_template": 1,
+   "terracotta": 1
+  },
+  2,
+  true
+ ],
+ "raw_copper": [
+  {
+   "raw_copper_block": 1
+  },
+  9,
+  false
+ ],
+ "raw_copper_block": [
+  {
+   "raw_copper": 9
+  },
+  1,
+  true
+ ],
+ "raw_gold": [
+  {
+   "raw_gold_block": 1
+  },
+  9,
+  false
+ ],
+ "raw_gold_block": [
+  {
+   "raw_gold": 9
+  },
+  1,
+  true
+ ],
+ "raw_iron": [
+  {
+   "raw_iron_block": 1
+  },
+  9,
+  false
+ ],
+ "raw_iron_block": [
+  {
+   "raw_iron": 9
+  },
+  1,
+  true
+ ],
+ "recovery_compass": [
+  {
+   "compass": 1,
+   "echo_shard": 8
+  },
+  1,
+  true
+ ],
+ "red_banner": [
+  {
+   "red_wool": 6,
+   "stick": 1
+  },
+  1,
+  true
+ ],
+ "red_candle": [
+  {
+   "candle": 1,
+   "red_dye": 1
+  },
+  1,
+  false
+ ],
+ "red_concrete_powder": [
+  {
+   "gravel": 4,
+   "red_dye": 1,
+   "sand": 4
+  },
+  8,
+  true
+ ],
+ "red_nether_brick_slab": [
+  {
+   "red_nether_bricks": 3
+  },
+  6,
+  true
+ ],
+ "red_nether_brick_stairs": [
+  {
+   "red_nether_bricks": 6
+  },
+  4,
+  true
+ ],
+ "red_nether_brick_wall": [
+  {
+   "red_nether_bricks": 6
+  },
+  6,
+  true
+ ],
+ "red_nether_bricks": [
+  {
+   "nether_brick": 2,
+   "nether_wart": 2
+  },
+  1,
+  false
+ ],
+ "red_sandstone": [
+  {
+   "red_sand": 4
+  },
+  1,
+  false
+ ],
+ "red_sandstone_wall": [
+  {
+   "red_sandstone": 6
+  },
+  6,
+  true
+ ],
+ "red_stained_glass": [
+  {
+   "glass": 8,
+   "red_dye": 1
+  },
+  8,
+  true
+ ],
+ "red_terracotta": [
+  {
+   "red_dye": 1,
+   "terracotta": 8
+  },
+  8,
+  true
+ ],
+ "redstone": [
+  {
+   "redstone_block": 1
+  },
+  9,
+  false
+ ],
+ "redstone_block": [
+  {
+   "redstone": 9
+  },
+  1,
+  true
+ ],
+ "redstone_lamp": [
+  {
+   "glowstone": 1,
+   "redstone": 4
+  },
+  1,
+  true
+ ],
+ "redstone_torch": [
+  {
+   "redstone": 1,
+   "stick": 1
+  },
+  1,
+  false
+ ],
+ "repeater": [
+  {
+   "redstone": 1,
+   "redstone_torch": 2,
+   "stone": 3
+  },
+  1,
+  true
+ ],
+ "resin_block": [
+  {
+   "resin_clump": 9
+  },
+  1,
+  true
+ ],
+ "resin_brick_slab": [
+  {
+   "resin_bricks": 3
+  },
+  6,
+  true
+ ],
+ "resin_brick_stairs": [
+  {
+   "resin_bricks": 6
+  },
+  4,
+  true
+ ],
+ "resin_brick_wall": [
+  {
+   "resin_bricks": 6
+  },
+  6,
+  true
+ ],
+ "resin_bricks": [
+  {
+   "resin_brick": 4
+  },
+  1,
+  false
+ ],
+ "resin_clump": [
+  {
+   "resin_block": 1
+  },
+  9,
+  false
+ ],
+ "respawn_anchor": [
+  {
+   "crying_obsidian": 6,
+   "glowstone": 3
+  },
+  1,
+  true
+ ],
+ "rib_armor_trim_smithing_template": [
+  {
+   "diamond": 7,
+   "netherrack": 1,
+   "rib_armor_trim_smithing_template": 1
+  },
+  2,
+  true
+ ],
+ "saddle": [
+  {
+   "iron_ingot": 1,
+   "leather": 3
+  },
+  1,
+  true
+ ],
+ "sandstone": [
+  {
+   "sand": 4
+  },
+  1,
+  false
+ ],
+ "sandstone_wall": [
+  {
+   "sandstone": 6
+  },
+  6,
+  true
+ ],
+ "scaffolding": [
+  {
+   "bamboo": 6,
+   "string": 1
+  },
+  6,
+  true
+ ],
+ "sea_lantern": [
+  {
+   "prismarine_crystals": 5,
+   "prismarine_shard": 4
+  },
+  1,
+  true
+ ],
+ "sentry_armor_trim_smithing_template": [
+  {
+   "cobblestone": 1,
+   "diamond": 7,
+   "sentry_armor_trim_smithing_template": 1
+  },
+  2,
+  true
+ ],
+ "shaper_armor_trim_smithing_template": [
+  {
+   "diamond": 7,
+   "shaper_armor_trim_smithing_template": 1,
+   "terracotta": 1
+  },
+  2,
+  true
+ ],
+ "shears": [
+  {
+   "iron_ingot": 2
+  },
+  1,
+  false
+ ],
+ "shulker_box": [
+  {
+   "chest": 1,
+   "shulker_shell": 2
+  },
+  1,
+  true
+ ],
+ "silence_armor_trim_smithing_template": [
+  {
+   "cobbled_deepslate": 1,
+   "diamond": 7,
+   "silence_armor_trim_smithing_template": 1
+  },
+  2,
+  true
+ ],
+ "skull_banner_pattern": [
+  {
+   "paper": 1,
+   "wither_skeleton_skull": 1
+  },
+  1,
+  false
+ ],
+ "slime_ball": [
+  {
+   "slime_block": 1
+  },
+  9,
+  false
+ ],
+ "slime_block": [
+  {
+   "slime_ball": 9
+  },
+  1,
+  true
+ ],
+ "smithing_table": [
+  {
+   "iron_ingot": 2,
+   "planks": 4
+  },
+  1,
+  true
+ ],
+ "smooth_quartz_slab": [
+  {
+   "smooth_quartz": 3
+  },
+  6,
+  true
+ ],
+ "smooth_quartz_stairs": [
+  {
+   "smooth_quartz": 6
+  },
+  4,
+  true
+ ],
+ "smooth_red_sandstone_slab": [
+  {
+   "smooth_red_sandstone": 3
+  },
+  6,
+  true
+ ],
+ "smooth_red_sandstone_stairs": [
+  {
+   "smooth_red_sandstone": 6
+  },
+  4,
+  true
+ ],
+ "smooth_sandstone_slab": [
+  {
+   "smooth_sandstone": 3
+  },
+  6,
+  true
+ ],
+ "smooth_sandstone_stairs": [
+  {
+   "smooth_sandstone": 6
+  },
+  4,
+  true
+ ],
+ "smooth_stone_slab": [
+  {
+   "smooth_stone": 3
+  },
+  6,
+  true
+ ],
+ "snout_armor_trim_smithing_template": [
+  {
+   "blackstone": 1,
+   "diamond": 7,
+   "snout_armor_trim_smithing_template": 1
+  },
+  2,
+  true
+ ],
+ "snow": [
+  {
+   "snow_block": 3
+  },
+  6,
+  true
+ ],
+ "snow_block": [
+  {
+   "snowball": 4
+  },
+  1,
+  false
+ ],
+ "soul_lantern": [
+  {
+   "iron_nugget": 8,
+   "soul_torch": 1
+  },
+  1,
+  true
+ ],
+ "spectral_arrow": [
+  {
+   "arrow": 1,
+   "glowstone_dust": 4
+  },
+  2,
+  true
+ ],
+ "spire_armor_trim_smithing_template": [
+  {
+   "diamond": 7,
+   "purpur_block": 1,
+   "spire_armor_trim_smithing_template": 1
+  },
+  2,
+  true
+ ],
+ "spruce_boat": [
+  {
+   "spruce_planks": 5
+  },
+  1,
+  true
+ ],
+ "spruce_button": [
+  {
+   "spruce_planks": 1
+  },
+  1,
+  false
+ ],
+ "spruce_chest_boat": [
+  {
+   "chest": 1,
+   "spruce_boat": 1
+  },
+  1,
+  false
+ ],
+ "spruce_door": [
+  {
+   "spruce_planks": 6
+  },
+  3,
+  true
+ ],
+ "spruce_fence": [
+  {
+   "spruce_planks": 4,
+   "stick": 2
+  },
+  3,
+  true
+ ],
+ "spruce_fence_gate": [
+  {
+   "spruce_planks": 2,
+   "stick": 4
+  },
+  1,
+  true
+ ],
+ "spruce_hanging_sign": [
+  {
+   "iron_chain": 2,
+   "stripped_spruce_log": 6
+  },
+  6,
+  true
+ ],
+ "spruce_pressure_plate": [
+  {
+   "spruce_planks": 2
+  },
+  1,
+  false
+ ],
+ "spruce_shelf": [
+  {
+   "stripped_spruce_log": 6
+  },
+  6,
+  true
+ ],
+ "spruce_sign": [
+  {
+   "spruce_planks": 6,
+   "stick": 1
+  },
+  3,
+  true
+ ],
+ "spruce_slab": [
+  {
+   "spruce_planks": 3
+  },
+  6,
+  true
+ ],
+ "spruce_stairs": [
+  {
+   "spruce_planks": 6
+  },
+  4,
+  true
+ ],
+ "spruce_trapdoor": [
+  {
+   "spruce_planks": 6
+  },
+  2,
+  true
+ ],
+ "spruce_wood": [
+  {
+   "spruce_log": 4
+  },
+  3,
+  false
+ ],
+ "spyglass": [
+  {
+   "amethyst_shard": 1,
+   "copper_ingot": 2
+  },
+  1,
+  true
+ ],
+ "sticky_piston": [
+  {
+   "piston": 1,
+   "slime_ball": 1
+  },
+  1,
+  false
+ ],
+ "stone_brick_slab": [
+  {
+   "stone_bricks": 3
+  },
+  6,
+  true
+ ],
+ "stone_brick_stairs": [
+  {
+   "stone_bricks": 6
+  },
+  4,
+  true
+ ],
+ "stone_brick_wall": [
+  {
+   "stone_bricks": 6
+  },
+  6,
+  true
+ ],
+ "stone_bricks": [
+  {
+   "stone": 4
+  },
+  4,
+  false
+ ],
+ "stone_button": [
+  {
+   "stone": 1
+  },
+  1,
+  false
+ ],
+ "stone_pressure_plate": [
+  {
+   "stone": 2
+  },
+  1,
+  false
+ ],
+ "stone_slab": [
+  {
+   "stone": 3
+  },
+  6,
+  true
+ ],
+ "stone_stairs": [
+  {
+   "stone": 6
+  },
+  4,
+  true
+ ],
+ "stonecutter": [
+  {
+   "iron_ingot": 1,
+   "stone": 3
+  },
+  1,
+  true
+ ],
+ "stripped_acacia_wood": [
+  {
+   "stripped_acacia_log": 4
+  },
+  3,
+  false
+ ],
+ "stripped_birch_wood": [
+  {
+   "stripped_birch_log": 4
+  },
+  3,
+  false
+ ],
+ "stripped_cherry_wood": [
+  {
+   "stripped_cherry_log": 4
+  },
+  3,
+  false
+ ],
+ "stripped_crimson_hyphae": [
+  {
+   "stripped_crimson_stem": 4
+  },
+  3,
+  false
+ ],
+ "stripped_dark_oak_wood": [
+  {
+   "stripped_dark_oak_log": 4
+  },
+  3,
+  false
+ ],
+ "stripped_jungle_wood": [
+  {
+   "stripped_jungle_log": 4
+  },
+  3,
+  false
+ ],
+ "stripped_mangrove_wood": [
+  {
+   "stripped_mangrove_log": 4
+  },
+  3,
+  false
+ ],
+ "stripped_oak_wood": [
+  {
+   "stripped_oak_log": 4
+  },
+  3,
+  false
+ ],
+ "stripped_pale_oak_wood": [
+  {
+   "stripped_pale_oak_log": 4
+  },
+  3,
+  false
+ ],
+ "stripped_spruce_wood": [
+  {
+   "stripped_spruce_log": 4
+  },
+  3,
+  false
+ ],
+ "stripped_warped_hyphae": [
+  {
+   "stripped_warped_stem": 4
+  },
+  3,
+  false
+ ],
+ "target": [
+  {
+   "hay_block": 1,
+   "redstone": 4
+  },
+  1,
+  true
+ ],
+ "tide_armor_trim_smithing_template": [
+  {
+   "diamond": 7,
+   "prismarine": 1,
+   "tide_armor_trim_smithing_template": 1
+  },
+  2,
+  true
+ ],
+ "tinted_glass": [
+  {
+   "amethyst_shard": 4,
+   "glass": 1
+  },
+  2,
+  true
+ ],
+ "tnt_minecart": [
+  {
+   "minecart": 1,
+   "tnt": 1
+  },
+  1,
+  false
+ ],
+ "trapped_chest": [
+  {
+   "chest": 1,
+   "tripwire_hook": 1
+  },
+  1,
+  false
+ ],
+ "tripwire_hook": [
+  {
+   "iron_ingot": 1,
+   "planks": 1,
+   "stick": 1
+  },
+  2,
+  true
+ ],
+ "tuff_brick_slab": [
+  {
+   "tuff_bricks": 3
+  },
+  6,
+  true
+ ],
+ "tuff_brick_stairs": [
+  {
+   "tuff_bricks": 6
+  },
+  4,
+  true
+ ],
+ "tuff_brick_wall": [
+  {
+   "tuff_bricks": 6
+  },
+  6,
+  true
+ ],
+ "tuff_bricks": [
+  {
+   "polished_tuff": 4
+  },
+  4,
+  false
+ ],
+ "tuff_slab": [
+  {
+   "tuff": 3
+  },
+  6,
+  true
+ ],
+ "tuff_stairs": [
+  {
+   "tuff": 6
+  },
+  4,
+  true
+ ],
+ "tuff_wall": [
+  {
+   "tuff": 6
+  },
+  6,
+  true
+ ],
+ "turtle_helmet": [
+  {
+   "turtle_scute": 5
+  },
+  1,
+  true
+ ],
+ "vex_armor_trim_smithing_template": [
+  {
+   "cobblestone": 1,
+   "diamond": 7,
+   "vex_armor_trim_smithing_template": 1
+  },
+  2,
+  true
+ ],
+ "ward_armor_trim_smithing_template": [
+  {
+   "cobbled_deepslate": 1,
+   "diamond": 7,
+   "ward_armor_trim_smithing_template": 1
+  },
+  2,
+  true
+ ],
+ "warped_button": [
+  {
+   "warped_planks": 1
+  },
+  1,
+  false
+ ],
+ "warped_door": [
+  {
+   "warped_planks": 6
+  },
+  3,
+  true
+ ],
+ "warped_fence": [
+  {
+   "stick": 2,
+   "warped_planks": 4
+  },
+  3,
+  true
+ ],
+ "warped_fence_gate": [
+  {
+   "stick": 4,
+   "warped_planks": 2
+  },
+  1,
+  true
+ ],
+ "warped_fungus_on_a_stick": [
+  {
+   "fishing_rod": 1,
+   "warped_fungus": 1
+  },
+  1,
+  false
+ ],
+ "warped_hanging_sign": [
+  {
+   "iron_chain": 2,
+   "stripped_warped_stem": 6
+  },
+  6,
+  true
+ ],
+ "warped_hyphae": [
+  {
+   "warped_stem": 4
+  },
+  3,
+  false
+ ],
+ "warped_pressure_plate": [
+  {
+   "warped_planks": 2
+  },
+  1,
+  false
+ ],
+ "warped_shelf": [
+  {
+   "stripped_warped_stem": 6
+  },
+  6,
+  true
+ ],
+ "warped_sign": [
+  {
+   "stick": 1,
+   "warped_planks": 6
+  },
+  3,
+  true
+ ],
+ "warped_slab": [
+  {
+   "warped_planks": 3
+  },
+  6,
+  true
+ ],
+ "warped_stairs": [
+  {
+   "warped_planks": 6
+  },
+  4,
+  true
+ ],
+ "warped_trapdoor": [
+  {
+   "warped_planks": 6
+  },
+  2,
+  true
+ ],
+ "waxed_copper_bars": [
+  {
+   "copper_bars": 1,
+   "honeycomb": 1
+  },
+  1,
+  false
+ ],
+ "waxed_copper_block": [
+  {
+   "copper_block": 1,
+   "honeycomb": 1
+  },
+  1,
+  false
+ ],
+ "waxed_copper_chain": [
+  {
+   "copper_chain": 1,
+   "honeycomb": 1
+  },
+  1,
+  false
+ ],
+ "waxed_copper_chest": [
+  {
+   "copper_chest": 1,
+   "honeycomb": 1
+  },
+  1,
+  false
+ ],
+ "waxed_copper_door": [
+  {
+   "copper_door": 1,
+   "honeycomb": 1
+  },
+  1,
+  false
+ ],
+ "waxed_copper_golem_statue": [
+  {
+   "copper_golem_statue": 1,
+   "honeycomb": 1
+  },
+  1,
+  false
+ ],
+ "waxed_copper_lantern": [
+  {
+   "copper_lantern": 1,
+   "honeycomb": 1
+  },
+  1,
+  false
+ ],
+ "waxed_copper_trapdoor": [
+  {
+   "copper_trapdoor": 1,
+   "honeycomb": 1
+  },
+  1,
+  false
+ ],
+ "waxed_exposed_copper": [
+  {
+   "exposed_copper": 1,
+   "honeycomb": 1
+  },
+  1,
+  false
+ ],
+ "waxed_exposed_copper_bars": [
+  {
+   "exposed_copper_bars": 1,
+   "honeycomb": 1
+  },
+  1,
+  false
+ ],
+ "waxed_exposed_copper_chain": [
+  {
+   "exposed_copper_chain": 1,
+   "honeycomb": 1
+  },
+  1,
+  false
+ ],
+ "waxed_exposed_copper_chest": [
+  {
+   "exposed_copper_chest": 1,
+   "honeycomb": 1
+  },
+  1,
+  false
+ ],
+ "waxed_exposed_copper_door": [
+  {
+   "exposed_copper_door": 1,
+   "honeycomb": 1
+  },
+  1,
+  false
+ ],
+ "waxed_exposed_copper_golem_statue": [
+  {
+   "exposed_copper_golem_statue": 1,
+   "honeycomb": 1
+  },
+  1,
+  false
+ ],
+ "waxed_exposed_copper_lantern": [
+  {
+   "exposed_copper_lantern": 1,
+   "honeycomb": 1
+  },
+  1,
+  false
+ ],
+ "waxed_exposed_copper_trapdoor": [
+  {
+   "exposed_copper_trapdoor": 1,
+   "honeycomb": 1
+  },
+  1,
+  false
+ ],
+ "waxed_exposed_lightning_rod": [
+  {
+   "exposed_lightning_rod": 1,
+   "honeycomb": 1
+  },
+  1,
+  false
+ ],
+ "waxed_lightning_rod": [
+  {
+   "honeycomb": 1,
+   "lightning_rod": 1
+  },
+  1,
+  false
+ ],
+ "waxed_oxidized_copper": [
+  {
+   "honeycomb": 1,
+   "oxidized_copper": 1
+  },
+  1,
+  false
+ ],
+ "waxed_oxidized_copper_bars": [
+  {
+   "honeycomb": 1,
+   "oxidized_copper_bars": 1
+  },
+  1,
+  false
+ ],
+ "waxed_oxidized_copper_chain": [
+  {
+   "honeycomb": 1,
+   "oxidized_copper_chain": 1
+  },
+  1,
+  false
+ ],
+ "waxed_oxidized_copper_chest": [
+  {
+   "honeycomb": 1,
+   "oxidized_copper_chest": 1
+  },
+  1,
+  false
+ ],
+ "waxed_oxidized_copper_door": [
+  {
+   "honeycomb": 1,
+   "oxidized_copper_door": 1
+  },
+  1,
+  false
+ ],
+ "waxed_oxidized_copper_golem_statue": [
+  {
+   "honeycomb": 1,
+   "oxidized_copper_golem_statue": 1
+  },
+  1,
+  false
+ ],
+ "waxed_oxidized_copper_lantern": [
+  {
+   "honeycomb": 1,
+   "oxidized_copper_lantern": 1
+  },
+  1,
+  false
+ ],
+ "waxed_oxidized_copper_trapdoor": [
+  {
+   "honeycomb": 1,
+   "oxidized_copper_trapdoor": 1
+  },
+  1,
+  false
+ ],
+ "waxed_oxidized_lightning_rod": [
+  {
+   "honeycomb": 1,
+   "oxidized_lightning_rod": 1
+  },
+  1,
+  false
+ ],
+ "waxed_weathered_copper": [
+  {
+   "honeycomb": 1,
+   "weathered_copper": 1
+  },
+  1,
+  false
+ ],
+ "waxed_weathered_copper_bars": [
+  {
+   "honeycomb": 1,
+   "weathered_copper_bars": 1
+  },
+  1,
+  false
+ ],
+ "waxed_weathered_copper_chain": [
+  {
+   "honeycomb": 1,
+   "weathered_copper_chain": 1
+  },
+  1,
+  false
+ ],
+ "waxed_weathered_copper_chest": [
+  {
+   "honeycomb": 1,
+   "weathered_copper_chest": 1
+  },
+  1,
+  false
+ ],
+ "waxed_weathered_copper_door": [
+  {
+   "honeycomb": 1,
+   "weathered_copper_door": 1
+  },
+  1,
+  false
+ ],
+ "waxed_weathered_copper_golem_statue": [
+  {
+   "honeycomb": 1,
+   "weathered_copper_golem_statue": 1
+  },
+  1,
+  false
+ ],
+ "waxed_weathered_copper_lantern": [
+  {
+   "honeycomb": 1,
+   "weathered_copper_lantern": 1
+  },
+  1,
+  false
+ ],
+ "waxed_weathered_copper_trapdoor": [
+  {
+   "honeycomb": 1,
+   "weathered_copper_trapdoor": 1
+  },
+  1,
+  false
+ ],
+ "waxed_weathered_lightning_rod": [
+  {
+   "honeycomb": 1,
+   "weathered_lightning_rod": 1
+  },
+  1,
+  false
+ ],
+ "wayfinder_armor_trim_smithing_template": [
+  {
+   "diamond": 7,
+   "terracotta": 1,
+   "wayfinder_armor_trim_smithing_template": 1
+  },
+  2,
+  true
+ ],
+ "weathered_chiseled_copper": [
+  {
+   "weathered_cut_copper_slab": 2
+  },
+  1,
+  false
+ ],
+ "weathered_copper_bulb": [
+  {
+   "blaze_rod": 1,
+   "redstone": 1,
+   "weathered_copper": 3
+  },
+  4,
+  true
+ ],
+ "weathered_copper_grate": [
+  {
+   "weathered_copper": 4
+  },
+  4,
+  true
+ ],
+ "weathered_cut_copper": [
+  {
+   "weathered_copper": 4
+  },
+  4,
+  false
+ ],
+ "weathered_cut_copper_slab": [
+  {
+   "weathered_cut_copper": 3
+  },
+  6,
+  true
+ ],
+ "weathered_cut_copper_stairs": [
+  {
+   "weathered_cut_copper": 6
+  },
+  4,
+  true
+ ],
+ "wheat": [
+  {
+   "hay_block": 1
+  },
+  9,
+  false
+ ],
+ "white_banner": [
+  {
+   "stick": 1,
+   "white_wool": 6
+  },
+  1,
+  true
+ ],
+ "white_candle": [
+  {
+   "candle": 1,
+   "white_dye": 1
+  },
+  1,
+  false
+ ],
+ "white_concrete_powder": [
+  {
+   "gravel": 4,
+   "sand": 4,
+   "white_dye": 1
+  },
+  8,
+  true
+ ],
+ "white_stained_glass": [
+  {
+   "glass": 8,
+   "white_dye": 1
+  },
+  8,
+  true
+ ],
+ "white_terracotta": [
+  {
+   "terracotta": 8,
+   "white_dye": 1
+  },
+  8,
+  true
+ ],
+ "wild_armor_trim_smithing_template": [
+  {
+   "diamond": 7,
+   "mossy_cobblestone": 1,
+   "wild_armor_trim_smithing_template": 1
+  },
+  2,
+  true
+ ],
+ "wind_charge": [
+  {
+   "breeze_rod": 1
+  },
+  4,
+  false
+ ],
+ "wolf_armor": [
+  {
+   "armadillo_scute": 6
+  },
+  1,
+  true
+ ],
+ "writable_book": [
+  {
+   "book": 1,
+   "feather": 1,
+   "ink_sac": 1
+  },
+  1,
+  false
+ ],
+ "yellow_banner": [
+  {
+   "stick": 1,
+   "yellow_wool": 6
+  },
+  1,
+  true
+ ],
+ "yellow_candle": [
+  {
+   "candle": 1,
+   "yellow_dye": 1
+  },
+  1,
+  false
+ ],
+ "yellow_concrete_powder": [
+  {
+   "gravel": 4,
+   "sand": 4,
+   "yellow_dye": 1
+  },
+  8,
+  true
+ ],
+ "yellow_stained_glass": [
+  {
+   "glass": 8,
+   "yellow_dye": 1
+  },
+  8,
+  true
+ ],
+ "yellow_terracotta": [
+  {
+   "terracotta": 8,
+   "yellow_dye": 1
+  },
+  8,
+  true
+ ]
+}

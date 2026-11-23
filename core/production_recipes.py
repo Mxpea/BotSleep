@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass
 from math import ceil
+import json
+from pathlib import Path
 
 from core.domain import PLANK_NAMES, WOOD_SPECIES
 from skills.daily_survival import DailySurvivalSkills
@@ -26,9 +28,16 @@ RECIPES = {
     **{f"{wood}_door": ({f"{wood}_planks": 6}, 3) for wood in WOOD_SPECIES},
     **{bed: ({bed[:-4] + "_wool": 3, "planks": 3}, 1) for bed in DailySurvivalSkills.BEDS},
 }
-CRAFT_ITEMS = frozenset(RECIPES)
 
 HAND_RECIPES = frozenset({"stick", "torch", "crafting_table", "flint_and_steel", "blaze_powder", "ender_eye", "bone_meal", *PLANK_NAMES})
+# Keep established acquisition choices (e.g. smelt iron instead of unpacking blocks).
+_catalog = json.loads((Path(__file__).resolve().parents[1] / "data" / "mc_tree_crafting.json").read_text(encoding="utf-8"))
+for _item, (_materials, _yield, _table) in _catalog.items():
+    if _item not in RECIPES:
+        RECIPES[_item] = (_materials, _yield)
+        if not _table:
+            HAND_RECIPES |= {_item}
+CRAFT_ITEMS = frozenset(RECIPES)
 MAX_PLANNED_BATCHES = 4
 
 
@@ -36,7 +45,7 @@ MAX_PLANNED_BATCHES = 4
 class CraftPlan:
     needs_table: bool
     request_count: int = 0
-    missing: tuple[str, int] | None = None
+    deficits: tuple[tuple[str, int], ...] = ()
 
 
 def wood_inputs(wood):
@@ -66,5 +75,6 @@ def plan_craft(item, needed, counts):
         # to a single recipe before status, inventory and threats are checked again.
         size = min(batches, ready, 1 if needs_table else MAX_PLANNED_BATCHES)
         return CraftPlan(needs_table, min(needed, size * output))
-    ingredient, quantity = next((name, amount) for name, amount in recipe.items() if available[name] < amount)
-    return CraftPlan(needs_table, missing=(ingredient, batches * quantity - available[ingredient]))
+    return CraftPlan(needs_table, deficits=tuple(
+        (name, batches * quantity - available[name]) for name, quantity in recipe.items()
+        if available[name] < quantity))

@@ -6,6 +6,7 @@ import threading
 import time
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from core.model_gate import ModelGateError, ModelRequestGate
 
@@ -50,7 +51,7 @@ class ModelGateTests(unittest.TestCase):
         self.assertEqual(peak, 1)
         self.assertEqual(self.gate().snapshot()["state"], "idle")
 
-    def test_timeout_survives_restart_until_explicit_acknowledgement(self):
+    def test_timeout_can_be_acknowledged_before_window_expires(self):
         with self.assertRaises(TransportTimeout):
             with self.gate().request(): raise TransportTimeout()
         gate = self.gate()
@@ -64,6 +65,17 @@ class ModelGateTests(unittest.TestCase):
         with self.assertRaises(KnownHttpFailure):
             with self.gate().request(): raise KnownHttpFailure()
         with self.gate().request(): pass
+
+    def test_transport_window_is_measured_from_dispatch_across_restart(self):
+        gate = self.gate()
+        for code in ("llm_timeout", "llm_network_error"):
+            gate._write(dict(state="uncertain", started_at=100, finished_at=121, error_code=code))
+            with patch("core.model_gate.time.time", return_value=129.9):
+                with self.assertRaises(ModelGateError), self.gate().request():
+                    self.fail("early retry")
+            with patch("core.model_gate.time.time", return_value=130):
+                with self.gate().request():
+                    self.assertEqual(gate.snapshot()["state"], "inflight")
 
     def test_crashed_inflight_ledger_is_not_automatically_recovered(self):
         gate = self.gate()

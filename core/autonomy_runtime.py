@@ -174,7 +174,18 @@ class AutonomyRuntime:
             self.context["cautious_bootstrap"] = cautious
             if cautious:
                 self.context["cautious_bootstrap_basis"] = copy.deepcopy(observation["status"])
-            self.task_controller.start(decision.args, observation, self.context)
+            args = decision.args
+            if (self.competition_mode and self.competition.state()["active_goal_id"] == "minecraft:story/smelt_iron"
+                    and args.get("task") == "gather" and args.get("resource") == "cobblestone"
+                    and type(args.get("count")) is int and args["count"] == 8
+                    and not observation["counts"].get("furnace")
+                    and not any(row["name"] == "furnace" for row in extract_blocks(observation))):
+                missing = 8 - observation["counts"].get("cobblestone", 0)
+                if missing <= 0:
+                    return SkillResult(True, "Furnace materials already available; plan crafting", {
+                        "completed": True, "executed": False})
+                args = {**args, "count": missing}
+            self.task_controller.start(args, observation, self.context)
         except ValueError as error:
             return SkillResult(False, str(error), {"executed": False}, "bad_args")
         if self.mainline_enabled:
@@ -220,7 +231,7 @@ class AutonomyRuntime:
                     and (math.floor(row["pos"][0]), math.floor(row["pos"][2])) not in blocked_xz]
 
         try:
-            rows = self.client.get_blocks(radius=64, types=sorted(log_names), limit=12)
+            rows = self.client.get_blocks(radius=128, types=sorted(log_names), limit=12)
         except APIError:
             return None
         waypoints = candidates(rows)
@@ -493,7 +504,7 @@ class AutonomyRuntime:
         log_names = (material[0] + "_log",) if material is not None else LOG_NAMES
         plank_names = (material[0] + "_planks",) if material is not None else PLANK_NAMES
         gathering_wood = args.get("task") == "gather" and args.get("resource") in {"logs", *LOG_NAMES}
-        needs_wood = args.get("task") in {"craft", "starter_tools", "shelter", "storage", "bed"} and not any(
+        needs_wood = args.get("task") in {"craft", "smelt", "starter_tools", "shelter", "storage", "bed"} and not any(
             counts.get(name) for name in (*log_names, *plank_names))
         if (relaxed_policy is None and (gathering_wood or needs_wood)
                 and self.task_controller._fresh(observation)

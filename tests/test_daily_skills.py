@@ -54,7 +54,9 @@ class DailyWorld:
     def find_blocks(self, types, **kwargs):
         return [{"pos": list(key), **value} for key, value in self.blocks.items() if value["name"] in types]
 
-    def move_to(self, x, y, z, **kwargs):
+    def move_to(self, x=None, y=None, z=None, **kwargs):
+        if "entity_id" in kwargs:
+            x, y, z = next(e["pos"] for e in self.entities if e["id"] == kwargs["entity_id"])
         self.calls.append(("move", [x, y, z], kwargs))
         self.status["pos"] = [x, y, z]
         if "move" in self.effects:
@@ -806,7 +808,8 @@ class DailySkillTests(unittest.TestCase):
         result = self.act("collect_drops", entity_id=3, expected_item="oak_log")
         self.assertTrue(result.success, result)
         self.assertEqual(result.data["gained"], 2)
-        self.assertEqual(self.writes("move")[0][2]["range"], 0)
+        self.assertEqual(self.writes("move")[0][2]["entity_id"], 3)
+        self.assertNotIn("range", self.writes("move")[0][2])
         self.assertEqual(len(self.writes("move")), 1)
 
     def test_pickup_accepts_inventory_gain_after_movement_returns(self):
