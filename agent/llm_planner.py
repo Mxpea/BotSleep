@@ -187,6 +187,8 @@ If that goal tool is unavailable, use only the currently advertised tools.
         self._undelivered_result = False
         self._task_repair_uses = {}
         self._scout_calls = 0
+        self._scout_reset_life = None
+        self.llm_override_on_block = bool(_setting(survival_settings, "llm_override_on_block", False))
         self._world_mutation_nonce = 0
 
     def close(self):
@@ -707,7 +709,7 @@ If that goal tool is unavailable, use only the currently advertised tools.
                 )
                 and self._scout_calls < 6
             )
-            if not (ready_for_lava_scout and not known_lava) and not no_wood_yet:
+            if not self.llm_override_on_block and not (ready_for_lava_scout and not known_lava) and not no_wood_yet:
                 for tool in tools:
                     if tool["function"]["name"] == "run_survival_task":
                         task_prop = tool["function"]["parameters"]["properties"].get("task")
@@ -717,6 +719,13 @@ If that goal tool is unavailable, use only the currently advertised tools.
                                 str(tool["function"].get("description", ""))
                                 + " Note: task='scout' is disabled this turn — do NOT pass 'scout'; choose gather, craft, smelt, starter_tools, iron_tools, food, or nether_portal."
                             )
+            elif self.llm_override_on_block and self._scout_calls >= 6 and not ready_for_lava_scout:
+                for tool in tools:
+                    if tool["function"]["name"] == "run_survival_task":
+                        tool["function"]["description"] = (
+                            str(tool["function"].get("description", ""))
+                            + " Warning: scout already ran repeatedly; prefer gather, craft, smelt, iron_tools, food, or nether_portal unless repositioning."
+                        )
         return (tools, {"mode": mode, "atomic_repair_remaining": 0}, None)
 
     def _decision(self, message, observation, context, allowed_names=None, allowed_schemas=None):
@@ -906,7 +915,7 @@ If that goal tool is unavailable, use only the currently advertised tools.
             request_tools, routing, repair_task_id = self._request_catalog(context, observation)
             allowed_names = frozenset(tool["function"]["name"] for tool in request_tools)
             allowed_schemas = {tool["function"]["name"]: copy.deepcopy(tool["function"]["parameters"]) for tool in request_tools}
-            prompt_context = {key: context[key] for key in ("blocked_targets", "explore_index", "failures", "last_result", "last_planner_rejection",
+            prompt_context = {key: context[key] for key in ("blocked_targets", "explore_index", "failures", "last_result", "last_planner_rejection", "safety_warnings",
                                                           "last_scout_report", "death_count", "spawn", "remaining_steps", "remaining_seconds",
                                                           "daily_tasks", "action_hints", "memory", "survival_constraints", "competition", "playbook", "task_execution") if key in context}
             if routing.get("mode") == "goal" and isinstance(prompt_context.get("action_hints"), list):

@@ -781,6 +781,24 @@ class DailyPolicyTests(unittest.TestCase):
             "retreat_from",
         )
 
+    def test_llm_override_on_block_downgrades_tactical_locks_to_warnings_while_keeping_lava_hard_stop(self):
+        over = DailySafetyPolicy({"low_health_threshold": 8, "food_threshold": 16, "threat_radius": 8,
+                                  "sleep_policy": "opportunistic", "llm_override_on_block": True})
+        wet = observed(in_water=True, on_ground=False)
+        self.assertIsNone(over.choose(wet, self.baseline, context={"water_recovery": {"steps": 2}}))
+        c_wet = over.constraints(wet, context={"water_recovery": {"steps": 2}})
+        self.assertTrue(c_wet["model_allowed"])
+        self.assertTrue(any("in_water" in w for w in c_wet["warnings"]))
+
+        hungry = observed(health=5, food=4, is_day=False, time_of_day=14000)
+        self.assertIsNone(over.choose(hungry, self.baseline, context={}))
+        self.assertTrue(over.constraints(hungry)["model_allowed"])
+        self.assertIsNone(over.validate(action("move_to", pos=[4, 64, 0]), hungry))
+
+        lava = observed(in_lava=True, on_ground=False)
+        self.assertEqual(over.choose(lava, self.baseline).goal, "recover")
+        self.assertFalse(over.constraints(lava)["model_allowed"])
+
 
 if __name__ == "__main__":
     unittest.main()

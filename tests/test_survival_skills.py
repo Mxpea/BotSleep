@@ -1497,6 +1497,38 @@ class WaterEscapeTests(unittest.TestCase):
         self.assertGreaterEqual(len(yaws), 2)
         self.assertNotEqual(yaws[0], yaws[-1])
 
+    def test_daily_skills_force_override_allows_water_move_and_combat_approach(self):
+        from skills.daily_survival import DailySurvivalSkills
+        from skills.combat import CombatSkills
+
+        world = World()
+        world.status.update({"pos": [0.5, 62.0, 0.5], "in_water": True, "on_ground": False, "health": 18, "food": 18})
+        res = DailySurvivalSkills(world).execute("move_to", {"pos": [4.5, 64.0, 0.5]}, force_override=True)
+        self.assertTrue(res.success, res)
+
+        cworld = World()
+        cworld.status.update({"pos": [0.5, 64.0, 0.5], "gamemode": "survival", "on_ground": True,
+                              "in_water": False, "in_lava": False, "on_fire": False, "in_vehicle": False,
+                              "health": 18, "food": 18, "held": {"name": "stone_sword", "count": 1}})
+        cworld.counts["stone_sword"] = 1
+        cworld.equip = lambda item, **kw: envelope({"held": {"name": item, "count": 1}})
+        cworld.look_at = lambda *a, **kw: envelope({"ok": True})
+        zombie = {"id": 99, "name": "zombie", "type": "hostile", "pos": [4.5, 64.0, 0.5], "health": 20.0}
+        moves = []
+
+        def fake_move(pos, kw):
+            moves.append(pos)
+            cworld.status["pos"] = [3.0, 64.0, 0.5]
+            return envelope({"pos": [3.0, 64.0, 0.5]})
+
+        cworld.move_effect = fake_move
+        cworld.control = lambda **kw: envelope({"ok": True, "hits": [{"entity": {"id": 99, "name": "zombie"}}]})
+        with patch.object(cworld, "get_entities", return_value=[zombie]), patch("skills.combat.clear_entity_ray", return_value={"visible": True, "queries": 1}), patch("skills.combat.time.sleep"):
+            cres = CombatSkills(cworld, starter_defense=False).execute("fight_hostile", {"entity_id": 99, "expected_name": "zombie"}, force_override=True)
+        self.assertTrue(cres.success, cres)
+        self.assertTrue(cres.data.get("approached"))
+        self.assertEqual(len(moves), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

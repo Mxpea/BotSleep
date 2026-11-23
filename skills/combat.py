@@ -401,6 +401,29 @@ class CombatSkills(SurvivalSkills):
     def _fight(self, context, args):
         observation = self._snapshot(context)
         option = self.options(observation, args["entity_id"], args["expected_name"])
+        if not option["allowed"] and context.get("force_override") and option.get("reason") in {"target_out_of_range", "no_safe_attack_range"}:
+            target_row = option.get("target") or next(
+                (r for r in observation.get("entities", [])
+                 if isinstance(r, dict) and r.get("id") == args["entity_id"] and r.get("name") == args["expected_name"]),
+                None,
+            )
+            if isinstance(target_row, dict) and isinstance(target_row.get("pos"), list):
+                try:
+                    self._write(
+                        context,
+                        self.client.move_to,
+                        float(target_row["pos"][0]),
+                        float(target_row["pos"][1]),
+                        float(target_row["pos"][2]),
+                        range=2.2,
+                        timeout_ms=4000,
+                        status=observation["status"],
+                    )
+                    context["data"]["approached"] = True
+                    observation = self._snapshot(context)
+                    option = self.options(observation, args["entity_id"], args["expected_name"])
+                except Exception as move_err:
+                    context["data"]["approach_error"] = str(move_err)
         if not option["allowed"]:
             raise _Failure("combat_unsafe", option["reason"], {"retreat_required": True, "reason": option["reason"]})
         target, shield = option["target"], option["shield"]
@@ -522,11 +545,12 @@ class CombatSkills(SurvivalSkills):
                 data.update(cleanup_skipped="disconnected_unknown", api_details=context["disconnection_details"])
             return SkillResult(False, str(error), data, code)
 
-    def execute(self, name, args, cancel_event=None):
+    def execute(self, name, args, cancel_event=None, *, force_override=False):
         data = {"skill": name, "executed": False, "attack_sent": False, "killed": False,
                 "completed": False, "damage_verified": False, "phase": "checking"}
         context = {"cancel": cancel_event, "acted": False, "write_sent": False, "data": data,
-                   "deadline": time.monotonic() + self.MAX_SECONDS, "block_reads": 0}
+                   "deadline": time.monotonic() + self.MAX_SECONDS, "block_reads": 0,
+                   "force_override": bool(force_override)}
         try:
             if (name != "fight_hostile" or not isinstance(args, dict) or set(args) != {"entity_id", "expected_name"}
                     or type(args["entity_id"]) is not int or args["entity_id"] < 0

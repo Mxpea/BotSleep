@@ -949,15 +949,26 @@ class AutonomousTaskController:
                 Decision("run_survival_task", args, "Revalidate the accepted limited goal", task), observation, context):
             self._escalate("cautious_bootstrap_goal_not_allowed")
             return None
-        if (status.get("busy") or status.get("gamemode") != "survival" or status.get("on_ground") is not True
-                or self.safety_policy._strict_night_block(observation, status) and relaxed_policy != NIGHT
+        override = getattr(self.safety_policy, "llm_override_on_block", False) is True
+        water_override = (
+            override
+            and task in {"scout", "gather", "food"}
+            and status.get("in_water") is True
+            and int(((context or {}).get("water_recovery") or {}).get("steps") or 0) >= 2
+            and not status.get("in_lava") and not status.get("on_fire")
+            and (not status.get("submerged") or (type(status.get("oxygen")) in (int, float) and status["oxygen"] > 8))
+        )
+        hostile_dist_limit = 2.5 if override else self.rules.threat_radius
+        if (status.get("busy") or status.get("gamemode") != "survival"
+                or (status.get("on_ground") is not True and not water_override)
+                or (not override and self.safety_policy._strict_night_block(observation, status) and relaxed_policy != NIGHT)
                 or not _finite(status.get("health")) or not _finite(status.get("food"))
-                or status["health"] <= self.rules.low_health and not cautious and relaxed_policy != LOW_HEALTH
-                or status["food"] <= 6
-                or any(status.get(k) for k in ("in_water", "in_lava", "on_fire", "submerged", "is_sleeping", "in_vehicle"))
-                or any(distance <= self.rules.threat_radius for distance, _ in self.rules._hostiles(observation, status["pos"]))
+                or (not override and status["health"] <= self.rules.low_health and not cautious and relaxed_policy != LOW_HEALTH)
+                or (not override and status["food"] <= 6)
+                or any(status.get(k) for k in (("in_lava", "on_fire", "is_sleeping", "in_vehicle") if water_override else ("in_water", "in_lava", "on_fire", "submerged", "is_sleeping", "in_vehicle")))
+                or any(distance <= hostile_dist_limit for distance, _ in self.rules._hostiles(observation, status["pos"]))
                 or isinstance(status.get("nearest_hostile"), dict) and _finite(status["nearest_hostile"].get("dist"))
-                   and status["nearest_hostile"]["dist"] <= self.rules.threat_radius):
+                   and status["nearest_hostile"]["dist"] <= hostile_dist_limit):
             self.interrupt("local_safety_policy_required")
             return None
         local = self._context(context, observation)

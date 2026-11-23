@@ -788,6 +788,36 @@ class BrainTransportTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "llm_no_progress")
         self.assertIn("nether_portal", str(caught.exception))
 
+    def test_llm_override_keeps_scout_callable_and_forwards_safety_warnings(self):
+        class CaptureBrain:
+            def __init__(self):
+                self.requests = []
+                self.tools = []
+
+            def chat_completion(self, messages, tools=None, cancel_event=None):
+                self.requests.append(messages)
+                self.tools.append(tools)
+                return response("run_survival_task", {"task": "scout"})
+
+        brain = CaptureBrain()
+        planner = LLMSurvivalPlanner(
+            {"enabled": True}, {"objective": "daily", "llm_override_on_block": True}, brain=brain
+        )
+        planner._scout_calls = 7
+        obs = {
+            "fresh": True, "stale": False, "observation_scope": "full",
+            "inventory_fresh": True, "terrain_fresh": True,
+            "status": {"ready": True, "alive": True, "busy": None, "gamemode": "survival",
+                       "dimension": "overworld", "pos": [0.5, 64, 0.5], "health": 18, "food": 18, "is_day": True},
+            "counts": {}, "inventory": [], "blocks": [],
+        }
+        decision = planner.choose(obs, {"safety_warnings": ["in_water: test warning"]})
+        self.assertEqual((decision.name, decision.args["task"]), ("run_survival_task", "scout"))
+        task_tool = next(t for t in brain.tools[0] if t["function"]["name"] == "run_survival_task")
+        self.assertIn("scout", task_tool["function"]["parameters"]["properties"]["task"]["enum"])
+        user_payload = json.loads(brain.requests[0][-1]["content"])
+        self.assertEqual(user_payload["context"]["safety_warnings"], ["in_water: test warning"])
+
 
 if __name__ == "__main__":
     unittest.main()

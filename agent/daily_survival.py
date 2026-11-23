@@ -508,7 +508,8 @@ class DailySurvivalGoals:
                     drops = self._action("collect_drops", {"entity_id": entity_id, "expected_item": item},
                                          "Collect one currently observed safe drop after death", "recover_drops")
                     break
-        task("recover_drops", 100, context.get("death_count", 0) == 0, action=drops,
+        drop_priority = 100 if (drops is not None and status.get("is_day") is True and context.get("death_count", 0) <= 2) else (45 if drops is not None else 5)
+        task("recover_drops", drop_priority, context.get("death_count", 0) == 0, action=drops,
              reason="No currently visible safe drop; do not replay a route to the death location", waiting=True)
 
         well_fed = (

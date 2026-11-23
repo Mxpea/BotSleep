@@ -1,5 +1,30 @@
 # 配置、客户端、生存、赛事与监控验证
 
+## 端侧 API 过夜 9-Bot 长跑与「LLM 优先接管 + 警告降级」方案（2026-11-23）
+
+基线为 `develop-tianya/api-model-opt`（提交 `0b02c21` 至 `9824e80` 实测，以及最新未提交/待推的 `llm_override_on_block` 改造）。Windows / Python 3.13，Leaves 1.21.11（`difficulty=easy`）+ 单端口 `mc-agent-api`（`18900`，未改动源码）+ 默认端侧 API（`https://api.nju-aia.com/v1`，`model: default`），跨 9 个 Bot 启用全局并发=1 FIFO 门禁与 `[4, 16, 32, 64, 128, 256]` 秒自动退避重试（`gate_wait_seconds: 600`、`recover_uncertain_transport: true`、`max_runtime_seconds: 4680`）。
+
+- **过夜实服汇总（`nether_bench_v7`–`v14`，截至 `v14` 第 58 分钟仍在运行）**：
+  - **是否已有 Bot 在 `< 1.3h` 内进入 `the_nether`**：**暂未（`0/9`）**。
+  - **稳定到达铁器/进门前夜的代表 Bot**：
+    - `v9`：`bot_1` 拿到 `13 iron_ingot` + `bucket` + `shield`；
+    - `v12`：`bot_3` 达成 `[Acquire Hardware]`（0 死亡，开始烧铁）；
+    - **`v13`**：`8/9` 达成 `[Getting an Upgrade]`（石镐），**`bot_6`（0 死、`iron_pickaxe + bucket + shield + 13 raw_iron + 2 iron_ingot`）与 `bot_9`（0 死、`iron_pickaxe + bucket + shield + 9 raw_iron + 3 iron_ingot`）均达成 `[Isn't It Iron Pick]`**；
+    - **`v14`（T+58m，仍在跑）**：`bot_5` 达成 `[Isn't It Iron Pick]` 并持 `iron_pickaxe + bucket + shield + 6 iron_ingot + 210 cobblestone` 启动 `nether_portal`（后受单会话连续 HTTP 500 退避阻断）；`bot_3`/`bot_8` 也均采出铁矿/黑曜石前驱或燧石（`bot_8` 峰值 `raw_iron=9, flint=2`）。
+- **逐轮定位并修复的全部主要问题**：
+  1. **API 并发超限与断连熔断**（已在 `0b02c21` 修复）：新增跨进程/线程并发=1 FIFO 排队门禁与 `4..256s` 自动退避，清理 `model_gate` 死锁后 `v8` 起不再因单次波动全员永久停摆。
+  2. **撤退/容器/树冠中断 `action_unconfirmed` 冻结**（`51d0f5e`–`fe3e8b1`、`9824e80`）：`retreat_from`、`inspect_container` 与 `canopy_escape`（含死亡触发的 `recovery_error="dead"/"life_changed"`）现优先在任务检查前复检恢复，`v11` 起连续运行时段保持 `pauses=0`。
+  3. **多处本地策略与状态机死循环**（`0e80c27`、`0d46211`、`ab7c6b8`、`9824e80`）：修正 `found_wood` 键名拼写、限制禁用 `scout` 与重复工具打造、打破低血 `food < 18` 永久 `wait(5)` 僵死、洞穴被围 `retreat_from -> wait(2)` 死循环、目标冷却复选同任务循环，并修正 `iron_pickaxe + bucket` 误手动找砂砾而不调 `nether_portal` 的提示。
+  4. **`v14` 新暴露残余阻塞（本轮新方案已全部覆盖）**：
+     - **脚本卡死仍拦截 LLM 指挥**：`bot_9` 落水循环 821 次（`water_ex=327`）却被禁止在水中调用 `move_to`/`scout`；`bot_3` 遭遇 45 次 `target_out_of_range` 被本地直接报错拦截；
+     - **单会话坏历史引发连续 HTTP 500**：`bot_2`（15 次）、`bot_5`（8 次）在同一代理端连续 HTTP 500 上重复发送同一批旧 `_turns` 退避；
+     - **禁用 `scout` 参数循环 & `recover_drops` 送死**：`bot_1` 连续 28 次误传已禁用 `scout`；`bot_6`（`steps=132, deaths=52`）在 `recover_drops` 优先级 100 下反复夜里送死。
+- **新开发「LLM 优先接管 + 非致命保护降级为警告」方案（`survival.llm_override_on_block`）**：
+  - `core/config.py` & `config.example.yaml`：新增 `survival.llm_override_on_block`（默认 `false` 保持原有严格契约测试不变，开启后启用以下机制）；
+  - `core/daily_policy.py` & `core/local_recovery_runtime.py` & `core/autonomous_tasks.py`：仅保留生命周期（`dead/not_ready`）、未知写入 `pending` 复查、`in_lava/on_fire`、低氧溺水（`oxygen <= 8`）等硬不变量；`water_escape` 失败 `>= 2` 次、`retreat` 被围、`low_health` 无食、夜间或 `food <= 6` 均立刻释放 `model_allowed=True`，并生成 `safety_warnings` 传给 LLM；
+  - `skills/daily_survival.py`、`skills/survival.py`、`skills/combat.py`：新增 `force_override` 通道，放行 LLM 在水中/非地面/夜间执行 `move_to`、`gather_block`、`place_item`、`clear_foliage`（仍禁岩浆/着火/低氧），并在 `fight_hostile` 超距（`target_out_of_range` / `no_safe_attack_range`）时先短距逼近再挥击；
+  - `agent/daily_survival.py`、`agent/llm_planner.py`、`core/survival_harness.py`：无可见近处掉落或夜间/多次死亡时降级 `recover_drops` 优先级（5/45）；`llm_override_on_block` 下保留 `scout` 可调并转发 `safety_warnings`；连续 `>= 2` 次 5xx/坏响应自动裁剪 `_turns` 解除坏上下文锁死。
+
 ## 端侧 API 9-Bot 并行进地狱调试与阻断说明（2026-11-23）
 
 基线为 `develop-tianya/api-model-opt`（提交 `4e7b9a7`、`c432674`、`3a483bf`、`3de226f`、`e900c65`、`3354b71`、`0779f21` 与 `scripts/multi_bot_runner.py` 散布点隔离改动）。Windows / Python 3.12，使用 Leaves 1.21.11（`difficulty=easy`）与 `mc-agent-api`（未改动其源码），通过 `scripts/multi_bot_runner.py` 启动 9 个 Bot 并行连接默认端侧 API（`https://api.nju-aia.com/v1`，`model: default`，实际返回模型为 `qwen3.6-35b-a3b`）进行实服压测。

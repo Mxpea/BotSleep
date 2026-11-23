@@ -14,6 +14,7 @@ survival:
   intent: survival                         # survival or speedrun; phase hints never enable unbound actions.
   objective: "starter"                     # starter, daily, competition (requires llm.enabled; no chat debug).
   sleep_policy: "opportunistic"            # opportunistic (sleep only if nearby bed exists; thunder/night no-bed keeps working) or strict.
+  llm_override_on_block: false             # true converts non-fatal safety/script blocks into warnings and prioritizes LLM rescue/override.
   operator_goal: ""                        # Optional current user goal (<=1000 visible characters); safety still wins.
   autonomy:                               # Daily/competition: one model goal, locally verified child steps.
     enabled: true                         # False retains atomic model tools; no new long task may start.

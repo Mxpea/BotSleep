@@ -261,7 +261,7 @@ class SurvivalSkills:
 
     def _gather_guard(self, pos, name, status, context):
         self._overworld(status)
-        if status.get("in_water") or status.get("in_lava") or status.get("on_fire"):
+        if status.get("in_lava") or status.get("on_fire") or (not context.get("force_override") and status.get("in_water")):
             raise _Failure("unsafe", "Do not gather while in water, lava or fire")
         feet = [math.floor(v) for v in status["pos"]]
         if pos[0] == feet[0] and pos[2] == feet[2]:
@@ -1371,7 +1371,7 @@ class SurvivalSkills:
         if before.get("on_ground") is not True:
             search["termination"] = "not_grounded"
             raise _Failure("unsafe", "Wait for stable footing before planning a retreat step", evidence())
-        if before.get("gamemode", "survival") != "survival" or any(before.get(key) for key in ("in_water", "in_lava", "on_fire", "submerged")):
+        if before.get("gamemode", "survival") != "survival" or any(before.get(key) for key in (("in_lava", "on_fire") if context.get("force_override") else ("in_water", "in_lava", "on_fire", "submerged"))):
             raise _Failure("unsafe", "Retreat requires dry survival footing", evidence())
         check_escape_threats(before)
         if not escaping:
@@ -1482,7 +1482,7 @@ class SurvivalSkills:
                 raise _Failure("unsafe", "Bot position changed while inspecting the retreat corridor", evidence(pos=status["pos"]))
             if status.get("on_ground") is not True:
                 raise _Failure("unsafe", "Bot left stable footing before the retreat step", evidence())
-            if any(status.get(key) for key in ("in_water", "in_lava", "on_fire", "submerged")):
+            if any(status.get(key) for key in (("in_lava", "on_fire") if context.get("force_override") else ("in_water", "in_lava", "on_fire", "submerged"))):
                 raise _Failure("unsafe", "Body state became hazardous before movement", evidence())
             if outcome["edge_start"]:
                 entry = feet(target)
@@ -1697,9 +1697,9 @@ class SurvivalSkills:
             raise _Failure("safety_changed", "Relaxed work state changed during its final checks")
 
     def execute(self, name: str, args: Dict[str, Any], cancel_event=None, *, recovery_context=None,
-                cautious=False, relaxed_work=None) -> SkillResult:
+                cautious=False, relaxed_work=None, force_override=False) -> SkillResult:
         """Execute one registered action; partial and unverified results fail explicitly."""
-        context = {"cancel": cancel_event, "acted": False}
+        context = {"cancel": cancel_event, "acted": False, "force_override": bool(force_override)}
         data = {"skill": name}
         try:
             if not isinstance(name, str) or name not in self.ARGUMENTS:

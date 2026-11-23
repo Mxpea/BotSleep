@@ -68,6 +68,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
         self._competition_advancements_fetched_monotonic = None
         self._competition_next_advancement = 0.0
         self.daily = settings.get("objective", "starter") in {"daily", "competition"}
+        self.llm_override_on_block = bool(settings.get("llm_override_on_block", False))
         if self.competition_mode and not self.uses_llm:
             raise ValueError("competition requires a model planner; no rule fallback")
         self.daily_goals = None
@@ -462,6 +463,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                 self.context["playbook"].update(fresh=False, observation_scope="safety")
             if self.daily_policy:
                 self.context["survival_constraints"] = self.daily_policy.constraints(observation, context=self.context)
+                if self.llm_override_on_block:
+                    self.context["safety_warnings"] = list(self.context["survival_constraints"].get("warnings") or [])
             return
         self.context["milestones"] = self.planner.progress(observation)
         if self.playbook:
@@ -481,6 +484,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                                                      for row in self.daily_board.get("tasks", [])]
             self.context["action_hints"] = [row["next_action"] for row in self.daily_board.get("tasks", []) if row.get("next_action")][:3]
             self.context["survival_constraints"] = self.daily_policy.constraints(observation, context=self.context)
+            if self.llm_override_on_block:
+                self.context["safety_warnings"] = list(self.context["survival_constraints"].get("warnings") or [])
             signature = json.dumps(self.context["daily_tasks"], sort_keys=True)
             if signature != self._daily_board_signature:
                 self._record("INFO", "DAILY_TASKS", {"board": self.daily_board,
@@ -948,6 +953,10 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                     result = self._run_task_wide_find(decision, observation, "water" if decision.goal == "nether_portal_water" else "gravel")
                 else:
                     runner = resolve_skill_runner(self, decision.name)
+                    if (self.llm_override_on_block
+                            and decision.name not in {"retreat_from", "canopy_escape", "water_escape", "auto_sleep"}
+                            and isinstance(runner, (SurvivalSkills, CombatSkills))):
+                        options["force_override"] = True
                     result = runner.execute(decision.name, decision.args, cancel_event=self._cancel, **options)
             if not isinstance(result, SkillResult):
                 raise TypeError("Skill returned an invalid result")
@@ -1317,9 +1326,20 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                             for sig, entry in self.planner._failed_actions.items()
                             if entry.get("decision") and entry["decision"].name == "run_survival_task"
                         }
-                if (result.error_code == "llm_context_limit" or context_limit_http) and isinstance(getattr(self.planner, "_turns", None), list):
+                server_5xx_or_bad = (
+                    (result.error_code == "llm_http_error" and int(result.data.get("http_status") or 0) >= 500)
+                    or result.error_code == "llm_invalid_response"
+                ) and self._model_failures >= 2
+                if (result.error_code == "llm_context_limit" or context_limit_http or server_5xx_or_bad) and isinstance(getattr(self.planner, "_turns", None), list):
                     turns = self.planner._turns
-                    self.planner._turns = turns[-2:] if len(turns) > 2 else []
+                    if server_5xx_or_bad and self._model_failures >= 3:
+                        self.planner._turns = []
+                        if hasattr(self.planner, "_undelivered_result"):
+                            self.planner._undelivered_result = False
+                    else:
+                        self.planner._turns = turns[-2:] if len(turns) > 2 else []
+                        if not self.planner._turns and hasattr(self.planner, "_undelivered_result"):
+                            self.planner._undelivered_result = False
                 if self.daily and model_uncertain:
                     self._model_blocked = result.error_code
                     self._record("WARN", "MODEL_BLOCKED_SAFETY_ACTIVE", {"code": result.error_code})

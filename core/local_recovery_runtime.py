@@ -254,8 +254,10 @@ class LocalRecoveryRuntime:
                 if stalled >= 4:
                     state["retry_after"] = time.time() + 15
                     state["stalled_steps"] = 0
+            if state["steps"] >= 2:
+                state["needs_ai"] = True
             if state["steps"] >= 48 and not submerged:
-                state.update(exhausted=True, reason="water_escape_budget_exhausted")
+                state.update(exhausted=True, needs_ai=True, reason="water_escape_budget_exhausted")
                 self._record("WARN", "WATER_ESCAPE_EXHAUSTED", {"recovery": copy.deepcopy(state)})
             return result.error_code not in {"unauthorized", "invalid_credentials", "death_limit", "dead",
                 "internal", "internal_error", "cancelled", "life_changed", "dimension_changed"}
