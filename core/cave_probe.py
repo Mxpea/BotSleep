@@ -70,6 +70,22 @@ def is_passable(blk: Mapping[str, Any], *, allow_cobweb: bool = False) -> bool:
     return False
 
 
+def overhead_excavation_hazard(
+    pos: Sequence[int], read_block: Callable[[Sequence[int]], Mapping[str, Any]], *, height: int = 8,
+) -> Optional[Tuple[Tuple[int, int, int], str]]:
+    """Look through the open column above a cut for liquid or missing terrain."""
+    x, y, z = pos
+    for dy in range(1, height + 1):
+        above = (x, y + dy, z)
+        block = read_block(above)
+        name = _block_name(block)
+        if name in {"unknown", "not_loaded", "void_air"} or is_water_like(block) or is_lava_like(block):
+            return above, name
+        if not is_passable(block):
+            return None
+    return None
+
+
 def is_solid_floor(blk: Mapping[str, Any]) -> bool:
     if is_water_like(blk) or is_lava_like(blk):
         return False

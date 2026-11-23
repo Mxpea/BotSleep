@@ -84,6 +84,17 @@ class ConfigTests(unittest.TestCase):
             with self.subTest(value=bad), self.assertRaises(ConfigError):
                 load_config(self.write({"survival": {"intent": bad}}), environ={})
 
+    def test_daily_sleep_and_mining_settings_load_through_yaml(self):
+        default = load_config(self.write({}), environ={})["survival"]
+        self.assertEqual(default["sleep_policy"], "opportunistic")
+        self.assertFalse(default["disable_deep_mining"])
+        overrides = {"sleep_policy": "strict", "disable_deep_mining": True, "continuous": True}
+        configured = load_config(self.write({"survival": overrides}), environ={})["survival"]
+        self.assertEqual({key: configured[key] for key in overrides}, overrides)
+        for key, value in (("disable_deep_mining", "false"), ("sleep_policy", "off")):
+            with self.subTest(key=key), self.assertRaises(ConfigError):
+                load_config(self.write({"survival": {key: value}}), environ={})
+
     def test_operator_goal_is_optional_bounded_owner_text(self):
         self.assertEqual(load_config(self.write({}), environ={})["survival"]["operator_goal"], "")
         for goal in ("", "采足木头并制作一把木镐；失败先本地恢复。", "木" * 1000):
@@ -105,7 +116,7 @@ class ConfigTests(unittest.TestCase):
 
     def test_autonomy_defaults_and_partial_disable_preserve_run_budget(self):
         config = load_config(self.write({"survival": {"objective": "daily"}}), environ={})
-        self.assertEqual(config["survival"]["autonomy"], {"enabled": True, "local_opening": False, "max_steps": 128,
+        self.assertEqual(config["survival"]["autonomy"], {"enabled": True, "local_opening": False, "mainline": True, "max_steps": 128,
             "max_seconds": 600, "max_local_failures": 4, "max_no_progress_steps": 8, "max_explore_steps": 8})
         config = load_config(self.write({"survival": {"autonomy": {"enabled": False, "max_explore_steps": 0}}}), environ={})
         self.assertFalse(config["survival"]["autonomy"]["enabled"])
@@ -113,6 +124,16 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config["survival"]["autonomy"]["max_steps"], 128)
         self.assertEqual(config["survival"]["max_steps"], 256)
         self.assertFalse((self.root / "runtime").exists())
+
+    def test_normal_daily_mainline_respects_existing_custom_profiles_and_explicit_settings(self):
+        for profile in ({"operator_goal": "Build a shelter"}, {"intent": "speedrun"},
+                        {"autonomy": {"local_opening": True}}, {"autonomy": {"mainline": False}}):
+            with self.subTest(profile=profile):
+                config = load_config(self.write({"survival": {"objective": "daily", **profile}}), environ={})
+                self.assertFalse(config["survival"]["autonomy"]["mainline"])
+        profile = {"objective": "daily", "operator_goal": "Keep this world's base supplied", "autonomy": {"mainline": True}}
+        config = load_config(self.write({"survival": profile}), environ={})
+        self.assertTrue(config["survival"]["autonomy"]["mainline"])
 
     def test_autonomy_limits_are_bounded_and_do_not_accept_boolean_numbers(self):
         for key, low, high in (("max_steps", 1, 2048), ("max_local_failures", 1, 32),

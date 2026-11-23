@@ -4,7 +4,7 @@
 
 本轮只读核对相邻 `mc-agent-api/package.json` 为 **1.3.14**，其 `docs/RULES.md` 指定 **Minecraft Java 1.21.11**。项目历史实服记录为 Leaves 1.21.11；这不表示本轮重新连接服务器确认了所有 gamerule、插件或数据包。本文不采用 Bedrock、Minecraft Dungeons、D&D《Monstrous Compendium》PDF 或 Feedback 用户建议作为 Java 实现依据。
 
-新增 `core/survival_playbook.py` 是**纯离线阶段建议器**。它不调用模型、HTTP、RCON，不移动、战斗或改变背包；不会凭历史记忆宣布阶段完成。整体流程覆盖到末地，但下界探索、猪灵交易、末地战斗等仍缺运行时适配，必须保持 `blocked`。本模块不能把独立 Python 脚本变成已注册模型工具。
+`core/survival_playbook.py` 是纯离线阶段建议器。下界探索、交易和末地战斗在本建议器的模型目录中仍显示为 `blocked`。在独立的通关模式中，这些阶段由本地控制器选用内部分支。启用方式、源码参照和现有验证见 [CAMPAIGN.md](CAMPAIGN.md)。
 
 ## 1. 给调用方的最短合同
 

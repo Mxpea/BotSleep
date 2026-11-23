@@ -33,10 +33,10 @@ class SurvivalTaskPlannerTests(unittest.TestCase):
             enabled_names = {tool["function"]["name"] for tool in visible}
             self.assertNotIn("run_survival_task", enabled_names)
             self.assertTrue({"gather_block", "craft_item", "move_to", "wait"} <= enabled_names)
-            self.assertEqual(enabled_names, names - {"run_survival_task"})
+            self.assertEqual(enabled_names, names - {"run_survival_task", "retreat_from", "fight_hostile"})
 
     def test_normal_autonomy_requests_expose_goals_safety_and_competition_metadata_only(self):
-        normal={"run_survival_task","wait","eat_food","auto_sleep","retreat_from","fight_hostile"}
+        normal={"run_survival_task","wait","eat_food","auto_sleep"}
         metadata={"select_task","update_progress","finish_task","force_exit_task","end_competition"}
         for objective,size in (("daily",35),("competition",40)):
             with self.subTest(objective=objective):
@@ -48,6 +48,14 @@ class SurvivalTaskPlannerTests(unittest.TestCase):
                 self.assertTrue({"gather_block","craft_item","move_to","clear_foliage"}<=set(planner.tool_schemas))
                 self.assertLess(planner._request_bytes(brain.requests[0]["messages"],brain.requests[0]["tools"]),
                                 planner._request_bytes(brain.requests[0]["messages"]))
+
+    def test_ready_competition_combat_goal_can_request_a_bounded_attack(self):
+        planner, _ = self.planner(objective="competition")
+        view = {"competition": {"active_goal": {"availability": "ready", "required_skills": ["fight_hostile"]}}}
+        tools, _, _ = planner._request_catalog(view)
+        names = {tool["function"]["name"] for tool in tools}
+        self.assertIn("fight_hostile", names)
+        self.assertNotIn("retreat_from", names)
 
     def test_hidden_atomic_is_rejected_and_bounded_repair_uses_same_permissions(self):
         planner,brain=self.planner(response("gather_block",{"pos":[3,64,0],"expected_name":"oak_log"},"hidden"),
@@ -181,7 +189,7 @@ class SurvivalTaskPlannerTests(unittest.TestCase):
                 self.assertEqual(planner._task_repair_uses, {})
                 planner.observe_result(decision, SkillResult(True, "Tool verified", {"gained": 1}), observation({"wooden_pickaxe": 1}))
                 planner.choose(observation({"wooden_pickaxe": 1}), {})
-                self.assertEqual(len(brain.requests[1]["tools"]), 6 if objective == "daily" else 11)
+                self.assertEqual(len(brain.requests[1]["tools"]), 4 if objective == "daily" else 9)
                 self.assertEqual([m["tool_call_id"] for m in brain.requests[1]["messages"] if m["role"] == "tool"], ["cautious_goal"])
 
     def test_cautious_schema_rejection_and_repair_use_same_request_permissions(self):
@@ -394,10 +402,12 @@ class SurvivalTaskPlannerTests(unittest.TestCase):
         self.assertEqual(json.loads(feedback[0]["content"])["result"], asdict(result))
         self.assertNotIn("last_result", current["context"])
 
-    def test_goal_mode_filters_uncallable_atomic_action_hints_and_preserves_scout_report(self):
-        planner, brain = self.planner(response("run_survival_task", {"task": "scout"}))
+    def test_goal_mode_keeps_chapter_and_scout_report_after_planner_restart(self):
+        goal = {"task": "craft", "item": "stone_pickaxe", "count": 1}
+        planner, brain = self.planner(response("run_survival_task", goal))
         obs = observation()
         ctx = {
+            "mainline": {"fresh": True, "goal": goal},
             "last_scout_report": {"aborted_empty": True, "estimated_reach": 195.0},
             "action_hints": [
                 {"name": "place_item", "args": {"item": "furnace", "pos": [1, 64, 1]}, "goal": "furnace"},
@@ -406,8 +416,12 @@ class SurvivalTaskPlannerTests(unittest.TestCase):
         }
         planner.choose(obs, ctx)
         sent = json.loads(brain.requests[-1]["messages"][-1]["content"])["context"]
+        self.assertEqual(sent["mainline"], ctx["mainline"])
         self.assertEqual(sent["last_scout_report"]["estimated_reach"], 195.0)
         self.assertEqual([h["name"] for h in sent["action_hints"]], ["eat_food"])
+        tools, _, _ = planner._request_catalog({"last_scout_report": ctx["last_scout_report"]}, obs)
+        task = next(t["function"] for t in tools if t["function"]["name"] == "run_survival_task")
+        self.assertNotIn("scout", task["parameters"]["properties"]["task"]["enum"])
 
     def test_scout_removed_from_goal_catalog_after_scout_completes_once(self):
         planner, brain = self.planner(

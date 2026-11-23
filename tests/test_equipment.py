@@ -107,6 +107,52 @@ class EquipmentSkillTests(unittest.TestCase):
         self.assertEqual(res.data["offhand"]["name"], "shield")
         self.assertEqual(world.items.get("iron_chestplate", 0), 1)  # Did not downgrade diamond for iron
 
+    def test_batch_stops_at_first_unconfirmed_slot_and_lists_only_verified_changes(self):
+        expected = [("iron_helmet", "head"), ("diamond_chestplate", "torso"),
+                    ("leather_boots", "feet"), ("shield", "off-hand")]
+        for index, (item, target) in enumerate(expected):
+            with self.subTest(target=target):
+                world = SimEquipWorld()
+                equip = world.equip
+
+                def ack_without_slot_change(*, item, slot, **options):
+                    if slot != target:
+                        return equip(item=item, slot=slot, **options)
+                    world.equip_calls.append((item, slot))
+                    return {"ok": True, "result": {}}
+
+                world.equip = ack_without_slot_change
+                result = EquipmentSkill(world).execute("auto_equip_best")
+                self.assertFalse(result.success)
+                self.assertEqual((result.error_code, result.data["action_state"]), ("equip_unverified", "unknown"))
+                self.assertTrue(result.data["executed"])
+                self.assertEqual((result.data["item"], result.data["slot"]), (item, target))
+                self.assertEqual(world.equip_calls, expected[:index + 1])
+                self.assertEqual(result.data["equipped_changes"], [
+                    {"item": name, "slot": slot} for name, slot in expected[:index]])
+
+    def test_single_equip_acknowledged_but_slot_unchanged_or_read_failed(self):
+        for unreadable in (False, True):
+            with self.subTest(unreadable=unreadable):
+                world = SimEquipWorld()
+
+                def failed_read(**options):
+                    raise APIError("temporarily_unavailable", "Inventory read unavailable")
+
+                def ack(*, item, slot, **options):
+                    world.equip_calls.append((item, slot))
+                    if unreadable:
+                        world.inventory = failed_read
+                    return {"ok": True, "result": {}}
+
+                world.equip = ack
+                result = EquipmentSkill(world).execute("equip", item="iron_chestplate", slot="chest")
+                self.assertFalse(result.success)
+                self.assertEqual(result.error_code, "temporarily_unavailable" if unreadable else "equip_unverified")
+                self.assertEqual((result.data["executed"], result.data["action_state"]), (True, "unknown"))
+                self.assertEqual((result.data["item"], result.data["slot"]), ("iron_chestplate", "torso"))
+                self.assertEqual(world.equip_calls, [("iron_chestplate", "torso")])
+
     def test_rejects_mismatched_armor_slot_and_preserves_unknown_on_disconnect(self):
         world = SimEquipWorld()
         skill = EquipmentSkill(world)

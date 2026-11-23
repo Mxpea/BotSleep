@@ -37,6 +37,22 @@ HAZARDS: Set[str] = {
     "lava", "water", "fire", "soul_fire", "magma_block",
     "cactus", "campfire", "soul_campfire", "powder_snow",
 }
+SCOUT_MIN_DISTANCE = 16
+SCOUT_MAX_DISTANCE = 256
+SCOUT_DEFAULT_DISTANCE = 165
+
+FOOD_HEADROOM_BLOCKS = frozenset({"dirt", "coarse_dirt", "rooted_dirt"})
+
+
+def food_headroom_ready(status: Mapping[str, Any]) -> bool:
+    """The state window for clearing one adjacent head block during food recovery."""
+    health, food, game_time = (status.get(key) for key in ("health", "food", "time_of_day"))
+    return (type(health) in (int, float) and 0 < health <= 4
+            and type(food) in (int, float) and 12 <= food < 18
+            and type(game_time) in (int, float) and 0 <= game_time < 11000
+            and status.get("is_day") is True and status.get("thundering") is False)
+
+
 AIR: Set[str] = {"air", "cave_air", "void_air"}
 STONE_TIERS: Tuple[str, ...] = ("stone", "iron", "diamond", "netherite")
 TOOL_KINDS: Tuple[str, ...] = ("pickaxe", "axe", "sword")

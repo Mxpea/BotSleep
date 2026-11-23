@@ -4,11 +4,14 @@ import copy
 import math
 import time
 
-from core.block_geometry import trace_block_visibility
+from core.block_geometry import PASS_THROUGH, trace_block_visibility
 from core.client import APIError
+from core.night_home_route import inspect_exterior
 from core.structure_spec import normalize_orientation, transform_rel_pos
+from core.shelter_project import active_project
 from core.survival_state import ObservationCollector
 from skills.survival import SurvivalSkills
+from skills.positioning import PositioningSkills
 from skills.combat import combat_options
 
 
@@ -16,10 +19,12 @@ class DailyObservationCollector(ObservationCollector):
     FURNACES = {"furnace", "smoker", "blast_furnace"}
     CONTAINERS = {"chest", "barrel"}
     SEED_PLANTS = {"short_grass", "tall_grass"}
-    def __init__(self, client, radius=24, *, low_health_threshold=8):
-        super().__init__(client, radius, include_terrain=True, combat_mode="daily")
+    def __init__(self, client, radius=24, *, low_health_threshold=8, mainline=False, campaign=False):
+        super().__init__(client, radius, include_terrain=True, terrain_summary=not campaign, combat_mode="daily")
         self.context = {}
         self.low_health_threshold = low_health_threshold
+        self.mainline = mainline
+        self.campaign = campaign
 
     def set_context(self, context):
         self.context = copy.deepcopy(context) if isinstance(context, dict) else {}
@@ -37,10 +42,11 @@ class DailyObservationCollector(ObservationCollector):
             raise APIError("invalid_response", "Daily block coordinates must be integers")
         return [int(v) for v in pos]
 
-    def _read(self, pos, cancel_event):
+    def _read(self, pos, cancel_event, *, read_block=None):
         pos = self._block_pos(pos)
         self._check_cancel(cancel_event)
-        value = self._result(self.client.get_block(pos, timeout_seconds=2))
+        read_block = read_block or self.client.get_block
+        value = self._result(read_block(pos, timeout_seconds=2))
         self._check_cancel(cancel_event)
         if (not isinstance(value.get("name"), str) or not value["name"]
                 or value.get("properties") is not None and not isinstance(value["properties"], dict)
@@ -180,7 +186,7 @@ class DailyObservationCollector(ObservationCollector):
                 current["visibility"] = sight
             self._replace_block(observation, pos, current)
 
-    def _local_foliage(self, observation, cancel_event):
+    def _local_foliage(self, observation, cancel_event, *, read_block=None):
         """Observe neighbouring body cells; this does not authorize removing them."""
         from skills.daily_survival import DailySurvivalSkills
         names = DailySurvivalSkills.FOLIAGE
@@ -190,7 +196,7 @@ class DailyObservationCollector(ObservationCollector):
 
         def read(pos):
             try:
-                return self._read(pos, cancel_event)
+                return self._read(pos, cancel_event, read_block=read_block)
             except APIError as error:
                 if error.code != "not_loaded":
                     raise
@@ -266,8 +272,106 @@ class DailyObservationCollector(ObservationCollector):
                 cell = [x + dx, y + dy, z + dz]
                 self._replace_block(observation, cell, self._read(cell, cancel_event))
 
+    def _resource_visibility(self, observation, cancel_event, *, read_block=None):
+        status = observation["status"]
+        task = self.context.get("task_execution") or {}
+        active = task.get("status") in {"running", "suspended", "needs_ai"}
+        wooden_pickaxe_goal = task.get("task") == "craft" and (task.get("args") or {}).get("item") == "wooden_pickaxe"
+        wood_first = (self.mainline and not self.campaign and (not active or wooden_pickaxe_goal)
+                      and not self.context.get("blocked_targets")
+                      and status.get("dimension") in {"overworld", "minecraft:overworld"}
+                      and status.get("on_ground") is True
+                      and not any(count and name.endswith("_pickaxe") for name, count in observation["counts"].items()))
+        reachable_logs = super()._resource_visibility(observation, cancel_event, read_block=read_block, wood_first=wood_first)
+        health, food = status.get("health"), status.get("food")
+        if (reachable_logs and wooden_pickaxe_goal and task.get("status") == "running"
+                and type(health) in (int, float) and health > self.low_health_threshold
+                and type(food) in (int, float) and food >= 18
+                and status.get("is_day") is True and status.get("thundering") is False):
+            observation["defer_seed_survey"] = True
+
+    def _ground_log(self, obs, cancel_event):
+        """Inspect a rooted trunk and a short level approach ending in actual hand reach."""
+        if not self.mainline:
+            return
+        status, origin = obs["status"], obs["status"]["pos"]
+        x, y, z = self._cell(origin)
+        if (obs.get("local_geometry_origin") != origin or abs(origin[1] - y) > .05
+                or status.get("is_day") is not True or status.get("thundering") is not False
+                or status.get("time_of_day", 24000) >= 11000 or status.get("on_ground") is not True
+                or status.get("health", 0) <= self.low_health_threshold or status.get("food", 0) <= 6):
+            return
+        rows = self._rows(obs, SurvivalSkills.LOGS)
+        roots = [row for row in rows if row["pos"][1] == y and math.dist(origin, row["pos"]) <= 8][:3]
+        if not roots:
+            return
+        cache = {}
+        deadline = time.monotonic() + 2
+
+        def read(point):
+            key = tuple(point)
+            if key not in cache:
+                if len(cache) >= 80 or time.monotonic() >= deadline:
+                    raise APIError("survey_budget", "Ground log survey reached its read budget")
+                cache[key] = self._read(list(key), cancel_event)
+            return cache[key]
+
+        def clear(col):
+            cx, cz = col
+            support = read((cx, y - 1, cz))
+            if support["name"] not in PositioningSkills.EDGE_GROUND or not SurvivalSkills._safe_block(support):
+                return False
+            for level in (y, y + 1):
+                body = read((cx, level, cz))
+                if body["name"] not in PASS_THROUGH or not SurvivalSkills._safe_block(body):
+                    return False
+            return True
+
+        try:
+            if not all(clear(col) for col in PositioningSkills._columns(origin, origin)):
+                return
+            for row in roots:
+                target = row["pos"]
+                tx, _, tz = target
+                base, log = read((tx, y - 1, tz)), read(target)
+                if (base["name"] not in PositioningSkills.EDGE_GROUND or not SurvivalSkills._safe_block(base)
+                        or log["name"] != row["name"] or log.get("diggable") is not True):
+                    continue
+                # Only level ground within six cardinal steps, first trying the
+                # nearest reachable stance. No proposed waypoint is replayed.
+                stances = sorted((abs(cx-x) + abs(cz-z), cx, cz)
+                    for cx in range(tx-4, tx+4) for cz in range(tz-4, tz+4)
+                    if (cx, cz) != (tx, tz) and abs(cx-x) + abs(cz-z) <= 6
+                    and math.dist([cx+.5, y, cz+.5], target) <= 4)
+                for steps, cx, cz in stances:
+                    stance = [cx+.5, y, cz+.5] if steps else origin
+                    if (math.dist(stance, target) > 4 or not clear((cx, cz))
+                            or not steps and log.get("can_dig", log.get("harvest_tool_ok")) is not True):
+                        continue
+                    for axes in ((0, 1), (1, 0)):
+                        p, path = [x, z], []
+                        for axis in axes:
+                            goal = (cx, cz)[axis]
+                            while p[axis] != goal:
+                                p[axis] += 1 if goal > p[axis] else -1
+                                path.append(tuple(p))
+                        first = [path[0][0]+.5, y, path[0][1]+.5] if path else origin
+                        if (not all(clear(col) for col in PositioningSkills._columns(origin, first))
+                                or not all(clear(col) for col in path)):
+                            continue
+                        sight = trace_block_visibility(stance, target, read, max_queries=20, max_distance=6)
+                        if sight["visible"] is not True:
+                            break  # The other axis order ends at the same viewing angle.
+                        obs["ground_log_approach"] = {"origin": list(origin), "target": target,
+                            "name": row["name"], "stance": list(stance), "next": first if path else None,
+                            "ground": base["name"], "steps": steps, "visibility": sight, "verified": True}
+                        return
+        except APIError as error:
+            if error.code not in {"not_loaded", "survey_budget", "request_timeout"}:
+                raise
+
     def _home(self, observation, cancel_event):
-        project = self.context.get("base_project")
+        project = active_project(self.context.get("shelter_project")) or self.context.get("base_project")
         status = observation["status"]
         if not isinstance(project, dict) or project.get("dimension") != status["dimension"]:
             return
@@ -319,6 +423,10 @@ class DailyObservationCollector(ObservationCollector):
             route = self._return_route(status, pos, cancel_event, orientation=norm_orient) if not data["inside"] or door["open"] else None
             if route:
                 observation["daily_evidence"]["shelter"]["return_route"] = route
+            if not data["inside"]:
+                outside = inspect_exterior(self, observation, data, cancel_event)
+                if outside:
+                    observation["daily_evidence"]["shelter"]["exterior_route"] = outside
 
     def _return_route(self, status, center, cancel_event, *, orientation="north"):
         origin, center = self._position(status), self._block_pos(center)
@@ -389,8 +497,9 @@ class DailyObservationCollector(ObservationCollector):
             result["blocked_door"] = blocked_door
         return result
 
-    def collect(self, cancel_event=None):
-        observation = super().collect(cancel_event)
+    def collect(self, cancel_event=None, *, inspect_windows=True):
+        read_geometry = self._geometry_reader(cancel_event)
+        observation = super().collect(cancel_event, _read_geometry_block=read_geometry)
         status = observation["status"]
         observation["daily_evidence"] = {}
         if status.get("ready") is not True or status.get("alive") is not True or status.get("busy"):
@@ -398,8 +507,13 @@ class DailyObservationCollector(ObservationCollector):
         if "busy" not in status or status["busy"] is not None and status["busy"] is not False:
             raise APIError("observation_changed", "Backend idle state is unknown")
         self._collect_footing(observation, cancel_event)
-        for types in (("iron_ore", "deepslate_iron_ore", "chest", "barrel", "smoker", "blast_furnace"),
-                      ("wheat", "carrots", "potatoes", "beetroots", "farmland", "grass_block", "dirt")):
+        resources = [("iron_ore", "deepslate_iron_ore", "diamond_ore", "deepslate_diamond_ore",
+                      "dead_bush", "chest", "barrel", "smoker", "blast_furnace", "gravel", "nether_portal")]
+        if self.campaign:
+            resources.append(("sand",))
+        if not self.campaign:
+            resources.append(("wheat", "carrots", "potatoes", "beetroots", "farmland", "grass_block", "dirt"))
+        for types in resources:
             self._check_cancel(cancel_event)
             rows = self.client.get_blocks(radius=self.radius, types=list(types), limit=48)
             self._check_cancel(cancel_event)
@@ -408,18 +522,15 @@ class DailyObservationCollector(ObservationCollector):
             for row in rows:
                 self._block_pos(row.get("pos"))
             observation["blocks"].extend(rows)
-        self._check_cancel(cancel_event)
-        inventory = self._result(self.client.inventory())
-        self._check_cancel(cancel_event)
-        if "armor" in inventory:
-            if not isinstance(inventory["armor"], dict):
-                raise APIError("invalid_response", "Armor evidence is malformed")
-            observation["armor"] = copy.deepcopy(inventory["armor"])
-        self._windows(observation, cancel_event)
-        self._farm(observation, cancel_event)
-        self._seed_plants(observation, cancel_event)
+        if inspect_windows:
+            self._windows(observation, cancel_event)
+        if not self.campaign:
+            self._farm(observation, cancel_event)
+            if not observation.pop("defer_seed_survey", False):
+                self._seed_plants(observation, cancel_event)
         self._food_neighborhoods(observation, cancel_event)
-        self._local_foliage(observation, cancel_event)
+        self._local_foliage(observation, cancel_event, read_block=read_geometry)
+        self._ground_log(observation, cancel_event)
         self._home(observation, cancel_event)
         observation["status"] = self._status(status, cancel_event)
         observation["combat"] = combat_options(observation)

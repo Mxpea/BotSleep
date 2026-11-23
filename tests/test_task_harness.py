@@ -11,11 +11,13 @@ import unittest
 from unittest.mock import Mock, patch
 
 from agent.llm_planner import LLMSurvivalPlanner
+from agent.survival_planner import Decision
 from core.client import APIError
 from core.config import DEFAULTS
 from core.block_geometry import trace_block_visibility
 from core.survival_harness import SurvivalHarness
 from skills import SkillResult
+from skills.action_workflow import WorkflowGuard
 from test_daily_runtime import RuntimeDailyWorld
 from test_daily_skills import envelope
 from test_llm_planner import Brain, response
@@ -224,6 +226,7 @@ class TaskHarnessTests(unittest.TestCase):
         self.assertTrue(result["success"])
         self.assertEqual(result["data"]["task_execution"]["progress"], {"current":6,"target":6,"unit":"logs"})
         self.assertEqual(harness.snapshot()["task_execution"]["steps"], 4)
+        self.assertEqual(sum(row["event"] == "TASK_INVENTORY_READBACK" for row in self.events(harness)), 4)
         self.assertIsNone(harness.journal.state["pending"])
 
     def test_opt_in_local_opening_uses_existing_controller_without_model_feedback(self):
@@ -377,7 +380,7 @@ class TaskHarnessTests(unittest.TestCase):
             with self.subTest(change=change):
                 partial=copy.deepcopy(complete)
                 partial.update(change,fresh=True,observation_scope="full")
-                with patch.object(harness,"_observe",return_value=partial):
+                with patch("core.continuous_recovery.ObservationCollector.collect", return_value=partial):
                     self.assertTrue(harness.resume())
                     self.assertFalse(self.cycle(harness).success)
                 self.assertTrue(harness.paused)
@@ -400,6 +403,31 @@ class TaskHarnessTests(unittest.TestCase):
         self.assertTrue(all(count>=0 for count in self.world.counts.values()))
         self.assertEqual(len(brain.requests),1)
         self.assertEqual(len(self.feedback(harness.planner)),1)
+
+    def test_hand_recipe_uses_one_bounded_batch_and_one_model_goal(self):
+        self.world.counts["oak_log"] = 3
+        harness, brain = self.harness(response("run_survival_task", {"task": "craft", "item": "oak_planks", "count": 12}))
+        self.cycle(harness)
+        self.until(harness, lambda: harness.snapshot()["task_execution"]["status"] == "completed")
+        self.assertEqual([call for call in self.world.calls if call[0] == "craft"], [("craft", "oak_planks", 12)])
+        self.assertEqual(self.world.counts["oak_log"], 0)
+        self.assertEqual(self.world.counts["oak_planks"], 12)
+        self.assertEqual(len(brain.requests), 1)
+        self.assertEqual(len(self.feedback(harness.planner)), 1)
+
+    def test_gather_uses_verified_storage_before_mining_more_wood(self):
+        self.logs(mixed=False)
+        self.world.block([-2, 64, 0], "chest")
+        self.world.sections["container"] = [{"name": "oak_log", "count": 8}]
+        harness, brain = self.harness(response("run_survival_task", {"task": "gather", "resource": "logs", "count": 3}))
+        self.cycle(harness)
+        self.until(harness, lambda: harness.snapshot()["task_execution"]["status"] == "completed")
+        self.assertEqual(self.world.counts["oak_log"], 3)
+        self.assertEqual(self.world.sections["container"][0]["count"], 5)
+        self.assertFalse(any(call[0] == "dig" for call in self.world.calls))
+        self.assertEqual(len(brain.requests), 1)
+        self.assertEqual(len(self.feedback(harness.planner)), 1)
+
 
     def test_bone_meal_goal_finishes_with_one_model_request_and_no_travel(self):
         self.world.counts["bone"] = 1
@@ -467,7 +495,7 @@ class TaskHarnessTests(unittest.TestCase):
         self.assertEqual(self.world.counts["birch_planks"], 9)
         self.assertEqual(self.world.counts["stripped_birch_log"], 0)
         self.assertEqual([call for call in self.world.calls if call[0] == "craft"],
-                         [("craft", "birch_planks", 4), ("craft", "birch_planks", 1)])
+                         [("craft", "birch_planks", 5)])
         self.assertFalse(any(call[0] in {"dig", "move"} for call in self.world.calls))
         self.assertEqual(len(brain.requests), 1)
         self.assertEqual(len(self.feedback(harness.planner)),1)
@@ -505,6 +533,36 @@ class TaskHarnessTests(unittest.TestCase):
         self.assertEqual(len([call for call in self.world.calls if call[0] == "dig"]), 11)
         self.assertEqual(len(brain.requests), 1)
         self.assertEqual([row["tool_call_id"] for row in self.feedback(harness.planner)], ["starter_set"])
+
+    def test_advisory_food_exhaustion_reaches_model_and_completes_a_batch(self):
+        self.settings.update(risk_policy="advisory", continuous=True)
+        self.settings["autonomy"].update(max_steps=1, max_seconds=1)
+        self.world.status.update(health=4, food=17)
+        self.logs(2)
+        harness, brain = self.harness(response("run_survival_task",
+            {"task": "gather", "resource": "logs", "count": 2}, "recover_wood"))
+        harness._recovery_state("food_recovery", {"status": self.world.status}).update(steps=8, needs_ai=True)
+        self.assertTrue(self.cycle(harness).data.get("accepted"))
+        harness.task_controller._data["started_at"] -= 2
+        self.until(harness, lambda: harness.snapshot()["task_execution"]["status"] == "completed")
+        self.assertEqual(sum(n for name, n in self.world.counts.items() if name.endswith("_log")), 2)
+        self.assertEqual(len(brain.requests), 1)
+        context = json.loads(brain.requests[0]["messages"][-1]["content"])["context"]
+        self.assertIn("low_health", context["survival_constraints"]["risks"])
+        self.assertIn("remaining_seconds", context["budget_advice"])
+
+    def test_rejected_food_clear_does_not_spend_an_attempt(self):
+        self.world.status.update(health=4, food=11)
+        harness, _ = self.harness()
+        obs = harness.collector.collect()
+        state = harness._recovery_state("food_recovery", obs)
+        state["steps"] = 7
+        decision = Decision("clear_food_headroom", {"pos": [1, 65, 0], "expected_name": "dirt"},
+                            "Try locally verified headroom", "food_recovery")
+        result = SkillResult(False, "Fresh stance changed", {"executed": False}, "safety_changed")
+        harness._local_recovery_result(decision, result, obs)
+        self.assertEqual(state["steps"], 7)
+        self.assertIsNot(state.get("needs_ai"), True)
 
     def test_low_health_bootstrap_crafts_from_near_trunk_without_implicit_pickup_path(self):
         self.world = ForestWorld()
@@ -748,6 +806,10 @@ class TaskHarnessTests(unittest.TestCase):
         seen_targets = []
 
         def fake_mine(miner_self, *, targets=None, **kwargs):
+            self.assertEqual(Path(miner_self.memory.data_dir).parent, harness.journal.directory)
+            self.assertGreater(kwargs["total_timeout_seconds"], 0)
+            self.assertLessEqual(kwargs["total_timeout_seconds"], 75)
+            self.assertFalse(kwargs["cancel_event"].is_set())
             seen_targets.append(copy.deepcopy(targets))
             self.world.counts["diamond"] = self.world.counts.get("diamond", 0) + 2
             return SkillResult(True, "Mined 2 diamond", {
@@ -755,6 +817,8 @@ class TaskHarnessTests(unittest.TestCase):
 
         harness, brain = self.harness(response("run_survival_task", {
             "task": "gather", "resource": "diamond", "count": 2}, "diamond_goal"))
+        harness.continuous = True
+        harness.task_controller.limits["max_seconds"] = 75
         with patch("skills.mining.MineShaftSkill.mine_targets_from_surface", new=fake_mine):
             self.cycle(harness)
             self.until(harness, lambda: harness.snapshot()["task_execution"]["status"] == "completed")
@@ -794,7 +858,11 @@ class TaskHarnessTests(unittest.TestCase):
     def test_discard_mining_clutter_drops_excess_junk_when_crowded(self):
         harness, _ = self.harness(response("wait", {"seconds": 1}))
         dropped = []
-        harness.client.drop = lambda item, count=None: dropped.append((item, count))
+        def discard(item, count):
+            dropped.append((item, count))
+            harness.client.counts[item] -= count
+            return envelope({"inventory": harness.client.counts.copy()})
+        harness.client.drop = discard
         harness.client.counts = {"cobblestone": 640, "granite": 324}
         harness.client.inventory = lambda timeout_seconds=None: {
             "ok": True,
@@ -803,12 +871,39 @@ class TaskHarnessTests(unittest.TestCase):
                 + [{"name": "granite", "count": 18, "slot": 10 + i} for i in range(18)]
             },
         }
-        harness._discard_mining_clutter(status_pos=[0.5, 64.0, 0.5])
+        harness._discard_mining_clutter(WorkflowGuard(harness.client))
         self.assertIn(("granite", 324), dropped)
         self.assertIn(("cobblestone", 576), dropped)
 
+    def test_unconfirmed_clutter_drop_stops_before_diamond_mine_or_second_drop(self):
+        self.world.counts.update(iron_pickaxe=2, granite=24, diorite=2)
+        harness, _ = self.harness(response("run_survival_task", {
+            "task": "gather", "resource": "diamond", "count": 1}))
+        self.cycle(harness)
+        original = self.world.inventory
+
+        def crowded(**kwargs):
+            result = original(**kwargs)
+            rows = result["result"]["items"]
+            rows[:] = [row for row in rows if row["name"] != "granite"]
+            rows.extend({"name": "granite", "count": 1, "slot": slot} for slot in range(12, 36))
+            return result
+
+        self.world.inventory = crowded
+        self.world.drop = Mock(side_effect=APIError("network_error", "reply lost", details={"action_state": "unknown"}))
+        with patch("skills.mining.MineShaftSkill.mine_targets_from_surface") as mine:
+            self.until(harness, lambda: harness.snapshot()["task_execution"]["status"] == "unknown")
+        self.world.drop.assert_called_once_with("granite", 24)
+        mine.assert_not_called()
+        self.assertIsNotNone(harness.journal.state["pending"])
+
     def test_scout_task_routes_to_surface_scout_and_reports_findings_to_llm(self):
         def fake_scout(scout_self, **kwargs):
+            self.assertEqual(Path(scout_self.memory.data_dir).parent, harness.journal.directory)
+            self.assertGreater(kwargs["timeout_seconds"], 0)
+            self.assertLessEqual(kwargs["timeout_seconds"], 20)
+            self.assertEqual(kwargs["distance"], 96)
+            self.assertEqual(kwargs["max_hops"], 2)
             return SkillResult(True, "Scout found village", {
                 "executed": True,
                 "estimated_reach": 112.0,
@@ -817,7 +912,8 @@ class TaskHarnessTests(unittest.TestCase):
                 "found_structures": [{"name": "chest", "pos": [60, 64, 0]}],
             })
 
-        harness, brain = self.harness(response("run_survival_task", {"task": "scout"}, "scout_goal"))
+        harness, brain = self.harness(response("run_survival_task", {"task": "scout", "distance": 96}, "scout_goal"))
+        harness.settings["max_runtime_seconds"] = 20
         with patch("skills.scouting.SurfaceScoutSkill.execute", new=fake_scout):
             self.cycle(harness)
             self.until(harness, lambda: harness.snapshot()["task_execution"]["status"] == "completed")
@@ -827,6 +923,22 @@ class TaskHarnessTests(unittest.TestCase):
         self.assertTrue(payload["result"]["success"])
         self.assertEqual(payload["result"]["data"]["scout_report"]["found_structures"][0]["name"], "chest")
         self.assertEqual(len(brain.requests), 1)
+        self.assertIn("last_scout_report", harness.context)
+        harness._update_lifecycle({**self.world.status, "alive": False})
+        self.assertNotIn("last_scout_report", harness.context)
+
+    def test_expired_advice_still_allows_one_scout_hop(self):
+        self.settings.update(continuous=True, risk_policy="advisory")
+        harness, brain = self.harness(response("run_survival_task", {"task": "scout", "distance": 96}))
+        harness._planning_started_at -= self.settings["max_runtime_seconds"] + 10
+        with patch("skills.scouting.SurfaceScoutSkill.execute", return_value=SkillResult(
+                True, "Scout finished one planned hop", {"waypoint_distance": 64})) as scout:
+            self.cycle(harness)
+            self.until(harness, lambda: harness.snapshot()["task_execution"]["status"] == "completed")
+        self.assertEqual(len(brain.requests), 1)
+        self.assertEqual(scout.call_args.kwargs["max_hops"], 1)
+        self.assertEqual(scout.call_args.kwargs["distance"], 96)
+        self.assertGreater(scout.call_args.kwargs["timeout_seconds"], 12)
 
     def test_nether_portal_task_routes_to_speedrun_skill_with_lava_search_and_completes(self):
         self.world.counts = {"water_bucket": 1, "flint_and_steel": 1, "cobblestone": 16, "iron_pickaxe": 1}
@@ -851,6 +963,29 @@ class TaskHarnessTests(unittest.TestCase):
         self.assertEqual(harness.snapshot()["task_execution"]["progress"]["current"], 1)
         self.assertEqual(len(brain.requests), 1)
 
+    def test_nether_portal_collects_water_before_delegating_construction(self):
+        self.world.counts = {"bucket": 1, "flint_and_steel": 1, "cobblestone": 16, "iron_pickaxe": 1}
+        self.world.block([2, 64, 0], "water")
+        harness, brain = self.harness(response("run_survival_task", {"task": "nether_portal"}, "portal"))
+
+        def fill(_skill, name, args, **_options):
+            self.assertEqual((name, args), ("collect_liquid", {"pos": [2, 64, 0], "expected_name": "water"}))
+            self.world.counts.pop("bucket")
+            self.world.counts["water_bucket"] = 1
+            return SkillResult(True, "Filled bucket", {"executed": True})
+
+        def build(_skill, **_options):
+            self.assertEqual(self.world.counts["water_bucket"], 1)
+            return SkillResult(True, "Portal ignited", {"executed": True, "portal_active": True})
+
+        with patch("skills.buckets.BucketSkills.execute", autospec=True, side_effect=fill) as collect, \
+             patch("skills.portal_speedrun.NetherPortalSpeedrunSkill.build_portal", autospec=True, side_effect=build) as portal:
+            self.assertTrue(self.cycle(harness).data["accepted"])
+            self.until(harness, lambda: harness.snapshot()["task_execution"]["status"] == "completed")
+        collect.assert_called_once()
+        portal.assert_called_once()
+        self.assertEqual(len(brain.requests), 1)
+
     def test_cobblestone_deep_mine_passes_origin_none_to_auto_select_clean_site(self):
         self.world.counts = {"wooden_pickaxe": 1}
         calls = []
@@ -858,13 +993,18 @@ class TaskHarnessTests(unittest.TestCase):
         def fake_build(mine_self, **kwargs):
             calls.append(kwargs)
             self.world.counts["cobblestone"] = 12
-            return SkillResult(True, "Mined cobblestone", {"executed": True, "surface_entry": [4, 64, 0]})
+            self.world.status["pos"] = [4.5, 64, .5]
+            return SkillResult(True, "Mined cobblestone", {"executed": True, "surface_entry": [4.5, 64, .5]})
 
         harness, brain = self.harness(response("run_survival_task", {"task": "gather", "resource": "cobblestone", "count": 8}, "cobble"))
-        with patch("skills.mining.MineShaftSkill.build_mine_shaft", new=fake_build), \
-             patch("skills.mining.MineShaftSkill._ensure_returned_to_surface", return_value={"on_surface": True, "pos": [4, 64, 0], "escaped": False}):
+        with patch("skills.starter_staircase.StarterStaircaseSkills.execute", return_value=SkillResult(
+                False, "No verified local stair", {"executed": False}, "no_staircase_site")), \
+             patch.object(harness.task_controller, "_explore", return_value=None), \
+             patch("skills.mining.MineShaftSkill.build_mine_shaft", new=fake_build), \
+             patch("skills.mining.MineShaftSkill._ensure_returned_to_surface") as extra_return:
             self.cycle(harness)
             self.until(harness, lambda: harness.snapshot()["task_execution"]["status"] == "completed")
+            extra_return.assert_not_called()
         self.assertEqual(len(calls), 1)
         self.assertIsNone(calls[0]["origin"])
         self.assertEqual(calls[0]["radius"], 24)

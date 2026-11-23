@@ -7,7 +7,7 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from agent.survival_planner import Decision
 from core.client import APIError
@@ -69,6 +69,55 @@ class HarnessTests(unittest.TestCase):
         events = [json.loads(line)["event"] for line in harness.journal.events_path.read_text().splitlines()]
         self.assertIn("DECISION", events)
         self.assertIn("STEP_RESULT", events)
+
+    def test_daily_loading_before_write_reobserves_without_counting_target_failure(self):
+        self.settings.update(objective="daily", max_consecutive_failures=1)
+        harness = self.harness()
+        loading = SkillResult(False, "Backend is loading", {"executed": False}, "not_ready")
+        decision = Decision("retreat_from", {"pos": [2, 64, 0], "distance": 8}, "Retreat", "safety")
+        initial = observation()
+        harness._checkpoint(pending={"decision": {"name": decision.name, "args": decision.args}})
+        with patch.object(harness, "_cycle", return_value=(decision, loading, initial)):
+            self.assertTrue(harness.request_step())
+            self.assertEqual(self.finish(harness).error_code, "not_ready")
+        self.assertFalse(harness.paused)
+        self.assertEqual(harness.failures, 0)
+        self.assertNotIn("retreat_from", harness.context.get("failures", {}))
+        self.assertIsNone(harness.journal.state["pending"])
+        self.client.stop.assert_not_called()
+
+    def test_daily_loading_recovery_still_pauses_at_death_limit(self):
+        self.settings.update(objective="daily", max_deaths=1)
+        harness = self.harness()
+        loading = SkillResult(False, "Backend is loading", error_code="not_ready")
+        read = Decision("observe", {}, "Refresh status", "observe")
+        with patch.object(harness, "_cycle", return_value=(read, loading, None)):
+            self.assertTrue(harness.request_step())
+            harness.context["death_count"] = 1
+            self.assertEqual(self.finish(harness).error_code, "not_ready")
+        self.assertTrue(harness.paused)
+        self.assertEqual(harness.pause_reason, "death_limit")
+        self.client.stop.assert_not_called()
+
+    def test_disconnected_fatal_result_updates_monitor_without_heartbeat(self):
+        from debug.monitor import EventMonitor
+        monitor = EventMonitor()
+        monitor.publish({"timestamp": "2026-11-17T06:33:45Z", "event": "AGENT_PHASE",
+                         "data": {"phase": "observing"}})
+        self.collector.collect.side_effect = APIError("death_loop_cooldown", "Cooldown active")
+        harness = self.harness()
+        harness.request_step()
+        self.assertEqual(self.finish(harness).error_code, "death_loop_cooldown")
+        records = [json.loads(line) for line in harness.journal.events_path.read_text().splitlines()]
+        result = next(row for row in reversed(records) if row["event"] == "STEP_RESULT")
+        monitor.publish(result)
+        monitor.publish({"timestamp": "2026-11-17T06:33:50Z", "event": "HEARTBEAT_FAILED",
+                         "data": {"code": "not_connected"}})
+        state = monitor.state()
+        self.assertEqual(state["run"]["phase"], "paused")
+        self.assertEqual(state["run"]["pause_reason"], "death_loop_cooldown")
+        self.assertFalse(state["status_fresh"])
+        self.assertEqual(state["status_connection"], "unavailable")
 
     def test_pause_serializes_and_requires_resume(self):
         entered = threading.Event()
@@ -237,6 +286,29 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(paired[0]["tool_call_id"], "dig_once")
         self.assertEqual(self.skills.execute.call_count, 1)
         self.assertIsNone(harness.journal.state["pending"])
+
+    def test_unknown_placement_preserves_pending_without_skill_or_harness_stop(self):
+        from skills.survival import SurvivalSkills
+        from test_survival_skills import World
+
+        world = World()
+        world.base_url, world.username = "http://local/api/v1", "HarnessBot"
+        world.counts["crafting_table"] = 1
+        def lost_response(item, pos):
+            raise APIError("network_error", "Placement acknowledgement unavailable")
+        world.place_effect = lost_response
+        self.client, self.skills = world, SurvivalSkills(world)
+        self.planner.choose.return_value = Decision("place_item", {
+            "pos": [2, 64, 0], "item": "crafting_table"}, "Deploy held workstation", "crafting_table")
+        harness = self.harness()
+        harness.request_step()
+        result = self.finish(harness)
+        self.assertEqual(result.data.get("cleanup_skipped"), "placement_unknown")
+        self.assertTrue(harness.paused)
+        self.assertIsNotNone(harness.journal.state["pending"])
+        for _ in range(3):
+            harness.tick()
+        self.assertEqual([row[0] for row in world.writes()], ["place"])
 
     def test_reconciled_dig_evidence_clears_pending_without_pause(self):
         self.skills.execute.return_value = SkillResult(True, "Verified after delayed acknowledgement", {
@@ -598,6 +670,20 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(harness.journal.state["pending"], pending)
         self.skills.execute.assert_not_called()
 
+    def test_idle_death_limit_snapshot_has_paused_phase_and_preserves_pending(self):
+        harness = self.harness()
+        harness.context["death_count"] = self.settings["max_deaths"]
+        harness.phase = "waiting"
+        pending = {"decision": {"name": "retreat_from"}, "action_state": "unknown"}
+        harness.journal.update(pending=pending)
+        harness._monitor_idle()
+        snapshot = harness.snapshot()
+        self.assertTrue(snapshot["paused"])
+        self.assertEqual(snapshot["pause_reason"], "death_limit")
+        self.assertEqual(snapshot["phase"], "paused")
+        self.assertEqual(snapshot["pending"], pending)
+        self.skills.execute.assert_not_called()
+
     def test_idle_dimension_change_clears_retreat_but_not_milestones_or_pause(self):
         current = self.retreat_fixture()
         harness = self.harness()
@@ -736,7 +822,7 @@ class ObservationTests(unittest.TestCase):
             self.assertNotIn((x + 0.5, 109, z + 0.5), stands)
             self.assertNotIn((x, 109, z), places)
 
-    def test_passable_litter_and_grass_are_standing_but_not_placement_cells(self):
+    def test_verified_replaceable_litter_and_grass_are_standing_and_placement_cells(self):
         client = self.client(blocks={
             (5, 109, -6): {"name": "short_grass"},
             (3, 109, -6): {"name": "leaf_litter"},
@@ -746,7 +832,7 @@ class ObservationTests(unittest.TestCase):
         places = {tuple(row["pos"]) for row in result["placement_candidates"]}
         for x in (3, 5):
             self.assertIn((x + 0.5, 109, -5.5), stands)
-            self.assertNotIn((x, 109, -6), places)
+            self.assertIn((x, 109, -6), places)
 
     def test_candidate_scan_checks_one_level_above_and_below_with_bounded_reads(self):
         client = self.client(ground_y=None, blocks={

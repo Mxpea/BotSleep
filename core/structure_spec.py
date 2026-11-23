@@ -53,6 +53,9 @@ SHELTER_PLANK_BLOCKS: FrozenSet[str] = frozenset({
     "bamboo_planks",
 })
 SHELTER_BUILDING_BLOCKS: FrozenSet[str] = frozenset(SHELTER_PLANK_BLOCKS | {"cobblestone", "stone", "dirt"})
+# Dirt walls can become grass naturally. Recognizing that full solid block
+# does not make grass_block an inventory material or authorize clearing a site.
+SHELTER_STRUCTURE_BLOCKS: FrozenSet[str] = SHELTER_BUILDING_BLOCKS | {"grass_block"}
 SHELTER_GROUND_BLOCKS: FrozenSet[str] = frozenset({
     "grass_block",
     "dirt",
@@ -1085,7 +1088,7 @@ def shelter_spec() -> StructureSpec:
             cells.append(
                 CellRule(
                     (dx, dy, dz),
-                    SHELTER_BUILDING_BLOCKS,
+                    SHELTER_STRUCTURE_BLOCKS,
                     stage_name,
                     priority=idx,
                     label=f"{stage_name}_{dx}_{dz}",
@@ -1108,7 +1111,7 @@ def shelter_spec() -> StructureSpec:
         cells.append(
             CellRule(
                 (dx, 2, dz),
-                SHELTER_BUILDING_BLOCKS,
+                SHELTER_STRUCTURE_BLOCKS,
                 "roof",
                 priority=idx,
                 label=f"roof_{dx}_{dz}",

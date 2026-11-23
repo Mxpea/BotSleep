@@ -1234,6 +1234,7 @@ class CaveExploreSkill(BaseSkill):
         critical_health: float = 6.0,
         max_steps: int = 36,
         timeout_seconds: float = 45.0,
+        cancel_event: Optional[threading.Event] = None,
         block_cache: Optional[Dict[Tuple[int, int, int], Dict[str, Any]]] = None,
     ) -> SkillResult:
         """Navigate to target_pos using direct move_to, falling back to 3D A* with compound terrain ops."""
@@ -1242,6 +1243,7 @@ class CaveExploreSkill(BaseSkill):
         if ctx is None:
             guard = WorkflowGuard(
                 self.client,
+                cancel_event=cancel_event,
                 timeout_seconds=timeout_seconds,
                 max_reads=4000,
                 allow_damage=allow_damage,

@@ -12,6 +12,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Union
 
+from core.client import APIError
 from core.domain import AIR, HAZARDS, parse_pos
 from core.structure_spec import (
     CAVE_DIGGABLE_BLOCKS,

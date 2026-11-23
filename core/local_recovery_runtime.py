@@ -54,6 +54,73 @@ def has_canopy_support(observation, context=None):
 
 
 class LocalRecoveryRuntime:
+    def _canopy_resume_blocked(self, state):
+        if self.journal.state.get("pending") or state.get("unknown") is True:
+            return True
+        if (self.context.get("task_execution") or {}).get("status") == "unknown":
+            return True
+        for result in (self.context.get("last_result"), self.journal.state.get("last_result")):
+            if isinstance(result, dict) and (result.get("data") or {}).get("action_state") == "unknown":
+                return True
+        return False
+
+    def _request_canopy_resume(self, *, automatic=False):
+        # Only the request is process-local. Actual movement still requires a
+        # new full observation and the ordinary checks of the escape skill.
+        self._canopy_resume_request = None
+        state = self.context.get("canopy_recovery")
+        if (not self.daily or not isinstance(state, dict) or state.get("exhausted") is not True
+                or type(state.get("steps")) is not int or state["steps"] < 64):
+            return True
+        if self._canopy_resume_blocked(state):
+            # Reopening this exhausted window must not let a following ordinary
+            # wait clear an unresolved intention through the generic resume path.
+            self._record("WARN", "CANOPY_RESUME_BLOCKED", {"reason": "pending_or_unknown", "steps": state["steps"]})
+            return False
+        self._canopy_resume_request = {"dimension": state.get("dimension"),
+            "life": copy.deepcopy(state.get("life")), "life_generation": state.get("life_generation", 0),
+            "steps": state["steps"], "requested_at": time.time(), "automatic": automatic}
+        return True
+
+    def _resume_canopy_window(self, observation, stable_full, footing, nearby):
+        request = getattr(self, "_canopy_resume_request", None)
+        if request is None:
+            return
+        state = self.context.get("canopy_recovery")
+        status = observation["status"]
+        if (not isinstance(state, dict) or state.get("exhausted") is not True
+                or state.get("steps") != request["steps"] or self._canopy_resume_blocked(state)
+                or state.get("dimension") != request["dimension"] or status.get("dimension") != request["dimension"]
+                or state.get("life") != request["life"] or status.get("last_death") != request["life"]
+                or state.get("life_generation", 0) != request["life_generation"]
+                or self.context.get("life_generation", 0) != request["life_generation"]):
+            self._canopy_resume_request = None
+            return
+        leaf = (footing or {}).get("name") in SurvivalSkills.RETREAT_LEAVES
+        supported = ((footing or {}).get("name") in SurvivalSkills.RETREAT_TRUNKS
+                     or leaf and (footing.get("properties") or {}).get("waterlogged") in (False, "false"))
+        budget = self._remaining_budget()
+        if (not stable_full or not supported or "busy" not in status or status["busy"] is not None
+                or status.get("gamemode") != "survival" or status.get("jumping") is True
+                or status.get("held_controls") or nearby or len(observation.get("entities") or []) >= 40
+                or self._safety_rules._dangerous_hostiles(observation, status["pos"])
+                or budget["remaining_steps"] == 0 or budget["remaining_seconds"] == 0):
+            return
+        self._canopy_resume_request = None
+        previous = {"steps": state["steps"], "reason": state.get("reason"),
+                    "resumed_at": time.time(), "resume_requested_at": request["requested_at"]}
+        state["total_steps"] = max(state.get("total_steps", state["steps"]), state["steps"])
+        state["completed_windows"] = state.get("completed_windows", 0) + 1
+        state["window_history"] = (state.get("window_history", []) + [previous])[-8:]
+        cell = [math.floor(value + .0001) for value in status["pos"]]
+        state["visited"] = ([old for old in state["visited"] if old != cell] + [cell])[-32:]
+        state.update(steps=0, exhausted=False, reason="continuous_fresh_canopy_window"
+                     if request["automatic"] else "explicit_resume_fresh_canopy_window")
+        state.pop("retry_after", None)
+        state.pop("search_origin", None)
+        self._record("INFO", "CANOPY_RECOVERY_WINDOW_REOPENED", {"previous_window": previous,
+            "pos": list(status["pos"]), "window_step_limit": 64, "recovery": copy.deepcopy(state)})
+
     def _recovery_state(self, key, observation):
         status = observation["status"]
         state = self.context.get(key)
@@ -102,6 +169,12 @@ class LocalRecoveryRuntime:
             and status.get("ready") is True and status.get("alive") is True and status.get("on_ground") is True
             and not status.get("busy") and not any(status.get(key) for key in
                 ("in_water", "in_lava", "on_fire", "submerged", "in_vehicle", "is_sleeping")))
+        if (self.continuous and self._automatic_cycle and not self.paused and stable_full and not nearby
+                and not getattr(self, "_canopy_resume_request", None) and isinstance(canopy, dict)
+                and canopy.get("exhausted") is True and time.time() >= canopy.get("retry_after", 0)
+                and not self._canopy_resume_blocked(canopy)):
+            self._request_canopy_resume(automatic=True)
+        self._resume_canopy_window(observation, stable_full, support_block, nearby)
         if (stable_full and retreat.get("evacuating") is True and support_block is not None
                 and len(observation.get("entities") or []) < 40 and not nearby
                 and not self._safety_rules._dangerous_hostiles(observation, status["pos"])):
@@ -162,14 +235,19 @@ class LocalRecoveryRuntime:
             origin = observation["status"]["pos"]
             previous = state.get("search_origin")
             unchanged = previous is not None and math.dist(origin, previous) < .2
-            if state["steps"] >= 128:
+            if state.get("exhausted") is True or state["steps"] >= 64:
                 if not state.get("exhausted"):
                     state.update(exhausted=True, reason="canopy_step_budget_exhausted")
+                    if self.continuous:
+                        state["retry_after"] = time.time() + 15
                     self._record("WARN", "CANOPY_RECOVERY_EXHAUSTED", {"recovery": copy.deepcopy(state)})
                     if self._task_active():
                         self.task_controller.stop("canopy_step_budget_exhausted")
                         self._save_task("TASK_NEEDS_AI")
                         self._finish_task_feedback(observation)
+                if self.continuous:
+                    return Decision("wait", {"seconds": 2},
+                        "Canopy recovery window exhausted; reobserve footing and threats before another window", "safety")
                 self._paused = True
                 self.pause_reason = "canopy_recovery_exhausted"
                 return Decision("wait", {"seconds": 2},
@@ -252,12 +330,15 @@ class LocalRecoveryRuntime:
             return result.error_code not in {"unauthorized", "invalid_credentials", "death_limit", "dead",
                 "internal", "internal_error", "cancelled", "life_changed", "dimension_changed"}
         canopy = decision.name == "canopy_escape"
-        forage = self.daily and decision.goal == "food_recovery" and decision.name == "position_for_task"
+        forage = self.daily and decision.goal == "food_recovery" and decision.name in {"position_for_task", "clear_food_headroom"}
         if not canopy and not forage:
             return False
         key = "canopy_recovery" if canopy else "food_recovery"
         state = self._recovery_state(key, observation)
-        state["steps"] += 1
+        if canopy:
+            state["total_steps"] = max(state.get("total_steps", state["steps"]), state["steps"]) + 1
+        if not forage or uncertain or result.data.get("executed") is not False:
+            state["steps"] += 1
         state["reason"] = result.error_code or result.message
         if uncertain:
             state["unknown"] = True

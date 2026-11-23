@@ -62,6 +62,19 @@ class CompetitionRuntimeTests(unittest.TestCase):
         self.addCleanup(runner.close)
         return runner, brain
 
+    def test_daily_mainline_checkpoint_is_not_a_competition_goal(self):
+        self.settings["autonomy"]["enabled"] = True
+        runner, _ = self.harness()
+        runner.task_controller.start({"task": "gather", "resource": "logs", "count": 2}, self.obs, runner.context)
+        runner._save_task()
+        runner.close()
+        runner.context.pop("autonomous_task_objective")
+        runner.context["mainline_task_id"] = runner.task_controller.snapshot()["task_id"]
+        runner._checkpoint(context=runner.context)
+        resumed, _ = self.harness()
+        self.assertEqual(resumed.task_controller.snapshot()["status"], "idle")
+        self.assertEqual(resumed.competition.snapshot()["phase"], "selection")
+
     def step(self, runner):
         runner._next_attempt = 0
         self.assertTrue(runner.request_step())

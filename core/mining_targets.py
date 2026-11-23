@@ -88,6 +88,7 @@ DEFAULT_HOME_THRESHOLDS: Dict[str, Any] = {
     "min_torches": 4,
     "min_blocks": 16,
     "min_pickaxe_durability_ratio": 0.10,
+    "min_pickaxe_tool": "wooden_pickaxe",
     "min_remaining_seconds": 30.0,
 }
 
@@ -408,6 +409,8 @@ def evaluate_home_trigger(
         reason = "low_food"
     elif usable_pick is None:
         reason = "no_pickaxe"
+    elif pickaxe_tier(usable_pick) < pickaxe_tier(th["min_pickaxe_tool"]):
+        reason = "target_pickaxe_exhausted"
     elif empty_slots <= int(th["min_empty_slots"]):
         reason = "inventory_full"
     elif torch_count < int(th["min_torches"]):

@@ -151,7 +151,7 @@ class LLMPlannerTests(unittest.TestCase):
     def test_latest_observation_limits_target_items_and_completion_claims(self):
         cases = [("gather_block", {"pos": [4, 64, 0], "expected_name": "oak_log"}),
                  ("eat_food", {"item": "bread"}), ("place_item", {"item": "crafting_table", "pos": [2, 64, 0]}),
-                 ("move_to", {"pos": [40, 64, 0]}), ("retreat_from", {"pos": [2, 64, 0]}),
+                 ("move_to", {"pos": [40, 64, 0]}),
                  ("goal_complete", {}), ("auto_sleep", {})]
         for name, args in cases:
             with self.subTest(name=name):
@@ -159,6 +159,13 @@ class LLMPlannerTests(unittest.TestCase):
                 with self.assertRaises(LLMError) as caught:
                     planner.choose(observation(), {})
                 self.assertEqual(caught.exception.code, "llm_unsafe_action")
+
+    def test_provider_cannot_select_a_retreat_handled_by_local_rules(self):
+        planner = self.planner(response("retreat_from", {"pos": [2, 64, 0]}), max_repair_attempts=0)
+        with self.assertRaises(LLMError) as caught:
+            planner.choose(observation(), {})
+        self.assertEqual(caught.exception.code, "llm_invalid_arguments")
+        self.assertNotIn("retreat_from", {tool["function"]["name"] for tool in self.brain.requests[0]["tools"]})
 
     def test_unobserved_workspace_can_be_proposed_only_with_real_inventory(self):
         planner = self.planner(response("place_item", {"item": "crafting_table", "pos": [2, 64, 0]}))

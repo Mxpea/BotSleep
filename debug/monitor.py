@@ -71,7 +71,7 @@ class EventMonitor:
             "status": {}, "decision": None, "last_result": None,
             "status_updated_at": None, "status_fresh": False,
             "status_connection": "unknown", "status_error": None,
-            "playbook": None, "combat": None, "combat_result": None,
+            "playbook": None, "mainline": None, "campaign": None, "combat": None, "combat_result": None,
             "task_execution": None,
             "daily": {"board": None, "memory_counts": {}},
             "competition": {"board": None},
@@ -213,17 +213,19 @@ class EventMonitor:
         self._update_status(record, data, event)
         status = state["status"]
         for key in ("username", "planner", "model", "steps", "busy", "paused", "goal", "phase", "pause_reason",
-                    "objective", "model_blocked", "model_pending", "pending"):
+                    "objective", "continuous", "death_count", "budget_advice", "model_blocked", "model_pending", "pending"):
             if key in data:
                 run[key] = data[key]
         if status.get("username"):
             run["username"] = status["username"]
         if event == "STARTUP":
             run["state"] = "starting"
+        if event == "CONNECTION_RETRY":
+            run["state"] = "running"
         if event == "HEARTBEAT":
             state["heartbeat_at"] = record["timestamp"]
-        if event in {"HEARTBEAT", "AGENT_STATE"}:
-            for key in ("playbook", "combat"):
+        if event in {"HEARTBEAT", "AGENT_STATE", "MAINLINE_STAGE"}:
+            for key in ("playbook", "mainline", "campaign", "combat"):
                 if key in data and (data[key] is None or isinstance(data[key], dict)):
                     state[key] = data[key]
         if event in {"HEARTBEAT", "AGENT_STATE", "TASK_STARTED", "TASK_PROGRESS", "TASK_SUSPENDED",

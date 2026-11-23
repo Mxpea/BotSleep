@@ -43,7 +43,7 @@ flowchart TD
 
 模型每轮只提一个已注册的工具。普通动作沿原有单步/最多 8 步小批技能派发；daily/competition 的 `run_survival_task` 则授权一个高层目标，`AutonomousTaskController` 从每次新观察中计算一个原子步骤，不保存可重放的动作队列。`AutonomyRuntime` 复用 harness 的本地安全、技能派发、逐动作 pending 和后验结果，并在目标边界反馈原始模型调用一次。模型文本自报“完成”、API 返回 ok 或路径目标点存在，均不能替代实际效果核验。
 
-目标程序有 12 类、默认 128 步/600 秒及局部失败/无进展/探索上限。正常子步骤不发模型请求；已知失败允许有界换候选，安全抢占保留目标意图，恢复时重查状态而不续跑旧路线。unknown 子动作冻结目标并保留游戏 pending；显式恢复须新鲜完整观察后放弃未确认目标，不重放旧写入。完整接口与不支持范围见 [AUTONOMOUS_TASKS.md](AUTONOMOUS_TASKS.md)。
+目标程序有 14 类、默认 128 步/600 秒及局部失败/无进展/探索上限。正常子步骤不发模型请求；已知失败允许有界换候选，安全抢占保留目标意图，恢复时重查状态而不续跑旧路线。unknown 子动作冻结目标并保留游戏 pending；显式恢复须新鲜完整观察后放弃未确认目标，不重放旧写入。完整接口与不支持范围见 [AUTONOMOUS_TASKS.md](AUTONOMOUS_TASKS.md)。
 
 ## 3. 模块职责
 
@@ -63,11 +63,12 @@ flowchart TD
 | `core/structure_spec.py` | 标准结构蓝图（庇护所/矿井坐标变换、安全选址与结构验收）与挖掘/危险/可替代方块常量 |
 | `skills/exploration.py` | 可开关后台雷达，约每秒读取状态，默认位移 6 格后扫描；不是寻路或导航执行器 |
 | `skills/daily_survival.py`、`skills/equipment.py`、`skills/scouting.py` | 日常生存技能库（作物、狩猎、铁矿、熔炼、储物、床门、5x5 庇护所）、装备与副手穿戴（`EquipmentSkill`）及 200 格前向航点侦察（`SurfaceScoutSkill`） |
+| `skills/positioning.py`、`skills/shelter_preparation.py` | 内部短距站位与住所相邻台阶；独立只读天然场地准备计划、每次至多一格土块清理，随后重新勘测基地；不调用独立整套建筑工作流 |
 | `skills/combat.py` | `fight_hostile` 短步近战/远程/撤退；按交战预算复查伤害与击杀，安全解除本技能持有的盾姿态 |
 | `skills/buckets.py` | `collect_liquid` 与受限 `hunt_with_lava`；核验源方块、桶转移、源回收和实际库存收益 |
 | `core/survival_playbook.py` | 按 `survival.intent` 生成 survival/speedrun 阶段建议、前置、已绑定动作及未实现缺口 |
 | `core/domain.py` | 共享领域常量（木种、床色、食物点、危险方块）、纯坐标/体素键解析、背包计数提取与 `TypedDict` 契约 |
-| `core/skill_registry.py` | starter / daily / competition 技能注册表（目标作用域、终点安全复核标记、执行器槽位分发），包含自主任务、战斗与桶类入口 |
+| `core/skill_registry.py` | starter / daily / competition 技能注册表（目标作用域、终点安全复核标记、执行器槽位分发），包含自主任务、战斗与桶类入口；内部住所准备目录不暴露给模型 |
 | `core/retreat_controller.py` | 树冠/近敌分段撤退恢复状态机、失败落点冷却与中继恢复判定 |
 | `core/survival_harness.py` | 串行任务推进、单游戏动作线程、独立模型 worker、安全复查、取消、失败退避和检查点 |
 | `agent/llm_planner.py`、`agent/tools.py` | 完整注册 starter 9 / daily 35 / competition 40 工具；autonomy 正常规划仅暴露目标及安全/赛事元工具，needs_ai 开放原子修复；严格解析并保留配对工具反馈 |
@@ -98,7 +99,7 @@ flowchart TD
 
 当前规划器发送精简观察、目标板、受限记忆和最近完整原生工具事务；按历史轮数和请求 JSON 字节预算裁剪。starter 默认上限 30,000 字节，daily/competition 48,000 字节（含工具定义），不是 provider 的 token 窗口。最近未交付工具结果受保护；当前输入本身过大则报 `llm_context_limit`，不发送请求。competition 选择时只发送当前证据解锁的短候选，执行时展开当前目标；完整目录仍供本地计分、终态检测和监控。有工具的模型请求要求一次调用，禁止并行；不兼容时不会自动降级为 `auto`。
 
-`context.playbook` 只提供阶段建议，不构成执行队列或完成证据。`survival.intent` 默认 `survival`，显式 `speedrun` 不改变 objective 或扩大工具权限；当前可建议盾、桶、铁镐等已绑定前置，下界移动/交易、要塞采样执行和末地战斗等后段仍标记 unsupported/blocked。完整观察更新建议；短安全观察只将保留的建议标为 `fresh=false`。详见 [SURVIVAL_PLAYBOOK.md](SURVIVAL_PLAYBOOK.md)。
+`context.playbook` 提供阶段建议。完整观察更新建议，短安全观察标记 `fresh=false`。显式启用 `daily + speedrun + campaign` 时，`core/campaign.py` 按真实维度与库存选择通关目标，现有 harness 写入检查点并交给 `skills/campaign.py` 执行。门户、要塞和末地动作属于本地通关控制器，模型工具目录沿用原有权限。详见 [CAMPAIGN.md](CAMPAIGN.md) 和 [SURVIVAL_PLAYBOOK.md](SURVIVAL_PLAYBOOK.md)。
 
 这不是访谈确定的 Pi/OMP token-aware、模型语义摘要与持久化边界的自动 compact；显式 handoff、动态 SKILL.md 加载、重复输出→compact→force-exit 的完整机制也尚未实现。已有重复失败/目标冷却不应命名为完整 attention-collapse 检测。
 

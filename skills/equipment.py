@@ -199,16 +199,8 @@ class EquipmentSkill(BaseSkill):
                     error_code="missing_item",
                     data={"item": item, "slot": norm_slot, "executed": False},
                 )
-            self._perform_equip(guard, item, norm_slot)
-            after = self._read_inventory(guard)
+            after = self._equip_and_verify(guard, item, norm_slot)
             equipped = read_worn_slot_item(after, norm_slot)
-            if not equipped or equipped.get("name") != item:
-                return SkillResult(
-                    False,
-                    f"Expected '{item}' in '{norm_slot}' after equip, observed {equipped.get('name') if equipped else None}.",
-                    error_code="equip_unverified",
-                    data={"item": item, "slot": norm_slot, "equipped": equipped, "executed": True},
-                )
             return SkillResult(
                 True,
                 f"Equipped {item} into {norm_slot}.",
@@ -240,26 +232,20 @@ class EquipmentSkill(BaseSkill):
                 target_item = upgrades.get(slot)
                 if not target_item:
                     continue
-                self._perform_equip(guard, target_item, slot)
-                payload = self._read_inventory(guard)
-                verified = read_worn_slot_item(payload, slot)
-                if verified and verified.get("name") == target_item:
-                    changes.append({"slot": slot, "item": target_item})
-                    worn[slot] = verified
-                    counts = self._item_counts(payload)
+                payload = self._equip_and_verify(guard, target_item, slot)
+                changes.append({"slot": slot, "item": target_item})
 
             offhand = read_worn_slot_item(payload, "off-hand")
+            counts = self._item_counts(payload)
             if (
                 isinstance(prefer_offhand, str)
                 and prefer_offhand
                 and (offhand is None or offhand.get("name") != prefer_offhand)
                 and counts.get(prefer_offhand, 0) > 0
             ):
-                self._perform_equip(guard, prefer_offhand, "off-hand")
-                payload = self._read_inventory(guard)
+                payload = self._equip_and_verify(guard, prefer_offhand, "off-hand")
                 offhand = read_worn_slot_item(payload, "off-hand")
-                if offhand and offhand.get("name") == prefer_offhand:
-                    changes.append({"slot": "off-hand", "item": prefer_offhand})
+                changes.append({"slot": "off-hand", "item": prefer_offhand})
 
             worn = {s: read_worn_slot_item(payload, s) for s in ARMOR_SLOTS}
             return SkillResult(
@@ -283,8 +269,22 @@ class EquipmentSkill(BaseSkill):
                 data={"equipped_changes": changes, "executed": guard.writes > 0},
             )
 
-    def _perform_equip(self, guard: WorkflowGuard, item: str, slot: str) -> None:
-        guard.write(self.client.equip, item=item, slot=slot, timeout_seconds=guard.remaining_timeout(10.0))
+    def _equip_and_verify(self, guard: WorkflowGuard, item: str, slot: str) -> Dict[str, Any]:
+        """Return fresh inventory only after the destination slot proves the equip."""
+        try:
+            guard.write(self.client.equip, item=item, slot=slot, timeout_seconds=guard.remaining_timeout(10.0))
+            try:
+                inventory = self._read_inventory(guard)
+            except WorkflowStepError as exc:
+                guard.fail_uncertain(exc.code, f"Could not verify {slot} after equipping {item}: {exc}")
+        except WorkflowUncertainError as exc:
+            exc.data.update(item=item, slot=slot)
+            raise
+        worn = read_worn_slot_item(inventory, slot)
+        if not worn or worn.get("name") != item:
+            guard.fail_uncertain("equip_unverified", f"Equipment slot {slot} did not confirm {item}",
+                                 {"item": item, "slot": slot, "equipped": worn})
+        return inventory
 
     def _read_inventory(self, guard: WorkflowGuard) -> Dict[str, Any]:
         raw = guard.read(self.client.inventory, timeout_seconds=guard.remaining_timeout(10.0))
