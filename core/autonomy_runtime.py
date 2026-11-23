@@ -364,8 +364,8 @@ class AutonomyRuntime:
             targets = {"coal": {"count": count, "min_tool": "wooden_pickaxe"}}
         if self.campaign is not None:
             deep_home_thresholds["min_pickaxe_tool"] = next(iter(targets.values()))["min_tool"]
-        total_t = min({"diamond": 1140, "raw_iron": 750, "coal": 540}[resource], window.remaining())
-        band_t = min({"diamond": 960, "raw_iron": 640, "coal": 460}[resource], total_t * .85)
+        total_t = min({"diamond": 1140, "raw_iron": 420, "coal": 540}[resource], window.remaining())
+        band_t = min({"diamond": 960, "raw_iron": 360, "coal": 460}[resource], total_t * .85)
         res = miner.mine_targets_from_surface(
             targets=targets,
             cave_policy={"explore_timeout_seconds": min(220.0, total_t), "allow_tall_cave_subgraph": True},

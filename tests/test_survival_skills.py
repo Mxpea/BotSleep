@@ -1539,6 +1539,51 @@ class WaterEscapeTests(unittest.TestCase):
         self.assertTrue(cres.data.get("approached"))
         self.assertEqual(len(moves), 1)
 
+    def test_emergency_burrow_digs_three_down_and_places_one_cap_overhead(self):
+        world = World()
+        world.status.update({"pos": [0.5, 64.0, 0.5], "dimension": "overworld", "on_ground": True,
+                            "in_water": False, "in_lava": False, "health": 18, "food": 18})
+        world.set_block((0, 63, 0), "grass_block")
+        world.set_block((0, 62, 0), "dirt")
+        world.set_block((0, 61, 0), "dirt")
+        world.set_block((0, 60, 0), "stone")
+        world.set_block((0, 65, 0), "air")
+        for y in (63, 62, 61):
+            for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                world.set_block((dx, y, dz), "dirt")
+
+        def dig_and_fall(pos):
+            key = tuple(pos)
+            name = world.blocks[key]["name"]
+            drop = "dirt" if name == "grass_block" else name
+            world.set_block(key, "air")
+            world.counts[drop] = world.counts.get(drop, 0) + 1
+            if key == (0, 61, 0):
+                world.status["pos"] = [0.5, 61.0, 0.5]
+            elif key == (0, 62, 0):
+                world.status["pos"] = [0.5, 62.0, 0.5]
+            elif key == (0, 63, 0):
+                world.status["pos"] = [0.5, 63.0, 0.5]
+            return envelope({"dug": name, "gained": {drop: 1}})
+
+        world.dig_effect = dig_and_fall
+        res = SurvivalSkills(world).execute("emergency_burrow", {})
+        self.assertTrue(res.success, res)
+        self.assertEqual(res.data["burrow_feet"], [0, 61, 0])
+        self.assertEqual(res.data["cap_pos"], [0, 63, 0])
+        self.assertEqual(world.blocks[(0, 63, 0)]["name"], res.data["cap_item"])
+
+        unsafe_world = World()
+        unsafe_world.status.update({"pos": [0.5, 64.0, 0.5], "dimension": "overworld", "on_ground": True,
+                                   "in_water": False, "in_lava": False, "health": 18, "food": 18})
+        unsafe_world.set_block((0, 63, 0), "grass_block")
+        unsafe_world.set_block((0, 62, 0), "dirt")
+        unsafe_world.set_block((0, 61, 0), "dirt")
+        unsafe_world.set_block((0, 60, 0), "lava")
+        bad = SurvivalSkills(unsafe_world).execute("emergency_burrow", {})
+        self.assertFalse(bad.success)
+        self.assertFalse(any(c[0] == "dig" for c in unsafe_world.calls))
+
 
 if __name__ == "__main__":
     unittest.main()

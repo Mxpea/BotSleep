@@ -200,3 +200,76 @@ class ContinuousRecoveryTests(unittest.TestCase):
         self.assertFalse(h.paused)
         self.assertFalse(h.finished)
         self.assertGreater(h._continuous_retry_at, time.monotonic())
+
+    def test_interrupted_water_escape_and_obs_error_recover_without_permanent_pause(self):
+        self.journal.update(context={"water_recovery": {"steps": 1}})
+        h = self.harness()
+        for name, rec_err in (("water_escape", "interrupted"), ("retreat_from", "interruption_observation_error")):
+            with self.subTest(name=name, rec_err=rec_err):
+                d = Decision(name, {} if name == "water_escape" else {"pos": [4, 64, 0], "distance": 8}, "Recover", "safety")
+                fail = __import__("skills").SkillResult(
+                    False,
+                    "Interrupted",
+                    {"executed": True, "action_state": "unknown", "cleanup_skipped": "navigation_unknown", "recovery_error": rec_err},
+                    "action_unconfirmed",
+                )
+                obs = {"status": dict(self.world.status), "fresh": True, "counts": {}, "inventory": [], "blocks": [], "entities": []}
+                with patch.object(h, "_cycle", return_value=(d, fail, obs)):
+                    res = self.cycle(h)
+                self.assertEqual(res.error_code, "action_unconfirmed")
+                self.assertFalse(h.paused)
+                self.assertEqual(res.data.get("action_state"), "verified_idle")
+                self.assertNotIn("water_recovery", h.context)
+
+    def test_action_watchdog_cancels_stalled_command_and_hands_to_llm_without_pause(self):
+        settings = {**self.settings, "intent": "speedrun", "continuous": False, "llm_override_on_block": True,
+                    "action_watchdog_seconds": 0.05}
+        h = SurvivalHarness(self.world, settings, DEFAULTS["sleep"], journal=self.journal)
+        self.addCleanup(h.close)
+        entered = threading.Event()
+        release = threading.Event()
+        d = Decision("move_to", {"pos": [6, 64, 0], "range": 1}, "Stalled move", "explore")
+
+        def slow_cycle(_manual):
+            now = time.monotonic()
+            h._watchdog_started_at = now
+            h._watchdog_last_progress_at = now
+            h._watchdog_decision_id = id(d)
+            h._active_decision = d
+            entered.set()
+            release.wait(2.0)
+            return d, __import__("skills").SkillResult(False, "Cancelled", {"executed": True}, "cancelled"), {
+                "status": dict(self.world.status), "fresh": True, "counts": {}, "inventory": []}
+
+        with patch.object(h, "_cycle", side_effect=slow_cycle), \
+             patch.object(self.world, "stop", wraps=self.world.stop) as stop:
+            self.assertTrue(h._start())
+            self.assertTrue(entered.wait(1.0))
+            time.sleep(0.08)
+            h.tick()
+            release.set()
+            res = self.cycle(h)
+        stop.assert_called()
+        self.assertEqual(res.error_code, "watchdog_timeout")
+        self.assertFalse(h.paused)
+        self.assertIn("WATCHDOG_TIMEOUT", h.context.get("watchdog_warning", ""))
+
+    def test_idle_auto_recovers_non_operator_game_pause_after_respawn(self):
+        settings = {**self.settings, "intent": "speedrun", "continuous": False, "llm_override_on_block": True}
+        h = SurvivalHarness(self.world, settings, DEFAULTS["sleep"], journal=self.journal)
+        self.addCleanup(h.close)
+        h._paused = True
+        h.pause_reason = "action_unconfirmed"
+        h._saw_observation = True
+        h.context["last_death"] = "old"
+        self.world.status["last_death"] = {"t": 123, "cause": "skeleton"}
+        h._next_idle_monitor = 0.0
+        h._monitor_idle()
+        self.assertFalse(h.paused)
+        self.assertIsNone(h.pause_reason)
+        h._paused = True
+        h._operator_pause = "user_requested"
+        h.pause_reason = "user_requested"
+        h._next_idle_monitor = 0.0
+        h._monitor_idle()
+        self.assertTrue(h.paused)

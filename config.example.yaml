@@ -20,6 +20,7 @@ survival:
   sleep_policy: "opportunistic"            # opportunistic (sleep only if nearby bed exists; thunder/night no-bed keeps working) or strict.
   disable_sleep: false                     # true disables bed crafting/sleeping completely (use for multi-bot servers where night cannot be slept).
   llm_override_on_block: false             # true converts non-fatal safety/script blocks into warnings and prioritizes LLM rescue/override.
+  action_watchdog_seconds: 30              # 0 disables; >0 cancels stalled non-child actions (or stalled child actions) after N seconds and hands control to the LLM.
   disable_deep_mining: false               # True keeps ore collection local and skips deep expeditions.
   operator_goal: ""                        # Optional current user goal (<=1000 visible characters); safety still wins.
   autonomy:                               # Daily/competition: one model goal, locally verified child steps.

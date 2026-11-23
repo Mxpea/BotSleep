@@ -82,6 +82,7 @@ class SurvivalSkills:
         # Internal safety actions; deliberately absent from the model catalog.
         "canopy_escape": (set(), set()),
         "water_escape": (set(), set()),
+        "emergency_burrow": (set(), set()),
     }
 
     def __init__(self, client):
@@ -598,6 +599,95 @@ class SurvivalSkills:
         recovery = context.setdefault("recovery_context", {})
         recovery["purpose"] = "canopy_escape"
         return self._retreat_from({"pos": [0, 0, 0], "distance": 8}, context)
+
+    def _emergency_burrow(self, args, context):
+        """Dig 3 blocks straight down and place 1 solid cap block overhead to survive night."""
+        initial = self._status(context)
+        self._overworld(initial)
+        if not initial.get("on_ground") or initial.get("in_water") or initial.get("in_lava"):
+            raise _Failure("unsafe", "Emergency burrow requires dry ground footing")
+        feet = [math.floor(v) for v in initial["pos"]]
+        fx, fy, fz = feet
+        if fy < 54:
+            raise _Failure("unsafe", "Already deep underground; emergency burrow not needed")
+        counts, _ = self._inventory(context)
+        floor_pos = [fx, fy - 4, fz]
+        floor_block = self._block(floor_pos, context)
+        if floor_block["name"] not in self.SUPPORT or not self._safe_block(floor_block):
+            raise _Failure("unsafe", "Unsafe floor beneath burrow depth", {"pos": floor_pos, "block": floor_block["name"]})
+        col_positions = ([fx, fy - 1, fz], [fx, fy - 2, fz], [fx, fy - 3, fz])
+        col_blocks = [self._block(pos, context) for pos in col_positions]
+        for pos, block in zip(col_positions, col_blocks):
+            if block["name"] not in self.SUPPORT or not self._safe_block(block):
+                raise _Failure("unsafe", "Burrow column contains unsupported or hazardous block",
+                               {"pos": pos, "block": block["name"]})
+        soft_burrow = {
+            "dirt", "grass_block", "coarse_dirt", "rooted_dirt", "podzol", "mycelium",
+            "mud", "packed_mud", "sand", "red_sand", "gravel", "snow_block", "moss_block", "pale_moss_block",
+        }
+        has_pickaxe = any(counts.get(p, 0) > 0 for p in self.PICKAXES)
+        if not has_pickaxe and sum(1 for blk in col_blocks if blk["name"] in soft_burrow) < 2:
+            raise _Failure("unsafe", "Too much hard stone to burrow quickly without a pickaxe")
+        cap_candidates = (
+            "dirt", "cobblestone", "cobbled_deepslate", "stone", "sandstone", "red_sandstone",
+            "andesite", "granite", "diorite",
+            "oak_planks", "spruce_planks", "birch_planks", "dark_oak_planks",
+            "acacia_planks", "jungle_planks", "mangrove_planks", "cherry_planks", "pale_oak_planks",
+            "oak_log", "spruce_log", "birch_log", "sand", "gravel",
+        )
+        has_existing_cap = any(counts.get(item, 0) >= 1 for item in cap_candidates)
+        can_harvest_cap = any(
+            blk["name"] in (soft_burrow - {"gravel", "sand"})
+            or (has_pickaxe and blk["name"] in {"stone", "cobblestone", "cobbled_deepslate", "deepslate"})
+            for blk in col_blocks
+        )
+        if not (has_existing_cap or can_harvest_cap):
+            raise _Failure("missing_item", "No solid cap block available for emergency burrow")
+        above = self._block([fx, fy + 1, fz], context)
+        if not self._safe_block(above):
+            raise _Failure("unsafe", "Hazard directly above head prevents burrowing", {"block": above["name"]})
+        for pos in col_positions:
+            for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                nbr = self._block([pos[0] + dx, pos[1], pos[2] + dz], context)
+                if not self._safe_block(nbr):
+                    raise _Failure("unsafe", "Adjacent liquid/fire hazard near burrow",
+                                   {"pos": [pos[0] + dx, pos[1], pos[2] + dz], "block": nbr["name"]})
+        if abs(initial["pos"][0] - (fx + 0.5)) > 0.2 or abs(initial["pos"][2] - (fz + 0.5)) > 0.2:
+            try:
+                self._action(context, self.client.move_to, fx + 0.5, float(fy), fz + 0.5, range=0.15, timeout_ms=4000)
+            except (_Failure, APIError):
+                pass
+        for pos in col_positions:
+            self._check(context)
+            cur = self._block(pos, context)
+            if cur["name"] not in self.AIR:
+                self._action(context, self.client.dig, pos, collect=True)
+                rem = self._block(pos, context)
+                if rem["name"] not in self.AIR:
+                    raise _Failure("dig_unverified", "Burrow block was not cleared", {"pos": pos, "block": rem["name"]})
+        settled = self._status(context)
+        if math.floor(settled["pos"][1]) > fy - 3:
+            try:
+                self._action(context, self.client.move_to, fx + 0.5, float(settled["pos"][1]), fz + 0.5, range=0.15, timeout_ms=3000)
+                settled = self._status(context)
+            except (_Failure, APIError):
+                pass
+        if math.floor(settled["pos"][1]) > fy - 3:
+            raise _Failure("move_unverified", "Bot did not drop 3 blocks into burrow", {"pos": settled["pos"], "expected_y": fy - 3})
+        after_counts, _ = self._inventory(context)
+        cap_item = next((item for item in cap_candidates if after_counts.get(item, 0) >= 1), None)
+        if cap_item is None:
+            raise _Failure("missing_item", "No cap block in inventory after digging burrow")
+        cap_pos = col_positions[0]
+        def _place_cap():
+            context["placement_write"] = True
+            return self.client.place_block(*cap_pos, item=cap_item)
+        self._action(context, _place_cap)
+        placed = self._block(cap_pos, context)
+        if placed["name"] in self.PLACEMENT_SPACE:
+            raise _Failure("place_unverified", "Cap block did not place overhead", {"pos": cap_pos, "block": placed["name"]})
+        context["placement_verified"] = True
+        return {"burrow_feet": [fx, fy - 3, fz], "cap_pos": cap_pos, "cap_item": cap_item, "night_burrow": True}
 
     @staticmethod
     def _hurt_interruption(error):

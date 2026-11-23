@@ -155,6 +155,9 @@ class DailySafetyPolicy:
                     target = combat["target"]
                     return "combat", Decision("fight_hostile", {"entity_id": target["id"], "expected_name": target["name"]},
                         "Take one locally verified defensive step when retreat is boxed in", "safety")
+                if not any(dist <= 3.0 for dist, _, _ in hostiles) and self._should_emergency_burrow(observation, context):
+                    return "emergency_burrow", Decision("emergency_burrow", {},
+                        "Dig 3 blocks down and cap 1 overhead instead of repeated hopeless retreat at night", "safety")
                 threshold = 4.0 if (self.llm_override_on_block and spawn_camp) else (2.5 if self.llm_override_on_block else 3.5)
                 if hostiles[0][0] <= threshold:
                     return "near_hostile", Decision("retreat_from", {"pos": hostiles[0][1], "distance": retreat_dist},
@@ -709,6 +712,54 @@ class DailySafetyPolicy:
             return False
         return not any(distance <= self.threat_radius for distance, _ in self.rules._hostiles(observation, status["pos"]))
 
+    def _should_emergency_burrow(self, observation, context=None):
+        status = observation.get("status") or {}
+        if not self.disable_sleep or not self._night(status):
+            return False
+        if status.get("dimension") not in {"overworld", "minecraft:overworld"}:
+            return False
+        pos = self._point(status.get("pos"))
+        if pos is None or pos[1] < 56:
+            return False
+        if status.get("on_ground") is not True or status.get("in_water") or status.get("in_lava") or status.get("in_cobweb"):
+            return False
+        ctx = context or {}
+        if time.time() < float(ctx.get("emergency_burrow_cooldown") or 0):
+            return False
+        burrow = ctx.get("night_burrow")
+        if isinstance(burrow, dict) and burrow.get("generation") == ctx.get("life_generation"):
+            b_pos = burrow.get("pos")
+            if (isinstance(b_pos, (list, tuple)) and len(b_pos) == 3
+                    and abs(pos[0] - b_pos[0]) <= 2 and abs(pos[2] - b_pos[2]) <= 2 and pos[1] <= b_pos[1] + 1):
+                return False
+        shelter = self._shelter(observation)
+        if shelter and shelter.get("inside") is True:
+            return False
+        fx, fy, fz = (math.floor(pos[0]), math.floor(pos[1]), math.floor(pos[2]))
+        blocks = {
+            cell: row
+            for row in extract_blocks(observation)
+            if (cell := cell_coords(row.get("pos"))) is not None
+        }
+        if blocks:
+            overhead = blocks.get((fx, fy + 2, fz))
+            if overhead and overhead.get("name") in DailySurvivalSkills.SUPPORT and not overhead["name"].endswith("_log"):
+                return False
+            for dy in (1, 2, 3, 4):
+                cell = blocks.get((fx, fy - dy, fz))
+                if cell and cell.get("name") not in DailySurvivalSkills.SUPPORT:
+                    return False
+        counts = self.rules._counts(observation)
+        has_shield = counts.get("shield", 0) > 0
+        has_melee = any(counts.get(w, 0) > 0 for w in (
+            "wooden_sword", "stone_sword", "iron_sword", "diamond_sword", "netherite_sword",
+            "stone_axe", "iron_axe", "diamond_axe", "netherite_axe",
+        ))
+        spawn_camp = bool(ctx.get("spawn_camp_alert")) or int(ctx.get("recent_spawn_deaths") or 0) >= 2
+        if has_shield and has_melee and not spawn_camp:
+            return False
+        return True
+
     def choose(self, observation, baseline_decision, task_board=None, context=None):
         scenario, forced = self._basics(observation, context)
         if forced is not None:
@@ -735,6 +786,9 @@ class DailySafetyPolicy:
             return None
         if self._night(status) and (home := self._return_home(observation)):
             return home
+        if self._should_emergency_burrow(observation, context):
+            return Decision("emergency_burrow", {},
+                "Dig 3 blocks down and cap 1 overhead to survive night without combat gear", "safety")
         if status["health"] <= self.low_health:
             if self._partial(observation) and status["food"] < 18:
                 return self._wait("Collect a complete fresh food and ground observation before resuming bounded recovery", "observe")
@@ -770,7 +824,7 @@ class DailySafetyPolicy:
                 return None
             if forced.name == "retreat_from" and decision.name == forced.name and self._point(decision.args.get("pos")) == forced.args["pos"]:
                 return None
-            if forced.name in {"auto_sleep", "water_escape"} and decision.name == forced.name and (forced.name != "water_escape" or not decision.args):
+            if forced.name in {"auto_sleep", "water_escape", "emergency_burrow"} and decision.name == forced.name and (forced.name not in {"water_escape", "emergency_burrow"} or not decision.args):
                 return None
             return scenario
         status = observation["status"]

@@ -861,6 +861,39 @@ class DailyPolicyTests(unittest.TestCase):
         fight = no_sleep.choose(skel_obs, self.baseline, context={})
         self.assertEqual((fight.name, fight.args["expected_name"]), ("fight_hostile", "skeleton"))
 
+    def test_emergency_burrow_triggers_on_night_unarmed_surface_and_skips_when_burrowed(self):
+        from agent.daily_survival import DailySurvivalGoals
+
+        no_sleep = DailySafetyPolicy({
+            "low_health_threshold": 8, "food_threshold": 16, "threat_radius": 8,
+            "sleep_policy": "strict", "disable_sleep": True, "llm_override_on_block": True,
+        })
+        night_obs = observed(is_day=False, time_of_day=15000, health=18, food=18, pos=[0.5, 64.0, 0.5])
+        night_obs["blocks"] = [
+            {"name": "grass_block", "pos": [0, 63, 0], "properties": {}},
+            {"name": "dirt", "pos": [0, 62, 0], "properties": {}},
+            {"name": "dirt", "pos": [0, 61, 0], "properties": {}},
+            {"name": "stone", "pos": [0, 60, 0], "properties": {}},
+        ]
+        burrow = no_sleep.choose(night_obs, self.baseline, context={"life_generation": 1})
+        self.assertIsNotNone(burrow)
+        self.assertEqual(burrow.name, "emergency_burrow")
+        self.assertIsNone(no_sleep.validate(burrow, night_obs, context={"life_generation": 1}))
+
+        burrowed_ctx = {"life_generation": 1, "night_burrow": {"pos": [0, 61, 0], "generation": 1}}
+        burrowed_obs = observed(is_day=False, time_of_day=15000, health=18, food=18, pos=[0.5, 61.0, 0.5])
+        burrowed_obs["blocks"] = [{"name": "dirt", "pos": [0, 63, 0], "properties": {}}]
+        self.assertIsNone(no_sleep.choose(burrowed_obs, self.baseline, context=burrowed_ctx))
+
+        goals = DailySurvivalGoals({"daily": {"food_reserve": 8, "wood_reserve": 8, "fuel_reserve": 8}})
+        ready_obs = observed(is_day=False, time_of_day=15000, health=18, food=18, pos=[0.5, 64.0, 0.5])
+        ready_obs["counts"] = {"iron_pickaxe": 1, "bucket": 1, "iron_ingot": 1, "shield": 1}
+        ready_obs["inventory"] = [{"name": k, "count": 1} for k in ready_obs["counts"]]
+        board = goals.build(ready_obs, {}, {})
+        iron_row = next(row for row in board["tasks"] if row["id"] == "iron_tools")
+        self.assertEqual(iron_row["priority"], 25)
+        self.assertFalse(iron_row.get("next_action") and iron_row["next_action"].get("args", {}).get("task") == "deep_mine")
+
 
 if __name__ == "__main__":
     unittest.main()

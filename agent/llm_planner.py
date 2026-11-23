@@ -119,8 +119,9 @@ while status.food >= 14 and status.health >= 16:
 Smelt remaining raw_iron into iron_ingot via run_survival_task(task="smelt", item="iron_ingot", count=...)
 first, then craft bucket (3) + shield (1, if >= 7 iron) + iron_pickaxe (3). Craft iron_armor only
 if you already hold >= 24 iron_ingot spare. Do NOT waste iron or turns on iron_axe before Nether/diamonds.
-Once you hold >= 1 iron_pickaxe and >= 1 bucket (and >= 1 iron_ingot for flint_and_steel),
-proceed DIRECTLY to run_survival_task(task="nether_portal") to enter the Nether quickly!
+Once you hold >= 1 iron_pickaxe and >= 1 bucket (or water_bucket/lava_bucket) and (>= 1 iron_ingot or flint_and_steel),
+DO NOT start another deep_mine(resource='raw_iron')! You already have enough iron for speedrun Nether entry;
+proceed DIRECTLY to run_survival_task(task="nether_portal") (or surface scouting/flint crafting) to enter the Nether quickly!
 Do NOT wait to gather gravel/flint or craft flint_and_steel manually — `nether_portal` itself mines/places
 gravel for flint, crafts flint_and_steel, fills water_bucket, finds lava/obsidian, casts/ignites the
 portal, and walks into `the_nether`. (Only mine `diamond` first if explicitly requested.)
@@ -1015,6 +1016,13 @@ If that goal tool is unavailable, use only the currently advertised tools.
                     if done:
                         board["completed_ids"] = done
                     prompt_context["daily_tasks"] = board
+            counts = observation.get("counts") or {}
+            if (counts.get("iron_pickaxe", 0) >= 1
+                    and (counts.get("bucket", 0) >= 1 or counts.get("water_bucket", 0) >= 1 or counts.get("lava_bucket", 0) >= 1)
+                    and (counts.get("iron_ingot", 0) >= 1 or counts.get("flint_and_steel", 0) >= 1)):
+                warnings = list(prompt_context.get("safety_warnings") or [])
+                warnings.append("PORTAL_IRON_READY: You already hold iron_pickaxe + bucket + flint_and_steel/iron_ingot. Do NOT run a second deep_mine(raw_iron); proceed with nether_portal / surface lava scouting.")
+                prompt_context["safety_warnings"] = warnings
             prompt_context["failed_actions"] = [{"action": failure["decision"].name, "args": failure["decision"].args,
                                                   "error_code": failure["code"]}
                                                  for failure in list(self._failed_actions.values())[-8:]

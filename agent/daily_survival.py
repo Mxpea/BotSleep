@@ -677,10 +677,17 @@ class DailySurvivalGoals:
                     counts.get("iron_ingot", 0) < ingots
                     or sum(n for name, n in counts.items() if name.endswith("_planks")) < planks)):
                 iron_action = tool_action
-        iron_prio = 70 if missing_defense else 55
+        portal_iron_ready = (
+            counts.get("iron_pickaxe", 0) >= 1
+            and (counts.get("bucket", 0) >= 1 or counts.get("water_bucket", 0) >= 1 or counts.get("lava_bucket", 0) >= 1)
+            and (counts.get("iron_ingot", 0) >= 1 or counts.get("flint_and_steel", 0) >= 1)
+        )
+        iron_prio = 25 if portal_iron_ready else (70 if missing_defense else 55)
+        if portal_iron_ready and iron_action and iron_action.get("args", {}).get("task") == "deep_mine":
+            iron_action = None
         is_night = bool(fresh and (status.get("is_day") is False or (status.get("time_of_day") or 0) >= 12000))
         on_surface = bool(fresh and isinstance(status.get("pos"), (list, tuple)) and len(status["pos"]) == 3 and status["pos"][1] >= 56)
-        if is_night and on_surface and any(counts.get(p, 0) for p in ("wooden_pickaxe", "stone_pickaxe", "iron_pickaxe", "diamond_pickaxe")):
+        if not portal_iron_ready and is_night and on_surface and any(counts.get(p, 0) for p in ("wooden_pickaxe", "stone_pickaxe", "iron_pickaxe", "diamond_pickaxe")):
             iron_prio = 96
         task("iron_tools", iron_prio, not missing_iron and not missing_defense,
              missing=missing_defense + ["iron_" + kind for kind in missing_iron], action=iron_action,

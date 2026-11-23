@@ -40,6 +40,7 @@ DEFAULTS: Dict[str, Any] = {
         "sleep_policy": "opportunistic",
         "disable_sleep": False,
         "llm_override_on_block": False,
+        "action_watchdog_seconds": 0,
         "disable_deep_mining": False,
         "operator_goal": "",
         "autonomy": {"enabled": True, "local_opening": False, "mainline": False, "max_steps": 128, "max_seconds": 600,
@@ -313,6 +314,9 @@ def _validate(config: Dict[str, Any], config_dir: Path) -> None:
         raise ConfigError("survival.scan_radius must be an integer between 4 and 64")
     for key in ("poll_interval_seconds", "retry_seconds", "max_runtime_seconds", "target_cooldown_seconds"):
         _positive(survival[key], f"survival.{key}")
+    watchdog = survival["action_watchdog_seconds"]
+    if type(watchdog) not in (int, float) or not math.isfinite(watchdog) or watchdog < 0 or watchdog > 3600:
+        raise ConfigError("survival.action_watchdog_seconds must be a finite number between 0 and 3600")
     for key, maximum in (("low_health_threshold", 20), ("food_threshold", 20), ("threat_radius", 24), ("explore_distance", 32)):
         _positive(survival[key], f"survival.{key}")
         if survival[key] > maximum:
