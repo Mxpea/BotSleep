@@ -155,8 +155,6 @@ class IntentCompiler:
         if task == "smelt":
             if "item" not in args and isinstance(args.get("resource"), str):
                 args["item"] = args.pop("resource")
-            else:
-                args.pop("resource", None)
             if isinstance(args.get("item"), str):
                 item = args["item"].strip().lower()
                 item = _SMELT_INPUT_TO_OUTPUT.get(item, _ITEM_ALIASES.get(item, item))
