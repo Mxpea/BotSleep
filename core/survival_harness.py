@@ -96,7 +96,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
         self.door_skills = None
         self.positioning_skills = None
         self.combat_skills = CombatSkills(client, starter_defense=not self.daily,
-                                         threat_radius=self._safety_rules.threat_radius)
+                                         threat_radius=self._safety_rules.threat_radius,
+                                         allow_unarmed=self.llm_override_on_block)
         self.bucket_skills = None
         self.daily_board = None
         self.playbook = None
@@ -328,6 +329,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
         if decision is None:
             return None
         if decision.name == "fight_hostile" and self.context.get("combat_blocked_until", {}).get(str(decision.args["entity_id"]), 0) > time.time():
+            if self.llm_override_on_block and self.daily_policy and not self.daily_policy._has_valuable_gear(observation):
+                return None
             target = next((row for row in observation.get("entities", [])
                            if row.get("id") == decision.args["entity_id"]), {})
             pos = self._safety_rules._pos(target.get("pos"))

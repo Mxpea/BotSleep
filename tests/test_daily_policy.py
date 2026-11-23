@@ -845,13 +845,30 @@ class DailyPolicyTests(unittest.TestCase):
         self.assertEqual(no_sleep.validate(action("auto_sleep"), night_obs), "sleep_disabled")
         self.assertTrue(no_sleep.constraints(night_obs)["model_allowed"])
 
-        camp_obs = observed(is_day=False, time_of_day=15000, health=18, food=18)
+        camp_obs = observed(is_day=False, time_of_day=15000, health=6, food=18)
+        camp_obs["counts"] = {"stone_pickaxe": 1, "raw_iron": 3}
+        camp_obs["inventory"] = [{"name": "stone_pickaxe", "count": 1}, {"name": "raw_iron", "count": 3}]
         camp_obs["entities"] = [{"id": 31, "type": "hostile", "name": "zombie", "pos": [4.5, 64.0, 0.5]}]
         camp_ctx = {"spawn_camp_alert": True, "recent_spawn_deaths": 2}
         retreat = no_sleep.choose(camp_obs, self.baseline, context=camp_ctx)
         self.assertEqual(retreat.name, "retreat_from")
         self.assertEqual(retreat.args["distance"], 14)
         self.assertTrue(any("SPAWN_CAMP_ALERT" in w for w in no_sleep.warnings(camp_obs, camp_ctx)))
+
+        # Unarmed / no-valuable-gear bots punch close zombies or recover drops instead of running blindly.
+        unarmed_punch = observed(is_day=False, time_of_day=15000, health=18, food=18)
+        unarmed_punch["inventory"] = []
+        unarmed_punch["entities"] = [{"id": 41, "type": "hostile", "name": "zombie", "pos": [2.2, 64.0, 0.5]}]
+        self.assertEqual(no_sleep.choose(unarmed_punch, self.baseline, context={}).name, "fight_hostile")
+
+        unarmed_drops = observed(is_day=False, time_of_day=15000, health=18, food=18)
+        unarmed_drops["inventory"] = []
+        unarmed_drops["entities"] = [
+            {"id": 42, "type": "hostile", "name": "zombie", "pos": [5.5, 64.0, 0.5]},
+            {"id": 43, "type": "item", "name": "iron_pickaxe", "pos": [1.5, 64.0, 1.5]},
+        ]
+        self.assertIsNone(no_sleep.choose(unarmed_drops, self.baseline, context={}))
+        self.assertTrue(any("DROPPED_GEAR_NEARBY" in w for w in no_sleep.warnings(unarmed_drops, {})))
 
         # Shield + sword enables advancing on ranged skeletons up to 10m locally.
         skel_obs = observed(is_day=False, time_of_day=15000, health=16, food=18)
@@ -875,10 +892,16 @@ class DailyPolicyTests(unittest.TestCase):
             {"name": "dirt", "pos": [0, 61, 0], "properties": {}},
             {"name": "stone", "pos": [0, 60, 0], "properties": {}},
         ]
-        burrow = no_sleep.choose(night_obs, self.baseline, context={"life_generation": 1})
+        # Empty-handed / starter bot stays free to explore and accumulate memory instead of burrowing.
+        self.assertIsNone(no_sleep.choose(night_obs, self.baseline, context={"life_generation": 1}))
+
+        valued_night_obs = copy.deepcopy(night_obs)
+        valued_night_obs["counts"] = {"stone_pickaxe": 1, "raw_iron": 4}
+        valued_night_obs["inventory"] = [{"name": "stone_pickaxe", "count": 1}, {"name": "raw_iron", "count": 4}]
+        burrow = no_sleep.choose(valued_night_obs, self.baseline, context={"life_generation": 1})
         self.assertIsNotNone(burrow)
         self.assertEqual(burrow.name, "emergency_burrow")
-        self.assertIsNone(no_sleep.validate(burrow, night_obs, context={"life_generation": 1}))
+        self.assertIsNone(no_sleep.validate(burrow, valued_night_obs, context={"life_generation": 1}))
 
         burrowed_ctx = {"life_generation": 1, "night_burrow": {"pos": [0, 61, 0], "generation": 1}}
         burrowed_obs = observed(is_day=False, time_of_day=15000, health=18, food=18, pos=[0.5, 61.0, 0.5])

@@ -364,15 +364,15 @@ class AutonomyRuntime:
             targets = {"coal": {"count": count, "min_tool": "wooden_pickaxe"}}
         if self.campaign is not None:
             deep_home_thresholds["min_pickaxe_tool"] = next(iter(targets.values()))["min_tool"]
-        total_t = min({"diamond": 1140, "raw_iron": 420, "coal": 540}[resource], window.remaining())
-        band_t = min({"diamond": 960, "raw_iron": 360, "coal": 460}[resource], total_t * .85)
+        total_t = min({"diamond": 1140, "raw_iron": 540, "coal": 540}[resource], window.remaining())
+        band_t = min({"diamond": 960, "raw_iron": 460, "coal": 460}[resource], total_t * .85)
         res = miner.mine_targets_from_surface(
             targets=targets,
-            cave_policy={"explore_timeout_seconds": min(220.0, total_t), "allow_tall_cave_subgraph": True},
+            cave_policy={"explore_timeout_seconds": min(90.0 if resource == "raw_iron" else 220.0, total_t), "allow_tall_cave_subgraph": True},
             home_thresholds=deep_home_thresholds,
             prefer_caves_first=(resource in {"raw_iron", "coal"}),
             cave_search_radius=40,
-            max_caves=3,
+            max_caves=1 if resource == "raw_iron" else 3,
             place_workstation=False,
             rib_length=12 if resource in {"diamond", "raw_iron"} else 6,
             rib_spacing=3 if resource in {"diamond", "raw_iron"} else 4,

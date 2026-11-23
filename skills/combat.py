@@ -67,7 +67,7 @@ def clear_entity_ray(origin, target, get_block, max_queries=48):
 
 
 def combat_options(observation: dict, entity_id: int | None = None, expected_name: str | None = None,
-                   *, starter_defense: bool = False, threat_radius: float = 8) -> dict:
+                   *, starter_defense: bool = False, threat_radius: float = 8, allow_unarmed: bool = False) -> dict:
     """Pure eligibility hint; the executing skill rereads geometry and state."""
     denied = lambda reason: {"allowed": False, "reason": reason}
     if (not isinstance(observation, dict) or observation.get("fresh") is not True
@@ -107,13 +107,18 @@ def combat_options(observation: dict, entity_id: int | None = None, expected_nam
             return denied("insufficient_health_or_food")
         return denied("target_not_observed")
     target = min(targets, key=lambda r: math.dist(origin, r["pos"]))
-    easy_melee_ok = (not starter_defense and melee is not None
-                     and target["name"] in {"zombie", "husk", "drowned", "spider", "cave_spider", "zombie_villager", "slime"})
+    distance = math.dist(origin, target["pos"])
+    easy_melee_targets = {"zombie", "husk", "drowned", "spider", "cave_spider", "zombie_villager", "slime"}
+    unarmed_ready = allow_unarmed and not starter_defense and melee is None and target["name"] != "creeper" and distance <= MELEE_RANGE
+    easy_melee_ok = (not starter_defense and (melee is not None or unarmed_ready)
+                     and target["name"] in easy_melee_targets)
     min_hp = MIN_HEALTH_SHIELD if shield else (MIN_HEALTH_EASY_MELEE if easy_melee_ok else MIN_HEALTH_UNSHIELDED)
     if hp < min_hp or food < MIN_FOOD:
         return denied("insufficient_health_or_food")
-    distance = math.dist(origin, target["pos"])
-    danger_radius = max(8, threat_radius) if starter_defense else (4 if easy_melee_ok and distance <= MELEE_RANGE else 8)
+    danger_radius = max(8, threat_radius) if starter_defense else (
+        2.8 if unarmed_ready
+        else (4 if easy_melee_ok and distance <= MELEE_RANGE else 8)
+    )
     if any(r["id"] != target["id"] and r.get("type") == "hostile"
            and math.dist(origin, r["pos"]) <= (
                hostile_threat_radius(r["name"], danger_radius) if starter_defense else danger_radius)
@@ -138,6 +143,8 @@ def combat_options(observation: dict, entity_id: int | None = None, expected_nam
             mode = "withdraw"
     elif melee and (1.5 if starter_defense else 0.0) <= distance <= MELEE_RANGE:
         mode, weapon = "melee", melee[0]
+    elif unarmed_ready:
+        mode, weapon = "melee", None
     elif (not starter_defense and melee and shield and hp >= MIN_HEALTH_SHIELD
           and ((target["name"] in {"skeleton", "stray", "bogged", "pillager"} and MELEE_RANGE < distance <= SHIELD_ADVANCE_MAX)
                or (target["name"] != "creeper" and MELEE_RANGE < distance <= 4.5))):
@@ -163,10 +170,11 @@ class CombatSkills(SurvivalSkills):
     UNKNOWN = frozenset({"request_timeout", "network_error", "invalid_json", "invalid_response",
                          "action_unconfirmed", "internal", "internal_error"})
 
-    def __init__(self, client, *, starter_defense=False, threat_radius=8):
+    def __init__(self, client, *, starter_defense=False, threat_radius=8, allow_unarmed=False):
         super().__init__(client)
         self.starter_defense = starter_defense
         self.threat_radius = threat_radius
+        self.allow_unarmed = bool(allow_unarmed and not starter_defense)
         self.entity_radius = max(16, threat_radius) if starter_defense else 16
         self._encounters = {}
         self._defense_owned = False
@@ -175,7 +183,7 @@ class CombatSkills(SurvivalSkills):
                 expected_name: str | None = None) -> dict:
         """Use the same eligibility policy for scheduling and write rechecks."""
         return combat_options(observation, entity_id, expected_name, starter_defense=self.starter_defense,
-                              threat_radius=self.threat_radius)
+                              threat_radius=self.threat_radius, allow_unarmed=self.allow_unarmed)
 
     @property
     def defense_active(self):
@@ -488,11 +496,12 @@ class CombatSkills(SurvivalSkills):
                 context["data"]["shield_advanced"] = True
             self._wait(context, cooldown)
         elif option["mode"] == "melee":
-            weapon, cooldown = melee_weapon(observation["inventory"], prefer_tier=self.starter_defense)
+            weapon_pair = melee_weapon(observation["inventory"], prefer_tier=self.starter_defense)
+            weapon, cooldown = weapon_pair if weapon_pair else (None, 0.5)
             is_creeper = target["name"] == "creeper"
             if shield:
                 self._ensure_shield_offhand(context, observation)
-            if (observation["status"].get("held") or {}).get("name") != weapon:
+            if weapon is not None and (observation["status"].get("held") or {}).get("name") != weapon:
                 self._write(context, self.client.equip, weapon, status=observation["status"])
             self._write(context, self.client.look_at, target["pos"][0], target["pos"][1] + .9, target["pos"][2], status=observation["status"])
             if shield and not is_creeper and observation["status"].get("blocking") is not True:
@@ -523,7 +532,7 @@ class CombatSkills(SurvivalSkills):
         target = fresh_option["target"]
         context["data"]["target"] = target
         if fresh_option["mode"] == "melee":
-            if (refreshed["status"].get("held") or {}).get("name") != fresh_option["weapon"]:
+            if fresh_option["weapon"] is not None and (refreshed["status"].get("held") or {}).get("name") != fresh_option["weapon"]:
                 raise _Failure("weapon_unverified", "The selected weapon is no longer held")
             if shield and target["name"] != "creeper":
                 if refreshed["status"].get("blocking") is not True:

@@ -606,44 +606,65 @@ class SurvivalSkills:
         self._overworld(initial)
         if not initial.get("on_ground") or initial.get("in_water") or initial.get("in_lava"):
             raise _Failure("unsafe", "Emergency burrow requires dry ground footing")
-        feet = [math.floor(v) for v in initial["pos"]]
-        fx, fy, fz = feet
-        if fy < 54:
+        fx = math.floor(initial["pos"][0])
+        top_y = math.floor(initial["pos"][1] - 0.15)
+        fz = math.floor(initial["pos"][2])
+        if top_y < 53:
             raise _Failure("unsafe", "Already deep underground; emergency burrow not needed")
         counts, _ = self._inventory(context)
-        floor_pos = [fx, fy - 4, fz]
+        burrow_support = self.SUPPORT | {"muddy_mangrove_roots", "dirt_path", "farmland", "soul_sand", "crimson_nylium", "warped_nylium"}
+        floor_pos = [fx, top_y - 3, fz]
         floor_block = self._block(floor_pos, context)
-        if floor_block["name"] not in self.SUPPORT or not self._safe_block(floor_block):
+        if floor_block["name"] not in burrow_support or not self._safe_block(floor_block):
             raise _Failure("unsafe", "Unsafe floor beneath burrow depth", {"pos": floor_pos, "block": floor_block["name"]})
-        col_positions = ([fx, fy - 1, fz], [fx, fy - 2, fz], [fx, fy - 3, fz])
+        col_positions = ([fx, top_y, fz], [fx, top_y - 1, fz], [fx, top_y - 2, fz])
         col_blocks = [self._block(pos, context) for pos in col_positions]
         for pos, block in zip(col_positions, col_blocks):
-            if block["name"] not in self.SUPPORT or not self._safe_block(block):
+            if block["name"] not in burrow_support or not self._safe_block(block):
                 raise _Failure("unsafe", "Burrow column contains unsupported or hazardous block",
                                {"pos": pos, "block": block["name"]})
         soft_burrow = {
             "dirt", "grass_block", "coarse_dirt", "rooted_dirt", "podzol", "mycelium",
-            "mud", "packed_mud", "sand", "red_sand", "gravel", "snow_block", "moss_block", "pale_moss_block",
+            "mud", "packed_mud", "muddy_mangrove_roots", "dirt_path", "farmland",
+            "sand", "red_sand", "gravel", "snow_block", "moss_block", "pale_moss_block",
+        }
+        hard_stone = {
+            "stone", "cobblestone", "cobbled_deepslate", "deepslate",
+            "andesite", "granite", "diorite", "tuff", "sandstone", "red_sandstone", "calcite",
         }
         has_pickaxe = any(counts.get(p, 0) > 0 for p in self.PICKAXES)
         if not has_pickaxe and sum(1 for blk in col_blocks if blk["name"] in soft_burrow) < 2:
             raise _Failure("unsafe", "Too much hard stone to burrow quickly without a pickaxe")
+        pick_tier = next(
+            (tier for tier in ("netherite", "diamond", "iron", "stone", "wooden", "copper", "golden")
+             if counts.get(tier + "_pickaxe", 0) > 0),
+            None,
+        )
+        stone_sec = {"netherite": 0.4, "diamond": 0.45, "iron": 0.55, "stone": 0.8, "golden": 0.6, "wooden": 1.4, "copper": 1.0, None: 7.5}[pick_tier]
+        estimated_sec = 2.0 + sum(
+            0.9 if blk["name"] in soft_burrow else (stone_sec if blk["name"] in hard_stone else 1.8)
+            for blk in col_blocks
+        )
+        if estimated_sec > 22.0:
+            raise _Failure("unsafe", f"Estimated burrow duration ({estimated_sec:.1f}s) too close to watchdog limit",
+                           {"estimated_seconds": round(estimated_sec, 1)})
         cap_candidates = (
             "dirt", "cobblestone", "cobbled_deepslate", "stone", "sandstone", "red_sandstone",
-            "andesite", "granite", "diorite",
+            "andesite", "granite", "diorite", "mud",
             "oak_planks", "spruce_planks", "birch_planks", "dark_oak_planks",
             "acacia_planks", "jungle_planks", "mangrove_planks", "cherry_planks", "pale_oak_planks",
             "oak_log", "spruce_log", "birch_log", "sand", "gravel",
         )
         has_existing_cap = any(counts.get(item, 0) >= 1 for item in cap_candidates)
         can_harvest_cap = any(
-            blk["name"] in (soft_burrow - {"gravel", "sand"})
+            blk["name"] in (soft_burrow - {"gravel", "sand", "muddy_mangrove_roots", "dirt_path", "farmland"})
+            or blk["name"] in {"grass_block", "dirt_path", "farmland"}
             or (has_pickaxe and blk["name"] in {"stone", "cobblestone", "cobbled_deepslate", "deepslate"})
             for blk in col_blocks
         )
         if not (has_existing_cap or can_harvest_cap):
             raise _Failure("missing_item", "No solid cap block available for emergency burrow")
-        above = self._block([fx, fy + 1, fz], context)
+        above = self._block([fx, top_y + 2, fz], context)
         if not self._safe_block(above):
             raise _Failure("unsafe", "Hazard directly above head prevents burrowing", {"block": above["name"]})
         for pos in col_positions:
@@ -652,9 +673,9 @@ class SurvivalSkills:
                 if not self._safe_block(nbr):
                     raise _Failure("unsafe", "Adjacent liquid/fire hazard near burrow",
                                    {"pos": [pos[0] + dx, pos[1], pos[2] + dz], "block": nbr["name"]})
-        if abs(initial["pos"][0] - (fx + 0.5)) > 0.2 or abs(initial["pos"][2] - (fz + 0.5)) > 0.2:
+        if abs(initial["pos"][0] - (fx + 0.5)) > 0.16 or abs(initial["pos"][2] - (fz + 0.5)) > 0.16:
             try:
-                self._action(context, self.client.move_to, fx + 0.5, float(fy), fz + 0.5, range=0.15, timeout_ms=4000)
+                self._action(context, self.client.move_to, fx + 0.5, float(initial["pos"][1]), fz + 0.5, range=0.15, timeout_ms=3500)
             except (_Failure, APIError):
                 pass
         for pos in col_positions:
@@ -665,15 +686,26 @@ class SurvivalSkills:
                 rem = self._block(pos, context)
                 if rem["name"] not in self.AIR:
                     raise _Failure("dig_unverified", "Burrow block was not cleared", {"pos": pos, "block": rem["name"]})
+        expected_feet_y = top_y - 2
         settled = self._status(context)
-        if math.floor(settled["pos"][1]) > fy - 3:
+        deadline = time.monotonic() + 1.2
+        while (settled["pos"][1] > expected_feet_y + 0.25 or settled.get("on_ground") is not True) and time.monotonic() < deadline:
+            if context["cancel"] is not None:
+                context["cancel"].wait(0.2)
+            else:
+                time.sleep(0.2)
+            self._check(context)
+            settled = self._status(context)
+        if settled["pos"][1] > expected_feet_y + 0.25:
             try:
                 self._action(context, self.client.move_to, fx + 0.5, float(settled["pos"][1]), fz + 0.5, range=0.15, timeout_ms=3000)
+                time.sleep(0.4)
                 settled = self._status(context)
             except (_Failure, APIError):
                 pass
-        if math.floor(settled["pos"][1]) > fy - 3:
-            raise _Failure("move_unverified", "Bot did not drop 3 blocks into burrow", {"pos": settled["pos"], "expected_y": fy - 3})
+        if settled["pos"][1] > expected_feet_y + 0.25:
+            raise _Failure("move_unverified", "Bot did not drop 3 blocks into burrow",
+                           {"pos": settled["pos"], "expected_y": expected_feet_y})
         after_counts, _ = self._inventory(context)
         cap_item = next((item for item in cap_candidates if after_counts.get(item, 0) >= 1), None)
         if cap_item is None:
@@ -687,7 +719,8 @@ class SurvivalSkills:
         if placed["name"] in self.PLACEMENT_SPACE:
             raise _Failure("place_unverified", "Cap block did not place overhead", {"pos": cap_pos, "block": placed["name"]})
         context["placement_verified"] = True
-        return {"burrow_feet": [fx, fy - 3, fz], "cap_pos": cap_pos, "cap_item": cap_item, "night_burrow": True}
+        return {"burrow_feet": [fx, expected_feet_y, fz], "cap_pos": cap_pos, "cap_item": cap_item,
+                "estimated_seconds": round(estimated_sec, 1), "night_burrow": True}
 
     @staticmethod
     def _hurt_interruption(error):

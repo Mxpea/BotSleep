@@ -131,15 +131,17 @@ class DailySafetyPolicy:
         sealed_underground = self._is_sealed_underground(observation, context)
         hostiles = self._visible_dangerous_hostiles(observation, status["pos"], context)
         if hostiles:
-            combat = combat_options(observation)
+            combat = combat_options(observation, allow_unarmed=self.llm_override_on_block)
             ranged_close = any(row.get("name") in RANGED_HOSTILES and dist <= 6.5 for dist, _, row in hostiles)
             ranged = any(row.get("name") in RANGED_HOSTILES for _, _, row in hostiles)
             close_melee = combat.get("allowed") is True and combat.get("mode") == "melee" and combat.get("distance", 9) <= 2.8 and not ranged_close
+            unarmed_close = combat.get("allowed") is True and combat.get("weapon") is None and combat.get("distance", 9) <= 2.8
             if combat.get("allowed") is True and (
                 not ranged
                 or combat.get("shield") is True
                 or combat.get("mode") == "shield_advance"
                 or close_melee
+                or unarmed_close
             ):
                 target = combat["target"]
                 return "combat", Decision("fight_hostile", {"entity_id": target["id"], "expected_name": target["name"]},
@@ -150,6 +152,14 @@ class DailySafetyPolicy:
             retreat_failed = retreat_rec.get("no_route_exhausted") is True or (
                 self.llm_override_on_block and int(retreat_rec.get("cooldown_cycles") or 0) >= 1
             )
+            if self.llm_override_on_block and not self._has_valuable_gear(observation):
+                if self._has_nearby_item_drop(observation) and not any(dist <= 2.8 for dist, _, _ in hostiles):
+                    return "normal", None
+                if not any(dist <= 2.8 for dist, _, _ in hostiles) and self._should_emergency_burrow(observation, context):
+                    return "emergency_burrow", Decision("emergency_burrow", {},
+                        "Dig 3 blocks down and cap 1 overhead instead of empty-handed night retreating", "safety")
+                if not any(dist <= 2.5 and row.get("name") == "creeper" for dist, _, row in hostiles) and status["health"] >= 8 and not any(dist <= 2.5 for dist, _, _ in hostiles):
+                    return "normal", None
             if ((self.sleep_policy == "opportunistic" or self.llm_override_on_block) and retreat_failed
                     and status["health"] > 4):
                 if combat.get("allowed") is True:
@@ -691,11 +701,13 @@ class DailySafetyPolicy:
             notes.append("SPAWN_CAMP_ALERT: repeated recent deaths near spawn; flee spawn pit, dig 2-3 blocks underground or craft shield+sword")
         pos = self._point(status.get("pos"))
         if pos is not None:
-            hostiles = self.rules._dangerous_hostiles(observation, pos)
+            hostiles = self._visible_dangerous_hostiles(observation, pos, context)
             if hostiles:
                 retreat_rec = context.get("retreat_recovery") or {}
                 suffix = " (retreat boxed in/failed)" if (retreat_rec.get("no_route_exhausted") or retreat_rec.get("cooldown_cycles")) else ""
                 notes.append(f"hostile_nearby ({len(hostiles)} within danger radius{suffix}): fight_hostile or move_to/dig escape")
+        if not self._has_valuable_gear(observation) and self._has_nearby_item_drop(observation):
+            notes.append("DROPPED_GEAR_NEARBY: Item drops are visible nearby; call run_survival_task(task='recover_drops') to reclaim gear.")
         return notes
 
     def _opportunistic_low_health_release(self, observation, context=None):
@@ -713,6 +725,28 @@ class DailySafetyPolicy:
         if footing is not None and footing.get("name") in TREE_SUPPORTS:
             return False
         return not any(distance <= self.threat_radius for distance, _ in self.rules._hostiles(observation, status["pos"]))
+
+    _VALUABLE_GEAR = frozenset({
+        "shield", "bucket", "water_bucket", "lava_bucket", "flint_and_steel",
+        "obsidian", "raw_iron", "iron_ingot", "diamond", "blaze_rod", "ender_pearl",
+        "stone_pickaxe", "stone_sword", "stone_axe", "furnace",
+        "bread", "cooked_beef", "cooked_porkchop", "cooked_mutton", "cooked_chicken",
+    })
+    _VALUABLE_PREFIXES = ("iron_", "diamond_", "netherite_", "golden_")
+
+    def _has_valuable_gear(self, observation):
+        counts = self.rules._counts(observation)
+        return any(
+            count > 0 and (name in self._VALUABLE_GEAR or name.startswith(self._VALUABLE_PREFIXES))
+            for name, count in counts.items()
+        )
+
+    @staticmethod
+    def _has_nearby_item_drop(observation):
+        return any(
+            isinstance(row, dict) and (row.get("type") == "item" or row.get("name") == "item")
+            for row in (observation.get("entities") or [])
+        )
 
     def _is_sealed_underground(self, observation, context=None):
         status = observation.get("status") or {}
@@ -765,6 +799,8 @@ class DailySafetyPolicy:
         if status.get("on_ground") is not True or status.get("in_water") or status.get("in_lava") or status.get("in_cobweb"):
             return False
         ctx = context or {}
+        if not self._has_valuable_gear(observation):
+            return False
         if time.time() < float(ctx.get("emergency_burrow_cooldown") or 0):
             return False
         burrow = ctx.get("night_burrow")
@@ -809,8 +845,18 @@ class DailySafetyPolicy:
             if scenario == "near_hostile" and isinstance(baseline_decision, Decision) and baseline_decision.goal == "safety" and baseline_decision.name in {"wait", "retreat_from"}:
                 return baseline_decision
             return forced
-        if isinstance(baseline_decision, Decision) and baseline_decision.name in {"retreat_from", "canopy_escape"}:
+        if isinstance(baseline_decision, Decision) and baseline_decision.name == "canopy_escape":
             return baseline_decision  # Continue an already verified canopy relay.
+        if isinstance(baseline_decision, Decision) and baseline_decision.name == "retreat_from":
+            evacuating = bool(((context or {}).get("retreat_recovery") or {}).get("evacuating"))
+            keep_retreat = (
+                evacuating
+                and not (self._is_sealed_underground(observation, context)
+                         and not self._visible_dangerous_hostiles(observation, observation["status"]["pos"], context))
+                and not (self.llm_override_on_block and not self._has_valuable_gear(observation))
+            )
+            if keep_retreat or not self.llm_override_on_block:
+                return baseline_decision
         if (isinstance(baseline_decision, Decision) and baseline_decision.name == "wait" and baseline_decision.goal == "safety"
                 and not (self._is_sealed_underground(observation, context)
                          and not self._visible_dangerous_hostiles(observation, observation["status"]["pos"], context))):

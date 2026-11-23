@@ -684,7 +684,7 @@ class CombatClientTests(unittest.TestCase):
             return CombatWorld.control(world, **kwargs)
 
         world.effects["control"] = advance
-        skills = CombatSkills(world)
+        skills = CombatSkills(world, allow_unarmed=True)
         with patch.object(skills, "_wait"):
             res = skills.execute("fight_hostile", {"entity_id": 5, "expected_name": "skeleton"})
         self.assertTrue(res.success, res)
@@ -698,7 +698,7 @@ class CombatClientTests(unittest.TestCase):
         world.counts = {"iron_sword": 1, "shield": 1}
         world.status["offhand"] = {"name": "shield", "count": 1}
         world.entities = [{"id": 8, "name": "creeper", "type": "hostile", "pos": [2.5, 64, .5], "health": 20}]
-        skills = CombatSkills(world)
+        skills = CombatSkills(world, allow_unarmed=True)
         with patch.object(skills, "_wait"):
             res = skills.execute("fight_hostile", {"entity_id": 8, "expected_name": "creeper"})
         self.assertTrue(res.success, res)
@@ -707,3 +707,15 @@ class CombatClientTests(unittest.TestCase):
         controls = [c[1] for c in world.calls if c[0] == "control"]
         self.assertTrue(any(c.get("hit") == 1 for c in controls))
         self.assertTrue(any(c.get("back") is True for c in controls))
+
+    def test_unarmed_daily_bot_punches_close_zombie_without_equip(self):
+        world = CombatWorld()
+        world.counts = {}
+        world.entities = [{"id": 12, "name": "zombie", "type": "hostile", "pos": [2.2, 64, .5], "health": 20}]
+        skills = CombatSkills(world, allow_unarmed=True)
+        with patch.object(skills, "_wait"):
+            res = skills.execute("fight_hostile", {"entity_id": 12, "expected_name": "zombie"})
+        self.assertTrue(res.success, res)
+        self.assertIsNone(res.data["weapon"])
+        self.assertFalse(any(c[0] == "equip" for c in world.calls))
+        self.assertTrue(any(c[0] == "control" and c[1].get("hit") == 1 for c in world.calls))

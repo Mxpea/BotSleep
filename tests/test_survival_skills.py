@@ -1571,7 +1571,34 @@ class WaterEscapeTests(unittest.TestCase):
         self.assertTrue(res.success, res)
         self.assertEqual(res.data["burrow_feet"], [0, 61, 0])
         self.assertEqual(res.data["cap_pos"], [0, 63, 0])
+        self.assertLessEqual(res.data["estimated_seconds"], 22.0)
         self.assertEqual(world.blocks[(0, 63, 0)]["name"], res.data["cap_item"])
+
+        mud_world = World()
+        mud_world.status.update({"pos": [0.5, 62.9, 0.5], "dimension": "overworld", "on_ground": True,
+                                 "in_water": False, "in_lava": False, "health": 18, "food": 18})
+        for y, name in ((62, "mud"), (61, "dirt"), (60, "dirt"), (59, "stone")):
+            mud_world.set_block((0, y, 0), name)
+        mud_world.set_block((0, 64, 0), "air")
+        for y in (62, 61, 60):
+            for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                mud_world.set_block((dx, y, dz), "dirt")
+
+        def mud_dig(pos):
+            key = tuple(pos)
+            name = mud_world.blocks[key]["name"]
+            mud_world.set_block(key, "air")
+            drop = "dirt" if name == "dirt" else "mud"
+            mud_world.counts[drop] = mud_world.counts.get(drop, 0) + 1
+            if key[1] == 60:
+                mud_world.status["pos"] = [0.5, 60.0, 0.5]
+            return envelope({"dug": name, "gained": {drop: 1}})
+
+        mud_world.dig_effect = mud_dig
+        mud_res = SurvivalSkills(mud_world).execute("emergency_burrow", {})
+        self.assertTrue(mud_res.success, mud_res)
+        self.assertEqual(mud_res.data["burrow_feet"], [0, 60, 0])
+        self.assertEqual(mud_res.data["cap_pos"], [0, 62, 0])
 
         unsafe_world = World()
         unsafe_world.status.update({"pos": [0.5, 64.0, 0.5], "dimension": "overworld", "on_ground": True,
