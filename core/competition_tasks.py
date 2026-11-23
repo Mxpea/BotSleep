@@ -746,9 +746,9 @@ class CompetitionTasks:
         if path == "mine_stone":
             return True
         if path == "upgrade_tools":
-            return stage in {"stone", "iron"}
+            return stage in {"stone", "iron"} or "minecraft:story/mine_stone" in self._state["confirmed"]
         if path == "smelt_iron":
-            return stage == "iron"
+            return stage == "iron" or "minecraft:story/upgrade_tools" in self._state["confirmed"]
         if path in {"iron_tools", "obtain_armor"}:
             raw = any(counts.get(name, 0) for name in ("raw_iron", "iron_ore", "deepslate_iron_ore"))
             return bool(counts.get("iron_ingot") or raw and (counts.get("furnace") or "furnace" in blocks))

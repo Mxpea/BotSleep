@@ -9,6 +9,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -45,6 +46,47 @@ class ObservationCollector:
         self.terrain_summary = terrain_summary
         self.include_footing = include_footing
         self.combat_mode = combat_mode
+        self._resource_pool = None
+        self._resource_job = None
+        self._resource_key = None
+        self._resource_rows = []
+        self._resource_refresh_at = 0
+
+    def close(self):
+        if self._resource_pool is not None:
+            self._resource_pool.shutdown(wait=True, cancel_futures=True)
+
+    def _resource_hints(self, status, groups):
+        """Poll one read-only survey; never wait for a pending resource lookup."""
+        position = self._position(status)
+        key = (status["dimension"], repr(status.get("last_death")),
+               tuple(math.floor(v / 8) for v in position))
+        now = time.monotonic()
+        if key != self._resource_key:
+            self._resource_key = key
+            self._resource_rows = []
+            self._resource_refresh_at = 0
+        if self._resource_job is not None and self._resource_job.done():
+            job, self._resource_job = self._resource_job, None
+            try:
+                source, rows = job.result()
+            except APIError:
+                rows, source = [], None
+            if source == key:
+                self._resource_rows = rows
+        if self._resource_job is None and now >= self._resource_refresh_at:
+            def survey():
+                rows = []
+                for names in groups:
+                    rows.extend(self.client.scan_blocks_detached(radius=self.radius, types=names, limit=64))
+                return key, rows
+            if self._resource_pool is None:
+                self._resource_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="resource-survey")
+            self._resource_job = self._resource_pool.submit(survey)
+            self._resource_refresh_at = now + 10
+        return [copy.deepcopy(r) for r in self._resource_rows
+                if math.dist(position, self._position(r)) <= self.radius]
+
 
     @staticmethod
     def _check_cancel(cancel_event):
@@ -123,6 +165,8 @@ class ObservationCollector:
             response = self.client.get_status(**options())
             self._check_cancel(cancel_event)
             status = response.get("result") if isinstance(response, dict) else None
+            if isinstance(status, dict) and status.get("ready") is False:
+                return status  # Spawn transitions can omit dimension, busy and coordinates.
             if (not isinstance(status, dict) or type(status.get("ready")) is not bool
                     or type(status.get("alive")) is not bool or "busy" not in status
                     or not isinstance(status.get("dimension"), str)):
@@ -131,7 +175,15 @@ class ObservationCollector:
                 self._position(status)
             return status
 
-        first = read_status()
+        try:
+            first = read_status()
+        except APIError as error:
+            if error.code != "request_timeout":
+                raise
+            # No observation or action exists yet. Give the read-only probe one fresh window.
+            self._check_cancel(cancel_event)
+            deadline = time.monotonic() + 2.0
+            first = read_status()
         nearby = first.get("nearest_hostile") or {}
         distance = nearby.get("dist") if isinstance(nearby, dict) else None
 
@@ -148,14 +200,22 @@ class ObservationCollector:
         possible_ranged = (type(distance) in (int, float) and math.isfinite(distance)
                            and 0 <= distance <= max(threat_radius, 16))
         idle = first["ready"] and first["alive"] and (first["busy"] is None or first["busy"] is False)
-        if not force and not near and not possible_ranged and idle:
-            return None
         observation = {"status": first, "inventory": [], "counts": {}, "blocks": [], "entities": [],
                        "fresh": True, "observed_at": utc_now(), "observation_scope": "safety",
                        "inventory_fresh": False, "terrain_fresh": False}
         if not idle:
             return observation  # Local wait only; never overlap a backend action.
-        entities = self.client.get_entities(radius=min(64, max(18, threat_radius + 2)), **options())
+        if (self.combat_mode == "daily" and first.get("health", 20) < 20
+                and first.get("dimension") in {"overworld", "minecraft:overworld"}
+                and not any(first.get(k) for k in ("in_water", "in_lava", "on_fire", "is_sleeping", "in_vehicle"))):
+            x, y, z = self._cell(first["pos"])
+            head = self.client.get_block([x, y + 1, z], **options()).get("result", {})
+            if head.get("name") in {"sand", "gravel", "red_sand"}:
+                return {**observation, "buried_head": [x, y + 1, z]}
+        if not force and not near and not possible_ranged:
+            return None
+        entities = self.client.get_entities(radius=min(64, max(18, threat_radius + 2)),
+                                            types=["hostile", "player"], **options())
         self._check_cancel(cancel_event)
         if not isinstance(entities, list) or len(entities) > 64:
             raise APIError("invalid_response", "Short safety entity list is invalid")
@@ -170,6 +230,13 @@ class ObservationCollector:
             raise APIError("observation_changed", "Lifecycle or backend activity changed during short safety observation")
         origin, endpoint = self._position(first), self._position(final)
         if self._cell(origin) != self._cell(endpoint) or abs(origin[1] - endpoint[1]) >= .5:
+            if (near_summary(final) and math.dist(origin, endpoint) <= 3
+                    and type(first.get("health")) in (int, float) and type(final.get("health")) in (int, float)
+                    and final["health"] < first["health"]):
+                options()
+                observation.update(status=final, entities=entities,
+                                   duration_seconds=round(time.monotonic() - started, 3))
+                return observation  # Retreat rechecks footing; do not authorize melee from this scan.
             raise APIError("observation_changed", "Position changed during short safety observation")
         options()  # Enforce the same total budget after the final response.
         dangerous = any(entity["type"] == "hostile" and math.dist(endpoint, entity["pos"]) <=
@@ -209,8 +276,7 @@ class ObservationCollector:
             final = self._status(status, cancel_event, grounded=True, timeout_seconds=remaining())
             remaining()
         except APIError as error:
-            if self.combat_mode != "starter" or error.code not in {
-                    "request_timeout", "network_error", "invalid_json", "invalid_response"}:
+            if error.code not in {"request_timeout", "network_error", "invalid_json", "invalid_response"}:
                 raise
             # The retreat skill will recheck status and terrain before any write.
             observation["combat"] = {"allowed": False, "reason": "combat_observation_unavailable",
@@ -243,7 +309,10 @@ class ObservationCollector:
 
         return read
 
-    def _local_geometry(self, status, cancel_event, *, read_block=None):
+    def _geometry_target(self, observation):
+        return None
+
+    def _local_geometry(self, status, cancel_event, *, read_block=None, target=None):
         """Sample local support/body cells, without promising a traversable path.
 
         One collection caches at most five blocks per selected column (60 reads
@@ -280,10 +349,14 @@ class ObservationCollector:
         offsets = sorted(self.LOCAL_COLUMNS, key=lambda offset:
                          (x + offset[0] + 0.5 - origin[0]) ** 2
                          + (z + offset[1] + 0.5 - origin[2]) ** 2)
+        if target is not None:
+            offsets.sort(key=lambda d: (abs(d[0]) + abs(d[1]) != 1,
+                         math.hypot(x + d[0] + .5 - target[0], z + d[1] + .5 - target[2])))
         for dx, dz in offsets:
             if len(standing) >= 8 and len(placement) >= 8:
                 break
             # Current column is absent, including feet/head cells at other levels.
+            direct = False
             for dy in (0, -1, 1):
                 candidate = [x + dx, y + dy, z + dz]
                 below = block_at([candidate[0], candidate[1] - 1, candidate[2]])
@@ -306,7 +379,11 @@ class ObservationCollector:
                 if can_place and len(placement) < 8:
                     placement.append({"pos": candidate, "support": below["name"]})
                 if can_stand and can_place:
+                    direct = dy == 0 and abs(dx) + abs(dz) == 1
                     break
+            if (direct and target is not None and math.hypot(candidate[0] + .5 - target[0], candidate[2] + .5 - target[2])
+                    < math.hypot(origin[0] - target[0], origin[2] - target[2])):
+                break
         return {"local_geometry_origin": origin, "safe_stand_candidates": standing,
                 "placement_candidates": placement, "food_headroom_candidates": headroom}
 
@@ -421,10 +498,16 @@ class ObservationCollector:
         origin = self._position(status)
         observation.update(self._inventory_evidence(cancel_event))
         # Separate resource classes so abundant stone cannot hide every bed/log.
-        for names in (LOGS + BEDS + ["crafting_table", "furnace"],
-                      ["stone", "cobblestone", "coal_ore", "deepslate_coal_ore"]):
-            self._check_cancel(cancel_event)
-            observation["blocks"].extend(self.client.get_blocks(radius=self.radius, types=names, limit=64))
+        groups = (LOGS + BEDS + ["crafting_table", "furnace"],
+                  ["stone", "cobblestone", "coal_ore", "deepslate_coal_ore"])
+        if callable(getattr(type(self.client), "scan_blocks_detached", None)):
+            observation["blocks"].extend(self._resource_hints(status, (LOGS, groups[1])))
+            observation["blocks"].extend(self.client.get_blocks(radius=self.radius,
+                types=BEDS + ["crafting_table", "furnace"], limit=64))
+        else:
+            for names in groups:
+                self._check_cancel(cancel_event)
+                observation["blocks"].extend(self.client.get_blocks(radius=self.radius, types=names, limit=64))
         self._check_cancel(cancel_event)
         if self.include_terrain:
             # A model needs ground/foliage context to choose a workspace instead
@@ -437,7 +520,8 @@ class ObservationCollector:
                 "lava", "water", "fire", "soul_fire", "magma_block", "cactus",
                 "campfire", "soul_campfire", "powder_snow", "sweet_berry_bush"], limit=32))
             read_geometry = _read_geometry_block or self._geometry_reader(cancel_event)
-            observation.update(self._local_geometry(status, cancel_event, read_block=read_geometry))
+            observation.update(self._local_geometry(status, cancel_event, read_block=read_geometry,
+                                                    target=self._geometry_target(observation)))
             self._resource_visibility(observation, cancel_event, read_block=read_geometry)
         self._check_cancel(cancel_event)
         observation["entities"] = self.client.get_entities(radius=self.radius)
@@ -497,11 +581,14 @@ class SurvivalJournal:
             self._instance_thread_lock = _INSTANCE_LOCKS.setdefault(str(self.instance_lock_path.resolve()), threading.Lock())
         self._lock_depth = 0
         self.state = {"version": 1, "scope": scope, "context": {}, "pending": None, "last_result": None}
+        self._load_checkpoint()
+
+    def _load_checkpoint(self):
         if self.path.exists():
             try:
                 loaded = json.loads(self.path.read_text(encoding="utf-8"))
                 if (not isinstance(loaded, dict) or loaded.get("version") != 1
-                        or loaded.get("scope") != scope or not isinstance(loaded.get("context"), dict)
+                        or loaded.get("scope") != self.scope or not isinstance(loaded.get("context"), dict)
                         or (loaded.get("pending") is not None and not isinstance(loaded["pending"], dict))):
                     raise ValueError()
             except (ValueError, OSError):
@@ -685,6 +772,34 @@ class SurvivalJournal:
         with self._file_lock():
             self.state.update(changes, updated_at=utc_now())
             self._write_json_atomic(self.path, self.state)
+
+    def prepare_competition_round(self, settings: dict, *, new: bool) -> None:
+        """Under the session instance lock, archive a finished competition on explicit rollover."""
+        from core.competition_tasks import CompetitionTasks
+
+        self._load_checkpoint()  # Another instance could have updated it before we acquired the lock.
+        context = self.state["context"]
+        saved = context.get("competition")
+        if saved is None:
+            return
+        board = CompetitionTasks(settings, saved=saved).snapshot()
+        ended = board["phase"] == "completed" or board["remaining_seconds"] <= 0
+        if not new:
+            if board["remaining_seconds"] <= 0:
+                raise ValueError("Saved competition has expired. Use --new-competition to archive it and start a new round.")
+            return
+        if not ended:
+            raise ValueError("An active competition already exists. Resume the current round.")
+        task = context.get("autonomous_task") or {}
+        if self.has_pending_intent() or task.get("pending_digest") or task.get("status") == "unknown":
+            raise ValueError("Resolve the pending game action before starting another competition.")
+        archive = self.directory / f"competition-{uuid.uuid4().hex}.json"
+        self._write_json_atomic(archive, self.state)
+        context = dict(context)
+        for key in ("competition", "autonomous_task", "task_execution", "autonomous_task_objective"):
+            context.pop(key, None)
+        self.update(context=context)
+        self.record("COMPETITION_ROLLOVER", {"archive": archive.name})
 
     def has_pending_intent(self) -> bool:
         """Return True iff an unverified pending game-action intent is recorded."""

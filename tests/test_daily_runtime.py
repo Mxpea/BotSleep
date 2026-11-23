@@ -177,7 +177,7 @@ class DailyRuntimeTests(unittest.TestCase):
         self.assertEqual(self.world.counts.get("iron_ingot", 0), 0)
         self.assertEqual(harness.context["smelting_jobs"][0]["expected_output"], "iron_ingot")
         tools = {entry["function"]["name"] for entry in endpoint.requests[0]["body"]["tools"]}
-        local_safety = {"canopy_escape", "water_escape", "emergency_burrow", "retreat_from", "fight_hostile"}
+        local_safety = {"canopy_escape", "water_escape", "emergency_burrow", "clear_burial", "retreat_from", "fight_hostile"}
         self.assertTrue((set(DailySurvivalSkills.ARGUMENTS) - local_safety).issubset(tools))
         self.assertFalse(local_safety & tools)
         self.assertIn("plan_shelter", tools)

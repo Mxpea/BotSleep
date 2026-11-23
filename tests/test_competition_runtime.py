@@ -62,6 +62,20 @@ class CompetitionRuntimeTests(unittest.TestCase):
         self.addCleanup(runner.close)
         return runner, brain
 
+    def test_verified_production_child_skips_second_full_scan(self):
+        self.settings["autonomy"]["enabled"] = True
+        runner, _ = self.harness()
+        runner.task_controller.start({"task": "gather", "resource": "logs", "count": 2}, self.obs, runner.context)
+        runner._task_child = True
+        class Collector:
+            collect_inventory_readback = Mock(return_value={**self.obs, "duration_seconds": 0})
+            collect = Mock()
+        runner.collector = Collector()
+        runner._post_observe(Decision("gather_block", {}, "", "gather"), self.skills.execute.return_value, self.obs)
+        runner.collector.collect_inventory_readback.assert_called_once_with(self.obs["status"], runner._cancel, may_have_moved=True)
+        runner.collector.collect.assert_not_called()
+        self.client.advancements.assert_not_called()
+
     def test_daily_mainline_checkpoint_is_not_a_competition_goal(self):
         self.settings["autonomy"]["enabled"] = True
         runner, _ = self.harness()
@@ -74,6 +88,81 @@ class CompetitionRuntimeTests(unittest.TestCase):
         resumed, _ = self.harness()
         self.assertEqual(resumed.task_controller.snapshot()["status"], "idle")
         self.assertEqual(resumed.competition.snapshot()["phase"], "selection")
+
+    def test_round_rollover_preserves_expired_checkpoint_and_refuses_unknowns(self):
+        runner, _ = self.harness()
+        journal = runner.journal
+        settings = self.settings["competition"]
+        saved = runner.competition.state()
+        with journal.instance_lock():
+            journal.update(context={"competition": saved})
+            with self.assertRaisesRegex(ValueError, "active competition"):
+                journal.prepare_competition_round(settings, new=True)
+            saved["started_at"] -= settings["max_seconds"] + 1
+            journal.update(context={"competition": saved}, pending={"action": "dig"})
+            with self.assertRaisesRegex(ValueError, "pending"):
+                journal.prepare_competition_round(settings, new=True)
+            journal.update(pending=None)
+            with self.assertRaisesRegex(ValueError, "expired"):
+                journal.prepare_competition_round(settings, new=False)
+            journal.prepare_competition_round(settings, new=True)
+            self.assertNotIn("competition", journal.state["context"])
+            archived, = journal.directory.glob("competition-*.json")
+            self.assertEqual(json.loads(archived.read_text())["context"]["competition"], saved)
+
+    def test_startup_timeout_waits_then_replans_without_acknowledgement(self):
+        from core.model_gate import ModelRequestGate
+        gate = ModelRequestGate("https://offline.invalid", "test", directory=self.directory.name)
+        with self.assertRaises(TimeoutError):
+            with gate.request():
+                error = TimeoutError("test transport timeout")
+                error.code = "llm_timeout"
+                raise error
+        brain = Brain(response("select_task", {"goal_id": GOAL}))
+        brain.request_gate = gate
+        planner = LLMSurvivalPlanner({"enabled": True, "max_repair_attempts": 0}, self.settings, brain=brain)
+        runner = SurvivalHarness(self.client, self.settings, DEFAULTS["sleep"], planner=planner,
+                                 skills=self.skills, collector=self.collector)
+        self.addCleanup(runner.close)
+        self.assertEqual(runner.snapshot()["model_blocked"], "llm_request_uncertain")
+        self.assertTrue(self.step(runner).data["waiting"])
+        self.assertEqual(brain.requests, [])
+        self.assertEqual(gate.snapshot()["state"], "uncertain")
+        ledger = gate._read()
+        gate._write(dict(ledger, started_at=ledger["started_at"] - 30))
+        runner._continuous_gate_check = 0
+        runner._next_attempt = 0
+        runner.tick()
+        for _ in range(500):
+            if runner.tick(automatic=False) is not None:
+                break
+            time.sleep(.005)
+        self.assertEqual(len(brain.requests), 1)
+        self.assertEqual(runner.competition.snapshot()["active_goal_id"], GOAL)
+
+    def test_director_selects_and_starts_production_without_model(self):
+        self.settings["autonomy"]["enabled"] = True
+        runner, brain = self.harness()
+        runner._model_blocked = "llm_request_uncertain"
+        self.assertTrue(self.step(runner).success)
+        self.assertEqual(runner.competition.snapshot()["phase"], "active")
+        self.assertTrue(self.step(runner).data["accepted"])
+        self.assertEqual(brain.requests, [])
+
+    def test_director_rebuilds_tools_after_confirmed_stone_age(self):
+        self.settings["autonomy"]["enabled"] = True
+        self.obs.update(inventory=[], counts={})
+        envelope = self.advancement_envelope()
+        result = envelope["result"]
+        row = next(r for r in result["advancements"] if r["id"] == "minecraft:story/mine_stone")
+        row.update(status="completed", progress={"criteria_done": 1, "criteria_total": 1})
+        result["summary"].update(completed=1, not_started=result["summary"]["total"] - 1)
+        self.client.advancements.side_effect = lambda **kwargs: envelope
+        runner, brain = self.harness()
+        self.assertTrue(self.step(runner).success)
+        self.assertEqual(runner.competition.state()["active_goal_id"], GOAL)
+        self.assertTrue(self.step(runner).data["accepted"])
+        self.assertEqual(brain.requests, [])
 
     def step(self, runner):
         runner._next_attempt = 0
@@ -335,15 +424,17 @@ class CompetitionRuntimeTests(unittest.TestCase):
         world.block(world.source, "lava", properties={"level": 0})
         self.obs["status"]["pos"] = world.status["pos"]
         self.obs["blocks"].append({"name": "lava", "pos": world.source, "properties": {"level": 0}})
-        runner, brain = self.harness(response("select_task", {"goal_id": lava}),
-            response("collect_liquid", {"pos": world.source, "expected_name": "lava"}, call_id="fill"))
+        runner, brain = self.harness(response("collect_liquid", {"pos": world.source, "expected_name": "lava"}, call_id="fill"))
         runner.bucket_skills = BucketSkills(world)
-        self.assertTrue(self.step(runner).success)
+        runner._competition_context(self.obs)
+        tools, _, _ = runner.planner._request_catalog({"competition": runner.competition.model_view()}, self.obs)
+        self.assertNotIn("collect_liquid", {t["function"]["name"] for t in tools})
+        self.assertTrue(runner.competition.select(lava)["success"])
         result = self.step(runner)
         self.assertTrue(result.success, result)
         tools = [{row["function"]["name"] for row in request["tools"]} for request in brain.requests]
-        self.assertNotIn("collect_liquid", tools[0])
-        self.assertIn("collect_liquid", tools[1])
+        self.assertEqual(len(tools), 1)
+        self.assertIn("collect_liquid", tools[0])
         self.assertEqual(world.counts["lava_bucket"], 1)
         self.assertFalse(any(call[0] == "move" for call in world.calls))
         self.assertEqual(runner.competition.snapshot()["score"]["raw"], 0)

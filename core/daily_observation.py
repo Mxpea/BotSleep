@@ -29,6 +29,20 @@ class DailyObservationCollector(ObservationCollector):
     def set_context(self, context):
         self.context = copy.deepcopy(context) if isinstance(context, dict) else {}
 
+    def _geometry_target(self, observation):
+        task = self.context.get("task_execution") or {}
+        status = observation["status"]
+        recent = task.get("recent_results") or []
+        if (self.campaign or task.get("status") != "running" or task.get("task") != "gather"
+                or task.get("local_recoveries") or (recent and recent[-1].get("success") is False)
+                or status.get("on_ground") is not True or status.get("is_day") is not True
+                or status.get("nearest_hostile") or status.get("health", 0) <= self.low_health_threshold):
+            return None
+        from core.autonomous_tasks import RESOURCE_NAMES
+        names = RESOURCE_NAMES.get((task.get("args") or {}).get("resource"), ())
+        points = [self._block_pos(row["pos"]) for row in observation["blocks"] if row.get("name") in names]
+        return min(points, key=lambda p: math.dist(p, status["pos"]), default=None)
+
     @staticmethod
     def _result(response):
         if not isinstance(response, dict) or response.get("ok") is not True or not isinstance(response.get("result"), dict):

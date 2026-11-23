@@ -46,7 +46,7 @@
 
 目标与能力差异：daily 的 13 项证据任务板不等于赛事 advancement 清单；competition 现在提供 advancement 任务板和结束 gate，但尚未实现完整阶段清单、动态 skill 加载或导航执行器；starter 的 `goal_complete` 与 competition 的 `end_competition` 是两套退出语义。
 
-模型与动作两个恢复入口必须分清：`--resume` 只处理游戏 pending；`--acknowledge-model-idle` 只在已确认 provider 空闲后解除模型不确定锁。不能用重启/清文件绕过门禁；当前脚本退出会登出游戏，不是 handoff 保持在线功能。
+`--resume` 只处理游戏 pending。模型超时或断网且本地请求已结束时，日常/赛事循环可在请求发起满 30 秒后按当前状态重新规划，无需人工解锁。服务端旧请求可能仍在生成并计费。进程异常中断等其他未知状态仍须先确认 provider 空闲，再使用 `--acknowledge-model-idle`。
 
 ### 当前目标程序与未来阶段调度的区别
 
@@ -95,6 +95,8 @@
 建议：同一能力注册信息生成 schema，避免实现与 skill 漂移。所有执行路径，包括调试和恢复，都经过动作协调器。读取独立并行；stop 独立通道；posture/look 虽不占服务器锁，也有受控资源所有权。网关不负责目标规划，导航策略负责路点、风险和进展。计划/进度卡保持简短，不要求模型逐个预批 API 动作；校验比赛规则、阶段范围、工具权限和明确安全护栏。
 
 ### 当前已实现的 competition 模型工具
+
+默认启用 autonomy 时，Harness 在 `selection` 从当前可选计分项目中确定目标。采石、石镐、铁锭、铁镐、铁靴、钻石、钻石靴复用本地批量任务。每次选定目标只自动派发一次；成功后仍须核对服务器 advancement。缺少程序路线或需要修复时才请求模型。未知写入和模型门禁仍按原协议处理。显式禁用 autonomy 保留旧单步模式。
 
 | 工具 | 参数 | 语义 |
 |---|---|---|
@@ -147,6 +149,8 @@
 规划器按已观测地形构建局部移动图，执行器按移动类型落实路点。可参考 Baritone 的移动可行性、时间/材料代价和执行校验，但无法直接接入其客户端控制与设置。公开 API 不提供避水配置，不得假造 `liquidCost` 参数。未知区域不能当作安全路径；材料不足或无可验证通路时报告 route_blocked。
 
 预设目标检测器逐项给证据与状态。`CompetitionTasks` 已用 `/advancements` 的 fresh 响应完成该 gate：缺失目标仍记录 unknown，未知不计分；所有非根目标被检查后，`end_competition` 才能进入 terminal。模型也可 force-exit 当前目标并回任务选择。
+
+同一世界启动新一轮使用 `python main.py --mode survival --objective competition --new-competition`。已有赛事须已完成或已到时，检查点有待确认游戏动作时需先处理该意图。旧检查点以 `competition-*.json` 归档在原作用域中。恢复进行中的赛事使用 `--resume`。
 
 ## 7. 已确认方向与设计树
 
@@ -236,3 +240,6 @@ Pi 的实现使用可配置 reserve/keepRecent 预算、摘要和保留消息边
 状态对照：已有离线回归覆盖单动作互斥、取消/安全反馈、模型串行门禁、pending 恢复和后验验证；不等于完整赛事导航/恢复验收。版本化生存/速通阶段建议已进入上下文与监控，缺少适配的阶段保持 blocked；它不替代可恢复的完整速通执行器。仍待补齐的主要是：动态 skill 加载、重复输出触发 compact 的兜底链、语义 compact/显式 handoff、受协调的要塞工具和水面/搭路导航。赛事目标检测、退出工具和基础监控已接入。模型服务未知状态当前需明确确认后才能恢复，不能承诺完全自主长期故障恢复。最新验证见 [TESTING.md](TESTING.md)。
 
 维护：标明事实/提案/已确认；接口修改同步实现、schema、skill 与测试；不记机器路径、凭据、token 或原始大日志。
+### 上游移动语义（a9d5ceb）
+
+客户端 `move_to` 接受坐标或 `entity_id`，两者互斥。拾取传 `entity_id`，省略 `range` 以使用掉落物默认距离 0.5 格；背包增量才证明拾取成功。精确落脚可传 `range=0`，不允许部分到达。地表侦察的长距离移动传 `allow_partial=True`，按实际落点计算进展，不能把 `partial: true` 当作已抵达指定坐标。

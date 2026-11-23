@@ -236,6 +236,7 @@ class SurfaceScoutSkill(BaseSkill):
                 round(tz, 1),
                 timeout_ms=move_timeout_ms,
                 range=4,
+                allow_partial=True,
             )
             receipt = response.get("result") if isinstance(response, dict) else None
             if isinstance(receipt, dict):

@@ -74,7 +74,7 @@ class LocalRecoveryRuntimeTests(unittest.TestCase):
         self.assertFalse(short["inventory_fresh"])
         self.assertFalse(short["terrain_fresh"])
         self.assertNotIn("footing", short)
-        self.assertFalse(any(call[0] == "get_block" for call in self.world.calls[before:]))
+        self.assertFalse(any(call[0] == "get_block" and call[1][1] < 70 for call in self.world.calls[before:]))
         harness, brain = self.make_harness()
         self.assertEqual(harness.daily_policy.constraints(full)["scenario"], "canopy_escape")
         self.assertNotEqual(harness.daily_policy.constraints(short)["scenario"], "canopy_escape")

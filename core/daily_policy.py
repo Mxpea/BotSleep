@@ -33,6 +33,7 @@ class DailySafetyPolicy:
         settings = settings or {}
         if isinstance(settings, Mapping) and isinstance(settings.get("survival"), Mapping):
             settings = settings["survival"]
+        self.competition = settings.get("objective") == "competition"
         self.rules = SurvivalPlanner(settings)
         self.low_health = self.rules.low_health
         self.threat_radius = self.rules.threat_radius
@@ -227,7 +228,7 @@ class DailySafetyPolicy:
         steps = recovery.get("steps", 0)
         critical = 0 < status["health"] <= 4
         night = self._night(status)
-        night_step = critical and self.sleep_policy == "opportunistic" and not self._strict_night_block(observation, status)
+        night_step = (critical or self.competition) and self.sleep_policy == "opportunistic" and not self._strict_night_block(observation, status)
         if (type(steps) is not int or not 0 <= steps < 8 or recovery.get("unknown") is True
                 or recovery.get("needs_ai") is True and not critical
                 or recovery.get("cooling_down") is True or status.get("thundering")
@@ -258,7 +259,7 @@ class DailySafetyPolicy:
                        and abs(start[0] - end[0]) + abs(start[2] - end[2]) == 1)
             if (row.get("support") not in DailySurvivalSkills.SUPPORT
                     or row.get("support") in TREE_SUPPORTS
-                    or not (terrace or level and not night) or start == end
+                    or not (terrace or level and (not night or self.competition and night_step)) or start == end
                     or self._cell(pos) in visited or self.rules._key(pos) in excluded
                     or not self._near_safe(pos, observation, 3)):
                 continue
@@ -586,7 +587,9 @@ class DailySafetyPolicy:
 
     def risk_advice(self, observation, context=None):
         """Allow normal planning for tactical risks after local recovery has no next step."""
-        if not self.advisory or not isinstance(observation, dict) or self._partial(observation):
+        recovery = (context or {}).get("food_recovery") or {}
+        stranded = self.competition and recovery.get("needs_ai") is True
+        if not (self.advisory or stranded) or not isinstance(observation, dict) or self._partial(observation):
             return []
         context = context or {}
         if self._basics(observation, context)[1] is not None:

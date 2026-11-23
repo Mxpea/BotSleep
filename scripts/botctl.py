@@ -89,7 +89,10 @@ def inspect_runtime(
     if gate_state in ("inflight", "in_flight"):
         block_reasons.append("model_gate_in_flight")
     elif gate_state == "uncertain":
-        block_reasons.append("model_gate_uncertain_requires_acknowledge_model_idle")
+        if gate_snapshot.get("error_code") in {"llm_timeout", "llm_network_error"}:
+            block_reasons.append("model_gate_transport_cooldown")
+        else:
+            block_reasons.append("model_gate_uncertain_requires_acknowledge_model_idle")
     elif gate_state not in ("idle", None):
         block_reasons.append(f"model_gate_{gate_state}")
 

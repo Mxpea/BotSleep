@@ -84,6 +84,7 @@ class SurvivalSkills:
         "canopy_escape": (set(), set()),
         "water_escape": (set(), set()),
         "emergency_burrow": (set(), set()),
+        "clear_burial": ({"pos"}, {"pos"}),
     }
 
     def __init__(self, client):
@@ -785,6 +786,41 @@ class SurvivalSkills:
             raise _Failure("action_unconfirmed", "Interrupted retreat did not settle within its observation budget")
         finally:
             context.pop("navigation_settle_deadline", None)
+
+    def _clear_burial(self, args, context):
+        head = self._pos(args["pos"], block=True)
+        feet = [head[0], head[1] - 1, head[2]]
+        def same_cell(status):
+            self._overworld(status)
+            if [math.floor(v + .0001) for v in status["pos"]] != feet:
+                raise _Failure("observation_changed", "Moved out of the buried cell")
+        same_cell(self._status(context))
+        falling = {"sand", "gravel", "red_sand"}
+        if self._block(head, context)["name"] not in falling:
+            return {"cleared": True}
+        if self._block(feet, context)["name"] in self.AIR and self._inventory(context)[0].get("torch", 0):
+            for _ in range(2):
+                context["placement_write"] = True
+                try:
+                    reply = self._action(context, self.client.place_block, item="torch", x=feet[0], y=feet[1], z=feet[2],
+                                         _validate_status=same_cell)
+                except APIError as error:
+                    if error.code not in {"occupied", "blocked_by_self", "no_support", "missing_item"}:
+                        raise
+                    context["placement_write"] = False
+                    if error.code == "occupied":
+                        continue
+                    break
+                if reply.get("placed") != "torch" or reply.get("pos") != feet:
+                    raise _Failure("action_unconfirmed", "Torch placement outcome unknown")
+                context["placement_verified"] = True
+                break
+        if self._block(head, context)["name"] in falling:
+            self._action(context, self.client.dig, head, collect=False, timeout_ms=3000, _validate_status=same_cell)
+        clear = self._block(head, context)["name"] in self.AIR
+        if not clear:
+            raise _Failure("still_buried", "Head cell not yet clear; reassess before another action")
+        return {"cleared": True}
 
     def _water_escape(self, args, context):
         before = self._status(context)

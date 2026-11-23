@@ -24,6 +24,7 @@ def parse_args(argv=None):
     parser.add_argument("--max-steps", type=int, help="Bound survival observation/action cycles")
     parser.add_argument("--once", action="store_true", help="Run one sleep attempt or survival decision and exit")
     parser.add_argument("--keep-connected", action="store_true", help="Keep the Minecraft player logged in on exit and reuse cached session token across runs")
+    parser.add_argument("--new-competition", action="store_true", help="Archive a completed or expired competition and start a fresh round")
     parser.add_argument("--resume", action="store_true", help="Explicitly resume survival from fresh observations; never replay a saved action")
     parser.add_argument("--acknowledge-model-idle", action="store_true", help="Clear model transport uncertainty ONLY after confirming the provider has no running request")
     parser.add_argument("--check-config", action="store_true", help="Validate configuration without connecting")
@@ -65,6 +66,8 @@ def main(argv=None) -> int:
                 raise ConfigError("competition disables in-game debug commands")
         if args.acknowledge_model_idle and (config["agent"]["mode"] != "survival" or not config["llm"]["enabled"]):
             raise ConfigError("--acknowledge-model-idle requires model survival mode")
+        if args.new_competition and (args.resume or config["survival"]["objective"] != "competition"):
+            raise ConfigError("--new-competition requires competition mode and cannot be combined with --resume")
         if args.resume and config["agent"]["mode"] != "survival":
             raise ConfigError("--resume is only available in survival mode")
         if args.max_steps is not None:
@@ -118,6 +121,7 @@ def main(argv=None) -> int:
             username=config["agent"]["name"],
             password=config["agent"]["password"],
             timeout_seconds=config["mc_api"]["timeout_seconds"],
+            recorder=recorder,
         )
         if survival:
             from core.survival_state import SurvivalJournal
@@ -129,6 +133,8 @@ def main(argv=None) -> int:
             )
             instance_lock = journal_guard.instance_lock()
             instance_lock.__enter__()
+            if config["survival"]["objective"] == "competition":
+                journal_guard.prepare_competition_round(config["survival"]["competition"], new=args.new_competition)
         if recorder:
             recorder.record("INFO", "main", "STARTUP", {"username": client.username, "mode": config["agent"]["mode"],
                             "planner": "llm" if survival and config["llm"]["enabled"] else "rules",
@@ -261,6 +267,12 @@ def main(argv=None) -> int:
                     except Exception as exc:
                         print(f"Session save warning: {exc}", file=sys.stderr)
             else:
+                if client.token and callable(getattr(client, "disconnect", None)):
+                    try:
+                        client.disconnect()
+                    except Exception as exc:
+                        exit_code = 1
+                        print(f"Game disconnect failed: {exc}", file=sys.stderr)
                 try:
                     client.logout()
                 except Exception as exc:
