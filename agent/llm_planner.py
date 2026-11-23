@@ -13,6 +13,8 @@ from typing import Optional
 from .brain import LLMError, OpenAIBrain
 from .survival_planner import Decision, SurvivalPlanner
 from .tools import TOOL_DEFINITIONS, TOOL_SCHEMAS, tools_for_objective
+from core.intent_compiler import IntentCompiler
+from skills.daily_survival import DailySurvivalSkills
 
 
 SYSTEM_PROMPT = """You control a Minecraft survival agent through the supplied tools.
@@ -136,6 +138,11 @@ class LLMSurvivalPlanner:
         self.tool_definitions = tools_for_objective(self.objective)
         self.autonomy_enabled = survival_settings.get("autonomy", {}).get("enabled", True) is True
         self.disable_sleep = bool(survival_settings.get("disable_sleep", False))
+        self.intent = str(survival_settings.get("intent", "survival") or "survival")
+        self._compiler = IntentCompiler(
+            intent=self.intent,
+            smelt_items=frozenset(DailySurvivalSkills.SMELTABLE.values()),
+        )
         self.advisory = (self.objective == "daily" and survival_settings.get("risk_policy") == "advisory"
                          and survival_settings.get("intent", "survival") == "survival"
                          and survival_settings.get("campaign") is not True)
@@ -789,12 +796,11 @@ If that goal tool is unavailable, use only the currently advertised tools.
         if name not in allowed_names or name not in allowed_schemas:
             raise LLMError("llm_invalid_arguments", "This tool is not allowed in the current request; choose an advertised bounded goal or safety tool")
         args = self._json_arguments(function.get("arguments"))
-        # The daily board uses a stock level, while the task API names the
-        # operation and resource separately. Normalize this one known spelling
-        # before applying the actual per-turn schema and all normal safety checks.
-        if (name == "run_survival_task" and args.get("task") == "wood_reserve"
-                and args.get("resource", "logs") == "logs" and "item" not in args):
-            args = {**args, "task": "gather", "resource": "logs"}
+        # Deterministically normalize model plurals/aliases, smelt inputs, and speedrun/cooldown guardrails
+        # before strict JSON schema validation runs.
+        args, compile_err = self._compiler.compile_tool_call(name, args, observation, context)
+        if compile_err is not None:
+            raise LLMError(compile_err[0], compile_err[1])
         self._validate(args, allowed_schemas[name])
         args = copy.deepcopy(args)
         content = message.get("content")
@@ -973,6 +979,7 @@ If that goal tool is unavailable, use only the currently advertised tools.
                     prompt_context["action_hints"] = filtered_hints
                 else:
                     prompt_context.pop("action_hints", None)
+            self._compiler.filter_prompt_context(prompt_context, allowed_names)
             if routing.get("mode") == "goal" and isinstance(prompt_context.get("daily_tasks"), dict):
                 board = dict(prompt_context["daily_tasks"])
                 tasks = board.get("tasks")

@@ -15,6 +15,7 @@ from agent.daily_survival import DAILY_SKILLS, DailySurvivalGoals
 from agent.survival_planner import Decision, LOG_NAMES, PLANK_NAMES, SAFE_FOOD, WOOD_SPECIES
 from core.daily_policy import DailySafetyPolicy
 from core.domain import SCOUT_DEFAULT_DISTANCE, SCOUT_MAX_DISTANCE, SCOUT_MIN_DISTANCE
+from core.intent_compiler import should_prefer_local_workstation
 from core.mining_targets import estimate_empty_main_slots
 from core.production_recipes import CRAFT_ITEMS, RECIPES, ingredient_items, plan_craft, wood_inputs
 from core.skill_registry import STARTER_MINING_SKILLS, internal_skills_for_objective
@@ -1046,6 +1047,21 @@ class AutonomousTaskController:
                     return child
             return deferred_move
         if plan.needs_table:
+            if item != "crafting_table" and should_prefer_local_workstation("crafting_table", obs, context):
+                # Remote table is out of safe vertical/horizontal reach (e.g. surface vs underground):
+                # craft or place a new local table beside the bot instead of failing on stale stairs.
+                if counts.get("crafting_table", 0) >= 1:
+                    local_obs = {
+                        **obs,
+                        "blocks": [b for b in self.rules._blocks(obs) if b.get("name") != "crafting_table"],
+                    }
+                    local_ws = self.rules._workspace(local_obs, context)
+                    if local_ws and local_ws.goal != "explore":
+                        return self._resource_child(local_ws, obs, context)
+                else:
+                    crafted_table = self._craft("crafting_table", 1, obs, context, depth + 1)
+                    if crafted_table and crafted_table.goal != "explore":
+                        return crafted_table
             workspace = self.rules._workspace(obs, context)
             if workspace:
                 if workspace.goal == "explore":
@@ -1131,19 +1147,20 @@ class AutonomousTaskController:
             if (job.get("expected_output") == item and job.get("dimension") == obs["status"].get("dimension")
                     and self.rules._pos(job.get("pos")) and self.rules._key(job["pos"]) not in self.rules._blocked(context)):
                 return self._decision("inspect_container", {"pos": job["pos"]}, "Inspect the current pending furnace job")
-        if not self.daily._safe_rows(obs, {"furnace"}, context=context):
+        if not self.daily._safe_rows(obs, {"furnace"}, context=context) or should_prefer_local_workstation("furnace", obs, context):
             if counts.get("furnace", 0):
                 return self._row_decision(self.daily._place("furnace", obs, self._data["task"], context))
-            self._recipe_gaps.append(f"{item} needs furnace x1")
-            furnace = self._craft("furnace", 1, obs, context, depth + 1)
-            if furnace is not None and furnace.goal != "explore":
+            if not self.daily._safe_rows(obs, {"furnace"}, context=context) or counts.get("cobblestone", 0) >= 8:
+                self._recipe_gaps.append(f"{item} needs furnace x1")
+                furnace = self._craft("furnace", 1, obs, context, depth + 1)
+                if furnace is not None and furnace.goal != "explore":
+                    return furnace
+                if item == "iron_ingot" and not any(counts.get(n, 0) for n, output in DailySurvivalSkills.SMELTABLE.items() if output == item):
+                    self._recipe_gaps.append("iron_ingot needs raw_iron x1")
+                    ore = self._gather("raw_iron", obs, context)
+                    if ore is not None and ore.goal != "explore":
+                        return ore
                 return furnace
-            if item == "iron_ingot" and not any(counts.get(n, 0) for n, output in DailySurvivalSkills.SMELTABLE.items() if output == item):
-                self._recipe_gaps.append("iron_ingot needs raw_iron x1")
-                ore = self._gather("raw_iron", obs, context)
-                if ore is not None and ore.goal != "explore":
-                    return ore
-            return furnace
         inputs = [name for name, output in DailySurvivalSkills.SMELTABLE.items() if output == item]
         if not any(counts.get(name, 0) for name in inputs):
             if item == "iron_ingot":
