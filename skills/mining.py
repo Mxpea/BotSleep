@@ -516,6 +516,7 @@ class MineShaftSkill(BaseSkill):
         prefer_caves_first: bool = False,
         initial_quota_progress: Optional[Mapping[str, int]] = None,
         resume_progress: Optional[Mapping[str, Any]] = None,
+        underground_reentry: bool = False,
         cancel_event: Optional[threading.Event] = None,
         timeout_seconds: float = 210.0,
         allow_damage: bool = True,
@@ -539,7 +540,28 @@ class MineShaftSkill(BaseSkill):
 
         excavation_spec = mine_shaft_spec(branch_length=branch_len, include_workstations=False)
         site: Optional[Dict[str, Any]] = None
-        if origin is None:
+        underground_direct = bool(underground_reentry and resumed is None and origin is None)
+        if underground_direct:
+            # Skip surface plot checks when continuing deep mining already underground:
+            # anchor straight at the bot's current underground coordinates.
+            st_raw = self.client.get_status()
+            st = st_raw.get("result") if isinstance(st_raw, dict) and "result" in st_raw else st_raw
+            bp = parse_pos(st.get("pos") if isinstance(st, dict) else None)
+            if bp is None:
+                return SkillResult(
+                    False,
+                    "Cannot resolve underground mining position.",
+                    error_code="invalid_state",
+                    data={"executed": False, "structure_verified": False},
+                )
+            int_origin = [math.floor(bp[0] + 0.0001), math.floor(bp[1] + 0.0001), math.floor(bp[2] + 0.0001)]
+            norm_orient = normalize_orientation(orientation or (orientations[0] if orientations else "south"))
+            site = {
+                "origin": list(int_origin),
+                "orientation": norm_orient,
+                "surface_entry": [bp[0], bp[1], bp[2]],
+            }
+        elif origin is None:
             if orientation is not None:
                 orient_filter = [normalize_orientation(orientation)]
             elif orientations:
@@ -735,9 +757,10 @@ class MineShaftSkill(BaseSkill):
                 "rib_spacing": max(2, min(8, int(rib_spacing))),
                 "max_trunk_steps": max(4, min(120, int(max_trunk_steps))),
                 "prefer_caves_first": bool(prefer_caves_first),
-                "deep_pos": list(resumed.get("deep_pos")) if resumed and resumed.get("deep_pos") else None,
+                "deep_pos": list(resumed.get("deep_pos")) if resumed and resumed.get("deep_pos") else (list(int_origin) if underground_direct else None),
                 "deep_fwd": list(resumed.get("deep_fwd")) if resumed and resumed.get("deep_fwd") else None,
-                "deep_trail": [list(p) for p in (resumed.get("deep_trail") or [])] if resumed else [],
+                "deep_trail": [list(p) for p in (resumed.get("deep_trail") or [])] if resumed else ([list(int_origin)] if underground_direct else []),
+                "underground_reentry": underground_direct,
                 "trunk_done": int(resumed.get("trunk_done", 0)) if resumed else 0,
                 "resume_progress": resumed,
                 "block_cache": {},
@@ -771,9 +794,12 @@ class MineShaftSkill(BaseSkill):
             place_workstation=place_workstation,
             resumed=resumed is not None,
             deep_or_fishbone=deep_or_fishbone,
+            underground_reentry=underground_direct,
         )
 
         def verify_fn(c: WorkflowContext) -> Dict[str, Any]:
+            if c.extra.get("underground_reentry"):
+                return {"complete": True, "missing": [], "underground_reentry": True}
             include_ws = bool(c.extra.get("deploy_workstation"))
             stop_reason_now = str(c.extra.get("stop_reason") or "branch_done")
             if c.extra.get("branch_redirected_or_sealed") or stop_reason_now != "branch_done":
@@ -926,6 +952,7 @@ class MineShaftSkill(BaseSkill):
         place_workstation: Optional[bool],
         resumed: bool = False,
         deep_or_fishbone: bool = False,
+        underground_reentry: bool = False,
     ) -> List[ActionStep]:
         move_branches = {
             "stalled": self._branch_recover_move,
@@ -938,7 +965,7 @@ class MineShaftSkill(BaseSkill):
             **move_branches,
         }
         steps: List[ActionStep] = []
-        if not resumed:
+        if not resumed and not underground_reentry:
             steps.extend([
                 ActionStep(
                     step_id="prepare_entry",
@@ -965,7 +992,7 @@ class MineShaftSkill(BaseSkill):
                     max_branch_attempts=2,
                 ),
             ])
-        if place_workstation is not False and not resumed:
+        if place_workstation is not False and not resumed and not underground_reentry:
             steps.append(
                 ActionStep(
                     step_id="deploy_workstation",
@@ -2021,7 +2048,11 @@ class MineShaftSkill(BaseSkill):
         fwd = (int(raw_fwd[0]), 0, int(raw_fwd[2]))
         opened_caves: Set[Tuple[int, int, int]] = set()
         saved_trail = [list(p) for p in (ctx.extra.get("deep_trail") or []) if isinstance(p, list) and len(p) == 3]
-        trail: List[List[int]] = saved_trail if saved_trail else [ctx.world_pos((0, -5, 8), integer=True)]
+        trail: List[List[int]] = (
+            saved_trail
+            if saved_trail
+            else ([list(cur_foot)] if ctx.extra.get("underground_reentry") else [ctx.world_pos((0, -5, 8), integer=True)])
+        )
         if saved_trail and len(saved_trail) > 1:
             self._retreat_downsampled(ctx, saved_trail, step_stride=1, reverse=False)
         elif tuple(cur_foot) != tuple(trail[0]):
@@ -2545,6 +2576,9 @@ class MineShaftSkill(BaseSkill):
         return report
 
     def _wf_settle_pose(self, ctx: WorkflowContext, *, return_to_surface: bool) -> Dict[str, Any]:
+        if ctx.extra.get("underground_reentry"):
+            # Underground re-entry has no 5-step surface staircase; stay safely near current origin.
+            return {"settled": "underground_reentry"}
         if return_to_surface:
             live = WorldNavigator.sync_live_pos(ctx)
             if live is not None and live[1] >= int(ctx.origin[1]) - 1:
@@ -3053,8 +3087,9 @@ class MineShaftSkill(BaseSkill):
 
         phase_reports: List[Dict[str, Any]] = []
         stop_reason = "bands_exhausted"
+        underground_start = bool(origin is None and bp0 is not None and bp0[1] <= 52.0)
 
-        if prefer_caves_first and parsed_targets:
+        if prefer_caves_first and parsed_targets and not underground_start:
             cave_cap = float((cave_policy or {}).get("explore_timeout_seconds", 220.0))
             cave_t = min(cave_cap, 240.0, float(band_timeout_seconds) * 0.65, max(45.0, float(total_timeout_seconds) * 0.45))
             cave_skill = CaveExploreSkill(self.client, memory=self.memory)
@@ -3109,11 +3144,15 @@ class MineShaftSkill(BaseSkill):
         else:
             schedule = [int(b["target_y"]) for b in bands]
             rem_total = max(90.0, float(total_timeout_seconds) - (time.monotonic() - t_start) - 10.0)
-            entry_check = self._ensure_returned_to_surface(start_surface, cancel_event=cancel_event)
+            entry_check = (
+                {"on_surface": True, "pos": list(bp0), "underground_reentry": True}
+                if underground_start
+                else self._ensure_returned_to_surface(start_surface, cancel_event=cancel_event)
+            )
             if not entry_check.get("on_surface"):
                 return SkillResult(False, "Could not verify the surface before starting the shaft",
                                    error_code="surface_return_failed", data={"surface_return": entry_check})
-            rot_orients = self._preferred_shaft_orientations(start_surface)
+            rot_orients = None if underground_start else self._preferred_shaft_orientations(start_surface)
             shaft_kwargs: Dict[str, Any] = {
                 "radius": 20,
                 "branch_length": 4,
@@ -3128,6 +3167,7 @@ class MineShaftSkill(BaseSkill):
                 "rib_spacing": rib_spacing,
                 "max_trunk_steps": max_trunk_steps,
                 "initial_quota_progress": net_now,
+                "underground_reentry": underground_start,
                 "timeout_seconds": min(float(band_timeout_seconds), rem_total),
                 "cancel_event": cancel_event,
                 "allow_damage": allow_damage,
@@ -3165,6 +3205,10 @@ class MineShaftSkill(BaseSkill):
                 stop_reason = "return_home"
             elif (res.data or {}).get("stop_reason") in {"band_complete", "branch_done"}:
                 stop_reason = str((res.data or {}).get("stop_reason"))
+            elif res.error_code:
+                # Preserve concrete failure reasons (e.g. no_mine_site_found, broken_pickaxe)
+                # rather than masking them under default bands_exhausted.
+                stop_reason = str(res.error_code)
             elif time.monotonic() - t_start >= float(total_timeout_seconds) - 10.0:
                 stop_reason = "timeout"
 
@@ -3183,6 +3227,7 @@ class MineShaftSkill(BaseSkill):
             data={
                 "harvested": final_net,
                 "stop_reason": stop_reason,
+                "underground_reentry": underground_start,
                 "phases": phase_reports,
                 "surface_return": final_surface,
             },

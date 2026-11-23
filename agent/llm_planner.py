@@ -733,7 +733,14 @@ If that goal tool is unavailable, use only the currently advertised tools.
         ):
             counts = (observation.get("counts") or {}) if isinstance(observation, dict) else {}
             report = context.get("last_scout_report") or {}
-            ready_for_lava_scout = any(counts.get(k, 0) > 0 for k in ("bucket", "water_bucket", "iron_pickaxe", "flint_and_steel"))
+            # Trigger lava-pool scouting once holding 4-iron portal prerequisites or an iron tool.
+            ready_for_lava_scout = (
+                any(
+                    counts.get(k, 0) > 0
+                    for k in ("bucket", "water_bucket", "lava_bucket", "iron_pickaxe", "flint_and_steel")
+                )
+                or counts.get("iron_ingot", 0) >= 4
+            )
             known_lava = bool(report.get("found_lava"))
             no_wood_yet = (
                 (("found_wood" in report and not report.get("found_wood"))
@@ -992,14 +999,17 @@ If that goal tool is unavailable, use only the currently advertised tools.
                     prompt_context["daily_tasks"] = board
             counts = observation.get("counts") or {}
             status = observation.get("status") or {}
-            portal_ready = (
-                counts.get("iron_pickaxe", 0) >= 1
-                and (counts.get("bucket", 0) >= 1 or counts.get("water_bucket", 0) >= 1 or counts.get("lava_bucket", 0) >= 1)
-                and (counts.get("iron_ingot", 0) >= 1 or counts.get("flint_and_steel", 0) >= 1)
+            # 4-iron portal threshold: bucket (3) + flint_and_steel (1), even without iron_pickaxe.
+            has_bucket = (
+                counts.get("bucket", 0) >= 1
+                or counts.get("water_bucket", 0) >= 1
+                or counts.get("lava_bucket", 0) >= 1
             )
+            has_ignition = counts.get("iron_ingot", 0) >= 1 or counts.get("flint_and_steel", 0) >= 1
+            portal_ready = (has_bucket and has_ignition) or counts.get("iron_ingot", 0) >= 4
             warnings = list(prompt_context.get("safety_warnings") or [])
             if portal_ready:
-                warnings.append("PORTAL_IRON_READY: You already hold iron_pickaxe + bucket + flint_and_steel/iron_ingot. Do NOT run a second deep_mine(raw_iron); proceed with nether_portal / surface lava scouting.")
+                warnings.append("PORTAL_IRON_READY: You already hold 4-iron portal materials (bucket + flint_and_steel/iron_ingot, or >=4 iron_ingot). Do NOT run another deep_mine(raw_iron); proceed with nether_portal / surface lava scouting.")
             elif counts.get("cobblestone", 0) >= 32 and counts.get("stone_pickaxe", 0) >= 1:
                 warnings.append("ENOUGH_COBBLESTONE: You already hold plenty of cobblestone; stop gathering cobblestone! Smelt raw_iron or run_survival_task(task='gather', resource='raw_iron', count=8) to dig deep for iron.")
             pos = status.get("pos")

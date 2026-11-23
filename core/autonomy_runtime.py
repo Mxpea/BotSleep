@@ -375,11 +375,13 @@ class AutonomyRuntime:
             targets = {"coal": {"count": count, "min_tool": "wooden_pickaxe"}}
         if self.campaign is not None:
             deep_home_thresholds["min_pickaxe_tool"] = next(iter(targets.values()))["min_tool"]
-        total_t = min({"diamond": 1140, "raw_iron": 540, "coal": 540}[resource], window.remaining())
-        band_t = min({"diamond": 960, "raw_iron": 460, "coal": 460}[resource], total_t * .85)
+        # Give raw_iron Y=16 shaft runs enough headroom (720s) after a short cave probe (60s)
+        # so the staircase descent leaves time for horizontal rib mining.
+        total_t = min({"diamond": 1140, "raw_iron": 720, "coal": 540}[resource], window.remaining())
+        band_t = min({"diamond": 960, "raw_iron": 600, "coal": 460}[resource], total_t * .84)
         res = miner.mine_targets_from_surface(
             targets=targets,
-            cave_policy={"explore_timeout_seconds": min(90.0 if resource == "raw_iron" else 220.0, total_t), "allow_tall_cave_subgraph": True},
+            cave_policy={"explore_timeout_seconds": min(60.0 if resource == "raw_iron" else 220.0, total_t), "allow_tall_cave_subgraph": True},
             home_thresholds=deep_home_thresholds,
             prefer_caves_first=(resource in {"raw_iron", "coal"}),
             cave_search_radius=40,
@@ -413,9 +415,16 @@ class AutonomyRuntime:
             max_hops = min(max_hops, estimated_hops)
         raw_r = decision.args.get("scan_radius", 48) if isinstance(decision.args, dict) else 48
         scan_radius = max(16, min(64, int(raw_r)))
+        # Focus surface scouts on lava pools once 4-iron portal materials or iron tools exist.
         goal_focus = (
             "lava"
-            if any(counts.get(k, 0) > 0 for k in ("bucket", "water_bucket", "iron_pickaxe", "flint_and_steel"))
+            if (
+                any(
+                    counts.get(k, 0) > 0
+                    for k in ("bucket", "water_bucket", "lava_bucket", "iron_pickaxe", "flint_and_steel")
+                )
+                or counts.get("iron_ingot", 0) >= 4
+            )
             else "auto"
         )
         attempt = int(self.context.get("scout_attempts", 0))
@@ -432,6 +441,12 @@ class AutonomyRuntime:
             cancel_event=window,
         )
         data = dict(res.data or {}) if isinstance(res.data, dict) else {}
+        mem_store = getattr(self, "memory", None)
+        if res.success and goal_focus == "lava" and not data.get("found_lava") and callable(getattr(mem_store, "recall_lava_candidates", None)):
+            remembered = mem_store.recall_lava_candidates(observation, limit=4)
+            if remembered:
+                data["found_lava"] = [{"name": r.get("name", "lava"), "pos": r["pos"]} for r in remembered]
+                data["lava_from_memory"] = True
         if res.success:
             self.context["last_scout_report"] = copy.deepcopy(data)
         return SkillResult(bool(res.success), str(res.message), data, res.error_code)
@@ -604,6 +619,14 @@ class AutonomyRuntime:
                 guard = WorkflowGuard(self.client, cancel_event=window, timeout_seconds=window.remaining())
                 rows = guard.read(self.client.find_blocks, types=["lava"], radius=64, limit=64)
                 pts = [row["pos"] for row in extract_blocks({"blocks": rows}) if row["name"] == "lava"]
+                mem_store = getattr(self, "memory", None)
+                if not pts and callable(getattr(mem_store, "recall_lava_candidates", None)):
+                    # Reuse verified surface lava pool coordinates across nights or deaths.
+                    pts = [
+                        r["pos"]
+                        for r in mem_store.recall_lava_candidates(observation, limit=4)
+                        if isinstance(r, dict) and r.get("pos")
+                    ]
                 approached = False
                 if pts:
                     nearest = min(pts, key=lambda pos: math.dist(origin, pos))
@@ -637,6 +660,14 @@ class AutonomyRuntime:
                     if scout_res.success:
                         self.context["last_scout_report"] = copy.deepcopy(sdata)
                     lava_pts = [r["pos"] for r in (sdata.get("found_lava") or []) if isinstance(r, dict) and isinstance(r.get("pos"), list)]
+                    if lava_pts and callable(getattr(mem_store, "remember_place", None)):
+                        dim = (observation.get("status") or {}).get("dimension")
+                        if dim and lava_pts[0][1] >= 56:
+                            try:
+                                mem_store.remember_place("hazard", "lava", lava_pts[0], dimension=dim,
+                                                         source="api_verified", ttl_seconds=3600)
+                            except Exception:
+                                pass
                     if lava_pts and window.remaining() > 15:
                         best = lava_pts[0]
                         mv = SurvivalSkills(self.client).execute(

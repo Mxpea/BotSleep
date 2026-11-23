@@ -70,8 +70,11 @@ flowchart TD
 | `core/domain.py` | 共享领域常量（木种、床色、食物点、危险方块）、纯坐标/体素键解析、背包计数提取与 `TypedDict` 契约 |
 | `core/skill_registry.py` | starter / daily / competition 技能注册表（目标作用域、终点安全复核标记、执行器槽位分发），包含自主任务、战斗与桶类入口；内部住所准备目录不暴露给模型 |
 | `core/retreat_controller.py` | 树冠/近敌分段撤退恢复状态机、失败落点冷却与中继恢复判定 |
-| `core/survival_harness.py` | 串行任务推进、单游戏动作线程、独立模型 worker、安全复查、取消、失败退避和检查点 |
-| `agent/llm_planner.py`、`agent/tools.py` | 完整注册 starter 9 / daily 35 / competition 40 工具；autonomy 正常规划仅暴露目标及安全/赛事元工具，needs_ai 开放原子修复；严格解析并保留配对工具反馈 |
+| `core/survival_harness.py` | 串行任务推进、单游戏动作线程、独立模型 worker、安全复查、取消、失败退避和检查点；安全门禁委托 `SafetyArbiter`，动作/跨步看门狗委托 `LoopSupervisor` |
+| `core/safety_arbiter.py` | 统一监控抢占基线与紧急状态判定（`SafetyArbiter`、`ThreatAssessment`）：严格模式保留硬门禁，放开 `llm_override_on_block` 时保证 `planning=True` 低血等警告对称放行，并在连续 `>=2` 次被动 `observation_scope="safety"` `wait(1)` 滞留后强制升级完整观测 |
+| `core/loop_supervisor.py` | 两级活锁看门狗（`LoopSupervisor`）：L1 单动作/工作流 `action_watchdog_seconds` 超时熔断，L2 跨步检查 `llm_cancelled` 高频抢占震荡护盾、静止 `wait` 提醒、无库存变化时的重复参数/失败签名冷却（库存变化即自动清除），以及夜间连续死亡热点 `recover_drops` 暂停 |
+| `core/intent_compiler.py` | 模型意图编译与本地工作台兜底（`IntentCompiler`、`resolve_plank_species`、`should_prefer_local_workstation`）：规范化复数与常见别称（`sticks->stick`）、`smelt` 输入映射与速通禁用铜/金提示、裁剪 `playbook.next_actions` 使之对齐当前可见工具集，并在工作台/熔炉过远或高差过大时优先本地合成放置 |
+| `agent/llm_planner.py`、`agent/tools.py` | 完整注册 starter 9 / daily 35 / competition 40 工具；autonomy 正常规划仅暴露目标及安全/赛事元工具，needs_ai 开放原子修复；通过 `IntentCompiler` 归一化并保留配对工具反馈 |
 | `core/competition_rules.py`、`core/competition_tasks.py` | 读取规则目录、计算可用性和服务器 advancement 证据、管理选择/完成/强退/终止及得分；不执行游戏动作 |
 | `core/model_worker.py`、`core/model_gate.py` | 慢模型异步等待；同服务/凭据作用域的本机线程与进程门禁；未知请求持久化锁定 |
 | `core/survival_state.py` | 有界观察、跨进程文件锁与原子检查点，按 API/账号/world_id 隔离并提供单实例 `instance_lock()`；pending 不自动重放 |
