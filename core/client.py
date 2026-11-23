@@ -88,6 +88,8 @@ class MinecraftAgentClient:
         self.token: Optional[str] = None
         self._continuous_session_file = None
         self._session = requests.Session()
+        self.activity_seq = 0
+        self.last_write_at = 0.0
 
     @staticmethod
     def _positive(value: float, name: str) -> float:
@@ -168,6 +170,9 @@ class MinecraftAgentClient:
             raise APIError(code, message, status_code, details)
         if data.get("ok") is not True:
             raise APIError("invalid_response", f"{endpoint} response has no boolean ok=true", status_code)
+        self.activity_seq += 1
+        if endpoint in self.WRITE_ENDPOINTS:
+            self.last_write_at = time.monotonic()
         return data
 
     @staticmethod

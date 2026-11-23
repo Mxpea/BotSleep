@@ -883,7 +883,9 @@ class DailyPolicyTests(unittest.TestCase):
         burrowed_ctx = {"life_generation": 1, "night_burrow": {"pos": [0, 61, 0], "generation": 1}}
         burrowed_obs = observed(is_day=False, time_of_day=15000, health=18, food=18, pos=[0.5, 61.0, 0.5])
         burrowed_obs["blocks"] = [{"name": "dirt", "pos": [0, 63, 0], "properties": {}}]
-        self.assertIsNone(no_sleep.choose(burrowed_obs, self.baseline, context=burrowed_ctx))
+        burrowed_obs["entities"] = [{"id": 91, "type": "hostile", "name": "skeleton", "pos": [0.5, 64.0, 0.5]}]
+        stale_wait = Decision("wait", {"seconds": 1}, "No verified retreat route; observe again before the bounded search", "safety")
+        self.assertIsNone(no_sleep.choose(burrowed_obs, stale_wait, context=burrowed_ctx))
 
         goals = DailySurvivalGoals({"daily": {"food_reserve": 8, "wood_reserve": 8, "fuel_reserve": 8}})
         ready_obs = observed(is_day=False, time_of_day=15000, health=18, food=18, pos=[0.5, 64.0, 0.5])

@@ -88,43 +88,10 @@ plan_shelter only checks a site; build_shelter_step places at most one block. Ke
 Death invalidates inventory and temporary plans. Only currently observed drops may be collected, after checking threats; do not charge toward an old death coordinate.
 After failures, use the paired result and fresh state to change target, position or prerequisites. Respect active target cooldowns. All models share one serialized request slot; provider uncertainty blocks new calls.
 Keep immediate safety and any active mainline chapter first.
-Combat & Night Underground Rule: On multiplayer servers where sleep is disabled (or at night without a bed), do NOT roam the open surface for food/wood or repeatedly call auto_sleep/bed. When night falls on the surface (pos[1]>=56) and you have a pickaxe, prioritize underground mining via run_survival_task(task="gather", resource="raw_iron" | "coal" | "cobblestone") to gather ore safely underground. When holding a shield and sword, fight_hostile handles shield-blocking vs skeleton arrows and hit-and-backstep vs creepers; dig/relocate if trapped on a repeated spawn-camp death spot.
+Combat & Night Rule: Do NOT roam open night surface or retry bed when sleep is disabled. At night/in night_burrow: mine <=11 cobblestone only if stone_pickaxe==0, NEVER keep mining cobblestone once >=16; with stone_pickaxe>=1 (and not portal-ready), run_survival_task(task="gather", resource="raw_iron", count=8) directly (or mine coal briefly if fuel<4). NEVER call scout at y<56. fight_hostile handles shield-blocking/creepers; dig down if spawn-camped.
 Speedrun Progression (ignore optional shelter/bed/farm/storage/maintenance/wood_reserve/fuel_reserve when food>=14 and health>=16):
-1) Spawn/early scouting: when newly spawned or lacking wood/structures (e.g., desert/treeless
-plains) and context.last_scout_report is absent, prefer ONE run_survival_task(task="scout")
-to scan forward ~200 blocks for villages, chests, crafting tables, oasis/border trees or
-surface caves. Once context.last_scout_report exists AND you have logs/planks/pickaxe or visible
-trees, do NOT call scout again; ONLY call scout again if you still hold 0 logs/planks/pickaxe
-and see no logs nearby, OR if gather(logs) escalated with bounded_local_recovery_exhausted due to
-unreachable/steep terrain (call scout ONCE to relocate). Always use unprefixed recipe names for
-"stick", "crafting_table", "furnace", "wooden_pickaxe", "stone_pickaxe" (NEVER wood-prefixed like
-"spruce_sticks"); once logs/planks >= 3, call run_survival_task(task="craft", item="wooden_pickaxe",
-count=1) directly (it crafts planks, sticks, and the table automatically). Do NOT call
-run_survival_task(task="recover_drops") unless item entities are visible nearby (death far away
-cannot be walked back). Do NOT craft stone_axe or extra duplicate tools early when operator_goal
-targets iron/diamond/nether speedrun: craft wooden_pickaxe -> gather(cobblestone, count=11) ->
-stone_pickaxe + furnace (and stone_sword if hostiles are near), then go straight to raw_iron.
-When context.operator_goal asks for iron/diamond gear and stone_pickaxe >= 1 with status.food >= 14
-and status.health >= 16, IGNORE optional daily_tasks (food_reserve, food_production, shelter, bed,
-base_site, storage, fuel_reserve, wood_reserve, furnace, maintain) EVEN AFTER a task
-escalation/failure: do NOT hunt animals, cook food, farm, chop extra wood reserves, or smelt
-charcoal (wooden planks/logs already smelt iron and mining finds coal). Call
-run_survival_task(task="gather", resource="raw_iron", count=12) IMMEDIATELY (it ensures spare stone
-pickaxes, prefers natural caves/water ravines and descends safely to Y=16, protecting you from
-night surface mobs). Do NOT craft any iron_pickaxe yet during raw_iron mining.
-2) Iron decision gate: once raw_iron, iron_ingot, or iron_tools completes, inspect current
-iron_ingot, iron_pickaxe, armor slots, offhand, food and reserves to decide the next goal
-yourself, STILL ignoring optional daily_tasks (food_reserve, shelter, wood_reserve, bed, furnace, maintain)
-while status.food >= 14 and status.health >= 16:
-Smelt remaining raw_iron into iron_ingot via run_survival_task(task="smelt", item="iron_ingot", count=...)
-first, then craft bucket (3) + shield (1, if >= 7 iron) + iron_pickaxe (3). Craft iron_armor only
-if you already hold >= 24 iron_ingot spare. Do NOT waste iron or turns on iron_axe before Nether/diamonds.
-Once you hold >= 1 iron_pickaxe and >= 1 bucket (or water_bucket/lava_bucket) and (>= 1 iron_ingot or flint_and_steel),
-DO NOT start another deep_mine(resource='raw_iron')! You already have enough iron for speedrun Nether entry;
-proceed DIRECTLY to run_survival_task(task="nether_portal") (or surface scouting/flint crafting) to enter the Nether quickly!
-Do NOT wait to gather gravel/flint or craft flint_and_steel manually — `nether_portal` itself mines/places
-gravel for flint, crafts flint_and_steel, fills water_bucket, finds lava/obsidian, casts/ignites the
-portal, and walks into `the_nether`. (Only mine `diamond` first if explicitly requested.)
+1) Early scout: if lacking wood/pickaxe and no last_scout_report, call ONE run_survival_task(task="scout") for trees/villages/caves; stop scouting once wood/pickaxe exist. Unprefixed names ("stick", "crafting_table", "furnace", "wooden_pickaxe", "stone_pickaxe"); craft wooden_pickaxe -> gather(cobblestone,11) -> stone_pickaxe+furnace -> gather(raw_iron,12) (with stone_pickaxe>=1 & food>=14 & health>=16, skip optional daily_tasks). Only recover_drops if visible.
+2) Iron gate: smelt raw_iron -> bucket (3) + shield (1) + iron_pickaxe (3). Hold >=1 iron_pickaxe + bucket + (iron_ingot>=1 or flint_and_steel)? DO NOT start another deep_mine(raw_iron); run nether_portal directly to build/ignite/enter the_nether.
 3) Food, Village/Chest & Lava/Nether gate: NEVER starve or ignore low food. If status.food <= 14
 and safe edible food in counts is 0, call run_survival_task(task="food", count=8) before deep
 mining (it crafts hay_block/wheat->bread, harvests crops, loots village chests, cooks meat and hunts
@@ -1017,11 +984,21 @@ If that goal tool is unavailable, use only the currently advertised tools.
                         board["completed_ids"] = done
                     prompt_context["daily_tasks"] = board
             counts = observation.get("counts") or {}
-            if (counts.get("iron_pickaxe", 0) >= 1
-                    and (counts.get("bucket", 0) >= 1 or counts.get("water_bucket", 0) >= 1 or counts.get("lava_bucket", 0) >= 1)
-                    and (counts.get("iron_ingot", 0) >= 1 or counts.get("flint_and_steel", 0) >= 1)):
-                warnings = list(prompt_context.get("safety_warnings") or [])
+            status = observation.get("status") or {}
+            portal_ready = (
+                counts.get("iron_pickaxe", 0) >= 1
+                and (counts.get("bucket", 0) >= 1 or counts.get("water_bucket", 0) >= 1 or counts.get("lava_bucket", 0) >= 1)
+                and (counts.get("iron_ingot", 0) >= 1 or counts.get("flint_and_steel", 0) >= 1)
+            )
+            warnings = list(prompt_context.get("safety_warnings") or [])
+            if portal_ready:
                 warnings.append("PORTAL_IRON_READY: You already hold iron_pickaxe + bucket + flint_and_steel/iron_ingot. Do NOT run a second deep_mine(raw_iron); proceed with nether_portal / surface lava scouting.")
+            elif counts.get("cobblestone", 0) >= 32 and counts.get("stone_pickaxe", 0) >= 1:
+                warnings.append("ENOUGH_COBBLESTONE: You already hold plenty of cobblestone; stop gathering cobblestone! Smelt raw_iron or run_survival_task(task='gather', resource='raw_iron', count=8) to dig deep for iron.")
+            pos = status.get("pos")
+            if isinstance(pos, (list, tuple)) and len(pos) == 3 and pos[1] < 56:
+                warnings.append("UNDERGROUND_NO_SCOUT: You are underground (y < 56); do NOT call scout. Dig raw_iron/smelt/craft or dig up cleanly.")
+            if warnings:
                 prompt_context["safety_warnings"] = warnings
             prompt_context["failed_actions"] = [{"action": failure["decision"].name, "args": failure["decision"].args,
                                                   "error_code": failure["code"]}

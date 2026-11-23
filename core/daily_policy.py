@@ -126,9 +126,10 @@ class DailySafetyPolicy:
             return "vehicle", self._wait("Leave the vehicle before daily tasks", "recover")
         if status.get("on_ground") is not True and not status.get("is_sleeping"):
             if not (self.llm_override_on_block and status.get("in_water") and int(((context or {}).get("water_recovery") or {}).get("steps") or 0) >= 2):
-                footing_wait = 0.3 if self.rules._dangerous_hostiles(observation, status["pos"]) else 1
+                footing_wait = 0.3 if self._visible_dangerous_hostiles(observation, status["pos"], context) else 1
                 return "unstable", self._wait("Wait for stable footing", "recover", footing_wait)
-        hostiles = self.rules._dangerous_hostiles(observation, status["pos"])
+        sealed_underground = self._is_sealed_underground(observation, context)
+        hostiles = self._visible_dangerous_hostiles(observation, status["pos"], context)
         if hostiles:
             combat = combat_options(observation)
             ranged_close = any(row.get("name") in RANGED_HOSTILES and dist <= 6.5 for dist, _, row in hostiles)
@@ -166,7 +167,8 @@ class DailySafetyPolicy:
                 return "near_hostile", Decision("retreat_from", {"pos": hostiles[0][1], "distance": retreat_dist},
                     "A hostile is within its danger radius; withdraw through freshly checked terrain instead of waiting exposed", "safety")
         nearby = status.get("nearest_hostile")
-        if isinstance(nearby, dict) and self.rules._number(nearby.get("dist")) and nearby["dist"] <= self.rules._threat_distance(nearby.get("name")):
+        if (not sealed_underground and isinstance(nearby, dict)
+                and self.rules._number(nearby.get("dist")) and nearby["dist"] <= self.rules._threat_distance(nearby.get("name"))):
             return "hostile_position_unknown", self._wait("Nearby hostile has no fresh position for a safe retreat")
         if status.get("is_sleeping"):
             return "sleeping", Decision("auto_sleep", {}, "Observe the existing sleep through the verified sleep skill", "sleep")
@@ -712,6 +714,45 @@ class DailySafetyPolicy:
             return False
         return not any(distance <= self.threat_radius for distance, _ in self.rules._hostiles(observation, status["pos"]))
 
+    def _is_sealed_underground(self, observation, context=None):
+        status = observation.get("status") or {}
+        pos = self._point(status.get("pos"))
+        if pos is None:
+            return False
+        ctx = context or {}
+        burrow = ctx.get("night_burrow")
+        if isinstance(burrow, dict) and burrow.get("generation") == ctx.get("life_generation"):
+            b_pos = burrow.get("pos")
+            if (isinstance(b_pos, (list, tuple)) and len(b_pos) == 3
+                    and abs(pos[0] - b_pos[0]) <= 2.5 and abs(pos[2] - b_pos[2]) <= 2.5 and pos[1] <= b_pos[1] + 1.5):
+                return True
+        fx, fy, fz = (math.floor(pos[0]), math.floor(pos[1]), math.floor(pos[2]))
+        blocks = {
+            cell: row
+            for row in extract_blocks(observation)
+            if (cell := cell_coords(row.get("pos"))) is not None
+        }
+        if not blocks:
+            return False
+        overhead = blocks.get((fx, fy + 2, fz))
+        if not overhead or overhead.get("name") not in DailySurvivalSkills.SUPPORT or overhead["name"].endswith("_log"):
+            return False
+        walled = sum(
+            1 for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1))
+            if (blocks.get((fx + dx, fy + 1, fz + dz)) or {}).get("name") in DailySurvivalSkills.SUPPORT
+        )
+        return walled >= 3
+
+    def _visible_dangerous_hostiles(self, observation, origin, context=None):
+        raw = self.rules._dangerous_hostiles(observation, origin)
+        if not raw or not self._is_sealed_underground(observation, context):
+            return raw
+        return [
+            (distance, pos, entity)
+            for distance, pos, entity in raw
+            if abs(float(pos[1]) - float(origin[1])) < 1.5 and distance <= 2.2
+        ]
+
     def _should_emergency_burrow(self, observation, context=None):
         status = observation.get("status") or {}
         if not self.disable_sleep or not self._night(status):
@@ -770,7 +811,9 @@ class DailySafetyPolicy:
             return forced
         if isinstance(baseline_decision, Decision) and baseline_decision.name in {"retreat_from", "canopy_escape"}:
             return baseline_decision  # Continue an already verified canopy relay.
-        if isinstance(baseline_decision, Decision) and baseline_decision.name == "wait" and baseline_decision.goal == "safety":
+        if (isinstance(baseline_decision, Decision) and baseline_decision.name == "wait" and baseline_decision.goal == "safety"
+                and not (self._is_sealed_underground(observation, context)
+                         and not self._visible_dangerous_hostiles(observation, observation["status"]["pos"], context))):
             return baseline_decision
         meal = self._meal(observation)
         if meal:

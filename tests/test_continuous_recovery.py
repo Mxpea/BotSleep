@@ -273,3 +273,20 @@ class ContinuousRecoveryTests(unittest.TestCase):
         h._next_idle_monitor = 0.0
         h._monitor_idle()
         self.assertTrue(h.paused)
+
+    def test_workflow_watchdog_allows_active_client_progress_beyond_single_timeout(self):
+        settings = {**self.settings, "intent": "speedrun", "continuous": False, "llm_override_on_block": True,
+                    "action_watchdog_seconds": 0.05}
+        self.world.activity_seq = 1
+        self.world.last_write_at = time.monotonic()
+        h = SurvivalHarness(self.world, settings, DEFAULTS["sleep"], journal=self.journal)
+        self.addCleanup(h.close)
+        d = Decision("gather_resource", {"task": "deep_mine"}, "Deep mining", "deep_mine")
+        h._task_child = True
+        h._active_decision = d
+        now = time.monotonic()
+        self.assertFalse(h._check_action_watchdog(now, d, self.world.status))
+        self.world.activity_seq += 1
+        self.world.last_write_at = now + 0.04
+        self.assertFalse(h._check_action_watchdog(now + 0.06, d, self.world.status))
+        h._task_child = False

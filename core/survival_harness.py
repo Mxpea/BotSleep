@@ -188,6 +188,9 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
         self._action_watchdog_seconds = float(settings.get("action_watchdog_seconds") or 0)
         self._watchdog_started_at = 0.0
         self._watchdog_last_progress_at = 0.0
+        self._watchdog_last_activity_at = 0.0
+        self._watchdog_last_activity_seq = None
+        self._watchdog_last_write_at = 0.0
         self._watchdog_last_pos = None
         self._watchdog_last_task_steps = None
         self._watchdog_decision_id = None
@@ -611,6 +614,11 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
         now_mono = time.monotonic()
         self._watchdog_started_at = now_mono
         self._watchdog_last_progress_at = now_mono
+        self._watchdog_last_activity_at = now_mono
+        raw_seq = getattr(self.client, "activity_seq", None)
+        self._watchdog_last_activity_seq = raw_seq if type(raw_seq) is int else None
+        raw_write = getattr(self.client, "last_write_at", 0.0)
+        self._watchdog_last_write_at = float(raw_write) if isinstance(raw_write, (int, float)) and not isinstance(raw_write, bool) else 0.0
         self._watchdog_last_pos = None
         self._watchdog_last_task_steps = (self.task_controller.snapshot().get("steps") if self.task_controller else None)
         self._watchdog_decision_id = None
@@ -935,8 +943,9 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
                     "t": time.time(),
                 }
                 self.context.pop("emergency_burrow_cooldown", None)
+                self.context.pop("retreat_recovery", None)
             elif not result.success:
-                self.context["emergency_burrow_cooldown"] = time.time() + 30.0
+                self.context["emergency_burrow_cooldown"] = time.time() + 120.0
         if observation and observation.get("observation_scope") == "safety":
             if decision.name == "fight_hostile" and self.memory:
                 self.memory.record_result(decision, result, observation)
@@ -1606,6 +1615,11 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
             self._watchdog_decision_id = id(decision)
             self._watchdog_started_at = now
             self._watchdog_last_progress_at = now
+            self._watchdog_last_activity_at = now
+            raw_seq = getattr(self.client, "activity_seq", None)
+            self._watchdog_last_activity_seq = raw_seq if type(raw_seq) is int else None
+            raw_write = getattr(self.client, "last_write_at", 0.0)
+            self._watchdog_last_write_at = float(raw_write) if isinstance(raw_write, (int, float)) and not isinstance(raw_write, bool) else 0.0
             self._watchdog_last_task_steps = (
                 self.task_controller.snapshot().get("steps") if self.task_controller else None
             )
@@ -1617,6 +1631,16 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
             )
             return False
         if self._is_workflow_decision(decision):
+            raw_seq = getattr(self.client, "activity_seq", None)
+            act_seq = raw_seq if type(raw_seq) is int else None
+            if act_seq is not None and act_seq != self._watchdog_last_activity_seq:
+                self._watchdog_last_activity_seq = act_seq
+                self._watchdog_last_activity_at = now
+            raw_write = getattr(self.client, "last_write_at", 0.0)
+            write_at = float(raw_write) if isinstance(raw_write, (int, float)) and not isinstance(raw_write, bool) else 0.0
+            if write_at > self._watchdog_last_write_at:
+                self._watchdog_last_write_at = write_at
+                self._watchdog_last_progress_at = now
             task_steps = self.task_controller.snapshot().get("steps") if self.task_controller else None
             if task_steps is not None and task_steps != self._watchdog_last_task_steps:
                 self._watchdog_last_task_steps = task_steps
@@ -1627,7 +1651,16 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
                 if self._watchdog_last_pos is None or math.dist(cur_pos, self._watchdog_last_pos) >= 0.45:
                     self._watchdog_last_pos = cur_pos
                     self._watchdog_last_progress_at = now
-            elapsed = now - self._watchdog_last_progress_at
+            # Workflows execute multi-step cave scans/mining: enforce strict 30s if API
+            # requests hang cleanly, and allow up to max(3*watchdog, 90s) for read-heavy scans
+            # before declaring no-write/no-movement stall.
+            if act_seq is not None and now - self._watchdog_last_activity_at >= watchdog_s:
+                elapsed = now - self._watchdog_last_activity_at
+            else:
+                stall_limit = max(watchdog_s * 3.0, 90.0) if act_seq is not None else watchdog_s
+                elapsed = now - self._watchdog_last_progress_at
+                if elapsed < stall_limit:
+                    return False
         else:
             elapsed = now - self._watchdog_started_at
         if elapsed < watchdog_s:
