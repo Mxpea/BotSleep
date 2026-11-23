@@ -89,6 +89,45 @@ class AutonomousTaskTests(unittest.TestCase):
         self.controller.record_result(decision, result, self.obs)
         return decision
 
+    def test_stone_search_does_not_return_to_start_or_spend_all_steps_circling(self):
+        obs = world({"wooden_pickaxe": 1, "cobblestone": 3})
+        ctrl = self.start({"task": "gather", "resource": "cobblestone", "count": 5}, obs)
+        start = list(obs["status"]["pos"])
+        self.assertIn(ctrl.rules._key(start), ctrl._data["visited"])
+        x, y, z = start
+        obs["status"]["pos"] = obs["local_geometry_origin"] = [x + 1, y, z]
+        obs["safe_stand_candidates"] = [{"pos": pos, "support": "stone"}
+                                        for pos in (start, [x + 2, y, z])]
+        self.assertEqual(ctrl._explore(obs, {}).args["pos"], [x + 2, y, z])
+        ctrl._data["explore_steps"] = 2
+        self.assertIsNone(ctrl._explore(obs, {}))
+
+    def test_imported_ladder_recurses_into_sticks(self):
+        obs = world({"oak_planks": 4})
+        obs["blocks"] = [{"name": "crafting_table", "pos": [2, 64, 0]}]
+        controller = self.start({"task": "craft", "item": "ladder", "count": 3}, obs)
+        self.assertEqual(self.act().args["item"], "stick")
+        self.assertEqual(self.act().args["item"], "ladder")
+        self.assertIsNone(controller.next_action(obs))
+        self.assertEqual(controller.snapshot()["status"], "completed")
+        self.assertEqual(obs["counts"]["ladder"], 3)
+
+    def test_missing_flint_does_not_hide_craftable_sticks_for_arrows(self):
+        obs = world({"oak_planks": 2, "feather": 1})
+        controller = self.start({"task": "craft", "item": "arrow", "count": 4}, obs)
+        self.assertEqual(self.act().args["item"], "stick")
+        self.assertIsNone(controller.next_action(obs))
+        self.assertIn("arrow needs flint x1", controller.snapshot()["reason"])
+
+    def test_iron_smelting_collects_available_ore_while_furnace_is_blocked(self):
+        obs = world({"stone_pickaxe": 1})
+        obs["blocks"] = [{"name": "iron_ore", "pos": [2, 64, 0], "can_see": True}]
+        controller = self.start({"task": "smelt", "item": "iron_ingot", "count": 1}, obs)
+        self.assertEqual(self.act().args["expected_name"], "iron_ore")
+        self.assertEqual(controller.snapshot()["progress"]["unit"], "iron_ingot")
+        self.assertIsNone(controller.next_action(obs))
+        self.assertIn("furnace needs cobblestone x8", controller.snapshot()["reason"])
+
     def test_bone_meal_crafts_from_held_bone_without_workstation(self):
         obs = world({"bone_meal": 2})
         controller = self.start({"task": "craft", "item": "bone_meal", "count": 3}, obs)
@@ -431,6 +470,7 @@ class AutonomousTaskTests(unittest.TestCase):
             self.controller.record_result(decision, apply_atomic(obs, decision), obs)
         self.assertEqual(self.controller.snapshot()["status"], "completed", self.controller.snapshot())
         self.assertEqual(obs["counts"]["stone_pickaxe"], 1)
+        self.assertEqual(actions[:3], [("gather_block", None)] * 3)
         self.assertIn(("craft_item", "wooden_pickaxe"), actions)
         self.assertIn(("place_item", "crafting_table"), actions)
         self.assertNotIn("gather_materials", [name for name, _ in actions])

@@ -80,6 +80,7 @@ class MinecraftAgentClient:
         username: str = "SleepBot",
         password: str = "agent-secret-pass",
         timeout_seconds: float = 15,
+        recorder=None,
     ):
         self.base_url = base_url.rstrip("/")
         self.username = username
@@ -88,6 +89,7 @@ class MinecraftAgentClient:
         self.token: Optional[str] = None
         self._continuous_session_file = None
         self._session = requests.Session()
+        self.recorder = recorder
 
     @staticmethod
     def _positive(value: float, name: str) -> float:
@@ -99,7 +101,22 @@ class MinecraftAgentClient:
     def headers(self) -> Dict[str, str]:
         return {"Authorization": f"Bearer {self.token}"} if self.token else {}
 
-    def _request(
+    def _request(self, method, endpoint, **options):
+        if self.recorder is None:
+            return self._send_request(method, endpoint, **options)
+        started = time.perf_counter()
+        try:
+            return self._send_request(method, endpoint, **options)
+        finally:
+            try:
+                self.recorder.record("INFO", "mc_api", "API_TIMING", {
+                    "endpoint": endpoint, "method": method,
+                    "duration_ms": round(1000 * (time.perf_counter() - started)),
+                })
+            except Exception:
+                pass  # Diagnostics cannot change the outcome of a game write.
+
+    def _send_request(
         self,
         method: str,
         endpoint: str,
@@ -340,6 +357,20 @@ class MinecraftAgentClient:
         finally:
             self.token = None
 
+    def disconnect(self) -> Dict[str, Any]:
+        """Leave the game before revoking the operator's API session."""
+        return self._request("POST", "disconnect")
+
+    def scan_blocks_detached(self, **options):
+        """A read-only worker must not share or close the action HTTP session."""
+        reader = MinecraftAgentClient(self.base_url, self.username, self.password,
+                                      self.timeout_seconds, recorder=self.recorder)
+        reader.token = self.token
+        try:
+            return reader.get_blocks(**options)
+        finally:
+            reader._session.close()
+
     def get_status(self, timeout_seconds: Optional[float] = None) -> Dict[str, Any]:
         return self._request("GET", "status", timeout_seconds=timeout_seconds)
 
@@ -358,16 +389,33 @@ class MinecraftAgentClient:
 
     def move_to(
         self,
-        x: float,
+        x: Optional[float] = None,
         y: Optional[float] = None,
         z: Optional[float] = None,
         timeout_ms: int = 15000,
-        range: float = 1,
+        range: Optional[float] = None,
         stop_on: Optional[List[str]] = None,
+        *,
+        entity_id: Optional[int] = None,
+        allow_partial: bool = False,
     ) -> Dict[str, Any]:
         """Pathfind within range (default one block), with a server deadline."""
         deadline = self._positive(timeout_ms, "timeout_ms") / 1000
-        payload: Dict[str, Any] = {"x": x, "range": range, "timeout": timeout_ms}
+        payload: Dict[str, Any] = {"timeout": timeout_ms}
+        if entity_id is not None:
+            if type(entity_id) is not int or any(v is not None for v in (x, y, z)):
+                raise APIError("bad_args", "Entity movement requires an integer id and no coordinates")
+            payload["entity_id"] = entity_id
+        elif x is None or z is None:
+            raise APIError("bad_args", "Coordinate movement requires x and z")
+        else:
+            payload["x"] = x
+        if range is not None:
+            payload["range"] = range
+        if type(allow_partial) is not bool:
+            raise APIError("bad_args", "allow_partial must be boolean")
+        if allow_partial:
+            payload["allow_partial"] = True
         if y is not None:
             payload["y"] = y
         if z is not None:

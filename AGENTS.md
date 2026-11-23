@@ -22,7 +22,7 @@ BotSleep 基于 mc-agent-api 控制 Minecraft 机器人，采用大模型决策�
 - autonomy 正常规划采用实际动态工具目录：目标工具与必要安全/赛事管理工具可见，`needs_ai` 后开放原子修复；不只依赖 prompt 的 prefer。9/35/40 是完整注册数，不是每次模型请求的暴露数；禁用 autonomy 保留原单步目录。
 - `core/competition_rules.py` 与 `core/competition_tasks.py` 管理规则、服务端 advancement 计分、任务状态及恢复。45 个无条件计分项中 13 个已有工具路线；其余 32 个及 54 个条件项在 `core/competition_blueprints.py` 有步骤和能力缺口，但不可选择。条件项计分仍须显式 override。见 `docs/HARNESS_INTERFACES.md`；不得把蓝图或离线回归说成实服执行验收。
 - `skills/combat.py`、`skills/hunting.py`、`skills/buckets.py` 分别实现短步战斗、静止狩猎和受限液体操作。攻击已发、伤害已证实、击杀与实际掉落增量分开；未知副作用保持 pending，不补发 stop/攻击/收桶。`core/survival_playbook.py` 的版本化阶段建议经 `survival.intent` 选择，未绑定的下界/末地技能保持 blocked；参见 `docs/COMBAT_AND_HUNTING.md` 与 `docs/SURVIVAL_PLAYBOOK.md`。
-- 模型只能选择已注册技能；返回后须重新观察并通过本地安全门禁。所有模型请求必须经过 `core/model_gate.py`，禁止并发请求；传输超时/连接中断留下持久化未知状态，不得自动重试或擅自清锁。明确 HTTP 失败可有界退避，不回退为规则采集。`llm.model` 是请求路由，实际模型仅采用 `response.model`，缺失时显示“未确认”。
+- 模型只能选择已注册技能；返回后须重新观察并通过本地安全门禁。所有模型请求必须经过 `core/model_gate.py`，本地请求串行。超时或断网且本地调用已退出时，从发起满 30 秒起允许重新规划；不重放游戏动作。进程异常中断仍需人工核实。明确 HTTP 失败可有界退避。`llm.model` 是请求路由，实际模型仅采用 `response.model`，缺失时显示“未确认”。
 
 ## 构建、测试与开发命令
 

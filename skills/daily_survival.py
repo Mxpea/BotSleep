@@ -637,7 +637,7 @@ class DailySurvivalSkills(SurvivalSkills):
             site(final)
 
         try:
-            self._daily_action(context, self.client.move_to, *destination, range=0, timeout_ms=8000,
+            self._daily_action(context, self.client.move_to, entity_id=args["entity_id"], timeout_ms=8000,
                                stop_on=["hurt", "death"], validate=validate)
         except _Failure as error:
             if error.code != "target_changed" or context["retreat_evidence"]["executed"]:

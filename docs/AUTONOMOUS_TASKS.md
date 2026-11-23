@@ -164,3 +164,15 @@ survival:
 浅水自救和树冠脱困使用单独的恢复预算。完整通关有独立入口和验证条件，见 [CAMPAIGN.md](CAMPAIGN.md)。普通日常任务仍受安全地形、原料、矿道溶洞和视野限制。各目标的实际验收状态见 [TESTING.md](TESTING.md)。
 
 普通日常配置按[生存主线](SURVIVAL_MAINLINE.md)推进。当 `craft(stone_pickaxe)`、`starter_tools` 或采圆石任务缺少可达露石时，控制器会在已观察的自然地表选址，逐步开挖阶梯。实际背包达到需求后先原路上返，再恢复制作。两个内部阶梯工具只供本地控制器串行使用。
+
+### MC_tree 配方目录
+
+`run_survival_task` 接受 `{"task":"craft","item":"ladder","count":3}`。规划器按背包递归补齐木棍等材料，每次制作后核对实际增量。目录随仓库分发，运行时离线读取。
+
+导入器从 MC_tree 的 `web/recipes-26.3.json` 读取配方，逐项比对 Java 1.21.11 数据包中的材料、产量和工作台需求。新增目录收录具有唯一普通合成配方、可解析材料的产物。重叠条目优先使用仓库已有路线。熔炼、工作站交互与取得原材料的能力仍由对应技能提供。
+
+复现当前数据可使用下列命令。数据基线分别为 [MC_tree 32f9b8f](https://github.com/xiaoyu8yin/MC_tree/tree/32f9b8fe53b564c659aefe2accf10a6f9c1686ac) 和 [mcmeta 1.21.11-data](https://github.com/misode/mcmeta/tree/3458455b4b4537db37d6251a6ace1eed98d025a9)。
+
+```powershell
+python scripts/import_mc_tree.py .cache/mc-tree-source/web/recipes-26.3.json .cache/mcmeta-1.21.11/data/minecraft/recipe data/mc_tree_crafting.json
+```

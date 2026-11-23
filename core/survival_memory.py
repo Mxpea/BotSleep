@@ -258,11 +258,10 @@ class SurvivalMemory:
         cell = [math.floor(v) for v in pos]
         identity = self._identity(dimension, category, name, cell)
         if source == "api_verified":
-            for row_id, encoded in db.execute("SELECT id,payload FROM memories WHERE kind='places' AND dimension=?", (dimension,)).fetchall():
-                previous = json.loads(encoded)
-                if (previous["pos"] == cell and previous["name"] != name
-                        and previous["category"] in {"bed", "workstation", "storage", "resource", "hazard"}):
-                    db.execute("DELETE FROM memories WHERE id=?", (row_id,))
+            db.execute("DELETE FROM memories WHERE kind='places' AND dimension=? "
+                       "AND json_extract(payload,'$.pos')=? AND json_extract(payload,'$.name')<>? "
+                       "AND json_extract(payload,'$.category') IN ('bed','workstation','storage','resource','hazard')",
+                       (dimension, self._json(cell), name))
         self._write(db, "places", identity, dimension,
                     {"category": category, "name": name, "pos": cell, "metadata": self._facts(metadata)},
                     source=source, confidence=confidence, ttl_seconds=ttl, now=now)

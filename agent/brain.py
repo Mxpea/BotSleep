@@ -9,7 +9,7 @@ import ssl
 import requests
 from requests.adapters import HTTPAdapter
 
-from core.model_gate import ModelGateError, ModelRequestGate
+from core.model_gate import ModelGateError, ModelRequestGate, TRANSPORT_WINDOW_SECONDS
 
 _AUTO_GATE = object()
 
@@ -58,7 +58,7 @@ class OpenAIBrain:
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
-        self.timeout_seconds = timeout_seconds
+        self.timeout_seconds = min(timeout_seconds, TRANSPORT_WINDOW_SECONDS)
         if tls_version not in ("auto", "1.2"):
             raise LLMError("llm_invalid_config", "Unsupported model TLS version setting")
         self.tls_version = tls_version
@@ -90,7 +90,7 @@ class OpenAIBrain:
         except LLMError as error:
             if error.code in {"llm_timeout", "llm_network_error"}:
                 raise LLMError("llm_request_uncertain",
-                               "Model transport ended without a complete response; confirm provider idle before another request",
+                               "Model transport ended without a complete response; replan after the retry window",
                                {"transport_error": error.code, "executed": False}) from None
             raise
 

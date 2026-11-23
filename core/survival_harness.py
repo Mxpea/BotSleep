@@ -13,10 +13,10 @@ from core.campaign import Campaign, dimension as campaign_dimension
 from core.client import APIError, connection_retry_delay
 from core.combat_reaction import CombatReaction
 from core.continuous_recovery import ContinuousRecovery
-from core.model_gate import ModelGateError
+from core.model_gate import ModelGateError, ModelRequestGate
 from core.config import continuous_daily
 from core.foliage_reconciliation import confirm_foliage, foliage_intent, pending_foliage, resolved_result
-from core.domain import RANGED_HOSTILES
+from core.domain import LOG_NAMES, PLANK_NAMES, RANGED_HOSTILES
 from core.policy_relaxation import RelaxedWork, allows_goal
 from core.retreat_controller import (
     RETREAT_REPLAN,
@@ -202,6 +202,15 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
             # enter planning or send a write before the old outcome is resolved.
             self._paused, self.pause_reason = False, None
         self._init_continuous_recovery()
+        gate = getattr(getattr(self.planner, "brain", None), "request_gate", None)
+        if self.daily and isinstance(gate, ModelRequestGate):
+            try:
+                if gate.snapshot()["state"] != "idle":
+                    self._model_blocked = "llm_request_uncertain"
+            except ModelGateError as error:
+                self._model_blocked = error.code
+            if self._model_blocked:
+                self._record("WARN", "MODEL_BLOCKED_SAFETY_ACTIVE", {"code": self._model_blocked})
         started = self.context.get("planning_started_at")
         self._planning_started_at = (started if self._safety_rules._number(started) and started > 0 else time.time())
         if self.continuous and started != self._planning_started_at:
@@ -546,7 +555,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
                 "death_count_this_run": self.context["death_count"]}
 
     def _death_limit_reached(self):
-        return not self.continuous and self.context["death_count"] >= self.settings["max_deaths"]
+        return (not self.continuous and not self.competition_mode
+                and self.context["death_count"] >= self.settings["max_deaths"])
 
     def _start(self, manual=None):
         if self._closed or self.busy or self.paused or self.finished:
@@ -672,6 +682,53 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
             self._record("INFO", "COMPETITION_TASKS", {"board": board})
             self._competition_board_signature = signature
 
+    def _competition_directive(self, observation):
+        from core.competition_director import choose
+
+        if (observation.get("fresh") is not True or observation.get("observation_scope", "full") != "full"
+                or self.journal.state.get("pending")):
+            return Decision("wait", {"seconds": 1}, "Wait for fresh competition evidence", "observe")
+        board = self.competition.snapshot()
+        attempt = self.context.get("competition_route_attempt")
+        decision = choose(board, attempt == [board["active_goal_id"], self.competition.state()["active_since"]])
+        if board["phase"] == "selection" and board["all_deferred"] and not board["stale"]:
+            prep = self._cooldown_preparation(observation, seek=True)
+            if prep is not None:
+                return prep
+        if (board["active_goal_id"] == "minecraft:story/smelt_iron" and decision is not None
+                and decision.name == "run_survival_task"
+                and not any(observation["counts"].get(name) for name in (*LOG_NAMES, *PLANK_NAMES))
+                and (self.context.get("survival_constraints") or {}).get("scenario") == "cautious_bootstrap"):
+            return Decision("run_survival_task", {"task": "gather", "resource": "logs", "count": 1},
+                            "Gather the permitted wood prerequisite before smelting", "competition_preparation")
+        if decision is None and self._model_blocked:
+            return Decision("force_exit_task", {"reason": "Local route needs repair and the model is unavailable"},
+                            "Defer the blocked goal and select another eligible goal", "competition_director")
+        return decision
+
+    def _cooldown_preparation(self, observation, *, seek=False):
+        """Prepare a small wood stock for tools during a scored-goal cooldown."""
+        status = observation["status"]
+        if (not observation.get("fresh") or observation.get("observation_scope", "full") != "full"
+                or self.journal.state.get("pending") or not status.get("ready") or not status.get("alive")
+                or status.get("busy") or not status.get("on_ground")):
+            return None
+        counts = observation["counts"]
+        if sum(counts.get(n, 0) for n in LOG_NAMES) * 4 + sum(counts.get(n, 0) for n in PLANK_NAMES) >= 12:
+            return None
+        action = self._safety_rules._gather(LOG_NAMES, "competition_preparation", observation, self.context)
+        if action.name != "gather_block":
+            if seek:
+                observation["prep_wood_waypoint"] = self._remote_log_waypoint(observation)
+            target = observation.get("prep_wood_waypoint")
+            if target is None:
+                return None
+            action = Decision("move_to", {"pos": target, "range": 2},
+                              "Approach observed wood for tool recovery", "competition_preparation")
+        if self.daily_policy.validate(action, observation, self.context):
+            return None
+        return action
+
     def _competition_tool(self, decision, observation):
         """Handle metadata-only task tools at an idle, fresh execution boundary."""
         if not self.competition:
@@ -679,7 +736,16 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
         names = {"select_task", "update_progress", "finish_task", "force_exit_task", "end_competition"}
         if decision.name not in names:
             if self.competition.snapshot().get("active_goal_id") is None and decision.name not in {
-                "wait", "retreat_from", "canopy_escape", "water_escape", "eat_food", "auto_sleep", "fight_hostile"}:
+                "wait", "retreat_from", "canopy_escape", "water_escape", "clear_burial", "eat_food", "auto_sleep", "fight_hostile"}:
+                if (decision.goal == "food_recovery" and decision.name in {"position_for_task", "clear_food_headroom"}
+                        and self.daily_policy and decision == self.daily_policy._food_search(observation, self.context)
+                        and self.daily_policy.validate(decision, observation, self.context) is None):
+                    return None
+                board = self.competition.snapshot()
+                if (decision.goal == "competition_preparation" and board["phase"] == "selection"
+                        and board["all_deferred"] and not board["stale"]
+                        and decision == self._cooldown_preparation(observation)):
+                    return None
                 return SkillResult(False, "Select a scored goal before production actions", {"executed": False}, "task_selection_required")
             return None
         status = observation.get("status", {})
@@ -731,7 +797,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
                 # Without a nearby enemy, existing food/low-health priorities
                 # still need a real inventory rather than a partial empty list.
                 quiet_evacuation = recovery.get("evacuating") is True and not close
-                if (safety_only or close or not needs_inventory and not quiet_evacuation
+                if (safety_only or short.get("buried_head") or close or not needs_inventory and not quiet_evacuation
                         or not status.get("ready") or not status.get("alive") or status.get("busy")):
                     if (self.campaign is not None and close and status.get("on_ground") is True
                             and (status.get("offhand") or {}).get("name") == "shield"
@@ -751,9 +817,9 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
 
     def _post_observe(self, decision, result, before):
         # Confirm an inventory goal without repeating the terrain scan after each child.
-        if (self.daily and not self.competition_mode and self.campaign is None
+        if (self.daily and self.campaign is None
                 and self._task_child and (self._task_snapshot() or {}).get("task") in {"gather", "craft"}
-                and decision.name in {"craft_item", "gather_block", "gather_resource", "collect_drops"}
+                and decision.name in {"craft_item", "gather_block", "gather_resource", "collect_drops", "position_for_task"}
                 and result.success and result.data.get("executed") is True
                 and callable(getattr(type(self.collector), "collect_inventory_readback", None))):
             observation = self.collector.collect_inventory_readback(before["status"], self._cancel,
@@ -1013,7 +1079,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
                                        or not observation["status"].get("alive") or observation["status"].get("busy")):
                 decision = Decision("wait", {"seconds": 1}, "Manual action needs an idle, living, ready bot", "observe")
                 return decision, SkillResult(False, decision.reason, error_code="busy"), observation
-            urgent = self._combat_priority(observation, hit)
+            urgent = (Decision("clear_burial", {"pos": observation["buried_head"]}, "Clear falling block at head", "safety")
+                      if observation.get("buried_head") else self._combat_priority(observation, hit))
             if urgent is None:
                 release = self._release_defense(observation)
                 if release is not None:
@@ -1023,7 +1090,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
                 if self._model_worker and self._model_worker.pending:
                     self._model_worker.cancel()
                 decision = urgent
-                self._last_reaction_hit = hit["t"]
+                if hit:
+                    self._last_reaction_hit = hit["t"]
                 manual = None  # No queued manual production is admitted during a confirmed attack.
                 self._record("WARN", "COMBAT_PREEMPT", {"hit": hit, "decision": asdict(decision), "source": "rules"})
             elif observation.get("observation_scope") == "safety":
@@ -1089,6 +1157,14 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
                         self._model_worker.cancel()
                     decision = safety
                     self._record("WARN", "SAFETY_OVERRIDE", {"decision": asdict(safety), "status": observation["status"]})
+                elif (self.competition and self.task_controller is not None
+                      and (not self._task_active() or self.competition.snapshot()["assessment"] == "completed")
+                      and (local := self._competition_directive(observation)) is not None):
+                    decision = local
+                    if local.name == "finish_task" and self._task_active():
+                        self.task_controller.stop("Server already confirmed the scored objective", cancelled=True)
+                        self._save_task("TASK_CANCELLED")
+                        self._finish_task_feedback(observation)
                 elif self._task_active():
                     decision = self._task_next(observation)
                 elif (opening := (self._mainline_action(observation) if self.mainline_enabled
@@ -1224,7 +1300,12 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
             if task_result is not None:
                 return decision, task_result, observation
             if decision.name == "run_survival_task":
-                return decision, self._task_start(decision, observation), observation
+                result = self._task_start(decision, observation)
+                if decision.goal == "competition_director":
+                    state = self.competition.state()
+                    self.context["competition_route_attempt"] = [state["active_goal_id"], state["active_since"]]
+                    self._checkpoint(context=self.context)
+                return decision, result, observation
             if decision.name == "wait":
                 self._phase("waiting")
                 return decision, SkillResult(True, decision.reason, {"waiting": True}), observation
@@ -1517,7 +1598,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
                          and status.get("health", 0) >= baseline.get("health", 20))
         permit = self._active_relaxed_work if decision is not None else None
         relaxed_stable = permit is not None and permit.stable(status, require_idle=False)
-        advisory_stable = (self.daily_policy is not None and self.daily_policy.advisory
+        advisory_stable = (self.daily_policy is not None and (self.daily_policy.advisory or self.competition_mode)
                            and (self.context.get("survival_constraints") or {}).get("scenario") == "risk_advisory"
                            and self._safety_rules._number(status.get("health"))
                            and self._safety_rules._number(baseline.get("health"))
@@ -1857,6 +1938,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
                 self.tick(automatic=False)
             if self._model_worker:
                 self._model_worker.close(self.last_observation)
+            if callable(getattr(type(self.collector), "close", None)):
+                self.collector.close()
             if self.memory:
                 self.memory.close()
             self._closed = True
