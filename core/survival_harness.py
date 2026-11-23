@@ -18,6 +18,7 @@ from core.config import continuous_daily
 from core.foliage_reconciliation import confirm_foliage, foliage_intent, pending_foliage, resolved_result
 from core.domain import LOG_NAMES, PLANK_NAMES, RANGED_HOSTILES
 from core.policy_relaxation import RelaxedWork, allows_goal
+from core.safety_arbiter import SafetyArbiter
 from core.retreat_controller import (
     RETREAT_REPLAN,
     RETREAT_SEARCH_COOLDOWN,
@@ -145,6 +146,15 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
             from core.survival_playbook import SurvivalPlaybook
             from agent.daily_survival import DAILY_SKILLS
             self.playbook = SurvivalPlaybook(available_tools=DAILY_SKILLS, goal=settings.get("intent", "survival"))
+        self._safety_arbiter = SafetyArbiter(
+            self._safety_rules,
+            self.settings,
+            daily=self.daily,
+            competition_mode=self.competition_mode,
+            llm_override_on_block=self.llm_override_on_block,
+            daily_policy=self.daily_policy,
+        )
+        self._safety_wait_streak = 0
         self.journal = journal or SurvivalJournal(settings["state_dir"], endpoint=client.base_url,
                                                 username=client.username, world_id=settings["world_id"])
         self.context = copy.deepcopy(self.journal.state.get("context", {}))
@@ -863,26 +873,14 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
                 force=safety_only or recovery.get("evacuating") is True,
                 threat_radius=self._safety_rules.threat_radius)
             if short is not None and (not self.campaign or campaign_dimension(short["status"]) == "overworld"):
-                status = short["status"]
-                hostiles = self._safety_rules._dangerous_hostiles(short, status.get("pos"))
-                nearby = status.get("nearest_hostile") or {}
-                close = (bool(hostiles)
-                    or isinstance(nearby, dict) and self._safety_rules._number(nearby.get("dist"))
-                    and nearby["dist"] <= self._safety_rules._threat_distance(nearby.get("name")))
-                needs_inventory = (self._safety_rules._number(status.get("health"))
-                    and self._safety_rules._number(status.get("food"))
-                    and status.get("on_ground") is True and not status.get("is_sleeping")
-                    and not status.get("in_vehicle")
-                    and not any(status.get(key) for key in ("in_water", "in_lava", "on_fire", "submerged"))
-                    and status.get("dimension") in {"overworld", "minecraft:overworld"}
-                    and status.get("gamemode") == "survival" and status["food"] < 20
-                    and (status["health"] <= self._safety_rules.low_health
-                         or status["food"] <= self._safety_rules.food_threshold))
-                # Without a nearby enemy, existing food/low-health priorities
-                # still need a real inventory rather than a partial empty list.
-                quiet_evacuation = recovery.get("evacuating") is True and not close
-                if (safety_only or short.get("buried_head") or close or not needs_inventory and not quiet_evacuation
-                        or not status.get("ready") or not status.get("alive") or status.get("busy")):
+                use_short, close = self._safety_arbiter.should_use_short_safety(
+                    short,
+                    recovery,
+                    safety_only=safety_only,
+                    safety_wait_streak=self._safety_wait_streak,
+                )
+                if use_short:
+                    status = short["status"]
                     if (self.campaign is not None and close and status.get("on_ground") is True
                             and (status.get("offhand") or {}).get("name") == "shield"
                             and status.get("health", 0) >= 14):
@@ -1206,6 +1204,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
                     decision, result = release
                     return decision, result, {**observation, "fresh": False} if _uncertain_result(result) else observation
             if urgent is not None:
+                self._safety_wait_streak = 0
                 if self._model_worker and self._model_worker.pending:
                     self._model_worker.cancel()
                 decision = urgent
@@ -1221,10 +1220,12 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
                 if water is None and self.campaign is not None:
                     decision = self.campaign.melee_recovery(decision, observation, self.context.get("retreat_recovery"))
                     decision = self.campaign.food_recovery(decision, observation)
-                if (water is None and (decision is None or decision.name not in {"retreat_from", "water_escape", "wait", "fight_hostile"})
-                        and not (decision and decision.name == "campaign_action"
-                                 and decision.args.get("operation") in {"emergency_food", "defend_melee", "escape_pressure"})):
+                if water is None and not self._safety_arbiter.is_admitted_short_decision(decision):
                     decision = Decision("wait", {"seconds": 1}, "Short safety observation cannot authorize production", "observe")
+                if self._safety_arbiter.is_passive_safety_wait(decision):
+                    self._safety_wait_streak += 1
+                else:
+                    self._safety_wait_streak = 0
                 self._record("WARN", "SAFETY_OVERRIDE", {"decision": asdict(decision), "status": observation["status"],
                     "observation_scope": "safety"})
             elif manual is not None:
@@ -1430,6 +1431,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
             self._watchdog_last_progress_at = now_decision
             self._watchdog_decision_id = id(decision)
             self._active_decision = decision
+            if not self._safety_arbiter.is_passive_safety_wait(decision):
+                self._safety_wait_streak = 0
             self._safety_baseline = copy.deepcopy(observation["status"])
             if relaxed_policy is not None:
                 self._record("INFO", "SOFT_POLICY_RELAXED", {"policy": relaxed_policy, "decision": asdict(decision)})
@@ -1800,97 +1803,22 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
             return
         if not planning and self._check_action_watchdog(time.monotonic(), decision, status):
             return
-        hostile = status.get("nearest_hostile") or {}
-        # A locally permitted low-health food turn must not be cancelled just
-        # because its initial health is low. Any new deterioration still wins.
         baseline = self._safety_baseline or {}
         attack = self._combat_reaction.observe(self.client, status, baseline)
-        if decision is not None and decision.name in {"eat_food", "auto_sleep"} and not attack:
-            return
-        constraints = self.context.get("survival_constraints") or {}
-        food_turn = False
-        if self.daily and constraints.get("scenario") == "low_health":
-            from core.daily_policy import FOOD_ACTIONS
-            food_turn = ((planning and constraints.get("model_allowed") is True)
-                or decision is not None and decision.name in FOOD_ACTIONS) and (
-                status.get("dimension") == baseline.get("dimension")
-                and status.get("last_death") == baseline.get("last_death")
-                and status.get("health", 0) >= baseline.get("health", 20)
-                and status.get("food", 0) >= baseline.get("food", 20)
-                and status.get("pos") == baseline.get("pos")
-                and status.get("on_ground") is True and status.get("is_day") is True
-                and not status.get("thundering") and status.get("time_of_day", 24000) < 11000)
-        forage_jump = False
-        if decision is not None and decision.name == "position_for_task" and decision.goal == "food_recovery":
-            start = self._safety_rules._pos(baseline.get("pos"))
-            target = self._safety_rules._pos(decision.args.get("pos"))
-            current = self._safety_rules._pos(status.get("pos"))
-            forage_jump = bool(start and target and current and abs(start[1] - target[1]) == 1
-                and all(min(start[i], target[i]) - .3 <= current[i] <= max(start[i], target[i]) + .3 for i in (0, 2))
-                and min(start[1], target[1]) - .05 <= current[1] <= max(start[1], target[1]) + 1.3)
-        local_recovery_turn = (constraints.get("scenario") in {"food_recovery", "cautious_bootstrap"}
-            and (planning and constraints.get("model_allowed") is True or decision is not None
-                 and (decision.goal == "food_recovery" or self.context.get("cautious_bootstrap") is True))
-            and status.get("dimension") == baseline.get("dimension")
-            and status.get("last_death") == baseline.get("last_death")
-            and status.get("health", 0) >= baseline.get("health", 20)
-            and status.get("food", 0) >= 12 and (status.get("on_ground") is True or forage_jump))
-        combat_action = decision is not None and decision.name == "fight_hostile"
-        campaign_encounter = (decision is not None and decision.name == "campaign_action"
-                              and (decision.args.get("operation") == "loot_mob" and hostile.get("name") == decision.args.get("mob")
-                                   or decision.args.get("operation") == "dragon" and hostile.get("name") == "ender_dragon"))
-        campaign_food = (decision is not None and decision.name == "campaign_action"
-                         and decision.args.get("operation") in {"emergency_food", "recover_gear"}
-                         and status.get("health", 0) >= baseline.get("health", 20))
-        permit = self._active_relaxed_work if decision is not None else None
-        relaxed_stable = permit is not None and permit.stable(status, require_idle=False)
-        advisory_stable = (self.daily_policy is not None and (self.daily_policy.advisory or self.competition_mode)
-                           and (self.context.get("survival_constraints") or {}).get("scenario") == "risk_advisory"
-                           and self._safety_rules._number(status.get("health"))
-                           and self._safety_rules._number(baseline.get("health"))
-                           and status["health"] >= baseline["health"]
-                           and status.get("dimension") == baseline.get("dimension")
-                           and status.get("last_death") == baseline.get("last_death"))
-        combat_changed = combat_action and (
-            status.get("dimension") != baseline.get("dimension")
-            or status.get("last_death") != baseline.get("last_death")
-            or status.get("health", 0) < baseline.get("health", 20))
-        surface_expedition = self._task_child and decision is not None and decision.goal in {"deep_mine", "scout_surface"}
-        shallow_water_allowed = bool(
-            surface_expedition
-            or (self.llm_override_on_block and decision is not None
-                and decision.name not in {"water_escape", "auto_sleep"})
+        assessment = self._safety_arbiter.evaluate_monitor(
+            status,
+            baseline,
+            decision=decision,
+            planning=planning,
+            defending=defending,
+            attack=attack,
+            constraints=self.context.get("survival_constraints"),
+            active_relaxed_work=self._active_relaxed_work,
+            task_child=self._task_child,
+            context=self.context,
         )
-        low_health_override = bool(
-            self.llm_override_on_block
-            and decision is not None
-            and self._safety_rules._number(baseline.get("health"))
-            and status.get("health", 20) >= baseline["health"]
-        )
-        hit_preempts = attack is not None and not defending
-        submerged_danger = bool(
-            status.get("submerged")
-            and (
-                not shallow_water_allowed
-                or (isinstance(status.get("oxygen"), (int, float)) and float(status.get("oxygen", 20)) <= 12)
-            )
-        )
-        if decision is not None and decision.goal == "deep_mine" and status.get("health", 20) >= 16:
-            hostile_limit = min(5.0, self._safety_rules._threat_distance(hostile.get("name")))
-        elif self.llm_override_on_block and status.get("health", 20) >= 14:
-            hostile_limit = min(4.5, self._safety_rules._threat_distance(hostile.get("name")))
-        else:
-            hostile_limit = self._safety_rules._threat_distance(hostile.get("name"))
-        danger = (hit_preempts or not status.get("alive") or status.get("in_lava") or status.get("on_fire")
-                  or submerged_danger or (status.get("in_water") and not shallow_water_allowed)
-                  or status.get("health", 20) <= self.settings["low_health_threshold"]
-                     and not (food_turn or local_recovery_turn or relaxed_stable or advisory_stable or campaign_food or low_health_override)
-                  or permit is not None and not relaxed_stable
-                  or combat_changed
-                  or (not (combat_action or campaign_encounter) and isinstance(hostile.get("dist"), (int, float))
-                      and hostile["dist"] <= hostile_limit))
-        if danger:
-            self._interrupt_for_safety(status, planning, attack if hit_preempts else None)
+        if assessment.danger:
+            self._interrupt_for_safety(status, planning, assessment.hit)
 
     def _interrupt_for_safety(self, status, planning, hit):
         self._cancel.set()
