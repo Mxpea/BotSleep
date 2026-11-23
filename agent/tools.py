@@ -1,7 +1,9 @@
 """Native function tools for implemented, locally verified survival actions."""
 
-from skills.survival import SurvivalSkills
 import copy
+
+from core.domain import SCOUT_DEFAULT_DISTANCE, SCOUT_MAX_DISTANCE, SCOUT_MIN_DISTANCE
+from skills.survival import SurvivalSkills
 
 
 def _position(integer=False):
@@ -184,12 +186,14 @@ def tools_for_objective(objective="starter"):
     entity_id = {"type": "integer", "minimum": 0}
     def add(name, description, properties, required=None):
         tools.append(_tool(name, description, properties, tuple(properties) if required is None else required))
-    add("run_survival_task", "Prefer ONE bounded survival goal over repeated atomic calls. Supports gather, craft, smelt, food, starter_tools, iron_tools, iron_armor (craft+equip armor), scout (forward ~200-block surface scan stopping on structures/wood or conserving stamina), shelter, bed, storage, farm, recover_drops, and maintenance. Stops on safety, unknown writes or budget; only the final summary is tool feedback. gather requires resource; craft/smelt require target item; others accept neither.",
+    add("run_survival_task", "Choose one bounded goal. The executor finds prerequisites and verifies each step locally. Shelter supplies its own wood, workstation, walls, roof and door. Scout takes distance in blocks. Gather takes resource and count. The harness handles movement, mining, pickup, and inventory checks. Craft/smelt take the output item. The final summary reports completion, interrupted work or an exhausted budget.",
         {"task": {"type": "string", "enum": list(SURVIVAL_TASK_NAMES)},
          "resource": {"type": "string", "enum": list(SURVIVAL_TASK_RESOURCES)},
          "item": {**_ITEM, "description": "Desired craft/smelt output; bone_meal uses held bones only."},
          "count": {"type": "integer", "minimum": 1, "maximum": 64, "default": 8,
                    "description": "Desired new output for gather/craft/smelt; current food reserve target for food."},
+         "distance": {"type": "integer", "minimum": SCOUT_MIN_DISTANCE, "maximum": SCOUT_MAX_DISTANCE,
+                      "default": SCOUT_DEFAULT_DISTANCE, "description": "Requested horizontal waypoint distance in blocks. Scout can stop early."},
          "radius": {"type": "integer", "minimum": 4, "maximum": 64, "default": 32}}, ("task",))
     add("fight_hostile", "Perform one bounded defensive step against an observed skeleton, zombie or creeper. The skill selects shield/no-shield handling and rechecks life, target and terrain. A hit, block or missing target is not a verified kill; never chase unknown enemies.",
         {"entity_id": entity_id, "expected_name": {"type": "string", "enum": ["skeleton", "zombie", "creeper"]}})
@@ -197,8 +201,8 @@ def tools_for_objective(objective="starter"):
         {**pos, "expected_name": {"type": "string", "enum": ["water", "lava"]}})
     add("hunt_with_lava", "Use an existing lava bucket only on one observed passive animal in a verified single-cell nonflammable containment pit. No players, enemies or flammables may be nearby. Recollect and verify the source immediately; success requires actual inventory gain. Never use on open terrain.",
         {"entity_id": entity_id, "expected_name": {"type": "string", "enum": ["pig", "cow", "sheep", "chicken"]}})
-    add("gather_resource", "Mine ONE currently observed iron ore with a stone-or-better pickaxe; block removal and raw iron gain are verified.",
-        {**pos, "expected_name": {"type": "string", "enum": sorted(Daily.IRON)}})
+    add("gather_resource", "Mine one observed iron ore with a stone-or-better pickaxe or diamond ore with an iron-or-better pickaxe. Verify block removal and the matching inventory gain.",
+        {**pos, "expected_name": {"type": "string", "enum": sorted(Daily.IRON | Daily.DIAMOND)}})
     add("harvest_crop", "Harvest ONE observed mature crop; maturity, removal and produce gain are checked. Replant when seeds are available.",
         {**pos, "expected_name": {"type": "string", "enum": sorted(Daily.CROPS)}})
     add("gather_seeds", "Break ONE currently observed short_grass or tall_grass plant within checked reach to try for wheat seeds. Drops are random: plant removal with gained=0 is not seed acquisition. Never use on crops or replay an unknown dig.",
@@ -236,7 +240,8 @@ def tools_for_objective(objective="starter"):
         {"resource": {"type": "string", "enum": ["logs", "stone", "cobblestone", "coal"]},
          "count": {"type": "integer", "minimum": 1, "maximum": 8},
          "radius": {"type": "integer", "minimum": 1, "maximum": 8, "default": 8}}, ("resource", "count"))
-    materials = {"type": "string", "enum": ["cobblestone", "oak_planks", "birch_planks", "spruce_planks"]}
+    from core.structure_spec import SHELTER_BUILDING_BLOCKS
+    materials = {"type": "string", "enum": sorted(SHELTER_BUILDING_BLOCKS)}
     orient = {"type": "string", "enum": ["north", "south", "east", "west"], "default": "north"}
     add("plan_shelter", "Read-only 5x5 ground site validation at feet pos.",
         {**pos, "material": materials, "orientation": orient}, ("pos", "material"))

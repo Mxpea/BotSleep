@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, 
 import requests
 
 from core.cave_probe import (
-    FALLING_BLOCKS,
+    FALLING_BLOCKS as CAVE_FALLING_BLOCKS,
     PASSABLE_NON_AIR,
     classify_cavity,
     is_lava_like,
@@ -20,6 +20,7 @@ from core.cave_probe import (
     is_water_like,
     new_exposed_face_positions,
     ore_cell_hazard_free,
+    overhead_excavation_hazard,
     probe_cavity,
 )
 from core.domain import AIR, parse_pos
@@ -80,6 +81,10 @@ from skills.cave_explore import CaveExploreSkill
 from skills.world_navigator import WorldNavigator
 from core.world_3d import VoxelWorld3D
 from . import BaseSkill, SkillResult
+
+
+EXPEDITION_INTERRUPTS = frozenset({"dead", "not_ready", "not_connected", "damage_taken", "life_changed",
+                                   "unsafe_state", "safety_interrupted", "interrupted", "cancelled"})
 
 
 def _unknown_result(result: SkillResult) -> bool:
@@ -369,7 +374,7 @@ class MineShaftSkill(BaseSkill):
     """
 
     FLUID_HAZARDS = frozenset({"water", "flowing_water", "lava", "flowing_lava"})
-    FALLING_BLOCKS = frozenset({"sand", "red_sand", "gravel"})
+    FALLING_BLOCKS = CAVE_FALLING_BLOCKS
     SCAFFOLD_PRIORITY: Tuple[str, ...] = tuple(SCAFFOLD_BLOCKS) + (
         "andesite",
         "diorite",
@@ -584,9 +589,12 @@ class MineShaftSkill(BaseSkill):
                             allow_bridge=True,
                             allow_drop=True,
                             max_steps=28,
+                            cancel_event=cancel_event,
                             timeout_seconds=12.0,
                         )
                         _raise_if_unknown(approach)
+                        if approach.error_code in EXPEDITION_INTERRUPTS:
+                            return approach
                         raw_chk = self.client.get_status()
                         st_chk = raw_chk.get("result") if isinstance(raw_chk, dict) and "result" in raw_chk else raw_chk
                         pos_chk = parse_pos(st_chk.get("pos") if isinstance(st_chk, dict) else None)
@@ -859,6 +867,8 @@ class MineShaftSkill(BaseSkill):
             "raw_targets": dict(ctx.extra.get("raw_targets") or {}),
         }
 
+        result.data["surface_entry"] = transform_rel_pos(
+            excavation_spec.anchors["surface_entry"].rel_pos, int_origin, norm_orient, integer=False)
         result.data["workstation_slots"] = workstation_slots
         result.data["workstation_deployed"] = bool(ctx.extra.get("deploy_workstation"))
         result.data["workstation"] = dict(ctx.extra.get("workstation_report") or {})
@@ -1097,6 +1107,18 @@ class MineShaftSkill(BaseSkill):
                         blocker_type="safety_interrupted",
                         blocker_pos=[world[0], world[1] + 2, world[2]],
                     )
+        if bname not in AIR:
+            hazard = overhead_excavation_hazard(world, ctx.read_block)
+            if hazard is not None:
+                above, name = hazard
+                unloaded = name in {"unknown", "not_loaded", "void_air"}
+                raise WorkflowStepError(
+                    "not_loaded" if unloaded else "hazard_adjacent",
+                    f"Overhead column near {world} contains {name} at {above}",
+                    blocker_type="unloaded" if unloaded else "safety_interrupted",
+                    blocker_pos=list(above),
+                    blocker_block=name,
+                )
         return bname
 
     @staticmethod
@@ -2848,8 +2870,9 @@ class MineShaftSkill(BaseSkill):
                 self._retreat_downsampled(trail_ctx, retreat_trail, step_stride=2, reverse=True)
             except WorkflowUncertainError:
                 raise
-            except Exception:
-                pass
+            except WorkflowStepError as exc:
+                if exc.code in EXPEDITION_INTERRUPTS:
+                    raise
             raw_t = self.client.get_status()
             st_t = raw_t.get("result") if isinstance(raw_t, dict) and "result" in raw_t else raw_t
             pos_t = parse_pos(st_t.get("pos") if isinstance(st_t, dict) else None)
@@ -2864,9 +2887,12 @@ class MineShaftSkill(BaseSkill):
             allow_bridge=True,
             allow_drop=True,
             max_steps=96,
+            cancel_event=cancel_event,
             timeout_seconds=min(120.0, max(20.0, float(timeout_seconds) * 0.55)),
         )
         _raise_if_unknown(nav)
+        if nav.error_code in EXPEDITION_INTERRUPTS:
+            raise WorkflowStepError(nav.error_code, nav.message, data=nav.data)
         raw2 = self.client.get_status()
         st2 = raw2.get("result") if isinstance(raw2, dict) and "result" in raw2 else raw2
         pos2 = parse_pos(st2.get("pos") if isinstance(st2, dict) else None)
@@ -2885,7 +2911,9 @@ class MineShaftSkill(BaseSkill):
         esc: Dict[str, Any] = {"escaped": False, "pos": list(pos2 or pos)}
         try:
             esc = escape_to_surface(ctx, max_ascend=160, blocks=SCAFFOLD_BLOCKS)
-        except WorkflowStepError:
+        except WorkflowStepError as exc:
+            if exc.code in EXPEDITION_INTERRUPTS:
+                raise
             esc = {"escaped": False, "pos": list(pos2 or pos)}
         if not esc.get("escaped"):
             ep = parse_pos(esc.get("pos")) or pos2
@@ -2899,13 +2927,18 @@ class MineShaftSkill(BaseSkill):
                             allow_bridge=True,
                             allow_drop=True,
                             max_steps=8,
+                            cancel_event=cancel_event,
                             timeout_seconds=10.0,
                         )
                         _raise_if_unknown(lateral)
+                        if lateral.error_code in EXPEDITION_INTERRUPTS:
+                            raise WorkflowStepError(lateral.error_code, lateral.message, data=lateral.data)
                         esc = escape_to_surface(ctx, max_ascend=160, blocks=SCAFFOLD_BLOCKS)
                     except WorkflowUncertainError:
                         raise
-                    except Exception:
+                    except WorkflowStepError as exc:
+                        if exc.code in EXPEDITION_INTERRUPTS:
+                            raise
                         continue
                     if esc.get("escaped"):
                         break
@@ -3036,7 +3069,7 @@ class MineShaftSkill(BaseSkill):
                 timeout_seconds=cave_t,
                 allow_damage=allow_damage,
             )
-            if _unknown_result(cave_res):
+            if _unknown_result(cave_res) or cave_res.error_code in EXPEDITION_INTERRUPTS:
                 return cave_res
             surface_chk = self._ensure_returned_to_surface(start_surface, cancel_event=cancel_event)
             net_now = _net_counts()
@@ -3049,13 +3082,11 @@ class MineShaftSkill(BaseSkill):
                 "harvested": dict(net_now),
                 "surface_return": surface_chk,
             })
-            if cave_res.error_code in {"dead", "not_ready", "damage_taken", "life_changed"}:
-                return SkillResult(
-                    False,
-                    str(cave_res.message),
-                    data={"harvested": net_now, "stop_reason": "safety_interrupted", "phases": phase_reports, "surface_return": surface_chk},
-                    error_code=cave_res.error_code,
-                )
+            if not surface_chk.get("on_surface"):
+                return SkillResult(False, "Could not verify return from the surface cave", error_code="surface_return_failed",
+                                   data={"harvested": net_now, "phases": phase_reports, "surface_return": surface_chk})
+            if cave_res.error_code == "return_home_requested":
+                return cave_res
             if (cave_res.data or {}).get("stop_reason") == "target_reached" or (
                 parsed_targets and all(
                     (net_now.get(spec["drop_item"], 0) + (net_now.get("iron_ingot", 0) if spec["drop_item"] == "raw_iron" else 0))
@@ -3078,7 +3109,10 @@ class MineShaftSkill(BaseSkill):
         else:
             schedule = [int(b["target_y"]) for b in bands]
             rem_total = max(90.0, float(total_timeout_seconds) - (time.monotonic() - t_start) - 10.0)
-            self._ensure_returned_to_surface(start_surface, cancel_event=cancel_event)
+            entry_check = self._ensure_returned_to_surface(start_surface, cancel_event=cancel_event)
+            if not entry_check.get("on_surface"):
+                return SkillResult(False, "Could not verify the surface before starting the shaft",
+                                   error_code="surface_return_failed", data={"surface_return": entry_check})
             rot_orients = self._preferred_shaft_orientations(start_surface)
             shaft_kwargs: Dict[str, Any] = {
                 "radius": 20,
@@ -3104,7 +3138,7 @@ class MineShaftSkill(BaseSkill):
                     res = self.build_mine_shaft(**shaft_kwargs)
             else:
                 res = self.build_mine_shaft(**shaft_kwargs)
-            if _unknown_result(res):
+            if _unknown_result(res) or res.error_code in EXPEDITION_INTERRUPTS:
                 return res
             retreat_trail = ((res.data or {}).get("mining_progress") or {}).get("deep_trail") or []
             surface_chk = self._ensure_returned_to_surface(
@@ -3134,18 +3168,14 @@ class MineShaftSkill(BaseSkill):
             elif time.monotonic() - t_start >= float(total_timeout_seconds) - 10.0:
                 stop_reason = "timeout"
 
-        final_surface = self._ensure_returned_to_surface(
-            start_surface,
-            retreat_trail=retreat_trail if bands else None,
-            cancel_event=cancel_event,
-        )
+        final_surface = surface_chk if bands else self._ensure_returned_to_surface(start_surface, cancel_event=cancel_event)
         final_net = _net_counts()
         target_drop_items = {spec["drop_item"] for spec in parsed_targets.values()} | {"iron_ingot", "gold_ingot"}
         target_ore_gained = sum(int(final_net.get(k, 0)) for k in target_drop_items)
         shaft_ok = (not bands) or bool(phase_reports and phase_reports[-1].get("success"))
-        done_ok = stop_reason == "target_reached" or bool(
-            final_surface.get("on_surface") and target_ore_gained > 0 and shaft_ok
-        )
+        done_ok = bool(final_surface.get("on_surface") and (stop_reason == "target_reached" or (target_ore_gained > 0 and shaft_ok)))
+        if not final_surface.get("on_surface"):
+            stop_reason = "surface_return_failed"
         return SkillResult(
             done_ok,
             f"Surface stratified mining finished (stop={stop_reason}, on_surface={final_surface.get('on_surface')}, harvested={final_net})",

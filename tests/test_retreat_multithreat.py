@@ -1,13 +1,15 @@
 """Fresh multi-hostile retreat choices; no game or model connection."""
 
 import copy
+import json
 import math
 import unittest
+from pathlib import Path
 
 from core.client import APIError
 from skills.survival import SurvivalSkills
 from test_canopy_escape import terrain
-from test_survival_skills import World
+from test_survival_skills import World, envelope
 
 
 def hostile(name, pos, entity_id):
@@ -31,7 +33,9 @@ class MultiThreatRetreatTests(unittest.TestCase):
         world.status["nearest_hostile"] = {"id": 1, "name": "skeleton", "dist": 3.5}
         result = self.retreat(world)
         self.assert_single_move(world, result)
-        self.assertEqual(result.data["target"], [1.5, 64, .5])
+        self.assertEqual(result.data["target"], [3.5, 64, .5])
+        self.assertEqual(result.data["ground_run"]["steps"], 3)
+        self.assertFalse(result.data["retreat_complete"])
         self.assertTrue(result.data["threat_assessment"]["all_threats_evaluated"])
         self.assertEqual(len([row for row in world.calls if row[0] == "get_entities"]), 2)
 
@@ -53,7 +57,8 @@ class MultiThreatRetreatTests(unittest.TestCase):
         world.entities = [hostile("creeper", [-3, 64, .5], 1), hostile("skeleton", [.5, 64, 8.5], 2)]
         result = self.retreat(world)
         self.assert_single_move(world, result)
-        self.assertEqual(result.data["target"], [.5, 64, -.5])
+        self.assertEqual(result.data["planned_path"][1], [.5, 64, -.5])
+        self.assertEqual(result.data["target"], [.5, 64, -2.5])
 
     def test_secondary_outside_circle_cannot_be_entered(self):
         world = World()
@@ -149,6 +154,106 @@ class MultiThreatRetreatTests(unittest.TestCase):
         result = self.retreat(world, [-1.0, 64, 0.5])
         self.assert_single_move(world, result)
         self.assertGreater(math.hypot(result.data["target"][0] + 1.0, result.data["target"][2] - 0.5), 1.5)
+
+
+class CanopyShooterDescentTests(unittest.TestCase):
+    """A descent can lose vertical distance while retreating from two shooters."""
+
+    retreat = MultiThreatRetreatTests.retreat
+    assert_single_move = MultiThreatRetreatTests.assert_single_move
+
+    def world(self, secondary=None, source="oak_leaves"):
+        world = terrain([(0, 70, 0, source), (1, 68, 0, "dirt")])
+        world.entities = [hostile("pillager", [-2.2, 63, -3.3], 1),
+                          hostile("skeleton", secondary or [-5.8, 63, 4.8], 2)]
+        return world
+
+    def descend(self, world):
+        return self.retreat(world, world.entities[0]["pos"])
+
+    def test_descending_away_from_two_lower_shooters_is_verified_once(self):
+        world = self.world()
+        original = list(world.status["pos"])
+        result = self.descend(world)
+        self.assert_single_move(world, result)
+        self.assertEqual(result.data["target"], [1.5, 68, .5])
+        secondary = world.entities[1]["pos"]
+        self.assertLess(math.dist(result.data["target"], secondary), math.dist(original, secondary))
+        self.assertFalse(result.data["retreat_complete"])
+
+    def test_descent_exception_stays_within_its_canopy_and_shooter_bounds(self):
+        for label, secondary, source, name in (
+                ("horizontal_approach", [6.5, 63, .5], "oak_leaves", "skeleton"),
+                ("outside_danger_circle", [-12.5, 60.5, .5], "oak_leaves", "skeleton"),
+                ("near_height", [-1, 66, .5], "oak_leaves", "skeleton"),
+                ("same_height", [.5, 68, 8.5], "oak_leaves", "skeleton"),
+                ("solid_origin", [-5.8, 63, 4.8], "dirt", "skeleton"),
+                ("melee_enemy", [-4, 64, .5], "oak_leaves", "zombie")):
+            with self.subTest(label=label):
+                world = self.world(secondary, source)
+                if source == "dirt":
+                    world.set_block([2, 67, 0], "dirt")
+                    world.set_block([3, 67, 0], "dirt")
+                world.entities[1]["name"] = name
+                result = self.descend(world)
+                self.assertEqual(result.error_code, "unsafe", result)
+                self.assertFalse(world.writes())
+
+    def test_fresh_secondary_position_revokes_descent_permission(self):
+        world = self.world()
+        original = world.get_entities
+        scans = 0
+
+        def scan(*args, **kwargs):
+            nonlocal scans
+            scans += 1
+            if scans == 2:
+                world.entities[1]["pos"] = [6.5, 63, .5]
+            return original(*args, **kwargs)
+
+        world.get_entities = scan
+        result = self.descend(world)
+        self.assertEqual(result.error_code, "unsafe", result)
+        self.assertEqual(scans, 2)
+        self.assertFalse(world.writes())
+
+
+class LiveTerrainRetreatTests(unittest.TestCase):
+    """Real captured geometry; fake movement never proves live navigation."""
+
+    def world(self):
+        fixture = json.loads((Path(__file__).parent / "fixtures" / "live_retreat_nine_hostiles.json").read_text("utf-8"))
+        world = World()
+        world.status = copy.deepcopy(fixture["status"])
+        world.entities = copy.deepcopy(fixture["entities"])
+        world.blocks = {tuple(row[:3]): {"pos": row[:3], "name": row[3], "properties": row[4]}
+                        for row in fixture["blocks"]}
+
+        def get_block(pos, **kwargs):
+            key = tuple(math.floor(value) for value in pos)
+            world.calls.append(("get_block", key))
+            # The captured volume is finite. Never manufacture air beyond it.
+            return envelope(world.blocks.get(key, {"name": "unknown", "pos": list(key)}))
+
+        world.get_block = get_block
+        return world, fixture
+
+    def test_captured_nine_hostile_scene_has_one_verified_leaf_step(self):
+        world, fixture = self.world()
+        result = SurvivalSkills(world).execute("retreat_from", {"pos": fixture["primary_pos"]})
+        MultiThreatRetreatTests.assert_single_move(self, world, result)
+        self.assertEqual(result.data["target"], fixture["expected_first_step"])
+        self.assertEqual(result.data["threat_assessment"]["count"], 9)
+        self.assertFalse(result.data["retreat_complete"])
+        self.assertEqual(world.blocks[(7, 119, 4)]["name"], "air")
+        self.assertTrue(any(c[0] == "get_block" and c[1] not in world.blocks for c in world.calls))
+
+    def test_uncaptured_origin_is_not_a_walkable_scene(self):
+        world, fixture = self.world()
+        world.blocks.clear()
+        result = SurvivalSkills(world).execute("retreat_from", {"pos": fixture["primary_pos"]})
+        self.assertEqual(result.error_code, "unsafe", result)
+        self.assertFalse(world.writes())
 
 
 class UpwardCanopyRelayTests(unittest.TestCase):

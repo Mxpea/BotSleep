@@ -66,7 +66,8 @@ class DailyWorld:
         if "dig" in self.effects:
             return self.effects["dig"]()
         name = self.blocks[tuple(pos)]["name"]
-        item = {"iron_ore": "raw_iron", "deepslate_iron_ore": "raw_iron", "wheat": "wheat",
+        item = {"iron_ore": "raw_iron", "deepslate_iron_ore": "raw_iron", "diamond_ore": "diamond",
+                "deepslate_diamond_ore": "diamond", "wheat": "wheat",
                 "carrots": "carrot", "potatoes": "potato", "beetroots": "beetroot"}[name]
         self.block(pos, "air")
         self.counts[item] = self.counts.get(item, 0) + 1
@@ -207,6 +208,19 @@ class DailySkillTests(unittest.TestCase):
         self.world.counts["golden_pickaxe"] = 1
         result = self.act("gather_resource", pos=self.pos, expected_name="iron_ore")
         self.assertEqual(result.error_code, "missing_tool")
+
+    def test_diamond_ore_needs_iron_tier_and_observed_gain(self):
+        for ore in ("diamond_ore", "deepslate_diamond_ore"):
+            with self.subTest(ore=ore):
+                self.world.block(self.pos, ore)
+                self.world.counts = {"stone_pickaxe": 1}
+                issued = len(self.writes("dig"))
+                self.assertEqual(self.act("gather_resource", pos=self.pos, expected_name=ore).error_code, "missing_tool")
+                self.assertEqual(len(self.writes("dig")), issued)
+                self.world.counts["iron_pickaxe"] = 1
+                result = self.act("gather_resource", pos=self.pos, expected_name=ore)
+                self.assertTrue(result.success, result)
+                self.assertEqual(result.data["gained"], {"diamond": 1})
 
     def test_crop_requires_fresh_maturity_then_food_gain(self):
         self.world.block(self.pos, "wheat", mature=False)
@@ -586,6 +600,21 @@ class DailySkillTests(unittest.TestCase):
         self.assertEqual((control["hit"], control["ms"], control["wait"]), (1, 50, True))
 
     @patch("skills.hunting._rest", return_value=None)
+    def test_hunting_allows_dry_short_grass_on_solid_footing(self, _rest):
+        self.world.block([0, 64, 0], "short_grass")
+        self.world.entities = [{"id": 1, "name": "cow", "type": "mob", "pos": self.pos}]
+        self.world.counts["stone_sword"] = 1
+        self.assertTrue(self.act("hunt_animal", entity_id=1, expected_name="cow").success)
+
+    @patch("skills.hunting._rest", return_value=None)
+    def test_hunting_can_use_an_existing_pickaxe_when_no_sword_or_axe_is_available(self, _rest):
+        self.world.entities = [{"id": 1, "name": "cow", "type": "mob", "pos": self.pos}]
+        self.world.counts["stone_pickaxe"] = 1
+        result = self.act("hunt_animal", entity_id=1, expected_name="cow")
+        self.assertTrue(result.success, result)
+        self.assertEqual(result.data["weapon"], "stone_pickaxe")
+
+    @patch("skills.hunting._rest", return_value=None)
     def test_hunting_killed_flag_without_loot_is_unverified(self, _rest):
         self.world.entities = [{"id": 1, "name": "cow", "type": "mob", "pos": self.pos}]
         self.world.counts["stone_sword"] = 1
@@ -737,6 +766,26 @@ class DailySkillTests(unittest.TestCase):
         self.assertTrue(view.success, view)
         self.assertFalse(view.data["executed"])
         self.assertEqual(view.data["window"]["sections"]["container"], [{"name": "oak_log", "count": 1}])
+
+    def test_elevated_container_inspection_needs_a_confirmed_approach(self):
+        pos = [4, 66, 0]
+        self.world.block(pos, "furnace")
+        self.furnace()
+        self.world.effects["move"] = lambda: envelope({"interrupted_by": "damage"})
+        result = self.act("inspect_container", pos=pos)
+        self.assertFalse(result.success)
+        self.assertTrue(result.data["executed"])
+        self.assertEqual(len(self.writes("move")), 1)
+        self.assertFalse(self.writes("window_view"))
+
+    def test_elevated_container_is_read_from_its_horizontal_approach(self):
+        pos = [4, 66, 0]
+        self.world.block(pos, "furnace")
+        self.furnace()
+        result = self.act("inspect_container", pos=pos)
+        self.assertTrue(result.success, result)
+        self.assertEqual([call[1] for call in self.writes("move")], [[4, 64, 0]])
+        self.assertEqual(len(self.writes("window_view")), 1)
 
     def test_storage_requires_container_change_not_just_player_inventory(self):
         self.world.block(self.pos, "chest")

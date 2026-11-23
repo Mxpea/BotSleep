@@ -16,6 +16,7 @@ from unittest.mock import patch
 from agent.brain import OpenAIBrain
 from agent.llm_planner import LLMSurvivalPlanner
 from agent.survival_planner import Decision
+from core.campaign import Campaign
 from core.client import APIError
 from core.config import DEFAULTS
 from core.daily_observation import DailyObservationCollector
@@ -176,9 +177,9 @@ class DailyRuntimeTests(unittest.TestCase):
         self.assertEqual(self.world.counts.get("iron_ingot", 0), 0)
         self.assertEqual(harness.context["smelting_jobs"][0]["expected_output"], "iron_ingot")
         tools = {entry["function"]["name"] for entry in endpoint.requests[0]["body"]["tools"]}
-        self.assertTrue((set(DailySurvivalSkills.ARGUMENTS) - {"canopy_escape", "water_escape"}).issubset(tools))
-        self.assertNotIn("canopy_escape", tools)  # Internal local safety, never a model command.
-        self.assertNotIn("water_escape", tools)  # Internal local safety, never a model command.
+        local_safety = {"canopy_escape", "water_escape", "retreat_from", "fight_hostile"}
+        self.assertTrue((set(DailySurvivalSkills.ARGUMENTS) - local_safety).issubset(tools))
+        self.assertFalse(local_safety & tools)
         self.assertIn("plan_shelter", tools)
         self.assertNotIn("goal_complete", tools)
         self.assertTrue(self.step(harness).success)
@@ -625,6 +626,61 @@ class DailyRuntimeTests(unittest.TestCase):
         self.assertFalse(harness.paused)
         self.assertIsNone(harness.journal.state.get("pending"))
         self.assertNotEqual(harness.task_controller.snapshot()["status"], "unknown")
+
+    def test_native_arrow_preempts_production_even_without_a_visible_attacker(self):
+        harness, endpoint = self.make_harness([tool_response("wait", {"seconds": 5}, "unused")])
+        self.world.get_events_page = lambda **opts: envelope({"events": [{"seq": 1, "type": "hurt",
+            "t": int(time.time() * 1000), "source": "arrow"}], "last_seq": 1})
+        harness._active_decision = Decision("gather_block", {"pos": [2, 64, 0], "expected_name": "oak_log"},
+                                            "Gather wood", "wood")
+        harness.latest_status = self.world.status
+        harness._next_monitor = time.monotonic() + 60
+        harness._monitor()
+        self.assertTrue(harness._cancel.is_set())
+        self.assertTrue(any(call[0] == "stop" for call in self.world.calls))
+        harness._active_decision = None
+        harness._cancel.clear()
+        result = self.step(harness)
+        self.assertTrue(result.success, result)
+        self.assertIn("after taking damage", result.message)
+        self.assertEqual(endpoint.requests, [])
+
+    def test_native_arrow_wakes_retry_delay_before_next_status_read(self):
+        harness, endpoint = self.make_harness([tool_response("wait", {"seconds": 5}, "unused")])
+        harness.latest_status = self.world.status
+        harness._next_attempt = harness._next_idle_monitor = time.monotonic() + 60
+        self.world.get_events_page = lambda **opts: envelope({"events": [{"seq": 1, "type": "hurt",
+            "t": int(time.time() * 1000), "source": "arrow"}], "last_seq": 1})
+        harness.tick()
+        self.assertIsNotNone(harness._future)
+        harness._future.result(timeout=5)
+        result = harness.tick(automatic=False)
+        self.assertTrue(result.success, result)
+        self.assertIn("after taking damage", result.message)
+        self.assertEqual(endpoint.requests, [])
+
+    def test_hit_near_failed_retreat_switches_to_short_escape_without_repeating_scan(self):
+        harness, _ = self.make_harness([])
+        harness.campaign = Campaign({})
+        enemy = {"id": 7, "name": "spider", "type": "hostile", "pos": [4, 64, 0]}
+        status = {**self.world.status, "pos": [0, 64, 0],
+                  "nearest_hostile": {"id": 7, "name": "spider", "dist": 4}}
+        observation = {"fresh": True, "status": status, "entities": [enemy]}
+        hit = {"t": 1, "source": "mob_attack", "attacker": {"id": 7}}
+        retry = time.time() + 15
+        retreat = {"retry_after": retry, "search_basis": {"pos": status["pos"]}}
+        harness.context["retreat_recovery"] = retreat
+
+        def route_reopened(_):
+            retreat.pop("retry_after", None)
+            return Decision("retreat_from", {"pos": enemy["pos"], "distance": 8}, "Replan", "safety")
+
+        with patch.object(harness, "_mandatory_safety", side_effect=route_reopened):
+            action = harness._combat_priority(observation, hit)
+            self.assertEqual(action.args, {"operation": "escape_pressure", "attacker_id": 7})
+            self.assertEqual(retreat.get("retry_after"), retry)
+            harness.campaign.state["escape_retry_after"] = time.time() + 1
+            self.assertEqual(harness._combat_priority(observation, hit).goal, "combat_reaction")
 
 
 if __name__ == "__main__":

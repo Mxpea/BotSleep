@@ -221,6 +221,23 @@ class WorkflowMineWorld:
 
 
 class MiningWorkflowTests(unittest.TestCase):
+    def test_excavation_rejects_open_channel_below_liquid_before_writing(self):
+        from skills.action_workflow import WorkflowContext, WorkflowGuard, WorkflowStepError
+
+        world = WorkflowMineWorld()
+        world.blocks[(1, 68, -3)] = {"name": "lava"}
+        skill = MineShaftSkill(world, memory=Mock())
+        context = WorkflowContext(
+            guard=WorkflowGuard(world, timeout_seconds=30),
+            spec=MineShaftSkill._hub_only_spec(4, include_workstations=False),
+            origin=[0, 64, 0], orientation="south",
+        )
+        with self.assertRaises(WorkflowStepError) as caught:
+            skill._dig_cell_safely(context, [1, 63, -3], relative=False)
+        self.assertEqual(caught.exception.code, "hazard_adjacent")
+        self.assertEqual(list(caught.exception.blocker_pos), [1, 68, -3])
+        self.assertEqual(world.dig_collect_flags, [])
+
     def setUp(self):
         # Rest/resupply creates a nested container skill; isolate its legacy memory too.
         container_memory = patch("skills.container.MemoryEngine", return_value=Mock())

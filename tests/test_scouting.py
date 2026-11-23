@@ -2,7 +2,9 @@
 
 import copy
 import math
+import threading
 import unittest
+from unittest.mock import Mock
 
 from core.client import APIError
 from skills.scouting import SurfaceScoutSkill
@@ -75,6 +77,14 @@ class SurfaceScoutSkillTests(unittest.TestCase):
         self.assertEqual(res.data["waypoints"][0], [10.5, 64.0, 20.5])
         self.assertGreater(math.dist(res.data["origin"], res.data["final_pos"]), 150.0)
 
+    def test_uses_requested_travel_and_shortens_the_last_hop(self):
+        world = SimScoutWorld()
+        result = SurfaceScoutSkill(world).execute(distance=96, hop_distance=64, max_hops=2)
+        self.assertTrue(result.success, result)
+        self.assertEqual(world.moves, [[64.5, 64.0, 0.5], [96.5, 64.0, 0.5]])
+        self.assertEqual(result.data["requested_distance"], 96)
+        self.assertEqual(result.data["waypoint_distance"], 96)
+
     def test_stops_immediately_upon_discovering_structure_or_oasis_log(self):
         # Origin chosen so heading is +x: 10+21 = 31 (31 % 4 == 3 -> (-1,0)), pick (0, 64, 0) -> (1, 0).
         world = SimScoutWorld(pos=(0.5, 64.0, 0.5))
@@ -125,6 +135,63 @@ class SurfaceScoutSkillTests(unittest.TestCase):
         self.assertEqual(res.error_code, "request_timeout")
         self.assertEqual(res.data["action_state"], "unknown")
         self.assertTrue(res.data["executed"])
+
+    def test_safety_or_cancellation_after_first_move_cannot_change_heading(self):
+        for stop, expected in (("cancel", "cancelled"), ("respawn", "life_changed"), ("fire", "unsafe_state"),
+                               ("dead", "dead"), ("interrupt_receipt", "interrupted")):
+            with self.subTest(stop=stop):
+                world = SimScoutWorld()
+                cancelled = threading.Event()
+
+                def halt(*args, **kwargs):
+                    if stop == "cancel":
+                        cancelled.set()
+                    elif stop == "respawn":
+                        world.status["last_death"] = {"t": "new-life"}
+                    elif stop == "fire":
+                        world.status["on_fire"] = True
+                    elif stop == "dead":
+                        world.status["alive"] = False
+                    else:
+                        return {"ok": True, "result": {"interrupted_by": "hurt"}}
+                    return {"ok": True, "result": {}}
+
+                world.move_to = Mock(side_effect=halt)
+                result = SurfaceScoutSkill(world).execute(cancel_event=cancelled)
+                self.assertFalse(result.success)
+                self.assertEqual(result.error_code, expected)
+                self.assertEqual(world.move_to.call_count, 1)
+
+    def test_missing_landing_or_read_failure_is_unknown_without_a_second_write(self):
+        for mode in ("no_position", "read_refusal"):
+            with self.subTest(mode=mode):
+                world = SimScoutWorld()
+
+                def move(*args, **kwargs):
+                    if mode == "no_position":
+                        world.status.pop("pos")
+                    else:
+                        world.get_status = Mock(side_effect=APIError("status_unavailable", "No current stance"))
+                    return {"ok": True, "result": {"pos": [42, 64, 0]}}
+
+                world.move_to = Mock(side_effect=move)
+                result = SurfaceScoutSkill(world).execute()
+                self.assertFalse(result.success)
+                self.assertEqual((result.error_code, result.data["action_state"]), ("action_unconfirmed", "unknown"))
+                world.move_to.assert_called_once()
+
+    def test_path_refusal_after_partial_progress_uses_observed_location(self):
+        world = SimScoutWorld()
+
+        def partial(*args, **kwargs):
+            world.status["pos"][0] += 2
+            raise APIError("path_not_found", "The rest of the route is blocked")
+
+        world.move_to = Mock(side_effect=partial)
+        result = SurfaceScoutSkill(world).execute(max_hops=1)
+        self.assertTrue(result.success)
+        self.assertEqual(result.data["final_pos"], [2.5, 64, .5])
+        world.move_to.assert_called_once()
 
     def test_ignores_nearby_player_workstations_within_16_blocks_of_origin(self):
         world = SimScoutWorld(pos=(0.5, 64.0, 0.5))

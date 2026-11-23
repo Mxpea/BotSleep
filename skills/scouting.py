@@ -81,6 +81,7 @@ class SurfaceScoutSkill(BaseSkill):
         scan_radius: int = 48,
         hop_distance: float = 55.0,
         max_hops: int = 3,
+        distance: Optional[float] = None,
         prefer_wood: bool = True,
         goal_focus: str = "auto",
         min_food: float = 14.0,
@@ -89,11 +90,14 @@ class SurfaceScoutSkill(BaseSkill):
         timeout_seconds: float = 55.0,
         cancel_event: Optional[threading.Event] = None,
     ) -> SkillResult:
-        """Scan forward from current position up to ~200+ blocks; stop early on target finds or stamina drop."""
+        """Scan forward along verified waypoints up to 256 blocks; stop early on target finds or stamina drop."""
         scan_r = max(16, min(64, int(scan_radius)))
         hop_d = max(16.0, min(64.0, float(hop_distance)))
         hops_limit = max(1, min(6, int(max_hops)))
         focus = str(goal_focus or "auto").lower()
+        travel_limit = hop_d * hops_limit if distance is None else float(distance)
+        if not math.isfinite(travel_limit) or not 0 < travel_limit <= 256:
+            return SkillResult(False, "Scout distance must be between 0 and 256 blocks", error_code="bad_args")
         guard = WorkflowGuard(
             self.client,
             cancel_event=cancel_event,
@@ -113,11 +117,11 @@ class SurfaceScoutSkill(BaseSkill):
             "villagers": {},
         }
         waypoints: List[List[float]] = []
-        early_stop_reason = "completed_forward_span"
+        travelled = 0.0
+        early_stop_reason = "completed_forward_span" if hop_d * hops_limit >= travel_limit else "planned_hops_complete"
 
         try:
-            st0 = guard.check_status(require_safe=False)
-            origin = parse_pos(st0.get("pos")) or [0.0, 64.0, 0.0]
+            st0, origin = self._stance(guard)
             start_food = float(st0.get("food", 20.0))
             dim = str(st0.get("dimension") or "overworld")
             waypoints.append([round(origin[0], 2), round(origin[1], 2), round(origin[2], 2)])
@@ -131,9 +135,8 @@ class SurfaceScoutSkill(BaseSkill):
             else:
                 headings = self._pick_headings(cur_pos, attempt=attempt)
                 heading_idx = 0
-                for hop_idx in range(hops_limit):
-                    cur_st = guard.check_status(require_safe=False)
-                    cur_pos = parse_pos(cur_st.get("pos")) or cur_pos
+                for _ in range(hops_limit):
+                    cur_st, cur_pos = self._stance(guard)
                     cur_food = float(cur_st.get("food", 20.0))
                     if cur_food <= float(min_food) or (start_food - cur_food) >= float(max_food_drop):
                         early_stop_reason = "stamina_conserved"
@@ -142,20 +145,25 @@ class SurfaceScoutSkill(BaseSkill):
                         early_stop_reason = "time_budget_conserved"
                         break
 
+                    stride = min(hop_d, max(0.0, travel_limit - travelled))
+                    if stride <= 4:
+                        break
                     hx, hz = headings[heading_idx % len(headings)]
-                    tx = cur_pos[0] + hx * hop_d
-                    tz = cur_pos[2] + hz * hop_d
-                    moved = self._advance_hop(guard, cur_pos, tx, tz)
-                    if moved < 4.0 and heading_idx + 1 < len(headings):
+                    tx = cur_pos[0] + hx * stride
+                    tz = cur_pos[2] + hz * stride
+                    landing = self._advance_hop(guard, tx, tz)
+                    if math.dist(landing, cur_pos) <= .1 and heading_idx + 1 < len(headings):
                         heading_idx += 1
                         hx2, hz2 = headings[heading_idx % len(headings)]
-                        moved = self._advance_hop(guard, cur_pos, cur_pos[0] + hx2 * hop_d, cur_pos[2] + hz2 * hop_d)
-                    if moved < 4.0:
+                        cur_pos = landing
+                        landing = self._advance_hop(guard, cur_pos[0] + hx2 * stride, cur_pos[2] + hz2 * stride)
+                    if math.dist(landing, cur_pos) <= .1:
+                        cur_pos = landing
                         early_stop_reason = "terrain_blocked_abort"
                         break
 
-                    cur_st = guard.check_status(require_safe=False)
-                    cur_pos = parse_pos(cur_st.get("pos")) or cur_pos
+                    travelled += math.hypot(landing[0] - cur_pos[0], landing[2] - cur_pos[2])
+                    cur_pos = landing
                     waypoints.append([round(cur_pos[0], 2), round(cur_pos[1], 2), round(cur_pos[2], 2)])
                     self._scan_checkpoint(guard, cur_pos, dim, scan_r, findings, origin=origin)
                     if self._should_stop_early(findings, prefer_wood=prefer_wood, goal_focus=focus):
@@ -176,7 +184,8 @@ class SurfaceScoutSkill(BaseSkill):
                 if report["highlights"]
                 else f"Scout covered ~{report['estimated_reach']} blocks forward with no structures; stopping cleanly to save stamina."
             )
-            return SkillResult(True, msg, data={**report, "executed": guard.writes > 0})
+            return SkillResult(True, msg, data={**report, "requested_distance": travel_limit,
+                "waypoint_distance": round(travelled, 2), "executed": guard.writes > 0})
         except WorkflowUncertainError as exc:
             return SkillResult(
                 False,
@@ -186,8 +195,6 @@ class SurfaceScoutSkill(BaseSkill):
                     **exc.data,
                     "executed": guard.writes > 0,
                     "completed": False,
-                    "action_state": "unknown",
-                    "cleanup_skipped": "workflow_unknown",
                 },
             )
         except WorkflowStepError as exc:
@@ -208,10 +215,21 @@ class SurfaceScoutSkill(BaseSkill):
         base = (math.floor(abs(origin[0])) + math.floor(abs(origin[2])) + max(0, int(attempt)) * 3) % len(ring)
         return [ring[(base + offset) % len(ring)] for offset in (0, 2, 6, 1)]
 
-    def _advance_hop(self, guard: WorkflowGuard, cur_pos: Sequence[float], tx: float, tz: float) -> float:
+    @staticmethod
+    def _stance(guard: WorkflowGuard):
+        status = guard.check_status()
+        pos = parse_pos(status.get("pos"))
+        if pos is None or status.get("alive") is not True or status.get("ready") is not True:
+            guard.fail_uncertain("action_unconfirmed" if guard.writes else "invalid_response",
+                                 "Scout requires a current position before choosing another heading")
+        if status.get("on_ground") is False:
+            raise WorkflowStepError("unsafe_state", "Scout is not on stable ground", blocker_type="safety_interrupted")
+        return status, pos
+
+    def _advance_hop(self, guard: WorkflowGuard, tx: float, tz: float) -> List[float]:
         move_timeout_ms = int(min(18000, max(5000, guard.remaining_timeout(18.0) * 800)))
         try:
-            guard.write(
+            response = guard.write(
                 self.client.move_to,
                 round(tx, 1),
                 None,
@@ -219,14 +237,25 @@ class SurfaceScoutSkill(BaseSkill):
                 timeout_ms=move_timeout_ms,
                 range=4,
             )
-        except WorkflowStepError:
-            return 0.0
+            receipt = response.get("result") if isinstance(response, dict) else None
+            if isinstance(receipt, dict):
+                if receipt.get("dimension_changed"):
+                    raise WorkflowStepError("life_changed", "Dimension changed during the scout hop")
+                if receipt.get("interrupted_by"):
+                    raise WorkflowStepError("interrupted", f"Scout movement interrupted by {receipt['interrupted_by']}")
+        except WorkflowStepError as exc:
+            if exc.code not in {"path_not_found", "stalled", "out_of_reach"}:
+                raise
+        # Even a known path failure can move partway. Check life and actual
+        # footing before deciding whether a different heading is warranted.
         try:
-            after = guard.check_status(require_safe=False)
-            after_pos = parse_pos(after.get("pos")) or list(cur_pos)
-            return math.hypot(after_pos[0] - cur_pos[0], after_pos[2] - cur_pos[2])
-        except WorkflowStepError:
-            return 0.0
+            _, landing = self._stance(guard)
+            return landing
+        except WorkflowStepError as exc:
+            if ((exc.blocker_type == "safety_interrupted" and exc.code != "workflow_budget_exhausted")
+                    or exc.code in {"dead", "life_changed", "cancelled", "unsafe_state"}):
+                raise
+            guard.fail_uncertain("action_unconfirmed", "Unable to verify the scout landing", {"read_error": exc.code})
 
     def _scan_checkpoint(
         self,
@@ -277,15 +306,9 @@ class SurfaceScoutSkill(BaseSkill):
     ) -> None:
         rows: List[Dict[str, Any]] = []
         if callable(getattr(self.client, "find_blocks", None)):
-            try:
-                rows = guard.read(self.client.find_blocks, list(types), radius=scan_r, limit=16) or []
-            except WorkflowStepError:
-                rows = []
+            rows = guard.read(self.client.find_blocks, list(types), radius=scan_r, limit=16) or []
         elif callable(getattr(self.client, "get_blocks", None)):
-            try:
-                rows = guard.read(self.client.get_blocks, radius=scan_r, types=list(types), limit=16) or []
-            except WorkflowStepError:
-                rows = []
+            rows = guard.read(self.client.get_blocks, radius=scan_r, types=list(types), limit=16) or []
         if not isinstance(rows, list):
             return
         local_workstations = frozenset({"crafting_table", "furnace", *BED_NAMES})

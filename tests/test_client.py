@@ -34,6 +34,11 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(self.request.call_args.kwargs["json"],
                          {"types": ["wheat"], "radius": 12, "limit": 4, "mature": True, "properties": {"age": 7}})
 
+    def test_filtered_block_query_honors_campaign_read_deadline(self):
+        self.request.return_value = response({"ok": True, "result": {"blocks": []}})
+        self.assertEqual(self.client.find_blocks(["oak_log"], timeout_seconds=3), [])
+        self.assertEqual(self.request.call_args.kwargs["timeout"], 3)
+
     def test_window_wrappers_use_slash_routes_and_nested_target(self):
         self.request.return_value = response({"ok": True, "result": {"sections": {"container": []}}})
         self.client.window_view([1, 64, 2])

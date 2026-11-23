@@ -367,6 +367,28 @@ class DailyPolicyTests(unittest.TestCase):
         self.assertIsNone(self.policy.validate(decision, obs, context))
         self.assertEqual((obs, context), before)
 
+    def test_critical_hunger_recovery_can_reconsider_one_adjacent_terrace(self):
+        obs = self.ground_search(observed(pos=[.7, 64, .5], health=1.33, food=17))
+        obs["safe_stand_candidates"] = [{"pos": [.5, 65, 1.5], "support": "stone"},
+                                         {"pos": [.5, 65, 2.5], "support": "stone"}]
+        context = {"food_recovery": {"steps": 0, "needs_ai": True}}
+        decision = self.policy.choose(obs, self.baseline, context=context)
+        self.assertEqual((decision.name, decision.args), ("position_for_task", {"pos": [.5, 65, 1.5]}))
+        self.assertIsNone(self.policy.validate(decision, obs, context))
+        context["food_recovery"]["steps"] = 8
+        self.assertEqual(self.policy.choose(obs, self.baseline, context=context).name, "wait")
+
+    def test_critical_food_search_can_clear_observed_dirt_headroom_at_dead_end(self):
+        obs = self.ground_search(observed(health=1.33, food=17))
+        obs["safe_stand_candidates"] = []
+        obs["food_headroom_candidates"] = [{"pos": [1, 65, 0], "name": "dirt"}]
+        decision = self.policy.choose(obs, self.baseline)
+        self.assertEqual((decision.name, decision.goal), ("clear_food_headroom", "food_recovery"))
+        self.assertIsNone(self.policy.validate(decision, obs))
+        self.assertNotIn(decision.name, self.policy.constraints({**obs, "fresh": False})["allowed_actions"])
+        obs["status"]["food"] = 11
+        self.assertEqual(self.policy.choose(obs, self.baseline).name, "wait")
+
     def test_food_search_skips_visited_failed_and_current_cells(self):
         obs = self.ground_search(observed(health=6, food=17))
         context = {"food_recovery": {"steps": 2, "visited": [[0, 64, 1]], "excluded_until": {}}}
@@ -734,6 +756,18 @@ class DailyPolicyTests(unittest.TestCase):
         night_with_bed = observed(is_day=False, time_of_day=14000)
         night_with_bed["blocks"] = [{"name": "white_bed", "pos": [2, 64, 0], "properties": {"occupied": False}}]
         self.assertEqual(opp.choose(night_with_bed, self.baseline).name, "auto_sleep")
+        thunder_day["blocks"] = night_with_bed["blocks"]
+        self.assertEqual(opp.choose(thunder_day, self.baseline).name, "auto_sleep")
+
+    def test_opportunistic_home_route_has_priority_over_night_work_at_low_health(self):
+        policy = DailySafetyPolicy({"sleep_policy": "opportunistic", "low_health_threshold": 8})
+        obs = observed(is_day=False, time_of_day=14000, health=7, food=15)
+        self.gated_shelter(obs)
+        decision = policy.choose(obs, self.baseline)
+        self.assertEqual(decision.name, "set_door")
+        self.assertIsNone(policy.validate(decision, obs))
+        self.assertEqual(policy.constraints(obs)["allowed_actions"], ["wait", "set_door"])
+        self.assertIsNotNone(policy.validate(action("gather_resource", pos=[2, 64, 0], expected_name="iron_ore"), obs))
 
     def test_in_water_chooses_water_escape_and_respects_exhausted_cooldown(self):
         obs = observed(in_water=True, on_ground=False)

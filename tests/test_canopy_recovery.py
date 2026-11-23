@@ -101,6 +101,7 @@ class LandingRecoveryTests(unittest.TestCase):
         ):
             with self.subTest(cause=cause, changes=changes):
                 self.world = World()
+                self.world.status.update(speed=0, velocity=[0, 0, 0])
 
                 def move(pos, kwargs):
                     self.world.status.update(health=19, **changes)

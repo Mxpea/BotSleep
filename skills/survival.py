@@ -30,9 +30,12 @@ class SurvivalSkills:
     WOODS = ("oak", "spruce", "birch", "jungle", "acacia", "dark_oak", "mangrove", "cherry", "pale_oak")
     LOGS = frozenset(wood + "_log" for wood in WOODS)
     PLANKS = frozenset(wood + "_planks" for wood in WOODS)
-    GATHERABLE = LOGS | {"stone", "cobblestone", "coal_ore", "deepslate_coal_ore", "dead_bush"}
+    GATHERABLE = LOGS | {"stone", "cobblestone", "coal_ore", "deepslate_coal_ore", "dead_bush", "sand"}
     PICKAXES = frozenset(tier + "_pickaxe" for tier in ("wooden", "copper", "stone", "iron", "golden", "diamond", "netherite"))
     AIR = frozenset({"air", "cave_air", "void_air"})
+    # Verified zero-collision, replaceable targets in Minecraft 1.21.11.
+    # This is deliberately separate from both traversability and solid support.
+    PLACEMENT_SPACE = AIR | {"leaf_litter", "short_grass"}
     RETREAT_PASSABLE = AIR | {
         "short_grass", "tall_grass", "short_dry_grass", "tall_dry_grass",
         "fern", "large_fern", "leaf_litter", "wildflowers", "bush", "firefly_bush", "cactus_flower",
@@ -171,11 +174,14 @@ class SurvivalSkills:
         self._check(context)
         if status.get("alive") is False:
             raise _Failure("dead", "Bot is dead")
+        if status.get("ready") is False:
+            raise _Failure("not_ready", "Bot must be ready and alive")
         try:
             health = self._number(status.get("health"), "health", 0, 1024)
             position = self._pos(status.get("pos"))
         except _Failure:
-            raise _Failure("invalid_response", "Status has invalid health or position") from None
+            raise _Failure("invalid_response", "Status has invalid health or position",
+                           {"status_read_unavailable": True}) from None
         if health <= 0:
             raise _Failure("dead", "Bot is dead")
         if status.get("ready") is not True or status.get("alive") is not True:
@@ -243,6 +249,12 @@ class SurvivalSkills:
     @classmethod
     def _safe_block(cls, block):
         return block["name"] not in cls.HAZARDS and (block.get("properties") or {}).get("waterlogged") not in (True, "true")
+
+    @staticmethod
+    def contact_overlap(point, cell):
+        """Physical contact guaranteed across the API's rounded player position."""
+        return [min(max(0, min(center + .3001, cell[axis] + 1) - max(center - .3001, cell[axis]))
+                    for center in (point[axis] - .05, point[axis] + .05)) for axis in (0, 2)]
 
     def _approach(self, pos, context):
         status = self._status(context)
@@ -516,12 +528,18 @@ class SurvivalSkills:
                 raise _Failure("unsafe", "Cannot place a block in the bot's body")
             target = self._block(pos, context)
             below = self._block([pos[0], pos[1] - 1, pos[2]], context)
-            if target["name"] not in self.AIR or below["name"] not in self.SUPPORT or not self._safe_block(below):
-                raise _Failure("unsafe", "Placement needs an empty cell above safe solid support")
+            if (target["name"] not in self.PLACEMENT_SPACE or not self._safe_block(target)
+                    or below["name"] not in self.SUPPORT or not self._safe_block(below)):
+                raise _Failure("unsafe", "Placement needs a verified replaceable cell above safe solid support")
+
+        def place():
+            # Mark only the actual write, after the final status/site guard.
+            context["placement_write"] = True
+            return self.client.place_block(*pos, item=item)
 
         validate_site(initial)
         validate_site(self._approach(pos, context))
-        self._action(context, self.client.place_block, *pos, item=item)
+        self._action(context, place, _validate_status=validate_site)
         self._status(context)
         placed = self._block(pos, context)
         after, _ = self._inventory(context)
@@ -529,6 +547,7 @@ class SurvivalSkills:
         used = before.get(item, 0) - after.get(item, 0)
         if placed["name"] not in allowed or used < 1:
             raise _Failure("place_unverified", "Matching world block and item consumption were not both observed", {"pos": pos, "block": placed["name"], "used": used})
+        context["placement_verified"] = True
         return {"pos": pos, "placed": placed["name"], "used": used}
 
     def _eat_food(self, args, context):
@@ -579,6 +598,69 @@ class SurvivalSkills:
         recovery = context.setdefault("recovery_context", {})
         recovery["purpose"] = "canopy_escape"
         return self._retreat_from({"pos": [0, 0, 0], "distance": 8}, context)
+
+    @staticmethod
+    def _hurt_interruption(error):
+        """Only a complete official response proves this move's backend termination."""
+        if (isinstance(error, APIError) and error.code == "interrupted" and error.status_code == 200
+                and isinstance(error.details, dict) and error.details.get("cause") == "hurt"
+                and error.details.get("action_state") != "unknown"):
+            return {"api_code": "interrupted", "cause": "hurt", "http_status": 200,
+                    "response": "error"}
+        if (isinstance(error, _Failure) and error.code == "interrupted"
+                and error.data.get("interrupted_by") == "hurt"):
+            # _action has already validated the ok=true/result envelope.
+            return {"api_code": "interrupted", "cause": "hurt", "response": "success",
+                    "interrupted_by": "hurt"}
+        return None
+
+    def _observe_interrupted_retreat(self, context, before, verify_footing):
+        """Observe the actual stopped position; never retry, stop or claim arrival."""
+        context["navigation_observe_only"] = True  # Also suppress outer failure cleanup.
+        deadline = time.monotonic() + 1.5
+        context["navigation_settle_deadline"] = deadline
+        previous = None
+        footing = None
+        try:
+            for count in range(1, 17):
+                status = self._status(context)
+                if (time.monotonic() > deadline or "busy" not in status or status["busy"] is not None
+                        or status.get("last_death") != before.get("last_death")
+                        or status.get("dimension") != before.get("dimension")
+                        or status.get("gamemode", "survival") != "survival"
+                        or any(status.get(k) for k in ("in_water", "in_lava", "on_fire", "submerged", "held_controls"))):
+                    raise _Failure("action_unconfirmed", "Interrupted retreat lost its idle same-life observation")
+                if previous is not None and status["health"] < previous["health"]:
+                    raise _Failure("action_unconfirmed", "Health changed during interrupted retreat verification")
+                speed = self._number(status["speed"], "speed", 0, 1024) if "speed" in status else 0.0
+                velocity = self._pos(status["velocity"]) if "velocity" in status else [0.0, 0.0, 0.0]
+                stable = (status.get("on_ground") is True and status.get("jumping") is not True
+                          and type(speed) in (int, float) and math.isfinite(speed) and 0 <= speed <= .1
+                          and math.dist(velocity, [0, 0, 0]) <= .1
+                          and abs(status["pos"][1] - round(status["pos"][1])) <= .05)
+                if stable:
+                    if (previous is not None and math.dist(status["pos"], previous["pos"]) <= .05
+                            and all(math.floor(a + .0001) == math.floor(b + .0001)
+                                    for a, b in zip(status["pos"], previous["pos"]))):
+                        return {"pos": status["pos"], "health_before": before["health"],
+                                "health_after": status["health"], "interruption_observations": count,
+                                "actual_footing": footing, "actual_footing_verified": True}
+                    footing = verify_footing(status)
+                    previous = status
+                else:
+                    previous = None
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                delay = min(.1, remaining)
+                if context.get("cancel") is not None:
+                    context["cancel"].wait(delay)
+                else:
+                    time.sleep(delay)
+                self._check(context)
+            raise _Failure("action_unconfirmed", "Interrupted retreat did not settle within its observation budget")
+        finally:
+            context.pop("navigation_settle_deadline", None)
 
     def _water_escape(self, args, context):
         before = self._status(context)
@@ -932,6 +1014,7 @@ class SurvivalSkills:
                     raise _Failure("near_hostile", "A hostile appeared before the canopy clearing write")
 
             outcome.update(operation="clear_foliage", cleared_pos=list(leaf), cleared_name=block["name"],
+                           destination_support_name=support_before["name"],
                            descent_target=destination, target=None, planned_path=None, final_target=None,
                            moved=0, ground_route_verified=False, retreat_complete=False)
             context["navigation_write"] = True
@@ -1001,6 +1084,10 @@ class SurvivalSkills:
         target = None
         final_target = None
         edge_sweeps = {}
+        edge_contacts = {}
+        edge_drops = set()
+        ground_run = []
+        ground_sweep = set()
         relay_candidates = []
         best_partial = None
         outcome = {"origin": origin, "threat_pos": None if escaping else threat, "target": None,
@@ -1012,7 +1099,7 @@ class SurvivalSkills:
         ranged_names = {"skeleton", "stray", "bogged", "pillager"}
         threats = []
 
-        def hostile_snapshot():
+        def hostile_snapshot(*, strict=False):
             radius = recovery.get("threat_radius", 8)
             # A sampled route may descend six while moving eight horizontally;
             # include shooters beyond the origin's own danger radius as well.
@@ -1027,6 +1114,10 @@ class SurvivalSkills:
             for entity in entities:
                 if not isinstance(entity, dict):
                     raise _Failure("invalid_response", "Hostile observation contains a malformed entity")
+                if strict and (entity.get("type") != "hostile"
+                        or type(entity.get("id")) not in (int, str) or entity.get("id") == ""
+                        or not isinstance(entity.get("name"), str) or not entity["name"]):
+                    raise _Failure("invalid_response", "Retreat clearance contains an incomplete hostile")
                 if entity.get("type") != "hostile":
                     continue
                 try:
@@ -1058,11 +1149,27 @@ class SurvivalSkills:
                 return True
             baseline = origin if baseline is None else baseline
             previous = baseline if previous is None else previous
+            source = outcome["origin_support"]
+            canopy_start = (source.get("state") == "center_supported"
+                            and source.get("center_name") in self.RETREAT_LEAVES | self.RETREAT_TRUNKS)
             for row in threats:
-                # Preserve horizontal retreat from the primary below a crown;
-                # its vertical exclusion is checked separately. Other mobs
-                # retain their actual 3D danger circles, including shooters.
-                gap = (lambda p: math.hypot(p[0] - row["pos"][0], p[2] - row["pos"][2])) if row["primary"] else (lambda p: math.dist(p, row["pos"]))
+                initial_3d, prior_3d, current_3d = (math.dist(p, row["pos"]) for p in (baseline, previous, point))
+                # Keep each secondary enemy's actual danger-circle boundary
+                # even when a canopy descent uses horizontal nonapproach.
+                # The primary retains its established horizontal retreat rule.
+                if (not row["primary"] and (initial_3d > row["radius"] or prior_3d > row["radius"])
+                        and current_3d <= row["radius"]):
+                    return False
+                # A verified canopy descent can reduce vertical separation
+                # while moving away from two shooters below. Permit only
+                # already-exposed, nonascending steps that stay above both
+                # shooters' close-height band; retain horizontal nonapproach
+                # to every shooter and the original 3D rule for other cases.
+                lower_shooter_descent = (not row["primary"] and canopy_start and row["name"] in ranged_names
+                    and initial_3d <= row["radius"] and prior_3d <= row["radius"]
+                    and point[1] < baseline[1] and point[1] <= previous[1]
+                    and all(p[1] - row["pos"][1] > 2.5 for p in (baseline, previous, point)))
+                gap = (lambda p: math.hypot(p[0] - row["pos"][0], p[2] - row["pos"][2])) if row["primary"] or lower_shooter_descent else (lambda p: math.dist(p, row["pos"]))
                 initial, prior, current = gap(baseline), gap(previous), gap(point)
                 if allow_distant_secondary and not row["primary"] and initial >= 7.5 and current >= 7.5:
                     continue
@@ -1175,16 +1282,6 @@ class SurvivalSkills:
                            for level in range(cell[1] + 2, current[1] + 2))
             return True
 
-        def contact_overlap(point, cell):
-            # mc-agent-api rounds position to 0.1; its physical half-width is
-            # 0.3001. Require positive contact for every possible true position.
-            overlaps = []
-            for axis in (0, 2):
-                overlaps.append(min(max(0, min(center + 0.3001, cell[axis] + 1)
-                                             - max(center - 0.3001, cell[axis]))
-                                    for center in (point[axis] - 0.05, point[axis] + 0.05)))
-            return overlaps
-
         def swept_entry_cells(point, cell):
             center = [cell[0] + 0.5, cell[1], cell[2] + 0.5]
             low_x = math.floor(min(point[0] - 0.05, center[0]) - 0.3001)
@@ -1194,6 +1291,126 @@ class SurvivalSkills:
             return {(x, level, z) for x in range(low_x, high_x + 1) for z in range(low_z, high_z + 1)
                     for level in (cell[1], cell[1] + 1)}
 
+        def edge_center_clear():
+            ground = read((start[0], start[1] - 1, start[2]))
+            # Leaf litter has no collision in 1.21.11, but is never footing.
+            # Only separately observed, overlapping neighbor support can
+            # authorize entry; do not infer a lower floor from decoration.
+            return (ground is not None and self._safe_block(ground)
+                    and ground["name"] in self.AIR | {"leaf_litter"})
+
+        def ground_segment_safe(point, route):
+            end = route[-1]
+            length = sum((end[i] - point[i]) ** 2 for i in (0, 2))
+            if length <= 0:
+                return False
+            fractions = {0., 1.}
+            for candidate in route[1:] + [row["pos"] for row in threats]:
+                for axes in ((0, 2), (0, 1, 2)):
+                    squared = sum((end[i] - point[i]) ** 2 for i in axes)
+                    fraction = sum((candidate[i] - point[i]) * (end[i] - point[i]) for i in axes) / squared
+                    fractions.add(max(0., min(1., fraction)))
+            prior = point
+            for fraction in sorted(fractions):
+                probe = [point[i] + fraction * (end[i] - point[i]) for i in range(3)]
+                if not safe_height_band(probe) or not threat_safe(probe, prior, baseline=point):
+                    return False
+                prior = probe
+            return True
+
+        def verified_ground_run(first):
+            nonlocal read_limit
+            # Only current, real hostile-directed movement on centered solid
+            # footing may coalesce steps. Tree/edge/vertical exits stay single.
+            source = outcome["origin_support"]
+            if (escaping or outcome["edge_start"] or source.get("state") != "center_supported"
+                    or source.get("center_name") not in self.SUPPORT - self.RETREAT_TRUNKS
+                    or abs(origin[1] - y) > .05 or before.get("jumping") is True
+                    or not any(row["primary"] and row["id"] is not None for row in threats)):
+                return [], set()
+            first_cell = feet(first)
+            sx, sz = first_cell[0] - start[0], first_cell[2] - start[2]
+            if first_cell[1] != y or abs(sx) + abs(sz) != 1:
+                return [], set()
+            transverse = 2 if sx else 0
+            if abs(origin[transverse] - (start[transverse] + .5)) > .05:
+                return [], set()
+            old_limit = read_limit
+            # At most fourteen fresh corridor cells and three landing reads.
+            read_limit = min(read_limit, 239)
+            route = [list(origin)]
+            try:
+                for step in range(1, 4):
+                    cell = (start[0] + sx * step, y, start[2] + sz * step)
+                    point = [cell[0] + .5, y, cell[2] + .5]
+                    candidate = route + [point]
+                    if (cell in excluded or math.dist(origin, point) > min(distance, 3.5)
+                            or not ground_segment_safe(origin, candidate)):
+                        break
+                    if safe_cell(cell) not in self.SUPPORT - self.RETREAT_TRUNKS:
+                        break
+                    sweep = swept_entry_cells(origin, cell)
+                    if not all(clear_body(key) for key in sorted(sweep)):
+                        break
+                    route = candidate
+            except _Failure as error:
+                if error.code != "retreat_budget_exhausted":
+                    raise
+            finally:
+                read_limit = old_limit
+            if len(route) < 3:
+                return [], set()
+            sweep = swept_entry_cells(origin, feet(route[-1]))
+            proof = sweep | {(feet(p)[0], y - 1, feet(p)[2]) for p in route}
+            if search["block_reads"] + len(proof) + 3 > 256:
+                return [], set()
+            return route, sweep
+
+        def drop_contact_aligned(point, contact):
+            offset = (contact[0] - start[0], contact[2] - start[2])
+            if abs(offset[0]) + abs(offset[1]) != 1:
+                return False
+            # Leave a single face, never a corner: the other horizontal axis
+            # already fits inside the destination column for every rounded pos.
+            axis = 2 if offset[0] else 0
+            return (point[axis] - .3501 >= start[axis]
+                    and point[axis] + .3501 <= start[axis] + 1)
+
+        def edge_sweep(point, cell):
+            if cell not in edge_drops:
+                return swept_entry_cells(point, cell)
+            # The source platform is beneath the upper horizontal leg. Only
+            # the destination column is occupied at the lower feet height.
+            return (swept_entry_cells(point, (cell[0], y, cell[2]))
+                    | {(cell[0], cell[1], cell[2])})
+
+        def drop_threat_safe(point, cell):
+            if escaping:
+                return True
+            upper = [cell[0] + .5, y, cell[2] + .5]
+            lower = [cell[0] + .5, cell[1], cell[2] + .5]
+            previous = point
+            for end in (upper, lower):
+                # Check the closest point to every enemy on each straight leg,
+                # as well as both endpoints; a lower endpoint must not hide a
+                # horizontal approach while still at the source height.
+                fractions = {1.0}
+                for row in threats:
+                    for axes in ((0, 2), (0, 1, 2)):
+                        length = sum((end[i] - previous[i]) ** 2 for i in axes)
+                        if length:
+                            fraction = sum((row["pos"][i] - previous[i]) * (end[i] - previous[i])
+                                           for i in axes) / length
+                            fractions.add(max(0, min(1, fraction)))
+                prior = previous
+                for fraction in sorted(fractions):
+                    probe = [previous[i] + fraction * (end[i] - previous[i]) for i in range(3)]
+                    if not safe_height_band(probe) or not threat_safe(probe, prior, baseline=point):
+                        return False
+                    prior = probe
+                previous = end
+            return True
+
         def starting_entries():
             nonlocal read_limit
             central = safe_cell(start, temporary_leaves=True)
@@ -1202,17 +1419,20 @@ class SurvivalSkills:
             if central:
                 source["state"] = "center_supported"
                 return [(start, [start])]
-            # An unknown, liquid, or unapproved center support is not evidence
-            # of an edge. Only loaded air with clear source body may use contact.
-            if source["center_name"] not in self.AIR or not clear_body(start) or not clear_body((start[0], start[1] + 1, start[2])):
+            # Require the observed feet to match the neighbor's full-block top;
+            # on_ground was checked before planning. Unknown blocks, liquids
+            # and partially colliding decorations cannot establish an edge.
+            if (not edge_center_clear() or abs(origin[1] - y) > .05
+                    or not clear_body(start) or not clear_body((start[0], start[1] + 1, start[2]))):
                 source["state"] = "unverified"
                 return []
-            read_limit = min(read_limit, 244)  # Worst edge sweep: 9 pre-move + 3 landing reads.
+            read_limit = min(read_limit, 243)  # Edge sweep + center: 10 pre-move + 3 landing reads.
             entries = []
+            contacts = []
             for x in range(math.floor(origin[0] - 0.3501), math.floor(origin[0] + 0.3501) + 1):
                 for z in range(math.floor(origin[2] - 0.3501), math.floor(origin[2] + 0.3501) + 1):
                     cell = (x, y, z)
-                    overlap = contact_overlap(origin, cell)
+                    overlap = self.contact_overlap(origin, cell)
                     if cell == start or min(overlap) <= 1e-4 or cell in excluded:
                         continue
                     support = safe_cell(cell, temporary_leaves=True)
@@ -1220,6 +1440,7 @@ class SurvivalSkills:
                         continue
                     source["contacts"].append({"pos": [x, y - 1, z], "name": support,
                                                "minimum_overlap": [round(value, 4) for value in overlap]})
+                    contacts.append(cell)
                     outcome["edge_start"] = True
                     point = [x + 0.5, y, z + 0.5]
                     if ((not escaping and math.hypot(point[0] - threat[0], point[2] - threat[2]) < norm - 0.5)
@@ -1232,7 +1453,28 @@ class SurvivalSkills:
                         source["entry_rejections"][reason] = source["entry_rejections"].get(reason, 0) + 1
                         continue
                     edge_sweeps[cell] = sweep
+                    edge_contacts[cell] = cell
                     entries.append((cell, [start, cell]))
+            # A contact can prove stable footing even when recentering onto it
+            # would approach a hostile. A separately checked same-column step
+            # down needs no such backward move and never treats litter as floor.
+            lower = (start[0], y - 1, start[2])
+            contact = next((cell for cell in contacts if drop_contact_aligned(origin, cell)), None)
+            # Threat-directed retreat has the fresh two-leg hostile proof.
+            # Keep canopy exploration on its existing, separately checked path.
+            if not escaping and contact is not None and lower not in excluded:
+                if not drop_threat_safe(origin, lower):
+                    source["entry_rejections"]["drop_threat_proximity"] = 1
+                elif safe_cell(lower):
+                    edge_drops.add(lower)
+                    sweep = edge_sweep(origin, lower)
+                    if all(clear_body(key) for key in sorted(sweep)):
+                        edge_sweeps[lower] = sweep
+                        edge_contacts[lower] = contact
+                        entries.append((lower, [start, lower]))
+                    else:
+                        edge_drops.remove(lower)
+                        source["entry_rejections"]["drop_body_blocked"] = 1
             source["state"] = "edge_entry_verified" if entries else "no_verified_edge_entry"
             return entries
 
@@ -1390,7 +1632,7 @@ class SurvivalSkills:
             else:
                 search["termination"] = "read_budget"
         relaxed_secondary = False
-        if not escaping and target is None and search.get("multi_threat_rejections", 0) > 0:
+        if not escaping and target is None and search.get("multi_threat_rejections", 0) > 0 and origin_distance <= 5.0:
             relaxed_secondary = True
             read_limit = min(240, max(read_limit, search["block_reads"] + 64))
             try:
@@ -1428,6 +1670,15 @@ class SurvivalSkills:
                 # Insufficient proof budget authorizes no dig. A separately
                 # verified non-destructive relay may still be available.
                 search["clearing_skipped"] = "read_budget"
+        if target is None and edge_drops:
+            # This one-block descent is already fully observed even when the
+            # surrounding terrain is unknown. It is a local step, not proof of
+            # a complete retreat or permission to continue without observation.
+            cell = max(edge_drops, key=lambda c: threat_score([c[0] + .5, c[1], c[2] + .5]))
+            target = [cell[0] + .5, cell[1], cell[2] + .5]
+            planned_path = [list(origin), target]
+            search["search_boundary"] = search["termination"]
+            search["termination"] = "verified_edge_drop"
         if (escaping and target is None and planned_path is None and not relay_candidates
                 and self._number(before.get("health", 0), "health", 0, 1024) >= 12):
             try:
@@ -1456,6 +1707,14 @@ class SurvivalSkills:
             search["termination"] = "verified_leaf_relay"
         if target is None:
             raise _Failure("unsafe", "No safe retreat destination was found within the bounded terrain search", evidence())
+        ground_run, ground_sweep = verified_ground_run(target)
+        if ground_run:
+            target = ground_run[-1]
+            planned_path = ground_run
+            final_target = target
+            outcome["ground_route_verified"] = True
+            outcome["ground_run"] = {"steps": len(ground_run) - 1, "max_steps": 3,
+                                     "same_height": True, "straight": True}
         read_limit = 256
         def validate_start(status):
             nearest = status.get("nearest_hostile") or {}
@@ -1484,47 +1743,92 @@ class SurvivalSkills:
                 raise _Failure("unsafe", "Bot left stable footing before the retreat step", evidence())
             if any(status.get(key) for key in (("in_lava", "on_fire") if context.get("force_override") else ("in_water", "in_lava", "on_fire", "submerged"))):
                 raise _Failure("unsafe", "Body state became hazardous before movement", evidence())
+            if ground_run and (abs(status["pos"][1] - y) > .05 or status.get("jumping") is True
+                    or not swept_entry_cells(status["pos"], feet(target)).issubset(ground_sweep)
+                    or not ground_segment_safe(status["pos"], ground_run)):
+                raise _Failure("unsafe", "Ground retreat corridor changed at the final start check", evidence())
             if outcome["edge_start"]:
                 entry = feet(target)
-                if (min(contact_overlap(status["pos"], entry)) <= 1e-4
-                        or not swept_entry_cells(status["pos"], entry).issubset(edge_sweeps.get(entry, set()))):
+                contact = edge_contacts.get(entry)
+                if (abs(status["pos"][1] - y) > .05
+                        or contact is None or min(self.contact_overlap(status["pos"], contact)) <= 1e-4
+                        or not edge_sweep(status["pos"], entry).issubset(edge_sweeps.get(entry, set()))
+                        or (entry in edge_drops and (not drop_contact_aligned(status["pos"], contact)
+                                                   or not drop_threat_safe(status["pos"], entry)))):
                     raise _Failure("unsafe", "Edge support contact changed before the retreat step", evidence(pos=status["pos"]))
 
         validate_start(self._status(context))
         # Re-read the destination after planning instead of trusting only cached blocks.
         cache.clear()
         blocked.clear()
-        if (not safe_cell(feet(target), temporary_leaves=True) or not clear_transition(start, feet(target))
+        if ((outcome["edge_start"] and not edge_center_clear())
+                or (outcome["edge_start"] and not safe_cell(edge_contacts[feet(target)], temporary_leaves=True))
+                or not safe_cell(feet(target), temporary_leaves=feet(target) not in edge_drops)
+                or not clear_transition(start, feet(target))
+                or (ground_run and (any(safe_cell(feet(point)) not in self.SUPPORT - self.RETREAT_TRUNKS
+                                       for point in ground_run)
+                                    or not all(clear_body(key) for key in sorted(ground_sweep))))
                 or not all(clear_body(key) for key in sorted(edge_sweeps.get(feet(target), set())))):
             raise _Failure("unsafe", "Retreat destination changed before movement", evidence(target=target))
         evidence()
         check_escape_threats(before, target)
         if not escaping:
             refresh_retreat_threats()
-            if not all(threat_safe(point, prior, allow_distant_secondary=relaxed_secondary)
-                       for prior, point in zip(planned_path, planned_path[1:])):
+            if ((feet(target) in edge_drops and not drop_threat_safe(origin, feet(target)))
+                    or (ground_run and not ground_segment_safe(origin, ground_run))
+                    or not all(threat_safe(point, prior, allow_distant_secondary=relaxed_secondary)
+                               for prior, point in zip(planned_path, planned_path[1:]))):
                 raise _Failure("unsafe", "A hostile changed the checked retreat corridor before movement", evidence())
             outcome["threat_assessment"]["target_score"] = list(threat_score(target))
+        if feet(target) in edge_drops:
+            contact = edge_contacts[feet(target)]
+            outcome["edge_drop"] = {"source_contact": [contact[0], contact[1] - 1, contact[2]],
+                                    "target": target, "drop_height": 1, "landing_verified": False}
+        close_enemies = [row["name"] for row in threats if math.dist(origin, row["pos"]) <= row["radius"]]
+        run_through_hit = (recovery.get("campaign_ground_escape") is True and bool(ground_run)
+                           and before["health"] > 4 and bool(close_enemies)
+                           and all(name in {"zombie", "zombie_villager", "husk", "drowned", "spider", "cave_spider"}
+                                   for name in close_enemies)
+                           and min(math.dist(origin, row["pos"]) for row in threats) <= 3)
+        movement = {"timeout_ms": 10000}
+        if run_through_hit:
+            # A first melee hit otherwise cancels the escape while still in reach.
+            # Permit only the short, rechecked level run, then verify actual footing.
+            movement.update(timeout_ms=2000, stop_on=["death"])
+            outcome["bounded_melee_escape"] = True
         try:
             context["navigation_write"] = True
-            self._action(context, self.client.move_to, *target, range=0, timeout_ms=10000,
-                         _validate_status=validate_start)
+            self._action(context, self.client.move_to, *target, range=0, _validate_status=validate_start, **movement)
             outcome["executed"] = True
         except Exception as error:
             outcome["executed"] = context["acted"]
             outcome["candidate_failed"] = getattr(error, "code", "") in {"path_not_found", "stalled", "out_of_reach"}
-            details = getattr(error, "details", None)
-            interruption = getattr(error, "data", {})
-            hurt = ((isinstance(error, APIError) and error.status_code == 200
-                     and isinstance(details, dict) and details.get("cause") == "hurt")
-                    or isinstance(error, _Failure) and interruption.get("interrupted_by") == "hurt")
-            if not escaping and context.get("write_sent") and getattr(error, "code", "") == "interrupted" and hurt:
-                cache.clear()
-                observed = self._verify_interrupted_retreat(context, before, feet, safe_cell)
-                if observed is not None:
-                    raise _Failure("retreat_interrupted", "Retreat stopped by damage; replan from verified footing",
-                                   evidence(pos=observed["pos"], landing_settled=True, candidate_failed=True,
-                                       safety_changed="health_lost", api_details=details or {"cause": "hurt"})) from None
+            interruption = (self._hurt_interruption(error)
+                            if not escaping and context.get("write_sent") is True and context.get("acted") is True else None)
+            if interruption is not None:
+                outcome["interruption"] = interruption
+                outcome["api_details"] = {"cause": interruption["cause"]}
+
+                def verify_actual_footing(status):
+                    cache.clear()
+                    cell = feet(status["pos"])
+                    support = safe_cell(cell, temporary_leaves=True)
+                    if (not support or not all(clear_body(key) for key in
+                            sorted(swept_entry_cells(status["pos"], cell)))):
+                        raise _Failure("action_unconfirmed", "Interrupted retreat has no verified actual footing")
+                    return {"pos": [cell[0], cell[1] - 1, cell[2]], "name": support}
+
+                try:
+                    observed = self._observe_interrupted_retreat(context, before, verify_actual_footing)
+                    self._check(context)
+                except Exception as observation_error:
+                    outcome["interruption_observation_error"] = getattr(observation_error, "code", "internal_error")
+                    raise _Failure("action_unconfirmed", "Hurt interruption could not be verified from fresh state") from None
+                raise _Failure("retreat_interrupted", "Backend stopped the retreat after hurt; reobserve before a new plan",
+                               evidence(**observed, executed=True, action_state="terminated", backend_terminated=True,
+                                        candidate_failed=True, retreat_complete=False, landing_settled=True,
+                                        safety_changed="health_lost",
+                                        moved=round(math.dist(origin, observed["pos"]), 3))) from None
             raise
         after = self._settle_navigation(context, before, target, outcome)
         horizontal_after = math.hypot(after["pos"][0] - threat[0], after["pos"][2] - threat[2])
@@ -1533,7 +1837,7 @@ class SurvivalSkills:
             raise _Failure("retreat_unverified", "Observed movement did not reach the checked retreat step", evidence(pos=after["pos"], candidate_failed=True))
         cache.clear()
         blocked.clear()
-        support = safe_cell(feet(after["pos"]), temporary_leaves=True)
+        support = safe_cell(feet(after["pos"]), temporary_leaves=feet(target) not in edge_drops)
         if not support:
             code = "action_unconfirmed" if context.get("navigation_landed_hurt") else "retreat_unverified"
             raise _Failure(code, "Retreat destination no longer has safe footing", evidence(pos=after["pos"], target=target))
@@ -1547,11 +1851,68 @@ class SurvivalSkills:
                 # situation. Return known evidence for immediate threat policy.
                 outcome["retreat_required"] = True
                 outcome["safety_changed"] = "near_hostile"
-        complete = support in self.SUPPORT - self.RETREAT_TRUNKS and farther(after["pos"])
+        ground_reached = support in self.SUPPORT - self.RETREAT_TRUNKS
+        complete = ground_reached and farther(after["pos"]) and outcome.get("retreat_required") is not True
+        if complete and not escaping:
+            # Landing on ground is progress, not escape from an enemy's radius.
+            # Only attempt a positive clearance claim once every known enemy
+            # is outside; then require a new complete scan and stable status.
+            complete = all(math.dist(after["pos"], row["pos"]) > row["radius"] for row in threats)
+            outcome["retreat_clearance"] = {"verified": False, "clear": False}
+            if complete:
+                deadline = time.monotonic() + 1.5
+                context["navigation_settle_deadline"] = deadline
+                try:
+                    clearance_error = None
+                    try:
+                        latest_threats = hostile_snapshot(strict=True)
+                    except _Failure as error:
+                        if error.code not in {"invalid_response", "unsafe"}:
+                            raise
+                        # Arrival is already known. An incomplete scan cannot
+                        # establish safety, but does not undo the observed move.
+                        latest_threats = []
+                        clearance_error = error.code
+                    latest = self._status(context)
+                    if latest.get("last_death") != before.get("last_death") or time.monotonic() > deadline:
+                        raise _Failure("action_unconfirmed", "Life or deadline changed during retreat clearance")
+                    # Official status may omit this field when no hostile is
+                    # found. Present malformed values (including []/{}/False)
+                    # must never be treated as an empty hostile summary.
+                    nearest = latest.get("nearest_hostile")
+                    nearest_gap = nearest.get("dist") if isinstance(nearest, dict) else None
+                    nearest_name = nearest.get("name") if isinstance(nearest, dict) else None
+                    nearest_limit = max(recovery.get("threat_radius", 8),
+                                        16 if isinstance(nearest_name, str) and nearest_name in ranged_names else 8)
+                    nearest_valid = nearest is None or (isinstance(nearest, dict)
+                        and type(nearest.get("id")) in (int, str) and nearest.get("id") != ""
+                        and type(nearest_gap) in (int, float) and math.isfinite(nearest_gap) and nearest_gap >= 0
+                        and isinstance(nearest_name, str) and bool(nearest_name))
+                    if not nearest_valid:
+                        clearance_error = "invalid_hostile_summary"
+                    complete = (clearance_error is None and math.dist(latest["pos"], after["pos"]) <= .05
+                        and latest.get("on_ground") is True and latest["health"] >= after["health"]
+                        and not any(latest.get(k) for k in ("in_water", "in_lava", "on_fire", "submerged", "jumping"))
+                        and not (type(nearest_gap) in (int, float) and nearest_gap <= nearest_limit)
+                        and all(math.dist(latest["pos"], row["pos"]) > row["radius"] for row in latest_threats))
+                    outcome["retreat_clearance"] = {"verified": clearance_error is None, "clear": complete,
+                                                   "threat_count": len(latest_threats)}
+                    if clearance_error is not None:
+                        outcome["retreat_clearance"].update(reason="incomplete_hostile_observation", error=clearance_error)
+                        outcome["requires_fresh"] = True
+                finally:
+                    context.pop("navigation_settle_deadline", None)
+            if not complete:
+                outcome["retreat_required"] = True
+        if not escaping and ground_reached and not complete:
+            outcome["retreat_required"] = True
         context["navigation_verified"] = True
         context["daily_verified"] = True
+        if outcome.get("edge_drop"):
+            outcome["edge_drop"]["landing_verified"] = True
         return evidence(pos=after["pos"], target=target, moved=round(math.dist(origin, after["pos"]), 3),
-                        retreat_complete=complete, evacuation_stage="ground" if complete else "relay",
+                        retreat_complete=complete, ground_reached=ground_reached,
+                        evacuation_stage="ground" if complete else "relay",
                         health_before=before["health"], health_after=after["health"],
                         horizontal_before=norm, horizontal_after=horizontal_after,
                         vertical_before=origin[1] - threat[1], vertical_after=after["pos"][1] - threat[1],
@@ -1600,7 +1961,6 @@ class SurvivalSkills:
         finally:
             context.pop("navigation_settle_deadline", None)
         return None
-
     def _cautious_guard(self, context, status):
         """Trusted local emergency bootstrap: no backend pickup/table travel."""
         self._overworld(status)
@@ -1709,22 +2069,24 @@ class SurvivalSkills:
                 raise _Failure("bad_args", "Missing or unsupported survival skill arguments")
             if recovery_context is not None:
                 if (name not in {"retreat_from", "canopy_escape", "water_escape"} or not isinstance(recovery_context, dict)
-                        or set(recovery_context) - {"excluded_targets", "evacuating", "evacuation_origin", "purpose", "recent_targets", "threat_radius", "steps"}):
+                        or set(recovery_context) - {"excluded_targets", "evacuating", "evacuation_origin", "purpose",
+                                                       "recent_targets", "threat_radius", "steps", "campaign_ground_escape"}):
                     raise _Failure("bad_args", "Unsupported retreat recovery context")
                 excluded = recovery_context.get("excluded_targets", [])
                 recent = recovery_context.get("recent_targets", [])
+                steps_val = recovery_context.get("steps", 0)
                 if (not isinstance(excluded, list) or len(excluded) > 8 or not isinstance(recent, list) or len(recent) > 8
                         or type(recovery_context.get("evacuating", False)) is not bool
+                        or type(recovery_context.get("campaign_ground_escape", False)) is not bool
+                        or type(steps_val) is not int or steps_val < 0
                         or recovery_context.get("purpose", "retreat") not in {"retreat", "canopy_escape", "water_escape"}):
-                    raise _Failure("bad_args", "Invalid retreat recovery context")
-                steps_val = recovery_context.get("steps", 0)
-                if type(steps_val) is not int or steps_val < 0:
                     raise _Failure("bad_args", "Invalid retreat recovery context")
                 context["recovery_context"] = {"excluded_targets": [self._pos(pos, block=True) for pos in excluded],
                                                "evacuating": recovery_context.get("evacuating", False),
                                                "recent_targets": [self._pos(pos, block=True) for pos in recent],
                                                "purpose": recovery_context.get("purpose", "retreat"),
                                                "steps": steps_val,
+                                               "campaign_ground_escape": recovery_context.get("campaign_ground_escape", False),
                                                "threat_radius": self._number(recovery_context.get("threat_radius", 8), "threat_radius", 1, 64)}
                 if "evacuation_origin" in recovery_context:
                     context["recovery_context"]["evacuation_origin"] = self._pos(recovery_context["evacuation_origin"])
@@ -1756,6 +2118,19 @@ class SurvivalSkills:
         except Exception as error:
             error = self._disconnection_error(error, context)
             code = getattr(error, "code", "internal_error")
+            if (context.get("placement_write") and not context.get("placement_verified")
+                    and (code in {"request_timeout", "network_error", "invalid_json", "invalid_response", "action_unconfirmed",
+                                 "cancelled", "dead", "not_ready", "dimension_changed", "interrupted", "busy",
+                                 "life_changed", "lifecycle_changed", "internal", "internal_error", "not_loaded"}
+                         or any(isinstance(evidence, dict) and evidence.get("action_state") == "unknown"
+                                for evidence in (getattr(error, "details", None), getattr(error, "data", None))))):
+                context["placement_unknown"] = True
+                data.update(executed=True, action_state="unknown", cleanup_skipped="placement_unknown",
+                            verification_error=code)
+                if code in {"cancelled", "dead", "not_ready", "dimension_changed", "interrupted", "busy",
+                            "life_changed", "lifecycle_changed", "not_loaded"}:
+                    error = _Failure("action_unconfirmed", "Placement write was interrupted before verification")
+                    code = error.code
             interrupted_details = getattr(error, "details", None)
             if code == "interrupted" and isinstance(interrupted_details, dict) and interrupted_details:
                 data["api_details"] = interrupted_details
@@ -1799,11 +2174,15 @@ class SurvivalSkills:
                             api_details=context["disconnection_details"])
             if (context["acted"] and code != "busy" and not context.get("cleanup_attempted")
                     and not context.get("disconnected_unknown") and not context.get("navigation_unknown")
+                    and not context.get("placement_unknown")
                     and not context.get("navigation_observe_only")):
                 try:
                     self.client.stop()
                     data["cleanup"] = "stop_requested"
                 except Exception as cleanup_error:
                     data["cleanup_error"] = getattr(cleanup_error, "code", "internal_error")
+            if (name == "retreat_from" and not context.get("write_sent") and not context["acted"]
+                    and data.get("action_state") != "unknown"):
+                data.update(executed=False, action_state="not_executed")
             data.setdefault("executed", context.get("write_sent") is True)
             return SkillResult(False, str(error), data, code)

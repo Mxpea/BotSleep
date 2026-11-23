@@ -8,6 +8,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import time
 from typing import Any, Dict, List, Optional, Union
 
@@ -46,6 +47,18 @@ class APIError(MinecraftAPIError):
         RuntimeError.__init__(self, f"{code}: {message}")
 
 
+def connection_retry_delay(error, base_seconds):
+    seconds = error.details.get("retry_after_s")
+    if error.code == "death_loop_cooldown":
+        # The current upstream only includes its remaining cooldown in the message.
+        match = re.search(r"\b(\d+)s remaining\b", error.message)
+        if match:
+            seconds = int(match.group(1))
+    if type(seconds) in (int, float) and math.isfinite(seconds) and seconds >= 0:
+        return max(base_seconds, seconds)
+    return base_seconds
+
+
 class MinecraftAgentClient:
     """Return API envelopes, except the documented list convenience methods."""
 
@@ -73,6 +86,7 @@ class MinecraftAgentClient:
         self.password = password
         self.timeout_seconds = self._positive(timeout_seconds, "timeout_seconds")
         self.token: Optional[str] = None
+        self._continuous_session_file = None
         self._session = requests.Session()
 
     @staticmethod
@@ -179,6 +193,45 @@ class MinecraftAgentClient:
         if session is not None:
             session.close()
 
+    def _open_session(self):
+        data = self._request("POST", "auth/login", payload={"username": self.username, "password": self.password},
+                             authenticated=False)
+        token = data.get("token")
+        if not isinstance(token, str) or not token:
+            raise APIError("invalid_response", "Login response has no token")
+        self.token = token
+
+    def connect_continuous(self, *, session_file=None):
+        """One connection check. Keep a valid session through spawn delays and death cooldowns."""
+        if session_file is not None:
+            self._continuous_session_file = session_file
+        session_file = self._continuous_session_file
+        if not self.token and session_file is not None:
+            self.load_session(session_file)
+        if not self.token:
+            self._open_session()
+            if session_file is not None:
+                self.save_session(session_file)
+        try:
+            status = self._result(self.get_status())
+        except APIError as error:
+            if error.code in {"unauthorized", "invalid_token"}:
+                self.token = None
+                self._open_session()
+                if session_file is not None:
+                    self.save_session(session_file)
+                raise APIError("not_ready", "New game session is starting") from None
+            if (error.code == "internal" and error.status_code == 200
+                    and error.message == "Cannot read properties of undefined (reading 'toFixed')"):
+                raise APIError("not_ready", "Waiting for the spawn status") from None
+            if error.code not in {"not_connected", "wrong_server", "not_ready"}:
+                raise
+        else:
+            if status.get("ready") is True:
+                return status
+        self.connect()
+        raise APIError("not_ready", "Waiting for the current game session to become ready")
+
     def login(
         self,
         max_wait_seconds: float = 15,
@@ -193,15 +246,9 @@ class MinecraftAgentClient:
             self.logout()
         try:
             deadline = time.monotonic() + max_wait_seconds
-            data = None
             for attempt in range(attempts):
                 try:
-                    data = self._request(
-                        "POST",
-                        "auth/login",
-                        payload={"username": self.username, "password": self.password},
-                        authenticated=False,
-                    )
+                    self._open_session()
                     break
                 except APIError as error:
                     if (not retry_rate_limit or attempt + 1 >= attempts
@@ -213,10 +260,6 @@ class MinecraftAgentClient:
                     if remaining <= 0:
                         raise
                     time.sleep(min(remaining, min(65.0, sleep_s + 0.25)))
-            token = data.get("token") if isinstance(data, dict) else None
-            if not isinstance(token, str) or not token:
-                raise APIError("invalid_response", "Login response has no token")
-            self.token = token
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -326,9 +369,10 @@ class MinecraftAgentClient:
     def get_status(self, timeout_seconds: Optional[float] = None) -> Dict[str, Any]:
         return self._request("GET", "status", timeout_seconds=timeout_seconds)
 
-    def get_events_page(self, since: int = 0, limit: int = 50) -> Dict[str, Any]:
+    def get_events_page(self, since: int = 0, limit: int = 50, *,
+                        timeout_seconds: Optional[float] = None) -> Dict[str, Any]:
         """Return the envelope, including last_seq, has_more and total."""
-        response = self._request("GET", "events", params={"since": since, "limit": limit})
+        response = self._request("GET", "events", params={"since": since, "limit": limit}, timeout_seconds=timeout_seconds)
         self._list(self._result(response), "events")
         return response
 
@@ -495,14 +539,16 @@ class MinecraftAgentClient:
 
     def find_blocks(self, types: List[str], radius: int = 16, limit: int = 64, *,
                     properties: Optional[Dict[str, Any]] = None,
-                    mature: Optional[bool] = None) -> List[Dict[str, Any]]:
+                    mature: Optional[bool] = None,
+                    timeout_seconds: Optional[float] = None) -> List[Dict[str, Any]]:
         """Return typed rows with the upstream crop/property filters."""
         payload: Dict[str, Any] = {"types": types, "radius": radius, "limit": limit}
         if properties is not None:
             payload["properties"] = properties
         if mature is not None:
             payload["mature"] = mature
-        return self._list(self._result(self._request("POST", "find_blocks", payload=payload)), "blocks")
+        return self._list(self._result(self._request("POST", "find_blocks", payload=payload,
+                                                     timeout_seconds=timeout_seconds)), "blocks")
 
     def window_view(self, pos: List[int], *, timeout_seconds: Optional[float] = None) -> Dict[str, Any]:
         """Open, inspect and close a GUI; this may pathfind and takes the action lock."""

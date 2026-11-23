@@ -73,6 +73,19 @@ class HuntingTests(unittest.TestCase):
                 self.assertFalse(self.act().success)
                 self.assertFalse(any(c[0] == "control" for c in self.world.calls))
 
+    def test_campaign_hunts_livestock_with_the_herd_off_the_ray(self):
+        self.skills = DailySurvivalSkills(self.world, allow_herd_hunting=True)
+        self.world.entities.append({"id": 9, "name": "cow", "type": "animal", "pos": [2.5, 64, 1.5]})
+
+        def effect():
+            self.world.entities = self.world.entities[1:]
+            self.world.counts["beef"] = 1
+
+        self.world.effects["attack"] = effect
+        result = self.act()
+        self.assertTrue(result.success, result)
+        self.assertEqual(result.data["gained"], {"beef": 1})
+
     def test_damage_stops_further_swings(self):
         self.world.effects["attack"] = lambda: self.world.status.update(health=19)
         result = self.act()

@@ -96,6 +96,14 @@ class MiningTargetsTests(unittest.TestCase):
             "no_pickaxe",
         )
 
+    def test_mining_returns_when_its_last_required_tool_is_exhausted(self):
+        status = {"health": 20, "food": 20}
+        items = [{"name": "wooden_pickaxe", "count": 1},
+                 {"name": "stone_pickaxe", "count": 1, "durability_used": 125}]
+        evaluated = evaluate_home_trigger(status, items, thresholds={"min_pickaxe_tool": "stone_pickaxe"})
+        self.assertTrue(evaluated["trigger"])
+        self.assertEqual(evaluated["home_reason"], "target_pickaxe_exhausted")
+
     def test_ore_spawn_bands_and_stratified_planning(self):
         self.assertFalse(target_spawns_at_y("coal", -54))
         self.assertTrue(target_spawns_at_y("coal", 28))

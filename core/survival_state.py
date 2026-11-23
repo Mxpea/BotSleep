@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from core.client import APIError
+from core.domain import FOOD_HEADROOM_BLOCKS
 from core.block_geometry import trace_block_visibility
 from core.domain import BED_NAMES, LOG_NAMES, hostile_threat_radius
 from skills.combat import HOSTILES, MELEE_RANGE, combat_options
@@ -37,10 +38,11 @@ class ObservationCollector:
                      (2, 0), (0, 2), (-2, 0), (0, -2))
     PASSABLE = SurvivalSkills.AIR | {"short_grass", "leaf_litter"}
 
-    def __init__(self, client, radius=24, include_terrain=False, *, include_footing=False, combat_mode=None):
+    def __init__(self, client, radius=24, include_terrain=False, *, include_footing=False, combat_mode=None, terrain_summary=True):
         self.client = client
         self.radius = radius
         self.include_terrain = include_terrain
+        self.terrain_summary = terrain_summary
         self.include_footing = include_footing
         self.combat_mode = combat_mode
 
@@ -80,7 +82,7 @@ class ObservationCollector:
             "properties": copy.deepcopy(block.get("properties") or {}),
             "fresh": True, "verified": True, "source": "api_verified"}
 
-    def _status(self, original, cancel_event, *, grounded=False, timeout_seconds=2):
+    def _status(self, original, cancel_event, *, grounded=False, timeout_seconds=2, same_stance=True):
         self._check_cancel(cancel_event)
         reply = self.client.get_status(timeout_seconds=timeout_seconds)
         self._check_cancel(cancel_event)
@@ -93,9 +95,11 @@ class ObservationCollector:
                 or "busy" not in status or (status["busy"] is not None and status["busy"] is not False)
                 or grounded and status.get("on_ground") is not True):
             raise APIError("observation_changed", "Stance check requires the same idle living bot")
-        pos, origin = self._position(status), self._position(original)
-        if self._cell(pos) != self._cell(origin) or math.dist(pos, origin) > .2:
-            raise APIError("observation_changed", "Bot moved during the stance check")
+        pos = self._position(status)
+        if same_stance:
+            origin = self._position(original)
+            if self._cell(pos) != self._cell(origin) or math.dist(pos, origin) > .2:
+                raise APIError("observation_changed", "Bot moved during the stance check")
         return status
 
     def collect_safety(self, cancel_event=None, *, force: bool = False,
@@ -222,7 +226,24 @@ class ObservationCollector:
                                                 threat_radius=threat_radius)
         return observation
 
-    def _local_geometry(self, status, cancel_event):
+    def _geometry_reader(self, cancel_event):
+        """Share successful block reads among geometry passes in one observation."""
+        replies = {}
+
+        def read(pos, **options):
+            self._check_cancel(cancel_event)
+            key = tuple(pos)
+            if key not in replies:
+                reply = self.client.get_block(pos, **options)
+                self._check_cancel(cancel_event)
+                if isinstance(reply, dict) and reply.get("ok") is True:
+                    replies[key] = reply
+                return reply
+            return replies[key]
+
+        return read
+
+    def _local_geometry(self, status, cancel_event, *, read_block=None):
         """Sample local support/body cells, without promising a traversable path.
 
         One collection caches at most five blocks per selected column (60 reads
@@ -232,14 +253,15 @@ class ObservationCollector:
         origin = self._position(status)
         x, y, z = self._cell(origin)
         cache = {}
-        standing, placement = [], []
+        standing, placement, headroom = [], [], []
+        read_block = read_block or self.client.get_block
 
         def block_at(pos):
             self._check_cancel(cancel_event)
             key = tuple(pos)
             if key not in cache:
                 try:
-                    block = self.client.get_block(list(pos))["result"]
+                    block = read_block(list(pos))["result"]
                 except APIError as error:
                     if error.code != "not_loaded":
                         raise
@@ -274,7 +296,10 @@ class ObservationCollector:
                     continue
                 head = block_at([candidate[0], candidate[1] + 1, candidate[2]])
                 can_stand = safe(head) and head["name"] in self.PASSABLE
-                can_place = feet["name"] in SurvivalSkills.AIR
+                if (dy == 0 and abs(dx) + abs(dz) == 1 and safe(head)
+                        and head["name"] in FOOD_HEADROOM_BLOCKS):
+                    headroom.append({"pos": [candidate[0], y + 1, candidate[2]], "name": head["name"]})
+                can_place = feet["name"] in SurvivalSkills.PLACEMENT_SPACE
                 if can_stand and len(standing) < 8:
                     standing.append({"pos": [candidate[0] + 0.5, candidate[1], candidate[2] + 0.5],
                                      "support": below["name"]})
@@ -283,9 +308,9 @@ class ObservationCollector:
                 if can_stand and can_place:
                     break
         return {"local_geometry_origin": origin, "safe_stand_candidates": standing,
-                "placement_candidates": placement}
+                "placement_candidates": placement, "food_headroom_candidates": headroom}
 
-    def _resource_visibility(self, observation, cancel_event):
+    def _resource_visibility(self, observation, cancel_event, *, read_block=None, wood_first=False):
         """Enrich a few nearby resources using only the original get_block API.
 
         Unknown shapes block a ray conservatively. No cached cell survives a
@@ -294,10 +319,12 @@ class ObservationCollector:
         origin = self._position(observation["status"])
         cache = {}
         groups = {"logs": 0, "minerals": 0}
+        confirmed_logs = set()
+        read_block = read_block or self.client.get_block
 
         def block_at(pos):
             self._check_cancel(cancel_event)
-            block = self.client.get_block(pos)["result"]
+            block = read_block(pos)["result"]
             self._check_cancel(cancel_event)
             if not isinstance(block, dict) or not isinstance(block.get("name"), str):
                 raise APIError("invalid_response", "Resource visibility block is malformed")
@@ -311,6 +338,8 @@ class ObservationCollector:
         for row in rows:
             group = "logs" if row["name"] in LOGS else "minerals"
             if row["name"] not in SurvivalSkills.GATHERABLE or groups[group] >= 8:
+                continue
+            if wood_first and group == "minerals":
                 continue
             if math.dist(origin, row["pos"]) > 8 or len(cache) >= 96:
                 continue
@@ -338,8 +367,47 @@ class ObservationCollector:
             if isinstance(visibility.get("visible"), bool):
                 row["can_see"] = visibility["visible"]
             row["visibility"] = visibility
+            if (wood_first and visibility.get("visible") is True and reachable is True
+                    and math.dist(origin, row["pos"]) <= 4 and abs(row["pos"][1] - origin[1]) <= 2.1):
+                confirmed_logs.add(key)
+                if len(confirmed_logs) >= 2:
+                    return True
+        return False
 
-    def collect(self, cancel_event=None):
+    def _inventory_evidence(self, cancel_event, **options):
+        self._check_cancel(cancel_event)
+        reply = self.client.inventory(**options)
+        self._check_cancel(cancel_event)
+        inventory = reply.get("result") if isinstance(reply, dict) else None
+        if not isinstance(inventory, dict):
+            raise APIError("invalid_response", "Inventory response must be an object")
+        items = inventory.get("items")
+        if not isinstance(items, list):
+            raise APIError("invalid_response", "Inventory items must be a list")
+        counts = {}
+        for item in items:
+            if not isinstance(item, dict) or not isinstance(item.get("name"), str) or type(item.get("count")) is not int or item["count"] < 0:
+                raise APIError("invalid_response", "Inventory item is malformed")
+            counts[item["name"]] = counts.get(item["name"], 0) + item["count"]
+        evidence = {"inventory": items, "counts": counts}
+        if "armor" in inventory:
+            if not isinstance(inventory["armor"], dict):
+                raise APIError("invalid_response", "Armor evidence is malformed")
+            evidence["armor"] = copy.deepcopy(inventory["armor"])
+        return evidence
+
+    def collect_inventory_readback(self, original_status, cancel_event=None, *, may_have_moved=False):
+        """Observe inventory and the same life at a stable stance after production."""
+        started = time.monotonic()
+        anchor = (self._status(original_status, cancel_event, same_stance=False)
+                  if may_have_moved else original_status)
+        evidence = self._inventory_evidence(cancel_event, timeout_seconds=2)
+        status = self._status(anchor, cancel_event)
+        return {**evidence, "status": status, "blocks": [], "entities": [],
+                "fresh": True, "observation_scope": "inventory", "observed_at": utc_now(),
+                "duration_seconds": round(time.monotonic() - started, 3)}
+
+    def collect(self, cancel_event=None, *, _read_geometry_block=None):
         self._check_cancel(cancel_event)
         started = time.monotonic()
         status = self.client.get_status()["result"]
@@ -351,16 +419,7 @@ class ObservationCollector:
         if not status.get("ready") or not status.get("alive") or status.get("busy"):
             return observation
         origin = self._position(status)
-        items = self.client.inventory()["result"].get("items")
-        self._check_cancel(cancel_event)
-        if not isinstance(items, list):
-            raise APIError("invalid_response", "Inventory items must be a list")
-        counts = {}
-        for item in items:
-            if not isinstance(item, dict) or not isinstance(item.get("name"), str) or type(item.get("count")) is not int or item["count"] < 0:
-                raise APIError("invalid_response", "Inventory item is malformed")
-            counts[item["name"]] = counts.get(item["name"], 0) + item["count"]
-        observation.update(inventory=items, counts=counts)
+        observation.update(self._inventory_evidence(cancel_event))
         # Separate resource classes so abundant stone cannot hide every bed/log.
         for names in (LOGS + BEDS + ["crafting_table", "furnace"],
                       ["stone", "cobblestone", "coal_ore", "deepslate_coal_ore"]):
@@ -371,13 +430,15 @@ class ObservationCollector:
             # A model needs ground/foliage context to choose a workspace instead
             # of repeatedly proposing unsupported cells while standing in a tree.
             # Untyped rows describe only the nearest exposed block of each type.
-            observation["terrain"] = self.client.get_blocks(radius=min(self.radius, 16), limit=64)
-            self._check_cancel(cancel_event)
+            if self.terrain_summary:
+                observation["terrain"] = self.client.get_blocks(radius=min(self.radius, 16), limit=64)
+                self._check_cancel(cancel_event)
             observation["blocks"].extend(self.client.get_blocks(radius=self.radius, types=[
                 "lava", "water", "fire", "soul_fire", "magma_block", "cactus",
                 "campfire", "soul_campfire", "powder_snow", "sweet_berry_bush"], limit=32))
-            observation.update(self._local_geometry(status, cancel_event))
-            self._resource_visibility(observation, cancel_event)
+            read_geometry = _read_geometry_block or self._geometry_reader(cancel_event)
+            observation.update(self._local_geometry(status, cancel_event, read_block=read_geometry))
+            self._resource_visibility(observation, cancel_event, read_block=read_geometry)
         self._check_cancel(cancel_event)
         observation["entities"] = self.client.get_entities(radius=self.radius)
         self._check_cancel(cancel_event)

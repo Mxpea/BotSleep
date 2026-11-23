@@ -14,7 +14,9 @@ import re
 from agent.survival_planner import Decision, SurvivalPlanner
 from core.domain import LOG_NAMES, PLANK_NAMES, SAFE_FOOD, TOOL_KINDS, parse_pos
 from core.skill_registry import skills_for_objective
+from core.structure_spec import SHELTER_BUILDING_BLOCKS
 from skills.daily_survival import DailySurvivalSkills
+from skills.hunting import HUNTING_TOOLS
 
 
 DAILY_SKILLS = skills_for_objective("daily")
@@ -27,7 +29,9 @@ COOKING = {"beef": "cooked_beef", "porkchop": "cooked_porkchop", "mutton": "cook
            "deepslate_iron_ore": "iron_ingot", **{name: "charcoal" for name in LOG_NAMES}}
 CROPS = {"wheat": (7, "wheat_seeds"), "carrots": (7, "carrot"),
          "potatoes": (7, "potato"), "beetroots": (3, "beetroot_seeds")}
-BUILDING_MATERIALS = ("oak_planks", "birch_planks", "spruce_planks", "cobblestone")
+BUILDING_MATERIALS = tuple(dict.fromkeys(("oak_planks", "birch_planks", "spruce_planks",
+                                        *sorted(SHELTER_BUILDING_BLOCKS))))
+BUILDING_LOGS = tuple(name for name in LOG_NAMES if name[:-4] + "_planks" in SHELTER_BUILDING_BLOCKS)
 
 
 class DailySurvivalGoals:
@@ -321,8 +325,10 @@ class DailySurvivalGoals:
                 entity_id = row.get("id", row.get("entity_id"))
                 if type(entity_id) is int and self._can_hunt(observation, counts, row):
                     if math.dist(observation["status"]["pos"], row["pos"]) > 2.8:
-                        return self._action("move_to", {"pos": list(row["pos"]), "range": 2},
-                            "Approach the observed passive animal once, then reobserve before the stationary short hunt", "food_reserve")
+                        approach = self._hunt_approach(observation, row, context, "food_reserve")
+                        if approach is not None:
+                            return approach
+                        continue
                     return self._action("hunt_animal", {"entity_id": entity_id, "expected_name": row["name"]},
                                         "Acquire food from one observed passive animal", "food_reserve")
         return None
@@ -330,24 +336,49 @@ class DailySurvivalGoals:
     def _can_hunt(self, observation, counts, row, *, max_distance=8):
         status = observation["status"]
         return (status.get("health", 0) >= 12 and status.get("food", 0) >= 10
-                and any(count and (name.endswith("_axe") or name.endswith("_sword")) for name, count in counts.items())
+                and any(counts.get(item) for item in HUNTING_TOOLS)
                 and math.dist(status["pos"], row["pos"]) <= max_distance)
 
-    def _containers(self, observation, context=None):
+    def _hunt_approach(self, observation, row, context, goal):
+        origin = observation["status"]["pos"]
+        target = row["pos"]
+        if observation.get("local_geometry_origin") != origin or abs(target[1] - origin[1]) > 2:
+            return None
+        blocked = self.rules._blocked(context or {})
+        x, y, z = map(math.floor, origin)
+
+        def supported_step(point):
+            if abs(point[1] - origin[1]) <= .05:
+                return True
+            return (abs(point[1] - y) == 1 and abs(origin[1] - y) <= .05
+                    and abs(math.floor(point[0]) - x) + abs(math.floor(point[2]) - z) == 1)
+
+        points = [point for candidate in self._rows(observation.get("safe_stand_candidates"))
+                  if candidate.get("support") in DailySurvivalSkills.SUPPORT
+                  and (point := self.rules._pos(candidate.get("pos"))) is not None
+                  and 0.5 <= math.dist(origin, point) <= 3 and supported_step(point)
+                  and math.dist(point, target) + .5 < math.dist(origin, target)
+                  and self.rules._key(point) not in blocked and not self.rules._dangerous_hostiles(observation, point)]
+        if points:
+            return self._action("position_for_task", {"pos": min(points, key=lambda p: math.dist(p, target))},
+                                "Take one checked ground step toward the animal, then reobserve", goal)
+        return None
+
+    def _containers(self, observation, context=None, *, radius=16):
         dimension = observation["status"].get("dimension")
         blocked = self.rules._blocked(context or {})
         hostiles = self.rules._hostiles(observation, observation["status"]["pos"])
         return [row for row in self._rows(observation.get("containers"))[:8]
                 if self._verified(row, dimension) and row.get("name") in {"chest", "barrel"}
                 and isinstance(row.get("items"), list) and self.rules._key(row["pos"]) not in blocked
-                and math.dist(row["pos"], observation["status"]["pos"]) <= 16
+                and math.dist(row["pos"], observation["status"]["pos"]) <= min(16, radius)
                 and not any(math.dist(row["pos"], threat) <= self.rules.threat_radius for _, threat in hostiles)]
 
-    def _take_supplies(self, observation, counts, names, target, goal, context):
+    def _take_supplies(self, observation, counts, names, target, goal, context, *, radius=16):
         deficit = target - sum(counts.get(name, 0) for name in names)
         if deficit <= 0:
             return None
-        for row in self._containers(observation, context):
+        for row in self._containers(observation, context, radius=radius):
             stored = self.rules._counts({"inventory": row["items"]})
             for item in sorted(stored):
                 if item in names:
@@ -367,8 +398,11 @@ class DailySurvivalGoals:
         return None
 
     def _base_candidate(self, observation, counts, context):
+        if context.get("shelter_survey_reposition") or context.get("shelter_survey_exhausted"):
+            return None
         material = next((name for name in BUILDING_MATERIALS if counts.get(name, 0)), "oak_planks")
         blocked = self.rules._blocked(context)
+        rejected = set(context.get("shelter_rejected_sites") or [])
         candidates = [observation["status"]["pos"]] + [row.get("pos") for row in self._rows(observation.get("safe_stand_candidates"))[:8]]
         seen = set()
         for raw in candidates:
@@ -380,8 +414,14 @@ class DailySurvivalGoals:
             if key in blocked or key in seen:
                 continue
             seen.add(key)
-            return self._action("plan_shelter", {"pos": pos, "material": material},
-                                "Survey a local candidate footprint; a standing cell does not prove a safe base", "base_site")
+            for orientation in ("north", "east", "south", "west"):
+                if key + "|" + orientation in rejected:
+                    continue
+                args = {"pos": pos, "material": material}
+                if orientation != "north":
+                    args["orientation"] = orientation
+                return self._action("plan_shelter", args,
+                                    "Survey a local candidate footprint; a standing cell does not prove a safe base", "base_site")
         return None
 
     def _shelter_action(self, observation, counts, base, context):
@@ -409,7 +449,7 @@ class DailySurvivalGoals:
         if shelter.get("needs_position") is True:
             for raw in shelter.get("stand_candidates") or []:
                 target = self._pos(raw)
-                if (target and 1 < math.dist(target, observation["status"]["pos"]) <= 16
+                if (target and .4 < math.dist(target, observation["status"]["pos"]) <= 16
                         and self.rules._key(target) not in self.rules._blocked(context)):
                     return self._action("move_to", {"pos": target, "range": .5},
                                         "Move to a currently checked construction standing cell, then reobserve", "shelter")
@@ -419,18 +459,43 @@ class DailySurvivalGoals:
             if material:
                 return self._action("build_shelter_step", {"pos": pos, "material": material, **build_extra},
                                     "Build at most one checked blueprint block", "shelter")
-            log = next((name for name in ("oak_log", "birch_log", "spruce_log") if counts.get(name, 0)), None)
+            log = next((name for name in BUILDING_LOGS if counts.get(name, 0)), None)
             if log:
                 count = min(64, counts[log] * 4, math.ceil(shelter["missing_blocks"] / 4) * 4)
                 return self._action("craft_item", {"item": log[:-4] + "_planks", "count": count},
                                     "Prepare available building material for the remaining blueprint", "shelter")
-            return self._gather(("oak_log", "birch_log", "spruce_log"), observation, context, "shelter")
+            return self._gather(BUILDING_LOGS, observation, context, "shelter")
         door = shelter.get("needs_door")
         if isinstance(door, dict) and self._pos(door.get("pos")):
-            held = next((name for name in counts if name.endswith("_door") and name != "iron_door" and counts[name]), None)
+            if door.get("reason") not in (None, "door_missing"):
+                frame = shelter.get("door") or {}
+                if (door.get("reason") != "door_not_closed" or frame.get("frame_verified") is not True
+                        or frame.get("open") is not True or frame.get("pos") != door["pos"]
+                        or frame.get("name") not in DailySurvivalSkills.DOORS):
+                    return None
+                if math.dist(door["pos"], observation["status"]["pos"]) > 3:
+                    stand = self._pos(door.get("approach_pos") if shelter.get("inside") is True
+                                      else door.get("stand_pos"))
+                    if not stand or self.rules._key(stand) in self.rules._blocked(context):
+                        return None
+                    return self._action("move_to", {"pos": stand, "range": .5},
+                                        "Approach a fresh door stance before closing the existing frame", "shelter")
+                return self._action("set_door", {"pos": door["pos"], "open": False},
+                                    "Close the freshly verified existing door, then recheck the shelter", "shelter")
+            held = next((name for name in counts if name in DailySurvivalSkills.DOORS and counts[name]), None)
             if held:
                 stand = self._pos(door.get("stand_pos"))
-                if stand and math.dist(stand, observation["status"]["pos"]) > 1:
+                approach = self._pos(door.get("approach_pos"))
+                origin = observation["status"]["pos"]
+                if shelter.get("inside") is True and approach:
+                    if math.dist(approach, origin) > .4:
+                        stand = approach
+                    elif isinstance(door.get("allowed_facing"), list) and not DailySurvivalSkills._body_at(door["pos"], origin):
+                        facings = DailySurvivalSkills.placement_facings(door["pos"], origin)
+                        if facings and all(facing in door["allowed_facing"] for facing in facings):
+                            return self._action("place_door", {"pos": door["pos"], "item": held},
+                                "Install the door from its aligned interior stance and verify both closed halves", "shelter")
+                if stand and math.dist(stand, observation["status"]["pos"]) > .4:
                     if self.rules._key(stand) in self.rules._blocked(context):
                         return None
                     return self._action("move_to", {"pos": stand, "range": .5}, "Approach the checked doorway standing cell", "shelter")
@@ -652,8 +717,9 @@ class DailySurvivalGoals:
                     entity_id = row.get("id", row.get("entity_id"))
                     if type(entity_id) is int and self._can_hunt(observation, counts, row):
                         if math.dist(observation["status"]["pos"], row["pos"]) > 2.8:
-                            bed_action = self._action("move_to", {"pos": list(row["pos"]), "range": 2},
-                                "Approach the observed sheep once, then reobserve before the stationary wool hunt", "bed")
+                            bed_action = self._hunt_approach(observation, row, context, "bed")
+                            if bed_action is None:
+                                continue
                         else:
                             bed_action = self._action("hunt_animal", {"entity_id": entity_id, "expected_name": "sheep"},
                                                       "Acquire wool from one observed sheep; verify its actual drops", "bed")
@@ -661,9 +727,17 @@ class DailySurvivalGoals:
         task("bed", 74, bool(complete_beds), missing=[] if complete_beds else ["complete_unoccupied_bed"], action=bed_action,
              depends_on=("base_site", "shelter"), proof={"positions": complete_beds[:4]}, reason="Need wool, planks and a safe two-block placement inside the completed shelter; held beds are not deployed beds")
 
+        site = observation.get("shelter")
+        door_only = (base_ok and isinstance(site, dict) and site.get("fresh") is True and site.get("pos") == base["pos"]
+                     and site.get("orientation", "north") == base.get("orientation", "north")
+                     and site.get("dimension") == dimension and type(site.get("missing_blocks")) is int
+                     and site["missing_blocks"] == 0
+                     and isinstance(site.get("needs_door"), dict)
+                     and any(counts.get(item, 0) for item in DailySurvivalSkills.DOORS))
         task("shelter", 73, shelter_ok, missing=[] if shelter_ok else ["fresh_roof_walls_exit_survey"],
              action=self._shelter_action(observation, counts, base, context),
-             depends_on=("base_site", "wood_reserve"), proof=copy.deepcopy(shelter) if shelter_ok else {},
+             depends_on=("base_site",) if door_only else ("base_site", "wood_reserve"),
+             proof=copy.deepcopy(shelter) if shelter_ok else {},
              reason="Shelter geometry must be freshly surveyed; a roof or remembered house alone is insufficient")
 
         storage_rows = self._containers(observation, context)

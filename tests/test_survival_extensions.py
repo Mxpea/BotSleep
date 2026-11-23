@@ -127,9 +127,12 @@ class ExtensionPolicyTests(unittest.TestCase):
         obs["blocks"] = []
         obs["containers"] = []
         obs["entities"] = [{"id": 51, "name": "pig", "type": "passive", "pos": [6, 64, .5]}]
+        obs["local_geometry_origin"] = obs["status"]["pos"]
+        obs["safe_stand_candidates"] = [{"pos": [2.5, 64, .5], "support": "grass_block"}]
         goals = DailySurvivalGoals()
         task = next(row for row in goals.build(obs)["tasks"] if row["id"] == "food_reserve")
-        self.assertEqual(task["next_action"]["name"], "move_to")
+        self.assertEqual(task["next_action"]["name"], "position_for_task")
+        self.assertEqual(task["next_action"]["args"], {"pos": [2.5, 64, .5]})
         obs["entities"][0]["pos"] = [2.5, 64, .5]
         task = next(row for row in goals.build(obs)["tasks"] if row["id"] == "food_reserve")
         self.assertEqual(task["next_action"]["name"], "hunt_animal")
@@ -228,11 +231,8 @@ class ExtensionRuntimeTests(unittest.TestCase):
         runner.combat_skills.execute.assert_called_once()
         self.assertEqual(runner.skills.execute.call_args.args[0], "retreat_from")
 
-    def test_known_combat_failure_keeps_feedback_and_immediately_reobserves_to_retreat(self):
-        self.obs = world(enemy=True, distance=9, ranged=True)
-        # A nine-block skeleton is now handled locally within its sixteen-block
-        # threat radius. Use a ranged-reachable zombie to exercise native model
-        # feedback outside the ordinary eight-block emergency radius.
+    def test_known_local_combat_failure_immediately_reobserves_to_retreat_without_model(self):
+        self.obs = world(enemy=True, distance=2.2)
         self.obs["entities"][0]["name"] = "zombie"
         self.obs["status"]["nearest_hostile"]["name"] = "zombie"
         runner, brain = self.runner(response("fight_hostile", {"entity_id": 44, "expected_name": "zombie"}))
@@ -253,9 +253,6 @@ class ExtensionRuntimeTests(unittest.TestCase):
         self.assertFalse(runner.paused)
         self.assertEqual(runner.failures, self.settings["max_consecutive_failures"] - 1)
         self.assertLessEqual(runner._next_attempt, time.monotonic())
-        feedback = [row for row in runner.planner.history if row["role"] == "tool"]
-        self.assertEqual(feedback[-1]["tool_call_id"], "call_1")
-        self.assertEqual(json.loads(feedback[-1]["content"])["result"]["error_code"], "combat_no_progress")
         self.assertEqual(runner.journal.state["last_result"]["error_code"], "combat_no_progress")
         self.assertTrue(any(call.args[2] == "COMBAT_RECOVERY_SCHEDULED" for call in runner.recorder.record.call_args_list))
         runner.tick()
@@ -263,7 +260,7 @@ class ExtensionRuntimeTests(unittest.TestCase):
         self.assertTrue(self.finish(runner, start=False).success)
         runner.combat_skills.execute.assert_called_once()
         self.assertEqual(runner.skills.execute.call_args.args[0], "retreat_from")
-        self.assertEqual(len(brain.requests), 1)
+        self.assertEqual(len(brain.requests), 0)
 
     def test_fatal_combat_failure_is_not_recovery_even_with_retreat_flag(self):
         self.obs = world(enemy=True)
@@ -400,17 +397,13 @@ class ExtensionRuntimeTests(unittest.TestCase):
         self.assertTrue(runner.journal.state["last_result"]["data"]["lava_outstanding"])
         self.client.stop.assert_not_called()
 
-    def test_stale_model_combat_target_is_rejected_before_skill(self):
-        original = world(enemy=True, distance=9, ranged=True)
-        original["entities"][0]["name"] = "zombie"
-        original["status"]["nearest_hostile"]["name"] = "zombie"
-        self.obs = copy.deepcopy(original)
-        self.obs["entities"][0]["id"] = 99
-        self.obs["status"]["nearest_hostile"]["id"] = 99
-        self.collector.collect.side_effect = [original, copy.deepcopy(self.obs)]
+    def test_model_combat_target_is_rejected_even_when_observed(self):
+        self.obs = world(enemy=True, distance=9, ranged=True)
+        self.obs["entities"][0]["name"] = "zombie"
+        self.obs["status"]["nearest_hostile"]["name"] = "zombie"
         runner, brain = self.runner(response("fight_hostile", {"entity_id": 44, "expected_name": "zombie"}))
         result = self.finish(runner)
-        self.assertEqual(result.error_code, "safety_changed")
+        self.assertEqual(result.error_code, "llm_invalid_arguments")
         runner.combat_skills.execute.assert_not_called()
         self.assertEqual(len(brain.requests), 1)
         self.assertIsNone(runner.planner._pending)

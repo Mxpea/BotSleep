@@ -3,12 +3,15 @@
 import math
 import time
 
-from .combat import aim_angles, clear_entity_ray, melee_weapon
+from core.block_geometry import PASS_THROUGH
+from .combat import MELEE, TIERS, aim_angles, clear_entity_ray, melee_weapon
 from .survival import _Failure
 
 
 COOKED_DROPS = {"cow": "cooked_beef", "pig": "cooked_porkchop",
                 "sheep": "cooked_mutton", "chicken": "cooked_chicken"}
+HUNTING_PICKS = tuple(tier + "_pickaxe" for tier in TIERS)
+HUNTING_TOOLS = MELEE | set(HUNTING_PICKS)
 
 
 def _rest(seconds, cancel):
@@ -60,9 +63,9 @@ def _hunt_animal(skill, args, context):
     initial_health, origin = status["health"], list(status["pos"])
     before, inventory = skill._inventory(context)
     budget()
-    weapon = melee_weapon(inventory)
+    weapon = melee_weapon(inventory) or next(((name, .90) for name in HUNTING_PICKS if before.get(name, 0)), None)
     if weapon is None:
-        raise _Failure("missing_tool", "A sword or axe is required for hunting")
+        raise _Failure("missing_tool", "A sword, axe or pickaxe is required for hunting")
     expected = skill.ANIMALS[name] | {COOKED_DROPS[name]}
     evidence = context["retreat_evidence"]
     evidence.update(entity_id=args["entity_id"], animal=name, weapon=weapon[0], hits=0,
@@ -80,8 +83,10 @@ def _hunt_animal(skill, args, context):
             raise _Failure("out_of_range", "Animal is outside checked melee reach; reobserve and choose a safe stance",
                            {**evidence, "target_pos": entity["pos"], "next_step": "reobserve_before_approach"})
         feet = [math.floor(v) for v in current["pos"]]
-        if (skill._block([feet[0], feet[1] - 1, feet[2]], context)["name"] not in skill.SUPPORT
-                or any(skill._block([feet[0], feet[1] + y, feet[2]], context)["name"] not in skill.AIR for y in (0, 1))):
+        floor = skill._block([feet[0], feet[1] - 1, feet[2]], context)
+        body = [skill._block([feet[0], feet[1] + y, feet[2]], context) for y in (0, 1)]
+        if (floor["name"] not in skill.SUPPORT or not skill._safe_block(floor)
+                or any(row["name"] not in PASS_THROUGH or not skill._safe_block(row) for row in body)):
             raise _Failure("unsafe", "Hunting needs solid footing and clear body space", evidence)
         rows = skill.client.get_entities(radius=8, **budget())
         budget()
@@ -105,9 +110,21 @@ def _hunt_animal(skill, args, context):
             pos = skill._pos(row.get("pos"))
             # The API's ray click selects the first entity. A sword can sweep,
             # so neither the attack corridor nor the victim's vicinity is shared.
-            if (row.get("type") in {"hostile", "player"}
-                    or math.dist(pos, entity["pos"]) < 1.5 or math.dist(pos, current["pos"]) < 3.5):
-                raise _Failure("unsafe_target", "Another entity could be hit, swept or draw danger", evidence)
+            kind, nearby = row.get("type"), row.get("name")
+            if skill.allow_herd_hunting and kind not in {"hostile", "player"}:
+                if nearby in {"item", "experience_orb"}:
+                    continue  # These entities are filtered out by the native ray click.
+                if nearby in skill.ANIMALS:
+                    dx, dz = (entity["pos"][i] - current["pos"][i] for i in (0, 2))
+                    px, pz = (pos[i] - current["pos"][i] for i in (0, 2))
+                    width = math.hypot(dx, dz)
+                    if width >= .3 and (abs(dx * pz - dz * px) / width >= .85
+                                       or dx * px + dz * pz > width * (width + .4)):
+                        continue  # Whitelisted livestock to the side can share the hunting area.
+            if (kind in {"hostile", "player"} or math.dist(pos, entity["pos"]) < 1.5
+                    or math.dist(pos, current["pos"]) < 3.5):
+                raise _Failure("unsafe_target", "Another entity could be hit, swept or draw danger",
+                               {**evidence, "nearby_entity": {"name": nearby, "type": kind, "pos": pos}})
         ray_target = list(entity["pos"])
         if name == "chicken":
             ray_target[1] -= .55
