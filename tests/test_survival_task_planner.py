@@ -462,6 +462,15 @@ class SurvivalTaskPlannerTests(unittest.TestCase):
         d3 = planner.choose(obs2, {})
         self.assertEqual((d3.name, d3.args["item"]), ("run_survival_task", "stone_pickaxe"))
 
+    def test_disable_sleep_strips_sleep_and_bed_tools_from_planner_catalog(self):
+        planner, _ = self.planner(response("wait", {"seconds": 1}))
+        planner.disable_sleep = True
+        tools, _, _ = planner._request_catalog({}, observation())
+        names = {t["function"]["name"] for t in tools}
+        self.assertNotIn("auto_sleep", names)
+        task = next(t["function"] for t in tools if t["function"]["name"] == "run_survival_task")
+        self.assertNotIn("bed", task["parameters"]["properties"]["task"]["enum"])
+
 
 if __name__ == "__main__":
     unittest.main()

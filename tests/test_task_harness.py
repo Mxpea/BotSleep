@@ -1027,6 +1027,24 @@ class TaskHarnessTests(unittest.TestCase):
         self.assertFalse(calls[0]["prefer_caves_first"])
         self.assertTrue(calls[0]["cave_policy"]["allow_tall_cave_subgraph"])
 
+    def test_nether_portal_move_to_water_source_is_allowed_while_lava_stays_blocked(self):
+        harness, _ = self.harness([])
+        water_obs = {
+            "blocks": [{"name": "water", "pos": [5, 64, 0]}],
+            "terrain": [],
+            "entities": [],
+        }
+        portal_move = Decision("move_to", {"pos": [5, 64, 0], "range": 3}, "Approach water", "nether_portal")
+        self.assertIsNone(harness._unsafe_destination(portal_move, water_obs))
+        regular_move = Decision("move_to", {"pos": [5, 64, 0], "range": 3}, "Regular", "explore")
+        self.assertIsNotNone(harness._unsafe_destination(regular_move, water_obs))
+        lava_obs = {
+            "blocks": [{"name": "lava", "pos": [5, 64, 0]}],
+            "terrain": [],
+            "entities": [],
+        }
+        self.assertIsNotNone(harness._unsafe_destination(portal_move, lava_obs))
+
 
 if __name__=="__main__":
     unittest.main()

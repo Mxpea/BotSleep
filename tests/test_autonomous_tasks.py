@@ -1178,6 +1178,18 @@ class AutonomousTaskTests(unittest.TestCase):
         retry = ctrl.next_action(obs, ctx)
         self.assertEqual((retry.name, retry.goal), ("gather_resource", "deep_mine"))
 
+    def test_night_surface_cobblestone_prefers_deep_mine_instead_of_surface_wandering(self):
+        from core.config import DEFAULTS
+        obs = world({"wooden_pickaxe": 1, "oak_log": 4})
+        obs["status"]["is_day"] = False
+        obs["status"]["time_of_day"] = 14000
+        obs["blocks"] = [{"name": "stone", "pos": [4, 64, 0], "can_see": True, "can_dig": True}]
+        ctrl = AutonomousTaskController({**DEFAULTS["survival"], "objective": "daily", "disable_sleep": True})
+        ctrl.start({"task": "gather", "resource": "cobblestone", "count": 8}, obs, {})
+        ctx = {"deep_mining_enabled": True}
+        step = ctrl.next_action(obs, ctx)
+        self.assertEqual((step.name, step.goal), ("gather_resource", "deep_mine"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -784,6 +784,13 @@ class AutonomousTaskController:
             round(abs(float(row["pos"][1]) - float(origin[1])), 1) if resource == "logs" else 0.0,
             row["pos"],
         ))
+        if (resource == "cobblestone" and not cautious
+                and (obs["status"].get("is_day") is False or (obs["status"].get("time_of_day") or 0) >= 12000)
+                and origin[1] >= 56
+                and isinstance(context, dict) and context.get("deep_mining_enabled") is True
+                and "cobblestone" not in self._data.get("deep_mine_ores", [])):
+            needed = max(1, self._data["progress"]["target"] - self._quantity(obs)) if self._data["task"] == "gather" and self._data["args"].get("resource") == "cobblestone" else 12
+            return self._deep_mine_decision("cobblestone", obs, count=needed)
         if resource == "cobblestone" and self._data.get("local_failures", 0) >= 2 and not cautious and isinstance(context, dict) and context.get("deep_mining_enabled") is True and "cobblestone" not in self._data.get("deep_mine_ores", []):
             needed = max(1, self._data["progress"]["target"] - self._quantity(obs)) if self._data["task"] == "gather" and self._data["args"].get("resource") == "cobblestone" else 12
             return self._deep_mine_decision("cobblestone", obs, count=needed)

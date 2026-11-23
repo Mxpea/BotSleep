@@ -88,6 +88,7 @@ plan_shelter only checks a site; build_shelter_step places at most one block. Ke
 Death invalidates inventory and temporary plans. Only currently observed drops may be collected, after checking threats; do not charge toward an old death coordinate.
 After failures, use the paired result and fresh state to change target, position or prerequisites. Respect active target cooldowns. All models share one serialized request slot; provider uncertainty blocks new calls.
 Keep immediate safety and any active mainline chapter first.
+Combat & Night Underground Rule: On multiplayer servers where sleep is disabled (or at night without a bed), do NOT roam the open surface for food/wood or repeatedly call auto_sleep/bed. When night falls on the surface (pos[1]>=56) and you have a pickaxe, prioritize underground mining via run_survival_task(task="gather", resource="raw_iron" | "coal" | "cobblestone") to gather ore safely underground. When holding a shield and sword, fight_hostile handles shield-blocking vs skeleton arrows and hit-and-backstep vs creepers; dig/relocate if trapped on a repeated spawn-camp death spot.
 Speedrun Progression (ignore optional shelter/bed/farm/storage/maintenance/wood_reserve/fuel_reserve when food>=14 and health>=16):
 1) Spawn/early scouting: when newly spawned or lacking wood/structures (e.g., desert/treeless
 plains) and context.last_scout_report is absent, prefer ONE run_survival_task(task="scout")
@@ -166,6 +167,7 @@ class LLMSurvivalPlanner:
             self.MAX_REQUEST_BYTES = 48000
         self.tool_definitions = tools_for_objective(self.objective)
         self.autonomy_enabled = survival_settings.get("autonomy", {}).get("enabled", True) is True
+        self.disable_sleep = bool(survival_settings.get("disable_sleep", False))
         self.advisory = (self.objective == "daily" and survival_settings.get("risk_policy") == "advisory"
                          and survival_settings.get("intent", "survival") == "survival"
                          and survival_settings.get("campaign") is not True)
@@ -721,6 +723,8 @@ If that goal tool is unavailable, use only the currently advertised tools.
                     {"mode": "atomic", "atomic_repair_remaining": 0}, None)
         normal = {"run_survival_task", "wait", "eat_food", "auto_sleep", "retreat_from", "fight_hostile",
                   "select_task", "update_progress", "finish_task", "force_exit_task", "end_competition"}
+        if self.disable_sleep:
+            normal.discard("auto_sleep")
         if self.objective == "competition":
             active = (context.get("competition") or {}).get("active_goal") or {}
             if active.get("id") == "minecraft:story/lava_bucket" and active.get("availability") == "ready":
@@ -783,7 +787,16 @@ If that goal tool is unavailable, use only the currently advertised tools.
                             + " Warning: scout already ran repeatedly; prefer gather, craft, smelt, iron_tools, food, or nether_portal unless repositioning."
                         )
         if mode == "atomic_repair":
+            if self.disable_sleep:
+                tools = [t for t in tools if t["function"]["name"] not in {"auto_sleep", "place_bed"}]
             return (tools, {"mode": mode, "atomic_repair_remaining": remaining}, task_id)
+        if self.disable_sleep:
+            tools = copy.deepcopy([t for t in tools if t["function"]["name"] not in {"auto_sleep", "place_bed"}])
+            for tool in tools:
+                if tool["function"]["name"] == "run_survival_task":
+                    task_prop = tool["function"]["parameters"]["properties"].get("task")
+                    if isinstance(task_prop, dict) and isinstance(task_prop.get("enum"), list) and "bed" in task_prop["enum"]:
+                        task_prop["enum"] = [name for name in task_prop["enum"] if name != "bed"]
         return (tools, {"mode": mode, "atomic_repair_remaining": 0}, None)
 
     def _decision(self, message, observation, context, allowed_names=None, allowed_schemas=None):
@@ -982,7 +995,7 @@ If that goal tool is unavailable, use only the currently advertised tools.
             allowed_names = frozenset(tool["function"]["name"] for tool in request_tools)
             allowed_schemas = {tool["function"]["name"]: copy.deepcopy(tool["function"]["parameters"]) for tool in request_tools}
             prompt_context = {key: context[key] for key in ("blocked_targets", "explore_index", "failures", "last_result", "last_planner_rejection", "safety_warnings",
-                                                          "last_scout_report", "death_count", "spawn", "remaining_steps", "remaining_seconds", "budget_advice",
+                                                          "last_scout_report", "death_count", "recent_spawn_deaths", "spawn_camp_alert", "disable_sleep", "spawn", "remaining_steps", "remaining_seconds", "budget_advice",
                                                           "daily_tasks", "action_hints", "memory", "survival_constraints", "competition", "playbook", "task_execution", "mainline") if key in context}
             if routing.get("mode") == "goal" and isinstance(prompt_context.get("action_hints"), list):
                 # In goal mode atomic tools like place_item/move_to are hidden; drop uncallable hints so small models do not emulate them with unrelated craft calls.

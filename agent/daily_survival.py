@@ -677,7 +677,12 @@ class DailySurvivalGoals:
                     counts.get("iron_ingot", 0) < ingots
                     or sum(n for name, n in counts.items() if name.endswith("_planks")) < planks)):
                 iron_action = tool_action
-        task("iron_tools", 70 if missing_defense else 55, not missing_iron and not missing_defense,
+        iron_prio = 70 if missing_defense else 55
+        is_night = bool(fresh and (status.get("is_day") is False or (status.get("time_of_day") or 0) >= 12000))
+        on_surface = bool(fresh and isinstance(status.get("pos"), (list, tuple)) and len(status["pos"]) == 3 and status["pos"][1] >= 56)
+        if is_night and on_surface and any(counts.get(p, 0) for p in ("wooden_pickaxe", "stone_pickaxe", "iron_pickaxe", "diamond_pickaxe")):
+            iron_prio = 96
+        task("iron_tools", iron_prio, not missing_iron and not missing_defense,
              missing=missing_defense + ["iron_" + kind for kind in missing_iron], action=iron_action,
              depends_on=("starter_tools", "furnace", "fuel_reserve"), reason="Need safe observed iron, fuel, smelting output and crafting materials")
 
@@ -686,7 +691,8 @@ class DailySurvivalGoals:
         task("base_site", 75, base_ok, missing=[] if base_ok else ["fresh_base_site_survey"], proof=copy.deepcopy(base) if base_ok else {},
              action=self._base_candidate(observation, counts, context),
              reason="A single safe standing cell or remembered location does not verify a buildable base site")
-        beds = self._safe_rows(observation, {row.get("name") for row in self._rows(observation.get("blocks")) if str(row.get("name", "")).endswith("_bed")})
+        disable_sleep = bool((context or {}).get("disable_sleep"))
+        beds = [] if disable_sleep else self._safe_rows(observation, {row.get("name") for row in self._rows(observation.get("blocks")) if str(row.get("name", "")).endswith("_bed")})
         complete_beds = []
         offsets = {"north": (0, -1), "south": (0, 1), "west": (-1, 0), "east": (1, 0)}
         indexed = {tuple(row["pos"]): row for row in beds}
@@ -702,11 +708,11 @@ class DailySurvivalGoals:
                     and head_props.get("facing") == props["facing"]
                     and (head_props.get("occupied") is False or head_props.get("occupied") == "false")):
                 complete_beds.append(row["pos"])
-        held_bed = next((name for name, count in counts.items() if name.endswith("_bed") and count > 0), None)
+        held_bed = None if disable_sleep else next((name for name, count in counts.items() if name.endswith("_bed") and count > 0), None)
         shelter = evidence.get("shelter")
         shelter_ok = self._verified(shelter, dimension) and shelter.get("shelter_verified") is True
         bed_action = self._place(held_bed, observation, "bed", context) if held_bed and base_ok and shelter_ok else None
-        if not held_bed:
+        if not held_bed and not disable_sleep:
             wool = next((name for name, count in counts.items() if name.endswith("_wool") and count >= 3), None)
             if wool and sum(counts.get(name, 0) for name in PLANK_NAMES) >= 3:
                 workspace = self.rules._workspace(observation, context)
@@ -724,8 +730,12 @@ class DailySurvivalGoals:
                             bed_action = self._action("hunt_animal", {"entity_id": entity_id, "expected_name": "sheep"},
                                                       "Acquire wool from one observed sheep; verify its actual drops", "bed")
                         break
-        task("bed", 74, bool(complete_beds), missing=[] if complete_beds else ["complete_unoccupied_bed"], action=bed_action,
-             depends_on=("base_site", "shelter"), proof={"positions": complete_beds[:4]}, reason="Need wool, planks and a safe two-block placement inside the completed shelter; held beds are not deployed beds")
+        task("bed", 0 if disable_sleep else 74, True if disable_sleep else bool(complete_beds),
+             missing=[] if (disable_sleep or complete_beds) else ["complete_unoccupied_bed"],
+             action=None if disable_sleep else bed_action,
+             depends_on=() if disable_sleep else ("base_site", "shelter"),
+             proof={"disabled": True} if disable_sleep else {"positions": complete_beds[:4]},
+             reason="Sleep is disabled by configuration" if disable_sleep else "Need wool, planks and a safe two-block placement inside the completed shelter; held beds are not deployed beds")
 
         site = observation.get("shelter")
         door_only = (base_ok and isinstance(site, dict) and site.get("fresh") is True and site.get("pos") == base["pos"]

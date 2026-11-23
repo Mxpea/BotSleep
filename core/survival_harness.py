@@ -458,6 +458,10 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
             if (decision.name == "collect_liquid"
                     and block.get("name") == decision.args.get("expected_name")):
                 continue  # The bucket skill verifies the source and safe stance.
+            if (decision.goal in {"nether_portal", "nether_portal_water"}
+                    and decision.name == "move_to"
+                    and block.get("name") in {"water", "flowing_water"}):
+                continue  # Approaching water shoreline for bucket fill during portal crafting.
             if pos is not None and block.get("name") in SurvivalSkills.HAZARDS and math.dist(pos, target) <= 1.5:
                 return "An observed environmental hazard is close to the proposed destination"
         return None
@@ -547,6 +551,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
         return started
 
     def request_sleep(self):
+        if self.settings.get("disable_sleep"):
+            return False
         if not self.resume():
             return False
         return self._start(Decision("auto_sleep", {}, "Player requested sleep", "sleep"))
@@ -600,6 +606,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
 
     def _prepare_context(self, observation):
         now = time.time()
+        self.context["disable_sleep"] = bool(self.settings.get("disable_sleep", False))
         self.context["blocked_until"] = {key: value for key, value in self.context.get("blocked_until", {}).items()
                                          if isinstance(value, (int, float)) and value > now}
         self.context["blocked_targets"] = list(self.context["blocked_until"])
@@ -967,8 +974,23 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
                 and self.context.get("was_alive") is not False):
             new_death = True
         if new_death:
+            now_ts = time.time()
+            death_pos = status.get("pos") or (death.get("pos") if isinstance(death, dict) else None)
+            spots = [s for s in self.context.get("recent_death_spots", [])
+                     if isinstance(s, dict) and now_ts - float(s.get("t", 0)) <= 180.0
+                     and s.get("dimension") == dimension]
+            if isinstance(death_pos, (list, tuple)) and len(death_pos) == 3:
+                spots.append({"t": now_ts, "pos": [float(v) for v in death_pos], "dimension": dimension})
+            spots = spots[-6:]
+            cluster_count = (
+                sum(1 for s in spots if math.dist(s["pos"], [float(v) for v in death_pos]) <= 16.0)
+                if isinstance(death_pos, (list, tuple)) and len(death_pos) == 3 else len(spots)
+            )
             self.context.update(failures={}, blocked_until={}, blocked_targets=[], explore_index=0,
-                                spawn=None, death_count=self.context["death_count"] + 1)
+                                spawn=None, death_count=self.context["death_count"] + 1,
+                                recent_death_spots=spots,
+                                recent_spawn_deaths=cluster_count,
+                                spawn_camp_alert=cluster_count >= 2)
             self.context.pop("retreat_recovery", None)
             self.context.pop("combat_retreat", None)
             self.context.pop("combat_blocked_until", None)
@@ -1299,8 +1321,11 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
                 "task_id": self._task_snapshot().get("task_id") if self._task_child else None})
             self._phase("acting")
             if decision.name == "auto_sleep":
-                options = {key: value for key, value in self.sleep_settings.items() if key in SleepController.SKILL_OPTIONS}
-                result = AutoSleepSkill(self.client).execute(**options, cancel_event=self._cancel)
+                if self.settings.get("disable_sleep") and not observation["status"].get("is_sleeping"):
+                    result = SkillResult(False, "Sleep disabled by configuration", {"executed": False}, "sleep_disabled")
+                else:
+                    options = {key: value for key, value in self.sleep_settings.items() if key in SleepController.SKILL_OPTIONS}
+                    result = AutoSleepSkill(self.client).execute(**options, cancel_event=self._cancel)
             elif decision.name == "campaign_action":
                 result = self.campaign_skills.execute(decision.args, self.campaign.state, cancel_event=self._cancel)
                 self.campaign.record(decision, result)

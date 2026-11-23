@@ -39,6 +39,10 @@ class DailySafetyPolicy:
         self.food_threshold = self.rules.food_threshold
         raw_policy = settings.get("sleep_policy", "strict") if isinstance(settings, Mapping) else "strict"
         self.sleep_policy = raw_policy if raw_policy in {"opportunistic", "strict"} else "strict"
+        self.disable_sleep = (
+            bool(settings.get("disable_sleep", False))
+            if isinstance(settings, Mapping) else False
+        )
         self.llm_override_on_block = (
             bool(settings.get("llm_override_on_block", False))
             if isinstance(settings, Mapping) else False
@@ -130,11 +134,18 @@ class DailySafetyPolicy:
             ranged_close = any(row.get("name") in RANGED_HOSTILES and dist <= 6.5 for dist, _, row in hostiles)
             ranged = any(row.get("name") in RANGED_HOSTILES for _, _, row in hostiles)
             close_melee = combat.get("allowed") is True and combat.get("mode") == "melee" and combat.get("distance", 9) <= 2.8 and not ranged_close
-            if combat.get("allowed") is True and (not ranged or combat.get("shield") is True or close_melee):
+            if combat.get("allowed") is True and (
+                not ranged
+                or combat.get("shield") is True
+                or combat.get("mode") == "shield_advance"
+                or close_melee
+            ):
                 target = combat["target"]
                 return "combat", Decision("fight_hostile", {"entity_id": target["id"], "expected_name": target["name"]},
                     "Take one locally verified defensive step, then observe again", "safety")
             retreat_rec = (context or {}).get("retreat_recovery") or {}
+            spawn_camp = bool((context or {}).get("spawn_camp_alert")) or int((context or {}).get("recent_spawn_deaths") or 0) >= 2
+            retreat_dist = 14 if spawn_camp else 8
             retreat_failed = retreat_rec.get("no_route_exhausted") is True or (
                 self.llm_override_on_block and int(retreat_rec.get("cooldown_cycles") or 0) >= 1
             )
@@ -144,12 +155,12 @@ class DailySafetyPolicy:
                     target = combat["target"]
                     return "combat", Decision("fight_hostile", {"entity_id": target["id"], "expected_name": target["name"]},
                         "Take one locally verified defensive step when retreat is boxed in", "safety")
-                threshold = 2.5 if self.llm_override_on_block else 3.5
+                threshold = 4.0 if (self.llm_override_on_block and spawn_camp) else (2.5 if self.llm_override_on_block else 3.5)
                 if hostiles[0][0] <= threshold:
-                    return "near_hostile", Decision("retreat_from", {"pos": hostiles[0][1], "distance": 8},
+                    return "near_hostile", Decision("retreat_from", {"pos": hostiles[0][1], "distance": retreat_dist},
                         "A hostile is within its danger radius; withdraw through freshly checked terrain instead of waiting exposed", "safety")
             else:
-                return "near_hostile", Decision("retreat_from", {"pos": hostiles[0][1], "distance": 8},
+                return "near_hostile", Decision("retreat_from", {"pos": hostiles[0][1], "distance": retreat_dist},
                     "A hostile is within its danger radius; withdraw through freshly checked terrain instead of waiting exposed", "safety")
         nearby = status.get("nearest_hostile")
         if isinstance(nearby, dict) and self.rules._number(nearby.get("dist")) and nearby["dist"] <= self.rules._threat_distance(nearby.get("name")):
@@ -175,6 +186,8 @@ class DailySafetyPolicy:
 
     def _strict_night_block(self, observation, status):
         """Check whether to rest after the verified home-route decision."""
+        if self.disable_sleep:
+            return False
         if not self._night(status):
             return False
         if self.sleep_policy != "opportunistic":
@@ -551,6 +564,8 @@ class DailySafetyPolicy:
                         "Return along fresh short terrain evidence; actual path and arrival require re-observation", "safety")
 
     def _bed(self, observation):
+        if self.disable_sleep:
+            return False
         return any(row["name"].endswith("_bed") and self._near_safe(row["pos"], observation, 16)
                    and (row.get("properties") or {}).get("occupied") not in (True, "true") for row in self._blocks(observation))
 
@@ -663,7 +678,12 @@ class DailySafetyPolicy:
         elif self.rules._number(status.get("food")) and status["food"] <= 6:
             notes.append(f"critical_hunger (food={status['food']}): prioritize eating or obtaining food")
         if self._night(status):
-            notes.append("night_or_thunder: surface hostiles active; fight_hostile, dig underground, or shelter")
+            if self.disable_sleep:
+                notes.append("night_or_thunder (sleep disabled): go underground to mine iron/coal/cobble or equip shield+sword instead of surface roaming")
+            else:
+                notes.append("night_or_thunder: surface hostiles active; fight_hostile, dig underground, or shelter")
+        if context.get("spawn_camp_alert") or int(context.get("recent_spawn_deaths") or 0) >= 2:
+            notes.append("SPAWN_CAMP_ALERT: repeated recent deaths near spawn; flee spawn pit, dig 2-3 blocks underground or craft shield+sword")
         pos = self._point(status.get("pos"))
         if pos is not None:
             hostiles = self.rules._dangerous_hostiles(observation, pos)
@@ -754,6 +774,8 @@ class DailySafetyPolicy:
                 return None
             return scenario
         status = observation["status"]
+        if self.disable_sleep and decision.name == "auto_sleep" and not status.get("is_sleeping"):
+            return "sleep_disabled"
         if decision.name == "eat_food":
             return None if self._food_valid(decision, observation) else "food_not_available_or_unsafe"
         if self._meal(observation):

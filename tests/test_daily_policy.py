@@ -833,6 +833,34 @@ class DailyPolicyTests(unittest.TestCase):
         self.assertEqual(over.choose(lava, self.baseline).goal, "recover")
         self.assertFalse(over.constraints(lava)["model_allowed"])
 
+    def test_disable_sleep_blocks_sleeping_and_spawn_camp_widens_retreat_and_warns(self):
+        no_sleep = DailySafetyPolicy({
+            "low_health_threshold": 8, "food_threshold": 16, "threat_radius": 8,
+            "sleep_policy": "strict", "disable_sleep": True, "llm_override_on_block": True,
+        })
+        night_obs = observed(is_day=False, time_of_day=15000, health=18, food=18)
+        night_obs["blocks"].append({"name": "red_bed", "pos": [2, 64, 0], "properties": {"occupied": False}})
+        self.assertFalse(no_sleep._bed(night_obs))
+        self.assertFalse(no_sleep._strict_night_block(night_obs, night_obs["status"]))
+        self.assertEqual(no_sleep.validate(action("auto_sleep"), night_obs), "sleep_disabled")
+        self.assertTrue(no_sleep.constraints(night_obs)["model_allowed"])
+
+        camp_obs = observed(is_day=False, time_of_day=15000, health=18, food=18)
+        camp_obs["entities"] = [{"id": 31, "type": "hostile", "name": "zombie", "pos": [4.5, 64.0, 0.5]}]
+        camp_ctx = {"spawn_camp_alert": True, "recent_spawn_deaths": 2}
+        retreat = no_sleep.choose(camp_obs, self.baseline, context=camp_ctx)
+        self.assertEqual(retreat.name, "retreat_from")
+        self.assertEqual(retreat.args["distance"], 14)
+        self.assertTrue(any("SPAWN_CAMP_ALERT" in w for w in no_sleep.warnings(camp_obs, camp_ctx)))
+
+        # Shield + sword enables advancing on ranged skeletons up to 10m locally.
+        skel_obs = observed(is_day=False, time_of_day=15000, health=16, food=18)
+        skel_obs["counts"] = {"iron_sword": 1, "shield": 1}
+        skel_obs["inventory"] = [{"name": "iron_sword", "count": 1}, {"name": "shield", "count": 1}]
+        skel_obs["entities"] = [{"id": 32, "type": "hostile", "name": "skeleton", "pos": [7.5, 64.0, 0.5]}]
+        fight = no_sleep.choose(skel_obs, self.baseline, context={})
+        self.assertEqual((fight.name, fight.args["expected_name"]), ("fight_hostile", "skeleton"))
+
 
 if __name__ == "__main__":
     unittest.main()

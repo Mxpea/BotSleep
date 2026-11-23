@@ -16,11 +16,12 @@ HOSTILES = frozenset({
 })
 TIERS = ("netherite", "diamond", "iron", "stone", "copper", "wooden", "golden")
 MELEE = frozenset(tier + suffix for tier in TIERS for suffix in ("_sword", "_axe"))
-MIN_HEALTH_SHIELD = 14
+MIN_HEALTH_SHIELD = 10
 MIN_HEALTH_UNSHIELDED = 18
 MIN_HEALTH_EASY_MELEE = 8
 MIN_FOOD = 8
 MELEE_RANGE = 2.8
+SHIELD_ADVANCE_MAX = 10.0
 RANGED_MIN = 6
 RANGED_MAX = 12
 SHIELD_WARMUP = .30
@@ -131,9 +132,16 @@ def combat_options(observation: dict, entity_id: int | None = None, expected_nam
     if ranged and (8 if target["name"] == "creeper" else RANGED_MIN) <= distance <= RANGED_MAX:
         mode, weapon = "ranged", ranged
     elif target["name"] == "creeper":
-        mode = "withdraw"  # API does not expose fuse/charged state; no blind melee.
+        if not starter_defense and melee and shield and hp >= 12 and distance <= MELEE_RANGE:
+            mode, weapon = "melee", melee[0]
+        else:
+            mode = "withdraw"
     elif melee and (1.5 if starter_defense else 0.0) <= distance <= MELEE_RANGE:
         mode, weapon = "melee", melee[0]
+    elif (not starter_defense and melee and shield and hp >= MIN_HEALTH_SHIELD
+          and target["name"] in {"skeleton", "stray", "bogged", "pillager"}
+          and MELEE_RANGE < distance <= SHIELD_ADVANCE_MAX):
+        mode, weapon = "shield_advance", melee[0]
     elif distance < 2:
         mode = "withdraw"
     else:
@@ -351,6 +359,17 @@ class CombatSkills(SurvivalSkills):
         context["pending_write"] = False
         return reply
 
+    def _ensure_shield_offhand(self, context, observation):
+        """Ensure shield sits in off-hand slot 45 before posture(shield=True)."""
+        status = observation["status"]
+        offhand = status.get("offhand") or {}
+        if offhand.get("name") == "shield":
+            return
+        names = {row.get("name") for row in observation.get("inventory", [])
+                 if isinstance(row, dict) and type(row.get("count")) is int and row["count"] > 0}
+        if "shield" in names:
+            self._write(context, self.client.equip, "shield", slot="off-hand", status=status)
+
     def _shield(self, context, enabled, status, *, warmup=True):
         reply = self._write(context, self.client.posture, shield=enabled, status=status)
         if reply.get("blocking") is not enabled:
@@ -378,6 +397,7 @@ class CombatSkills(SurvivalSkills):
             distance = step * .25
             self._footing(context, [origin[0] + dx / norm * distance, origin[1], origin[2] + dz / norm * distance])
         if context["data"].get("shield") and observation["status"].get("blocking") is not True:
+            self._ensure_shield_offhand(context, observation)
             self._write(context, self.client.look_at, target["pos"][0], target["pos"][1] + .9, target["pos"][2],
                         status=observation["status"])
             # Do not stand still near a creeper waiting for the shield. Retreat
@@ -436,10 +456,37 @@ class CombatSkills(SurvivalSkills):
             self._withdraw(context, observation, target)
             return
         self._geometry(context, observation, target)
-        if observation["status"].get("blocking"):
+        if observation["status"].get("blocking") and option["mode"] != "shield_advance":
             self._shield(context, False, observation["status"])
-        if option["mode"] == "melee":
+        if option["mode"] == "shield_advance":
             weapon, cooldown = melee_weapon(observation["inventory"], prefer_tier=self.starter_defense)
+            self._ensure_shield_offhand(context, observation)
+            self._write(context, self.client.equip, weapon, status=observation["status"])
+            self._write(context, self.client.look_at, target["pos"][0], target["pos"][1] + .9, target["pos"][2], status=observation["status"])
+            if observation["status"].get("blocking") is not True:
+                self._shield(context, True, observation["status"], warmup=True)
+            # If an arrow is already airborne nearby, absorb it briefly before advancing.
+            origin = observation["status"]["pos"]
+            incoming_arrow = any(
+                r.get("name") == "arrow" and math.dist(origin, self._pos(r.get("pos"))) <= 6.5
+                for r in observation.get("entities", [])
+            )
+            if incoming_arrow:
+                self._wait(context, .25)
+            dx, dz = target["pos"][0] - origin[0], target["pos"][2] - origin[2]
+            norm = math.hypot(dx, dz)
+            if norm >= .5:
+                step_check = [origin[0] + dx / norm * min(1.25, norm), origin[1], origin[2] + dz / norm * min(1.25, norm)]
+                self._footing(context, step_check)
+                yaw, _ = aim_angles(origin, target["pos"])
+                self._write(context, self.client.control, forward=True, yaw=yaw, pitch=0, ms=450, wait=True,
+                            status=observation["status"])
+                context["data"]["shield_advanced"] = True
+            self._wait(context, cooldown)
+        elif option["mode"] == "melee":
+            weapon, cooldown = melee_weapon(observation["inventory"], prefer_tier=self.starter_defense)
+            if shield:
+                self._ensure_shield_offhand(context, observation)
             self._write(context, self.client.equip, weapon, status=observation["status"])
             self._write(context, self.client.look_at, target["pos"][0], target["pos"][1] + .9, target["pos"][2], status=observation["status"])
             if shield:
@@ -452,14 +499,22 @@ class CombatSkills(SurvivalSkills):
                 self._shield(context, False, refreshed["status"])
             context["data"].update(phase="target_missing", target_missing=True)
             return
-        if (not fresh_option["allowed"] or fresh_option.get("mode") != option["mode"]
-                or refreshed["status"]["health"] < observation["status"]["health"]):
+        mode_ok = (fresh_option.get("mode") == option["mode"]) or (
+            option["mode"] == "shield_advance" and fresh_option.get("mode") == "melee"
+        )
+        if not fresh_option["allowed"] or not mode_ok or refreshed["status"]["health"] < observation["status"]["health"]:
             self._withdraw(context, refreshed, target)
+            return
+        if option["mode"] == "shield_advance" and fresh_option.get("mode") != "melee":
+            # Closed distance while blocking; hold shield until next cycle closes the rest.
+            self._write(context, self.client.look_at, fresh_option["target"]["pos"][0],
+                        fresh_option["target"]["pos"][1] + .9, fresh_option["target"]["pos"][2], status=refreshed["status"])
+            context["data"].update(phase="shield_advance", completed=False)
             return
         target = fresh_option["target"]
         context["data"]["target"] = target
         self._geometry(context, refreshed, target)
-        if option["mode"] == "melee":
+        if fresh_option["mode"] == "melee":
             if (refreshed["status"].get("held") or {}).get("name") != option["weapon"]:
                 raise _Failure("weapon_unverified", "The selected weapon is no longer held")
             if shield:
@@ -504,7 +559,11 @@ class CombatSkills(SurvivalSkills):
             encounter["cooldown_until"] = time.monotonic() + 30
             raise _Failure("combat_no_progress", "Repeated attacks have no verified damage; withdraw before replanning",
                            {"retreat_required": True, "cooldown_seconds": 30})
-        if (after["status"]["health"] < observation["status"]["health"]
+        if (target["name"] == "creeper" and current is not None and not context["data"]["completed"]):
+            context["data"]["retreat_required"] = True
+            context["data"]["creeper_kited"] = True
+            self._withdraw(context, after, current)
+        elif (after["status"]["health"] < observation["status"]["health"]
                 or not self.options(after, args["entity_id"], args["expected_name"])["allowed"] and current is not None):
             context["data"]["retreat_required"] = True
             if current is not None:

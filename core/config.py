@@ -38,6 +38,7 @@ DEFAULTS: Dict[str, Any] = {
         "continuous": False,
         "risk_policy": "guarded",
         "sleep_policy": "opportunistic",
+        "disable_sleep": False,
         "llm_override_on_block": False,
         "disable_deep_mining": False,
         "operator_goal": "",
@@ -255,6 +256,7 @@ def _validate(config: Dict[str, Any], config_dir: Path) -> None:
         raise ConfigError("survival.campaign requires objective=daily and intent=speedrun")
     if not isinstance(survival["sleep_policy"], str) or survival["sleep_policy"] not in ("opportunistic", "strict"):
         raise ConfigError("survival.sleep_policy must be opportunistic or strict")
+    _boolean(survival["disable_sleep"], "survival.disable_sleep")
     _boolean(survival["llm_override_on_block"], "survival.llm_override_on_block")
     goal = survival["operator_goal"]
     if (not isinstance(goal, str) or len(goal) > 1000 or goal and not goal.strip()
