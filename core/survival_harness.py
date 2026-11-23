@@ -18,6 +18,7 @@ from core.config import continuous_daily
 from core.foliage_reconciliation import confirm_foliage, foliage_intent, pending_foliage, resolved_result
 from core.domain import LOG_NAMES, PLANK_NAMES, RANGED_HOSTILES
 from core.policy_relaxation import RelaxedWork, allows_goal
+from core.loop_supervisor import LoopSupervisor
 from core.safety_arbiter import SafetyArbiter
 from core.retreat_controller import (
     RETREAT_REPLAN,
@@ -197,16 +198,10 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
         self._next_monitor = 0.0
         self._next_idle_monitor = 0.0
         self._action_watchdog_seconds = float(settings.get("action_watchdog_seconds") or 0)
-        self._watchdog_started_at = 0.0
-        self._watchdog_last_progress_at = 0.0
-        self._watchdog_last_activity_at = 0.0
-        self._watchdog_last_activity_seq = None
-        self._watchdog_last_write_at = 0.0
-        self._watchdog_last_pos = None
-        self._watchdog_last_task_steps = None
-        self._watchdog_decision_id = None
-        self._watchdog_triggered = False
-        self._watchdog_reason = None
+        self._loop_supervisor = LoopSupervisor(
+            action_watchdog_seconds=self._action_watchdog_seconds,
+            record_fn=self._record,
+        )
         self._paused_idle_since = None
         self._started = time.monotonic()
         self._saw_observation = False
@@ -265,6 +260,46 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
     @property
     def busy(self):
         return self._future is not None
+
+    @property
+    def _watchdog_started_at(self):
+        return self._loop_supervisor.watchdog_started_at
+
+    @_watchdog_started_at.setter
+    def _watchdog_started_at(self, value):
+        self._loop_supervisor.watchdog_started_at = value
+
+    @property
+    def _watchdog_last_progress_at(self):
+        return self._loop_supervisor.watchdog_last_progress_at
+
+    @_watchdog_last_progress_at.setter
+    def _watchdog_last_progress_at(self, value):
+        self._loop_supervisor.watchdog_last_progress_at = value
+
+    @property
+    def _watchdog_decision_id(self):
+        return self._loop_supervisor.watchdog_decision_id
+
+    @_watchdog_decision_id.setter
+    def _watchdog_decision_id(self, value):
+        self._loop_supervisor.watchdog_decision_id = value
+
+    @property
+    def _watchdog_triggered(self):
+        return self._loop_supervisor.watchdog_triggered
+
+    @_watchdog_triggered.setter
+    def _watchdog_triggered(self, value):
+        self._loop_supervisor.watchdog_triggered = value
+
+    @property
+    def _watchdog_reason(self):
+        return self._loop_supervisor.watchdog_reason
+
+    @_watchdog_reason.setter
+    def _watchdog_reason(self, value):
+        self._loop_supervisor.watchdog_reason = value
 
     @property
     def paused(self):
@@ -637,19 +672,9 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
         self._model_feedback = False
         self._reading_pending = self._pending_leaf_readback is not None or (
             self.daily and (self.continuous or self._task_resume_requested) and self._has_interrupted_intent())
-        now_mono = time.monotonic()
-        self._watchdog_started_at = now_mono
-        self._watchdog_last_progress_at = now_mono
-        self._watchdog_last_activity_at = now_mono
-        raw_seq = getattr(self.client, "activity_seq", None)
-        self._watchdog_last_activity_seq = raw_seq if type(raw_seq) is int else None
-        raw_write = getattr(self.client, "last_write_at", 0.0)
-        self._watchdog_last_write_at = float(raw_write) if isinstance(raw_write, (int, float)) and not isinstance(raw_write, bool) else 0.0
-        self._watchdog_last_pos = None
-        self._watchdog_last_task_steps = (self.task_controller.snapshot().get("steps") if self.task_controller else None)
-        self._watchdog_decision_id = None
-        self._watchdog_triggered = False
-        self._watchdog_reason = None
+        self._loop_supervisor.begin_cycle_watchdog(
+            time.monotonic(), client=self.client, task_controller=self.task_controller
+        )
         self._paused_idle_since = None
         self._future = self._executor.submit(self._cycle, manual)
         return True
@@ -705,6 +730,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
                     self.context["safety_warnings"] = warnings
             return
         self._observe_shelter_project(observation)
+        if observation.get("inventory_fresh") is not False:
+            self._loop_supervisor.sync_inventory_counts(observation.get("counts"))
         self.context["milestones"] = self.planner.progress(observation)
         if self.playbook:
             self.context["playbook"] = self.playbook.build(observation,
@@ -728,6 +755,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
                 warnings.append(self.context.pop("watchdog_warning"))
             if self.context.get("night_burrow"):
                 warnings.append("NIGHT_BURROW_ACTIVE: You are sealed 3 blocks underground with 1 overhead cap to survive night; gather stone/coal safely or wait until daytime before surfacing.")
+            if isinstance(self.context.get("loop_supervisor_alert"), dict):
+                warnings.append(f"LIVELOCK_ALERT: {self.context['loop_supervisor_alert']['hint']}")
             if self.llm_override_on_block or warnings:
                 self.context["safety_warnings"] = warnings
             signature = json.dumps(self.context["daily_tasks"], sort_keys=True)
@@ -1687,90 +1716,23 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
         return decision, result
 
     def _is_workflow_decision(self, decision):
-        return bool(
-            self._task_child and decision is not None and (
-                decision.goal in {"deep_mine", "scout_surface", "equip_loadout",
-                                  "nether_portal_water", "nether_portal_gravel"}
-                or (decision.goal == "nether_portal" and decision.name == "move_to")
-            )
-        )
+        """Return True when `decision` executes a bounded multi-step workflow."""
+        return self._loop_supervisor.is_workflow_decision(decision, task_child=self._task_child)
 
     def _check_action_watchdog(self, now, decision, status=None):
-        watchdog_s = self._action_watchdog_seconds
-        if (watchdog_s <= 0 or decision is None or self._watchdog_triggered
-                or self._cancel.is_set() or self._reading_pending
-                or decision.name in {"wait", "observe", "goal_complete"}):
-            return False
-        if self._watchdog_decision_id != id(decision):
-            self._watchdog_decision_id = id(decision)
-            self._watchdog_started_at = now
-            self._watchdog_last_progress_at = now
-            self._watchdog_last_activity_at = now
-            raw_seq = getattr(self.client, "activity_seq", None)
-            self._watchdog_last_activity_seq = raw_seq if type(raw_seq) is int else None
-            raw_write = getattr(self.client, "last_write_at", 0.0)
-            self._watchdog_last_write_at = float(raw_write) if isinstance(raw_write, (int, float)) and not isinstance(raw_write, bool) else 0.0
-            self._watchdog_last_task_steps = (
-                self.task_controller.snapshot().get("steps") if self.task_controller else None
-            )
-            pos = status.get("pos") if isinstance(status, dict) else None
-            self._watchdog_last_pos = (
-                [float(v) for v in pos]
-                if isinstance(pos, (list, tuple)) and len(pos) == 3
-                else None
-            )
-            return False
-        if self._is_workflow_decision(decision):
-            raw_seq = getattr(self.client, "activity_seq", None)
-            act_seq = raw_seq if type(raw_seq) is int else None
-            if act_seq is not None and act_seq != self._watchdog_last_activity_seq:
-                self._watchdog_last_activity_seq = act_seq
-                self._watchdog_last_activity_at = now
-            raw_write = getattr(self.client, "last_write_at", 0.0)
-            write_at = float(raw_write) if isinstance(raw_write, (int, float)) and not isinstance(raw_write, bool) else 0.0
-            if write_at > self._watchdog_last_write_at:
-                self._watchdog_last_write_at = write_at
-                self._watchdog_last_progress_at = now
-            task_steps = self.task_controller.snapshot().get("steps") if self.task_controller else None
-            if task_steps is not None and task_steps != self._watchdog_last_task_steps:
-                self._watchdog_last_task_steps = task_steps
-                self._watchdog_last_progress_at = now
-            pos = status.get("pos") if isinstance(status, dict) else None
-            if isinstance(pos, (list, tuple)) and len(pos) == 3:
-                cur_pos = [float(v) for v in pos]
-                if self._watchdog_last_pos is None or math.dist(cur_pos, self._watchdog_last_pos) >= 0.45:
-                    self._watchdog_last_pos = cur_pos
-                    self._watchdog_last_progress_at = now
-            # Workflows execute multi-step cave scans/mining: enforce strict 30s if API
-            # requests hang cleanly, and allow up to max(3*watchdog, 90s) for read-heavy scans
-            # before declaring no-write/no-movement stall.
-            if act_seq is not None and now - self._watchdog_last_activity_at >= watchdog_s:
-                elapsed = now - self._watchdog_last_activity_at
-            else:
-                stall_limit = max(watchdog_s * 3.0, 90.0) if act_seq is not None else watchdog_s
-                elapsed = now - self._watchdog_last_progress_at
-                if elapsed < stall_limit:
-                    return False
-        else:
-            elapsed = now - self._watchdog_started_at
-        if elapsed < watchdog_s:
-            return False
-        self._watchdog_triggered = True
-        self._watchdog_reason = f"{decision.name} timed out after {int(watchdog_s)}s watchdog"
-        self._cancel.set()
-        self._record("WARN", "ACTION_WATCHDOG_TIMEOUT", {
-            "decision": decision.name,
-            "goal": decision.goal,
-            "watchdog_seconds": watchdog_s,
-            "elapsed": round(elapsed, 2),
-            "workflow": self._is_workflow_decision(decision),
-            "pos": (status or self.latest_status or {}).get("pos"),
-        })
-        try:
-            self.client.stop(timeout_seconds=2.0)
-        except APIError as exc:
-            self._record("WARN", "STOP_FAILED", {"code": exc.code})
-        return True
+        """Delegate L1 single-action and workflow stall detection to `LoopSupervisor`."""
+        return self._loop_supervisor.check_action_watchdog(
+            now,
+            decision,
+            status,
+            client=self.client,
+            task_controller=self.task_controller,
+            task_child=self._task_child,
+            cancelled=self._cancel.is_set(),
+            reading_pending=self._reading_pending,
+            cancel_callback=self._cancel.set,
+            latest_status=self.latest_status,
+        )
 
     def _monitor(self):
         if self._cancel.is_set():
@@ -1818,6 +1780,9 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
             context=self.context,
         )
         if assessment.danger:
+            non_critical_reasons = set(assessment.reasons) <= {"hostile_within_limit", "low_health_deteriorated"}
+            if self._loop_supervisor.preemption_shield_active(now) and non_critical_reasons:
+                return
             self._interrupt_for_safety(status, planning, assessment.hit)
 
     def _interrupt_for_safety(self, status, planning, hit):
@@ -2276,6 +2241,14 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
                 elif result.success:
                     self._continuous_retries = 0
             self.phase = "paused" if self.paused else "complete" if self.completed else "waiting"
+            self._loop_supervisor.record_step_outcome(
+                time.monotonic(),
+                time.time(),
+                decision,
+                result,
+                observation,
+                self.context,
+            )
             # Keep uncertain intentions for explicit recovery after a restart.
             keep_pending = ((_uncertain_result(result) and decision.name != "observe"
                              and result.data.get("action_state") != "verified_idle")

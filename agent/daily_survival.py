@@ -13,6 +13,7 @@ import re
 
 from agent.survival_planner import Decision, SurvivalPlanner
 from core.domain import LOG_NAMES, PLANK_NAMES, SAFE_FOOD, TOOL_KINDS, parse_pos
+from core.loop_supervisor import LoopSupervisor
 from core.skill_registry import skills_for_objective
 from core.structure_spec import SHELTER_BUILDING_BLOCKS
 from skills.daily_survival import DailySurvivalSkills
@@ -563,7 +564,8 @@ class DailySurvivalGoals:
                     "needs": ["fresh_observation"], "revalidate_candidates": []}
 
         drops = None
-        if context.get("death_count", 0) > 0:
+        drop_hotspot_suspended = LoopSupervisor.should_suspend_drop_recovery(observation, context)
+        if context.get("death_count", 0) > 0 and not drop_hotspot_suspended:
             for row in self._safe_rows(observation, entities=True, context=context):
                 item = self._drop_name(row)
                 entity_id = row.get("id", row.get("entity_id"))
@@ -573,9 +575,16 @@ class DailySurvivalGoals:
                     drops = self._action("collect_drops", {"entity_id": entity_id, "expected_item": item},
                                          "Collect one currently observed safe drop after death", "recover_drops")
                     break
-        drop_priority = 100 if (drops is not None and status.get("is_day") is True and context.get("death_count", 0) <= 2) else (45 if drops is not None else 5)
+        drop_priority = (
+            0 if drop_hotspot_suspended
+            else (100 if (drops is not None and status.get("is_day") is True and context.get("death_count", 0) <= 2)
+                  else (45 if drops is not None else 5))
+        )
         task("recover_drops", drop_priority, context.get("death_count", 0) == 0, action=drops,
-             reason="No currently visible safe drop; do not replay a route to the death location", waiting=True)
+             reason=("Night death hotspot suspended; recover drops after dawn or re-gear locally"
+                     if drop_hotspot_suspended
+                     else "No currently visible safe drop; do not replay a route to the death location"),
+             waiting=True)
 
         well_fed = (
             fresh
