@@ -955,7 +955,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime):
                     runner = resolve_skill_runner(self, decision.name)
                     if (self.llm_override_on_block
                             and decision.name not in {"retreat_from", "canopy_escape", "water_escape", "auto_sleep"}
-                            and isinstance(runner, (SurvivalSkills, CombatSkills))):
+                            and runner in {self.skills, self.combat_skills, self.bucket_skills}):
                         options["force_override"] = True
                     result = runner.execute(decision.name, decision.args, cancel_event=self._cancel, **options)
             if not isinstance(result, SkillResult):

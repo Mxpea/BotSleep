@@ -26,7 +26,9 @@ class BucketSkills(DailySurvivalSkills):
         self._ignitions = {}
 
     def execute(self, name, args, cancel_event=None, **kwargs):
+        force_override = bool(kwargs.pop("force_override", False))
         context = {"cancel": cancel_event, "acted": False, "reads": 0,
+                   "force_override": force_override,
                    "deadline": time.monotonic() + 12, "evidence": {"skill": name, "executed": False}}
         data = context["evidence"]
         try:

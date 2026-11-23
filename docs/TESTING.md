@@ -24,6 +24,10 @@
   - `core/daily_policy.py` & `core/local_recovery_runtime.py` & `core/autonomous_tasks.py`：仅保留生命周期（`dead/not_ready`）、未知写入 `pending` 复查、`in_lava/on_fire`、低氧溺水（`oxygen <= 8`）等硬不变量；`water_escape` 失败 `>= 2` 次、`retreat` 被围、`low_health` 无食、夜间或 `food <= 6` 均立刻释放 `model_allowed=True`，并生成 `safety_warnings` 传给 LLM；
   - `skills/daily_survival.py`、`skills/survival.py`、`skills/combat.py`：新增 `force_override` 通道，放行 LLM 在水中/非地面/夜间执行 `move_to`、`gather_block`、`place_item`、`clear_foliage`（仍禁岩浆/着火/低氧），并在 `fight_hostile` 超距（`target_out_of_range` / `no_safe_attack_range`）时先短距逼近再挥击；
   - `agent/daily_survival.py`、`agent/llm_planner.py`、`core/survival_harness.py`：无可见近处掉落或夜间/多次死亡时降级 `recover_drops` 优先级（5/45）；`llm_override_on_block` 下保留 `scout` 可调并转发 `safety_warnings`；连续 `>= 2` 次 5xx/坏响应自动裁剪 `_turns` 解除坏上下文锁死。
+- **`v15` 实服压测完成与发现（`f92763f`，2026-11-23 `09:13–10:33`）**：
+  - `nether_bench_v15` 全员 9/9 Bot 在 `4680s` 预算内 `rc=2` 完整运行退出（0 熔断暂停，0 HTTP 500 锁死，0 `water_ex` 落水死循环，`scout` 禁用参数误选清零，`target_out_of_range` 降至 0–3 次）；服务端总进度 `16` 项、死亡 `388` 次、进地狱 `0/9`。
+  - **`bot_3` 进门阻断精确原因**：`bot_3` 于 `09:56:17` 达成 `[Isn't It Iron Pick]` 并集齐 `iron_pickaxe + bucket + shield + 9 iron_ingot + 356 cobblestone` 后两次启动 `nether_portal`（`02:03:28Z` 与 `02:04:04Z`），但均因 `BucketSkills.execute(..., force_override=True)` 触发 `or kwargs` 校验返回 `bad_args` 失败 5 次并在约 2 分钟后夜间遭围杀掉光装备；`bot_9` `0` 死获 `[Acquire Hardware]`（峰值 `6 raw_iron + 1 iron_ingot + 245 cobblestone`）。
+  - 本次已修复 `skills/buckets.py` 对 `force_override` 的兼容，并将 `core/survival_harness.py` 的 `force_override` 传递限定到 `self.skills`、`self.combat_skills`、`self.bucket_skills`。
 
 ## 端侧 API 9-Bot 并行进地狱调试与阻断说明（2026-11-23）
 

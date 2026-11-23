@@ -236,3 +236,10 @@ class BucketTests(unittest.TestCase):
                 self.world.status.update(changes)
                 self.assertEqual(self.hunt().error_code, "unsafe")
                 self.assertFalse(self.writes())
+
+    def test_collect_liquid_accepts_force_override_kwarg_without_bad_args(self):
+        self.world.counts = {"bucket": 1}
+        self.world.block([2, 63, 0], "water", properties={"level": 0})
+        res = self.skills.execute("collect_liquid", {"pos": [2, 63, 0], "expected_name": "water"}, force_override=True)
+        self.assertTrue(res.success, res)
+        self.assertEqual(self.world.counts.get("water_bucket"), 1)
