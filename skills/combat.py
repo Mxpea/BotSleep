@@ -139,8 +139,8 @@ def combat_options(observation: dict, entity_id: int | None = None, expected_nam
     elif melee and (1.5 if starter_defense else 0.0) <= distance <= MELEE_RANGE:
         mode, weapon = "melee", melee[0]
     elif (not starter_defense and melee and shield and hp >= MIN_HEALTH_SHIELD
-          and target["name"] in {"skeleton", "stray", "bogged", "pillager"}
-          and MELEE_RANGE < distance <= SHIELD_ADVANCE_MAX):
+          and ((target["name"] in {"skeleton", "stray", "bogged", "pillager"} and MELEE_RANGE < distance <= SHIELD_ADVANCE_MAX)
+               or (target["name"] != "creeper" and MELEE_RANGE < distance <= 4.5))):
         mode, weapon = "shield_advance", melee[0]
     elif distance < 2:
         mode = "withdraw"
@@ -304,6 +304,10 @@ class CombatSkills(SurvivalSkills):
                                    or abs(latest["pos"][1] - status["pos"][1]) >= .3
                                    or latest.get("health", 0) < status.get("health", 0)):
             raise _Failure("safety_changed", "Position or health changed immediately before the combat write")
+        if latest.get("on_ground") is not True and not self.starter_defense and not any(
+                latest.get(k) for k in ("in_lava", "in_water", "submerged", "on_fire", "is_sleeping", "in_vehicle")):
+            self._wait(context, .12)
+            latest = self._status(context)
         if latest.get("on_ground") is not True or any(latest.get(k) for k in ("in_lava", "in_water", "submerged", "on_fire")):
             raise _Failure("unsafe_state", "Combat write requires stable dry footing")
         if context.get("life") != (latest.get("last_death"), latest["dimension"]):
@@ -313,8 +317,9 @@ class CombatSkills(SurvivalSkills):
             current = {**attack_observation, "status": latest, "entities": rows}
             expected = context["data"]["target"]
             option = self.options(current, expected["id"], expected["name"])
+            drift_limit = .35 if self.starter_defense else .95
             if (not option["allowed"] or option.get("mode") != context["data"]["mode"]
-                    or math.dist(option["target"]["pos"], expected["pos"]) > .35):
+                    or math.dist(option["target"]["pos"], expected["pos"]) > drift_limit):
                 raise _Failure("safety_changed", "The target or nearby entities changed before attack", {"retreat_required": True})
             self._geometry(context, current, option["target"])
             newest = self._status(context)
@@ -412,7 +417,7 @@ class CombatSkills(SurvivalSkills):
         farther = math.hypot(position[0] - current["pos"][0], position[2] - current["pos"][2])
         self._footing(context, position)
         if (after["status"].get("on_ground") is not True or abs(position[1] - origin[1]) > .3
-                or math.dist(position, origin) > 1.6 or farther < norm + .1):
+                or math.dist(position, origin) > 1.6 or (farther < norm + .1 and math.dist(position, origin) < .2)):
             raise _Failure("retreat_unverified", "The short withdrawal did not gain confirmed separation",
                            {"retreat_required": True, "pos_after": position})
         context["data"].update(phase="withdraw", retreat_required=True, pos_after=position,
@@ -456,12 +461,11 @@ class CombatSkills(SurvivalSkills):
             self._withdraw(context, observation, target)
             return
         self._geometry(context, observation, target)
-        if observation["status"].get("blocking") and option["mode"] != "shield_advance":
-            self._shield(context, False, observation["status"])
         if option["mode"] == "shield_advance":
             weapon, cooldown = melee_weapon(observation["inventory"], prefer_tier=self.starter_defense)
             self._ensure_shield_offhand(context, observation)
-            self._write(context, self.client.equip, weapon, status=observation["status"])
+            if (observation["status"].get("held") or {}).get("name") != weapon:
+                self._write(context, self.client.equip, weapon, status=observation["status"])
             self._write(context, self.client.look_at, target["pos"][0], target["pos"][1] + .9, target["pos"][2], status=observation["status"])
             if observation["status"].get("blocking") is not True:
                 self._shield(context, True, observation["status"], warmup=True)
@@ -485,13 +489,16 @@ class CombatSkills(SurvivalSkills):
             self._wait(context, cooldown)
         elif option["mode"] == "melee":
             weapon, cooldown = melee_weapon(observation["inventory"], prefer_tier=self.starter_defense)
+            is_creeper = target["name"] == "creeper"
             if shield:
                 self._ensure_shield_offhand(context, observation)
-            self._write(context, self.client.equip, weapon, status=observation["status"])
+            if (observation["status"].get("held") or {}).get("name") != weapon:
+                self._write(context, self.client.equip, weapon, status=observation["status"])
             self._write(context, self.client.look_at, target["pos"][0], target["pos"][1] + .9, target["pos"][2], status=observation["status"])
-            if shield:
+            if shield and not is_creeper and observation["status"].get("blocking") is not True:
                 self._shield(context, True, observation["status"])
-            self._wait(context, cooldown)
+            # Creepers do not deal melee punches; strike promptly so knockback/backstep resets their 1.5s fuse.
+            self._wait(context, min(.2, cooldown) if is_creeper else cooldown)
         refreshed = self._snapshot(context)
         fresh_option = self.options(refreshed, args["entity_id"], args["expected_name"])
         if not any(r.get("id") == target["id"] and r.get("name") == target["name"] for r in refreshed["entities"]):
@@ -502,7 +509,8 @@ class CombatSkills(SurvivalSkills):
         mode_ok = (fresh_option.get("mode") == option["mode"]) or (
             option["mode"] == "shield_advance" and fresh_option.get("mode") == "melee"
         )
-        if not fresh_option["allowed"] or not mode_ok or refreshed["status"]["health"] < observation["status"]["health"]:
+        health_dropped_unshielded = (not shield) and refreshed["status"]["health"] < observation["status"]["health"]
+        if not fresh_option["allowed"] or not mode_ok or health_dropped_unshielded:
             self._withdraw(context, refreshed, target)
             return
         if option["mode"] == "shield_advance" and fresh_option.get("mode") != "melee":
@@ -511,16 +519,27 @@ class CombatSkills(SurvivalSkills):
                         fresh_option["target"]["pos"][1] + .9, fresh_option["target"]["pos"][2], status=refreshed["status"])
             context["data"].update(phase="shield_advance", completed=False)
             return
+        context["data"]["mode"] = fresh_option["mode"]
         target = fresh_option["target"]
         context["data"]["target"] = target
-        self._geometry(context, refreshed, target)
         if fresh_option["mode"] == "melee":
-            if (refreshed["status"].get("held") or {}).get("name") != option["weapon"]:
+            if (refreshed["status"].get("held") or {}).get("name") != fresh_option["weapon"]:
                 raise _Failure("weapon_unverified", "The selected weapon is no longer held")
-            if shield:
+            if shield and target["name"] != "creeper":
                 if refreshed["status"].get("blocking") is not True:
                     raise _Failure("shield_unverified", "The shield command is no longer active")
                 self._shield(context, False, refreshed["status"])
+                refreshed = self._snapshot(context)
+                after_drop = self.options(refreshed, args["entity_id"], args["expected_name"])
+                if not after_drop["allowed"] or after_drop.get("mode") != "melee":
+                    self._withdraw(context, refreshed, target)
+                    return
+                target = after_drop["target"]
+                context["data"]["target"] = target
+            elif shield and refreshed["status"].get("blocking") is True:
+                self._shield(context, False, refreshed["status"])
+                refreshed = self._snapshot(context)
+            self._geometry(context, refreshed, target)
             yaw, pitch = aim_angles(refreshed["status"]["pos"], target["pos"])
             reply = self._write(context, self.client.control, yaw=yaw, pitch=pitch, hit=1, ms=50, wait=True,
                                 status=refreshed["status"], attack_observation=refreshed)
@@ -532,7 +551,18 @@ class CombatSkills(SurvivalSkills):
                 raise _Failure("action_unconfirmed" if selected is not None else "attack_unverified", "The bounded ray did not select the expected entity",
                                {"selected_entity": selected, "retreat_required": True})
             context["data"]["attack_sent"] = True
+            if target["name"] == "creeper":
+                # Raise shield and backstep immediately without waiting for snapshot so fuse resets/blocks cleanly.
+                if shield:
+                    self._shield(context, True, refreshed["status"], warmup=False)
+                self._write(context, self.client.control, back=True, yaw=yaw, pitch=0, ms=300, wait=True,
+                            status=refreshed["status"])
+                context["data"].update(creeper_kited=True, retreat_required=True)
+            elif not self.starter_defense and before_health is None:
+                # Allow 2-3 server ticks for knockback/death packet sync when entity.health is omitted.
+                self._wait(context, .12)
         else:
+            self._geometry(context, refreshed, target)
             before_ammo = sum(r.get("count", 0) for r in refreshed["inventory"] if r.get("name") == "arrow")
             charge_ms = 1400 if option["weapon"] == "crossbow" else 1100
             reply = self._write(context, self.client.shoot, target["id"], weapon=option["weapon"], charge_ms=charge_ms,
@@ -549,17 +579,28 @@ class CombatSkills(SurvivalSkills):
             if not context["data"]["attack_sent"] or not (ammo < before_ammo or reply.get("projectiles")):
                 raise _Failure("attack_unverified", "No projectile or ammunition change confirmed the shot")
         context["attack_needs_verification"] = False
+        knockback_observed = (
+            not self.starter_defense
+            and not measured
+            and option["mode"] != "ranged"
+            and context["data"].get("attack_sent") is True
+            and current is not None
+            and math.dist(current["pos"], target["pos"]) >= 0.35
+            and math.dist(current["pos"], after["status"]["pos"]) > math.dist(target["pos"], refreshed["status"]["pos"]) + 0.1
+        )
         context["data"].update(phase="attack", damage_verified=bool(measured and health < before_health),
+                               knockback_observed=knockback_observed,
                                killed=bool(measured and health <= 0), completed=bool(measured and health <= 0),
                                target_missing=current is None, target_health_before=before_health, target_health_after=health)
         encounter = context["encounter"]
-        encounter["unverified"] = 0 if context["data"]["damage_verified"] else encounter["unverified"] + 1
+        encounter["unverified"] = 0 if (context["data"]["damage_verified"] or knockback_observed) else encounter["unverified"] + 1
         context["data"].update(encounter_attacks=encounter["attacks"], unverified_attacks=encounter["unverified"])
         if current is not None and encounter["unverified"] >= (2 if option["mode"] == "ranged" else 3):
             encounter["cooldown_until"] = time.monotonic() + 30
             raise _Failure("combat_no_progress", "Repeated attacks have no verified damage; withdraw before replanning",
                            {"retreat_required": True, "cooldown_seconds": 30})
-        if (target["name"] == "creeper" and current is not None and not context["data"]["completed"]):
+        if (target["name"] == "creeper" and current is not None and not context["data"]["completed"]
+                and not context["data"].get("creeper_kited")):
             context["data"]["retreat_required"] = True
             context["data"]["creeper_kited"] = True
             self._withdraw(context, after, current)
