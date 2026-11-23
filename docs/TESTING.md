@@ -28,6 +28,9 @@
   - `nether_bench_v15` 全员 9/9 Bot 在 `4680s` 预算内 `rc=2` 完整运行退出（0 熔断暂停，0 HTTP 500 锁死，0 `water_ex` 落水死循环，`scout` 禁用参数误选清零，`target_out_of_range` 降至 0–3 次）；服务端总进度 `16` 项、死亡 `388` 次、进地狱 `0/9`。
   - **`bot_3` 进门阻断精确原因**：`bot_3` 于 `09:56:17` 达成 `[Isn't It Iron Pick]` 并集齐 `iron_pickaxe + bucket + shield + 9 iron_ingot + 356 cobblestone` 后两次启动 `nether_portal`（`02:03:28Z` 与 `02:04:04Z`），但均因 `BucketSkills.execute(..., force_override=True)` 触发 `or kwargs` 校验返回 `bad_args` 失败 5 次并在约 2 分钟后夜间遭围杀掉光装备；`bot_9` `0` 死获 `[Acquire Hardware]`（峰值 `6 raw_iron + 1 iron_ingot + 245 cobblestone`）。
   - 本次已修复 `skills/buckets.py` 对 `force_override` 的兼容，并将 `core/survival_harness.py` 的 `force_override` 传递限定到 `self.skills`、`self.combat_skills`、`self.bucket_skills`。
+  - 后续实服 `nether_bench_v16`–`v20` 迭代并合并提交 `06926da`、`1576edd`、`c804104`、`766736d`、`07daa6e`（消除 `water_escape`/`retreat_from`/游戏侧 `action_unconfirmed` 永久 `paused` 锁死，引入 `action_watchdog_seconds: 30` 动作超时看门狗，收敛二轮多余 `deep_mine(raw_iron)` 并调整预算，仅高价值装备启用夜间 `emergency_burrow` 挖三填一与退避、空手近战与掉落物找回、红树林浅水与竹林阻挡清理、`--spread` 分散安全林地出生及开局优先找树）。
+  - `nether_bench_v20`（基线 `07daa6e`，9 Bot `4680s` 预算，`min_dist=1667.2`，`y=66..91`，`0` 树顶/水中出生）：9/9 全员按 `budget_exhausted`（`rc=2`）完整退出，实现全航程 `0` 永久暂停锁死（`ACTION_WATCHDOG_TIMEOUT=0`、`AUTO_PAUSED_GAME_RECOVERED=4`、`RECOVERY_REQUIRED=0`、`RETREAT_INTERRUPTION_RECOVERED=78`）；MC 服务端累计进度 `17` 项、总死亡 `55` 次（`bot_2/8/9` 全程 `0` 死，`bot_6` 夜间 `recover_drops` 重复死亡 `28` 次）、进地狱 `0/9`。
+  - `nether_bench_v20` 剩余推进瓶颈：模型参数误用 `craft(item="sticks")` 与无效 `smelt` 参数导致 `bad_args`（如 `bot_8` 已至 `y=16`）、`bot_9` 携 `raw_iron=1` 停留在 `smelt:needs_ai`、`bot_2` 耗尽石镐后持 `cobblestone=149` 停滞及夜间地面 `recover_drops` 连续死亡。
 
 ## 端侧 API 9-Bot 并行进地狱调试与阻断说明（2026-11-23）
 
