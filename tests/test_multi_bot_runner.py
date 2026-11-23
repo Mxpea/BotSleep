@@ -50,6 +50,25 @@ class MultiBotRunnerTests(unittest.TestCase):
         positions = {f"Bot{i}": [float(x), 64.0, float(z)] for i, (x, z) in enumerate(anchors, 1)}
         self.assertGreaterEqual(multi_bot_runner.compute_min_horizontal_distance(positions), 2000.0)
 
+    def test_verify_safe_spawn_spot_rejects_leaves_water_and_accepts_forest_ground(self):
+        class _Client:
+            def __init__(self, ground="grass_block", logs=None):
+                self.ground = ground
+                self.logs = logs if logs is not None else [{"pos": [4, 65, 0], "name": "oak_log"}]
+
+            def get_block(self, pos, **_kw):
+                y = pos[1]
+                return {"result": {"name": self.ground if y <= 63 else "air"}}
+
+            def get_blocks(self, **_kw):
+                return self.logs
+
+        ok_st = {"pos": [0.5, 64.0, 0.5], "in_water": False, "in_lava": False}
+        self.assertTrue(multi_bot_runner._verify_safe_spawn_spot(_Client("grass_block"), ok_st, require_trees=True))
+        self.assertFalse(multi_bot_runner._verify_safe_spawn_spot(_Client("acacia_leaves"), ok_st, require_trees=True))
+        self.assertFalse(multi_bot_runner._verify_safe_spawn_spot(_Client("grass_block", logs=[]), ok_st, require_trees=True))
+        self.assertFalse(multi_bot_runner._verify_safe_spawn_spot(_Client("grass_block"), {**ok_st, "in_water": True}, require_trees=True))
+
     def test_dry_run_writes_configs_for_single_api_port(self):
         with tempfile.TemporaryDirectory() as tmp:
             tpl = Path(tmp) / "tpl.yaml"

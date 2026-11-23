@@ -141,6 +141,49 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+_SAFE_SPAWN_GROUND = frozenset({"grass_block", "dirt", "coarse_dirt", "podzol", "stone", "sand", "gravel"})
+_SPAWN_TREE_LOGS = ["oak_log", "birch_log", "spruce_log", "dark_oak_log", "acacia_log", "cherry_log", "pale_oak_log"]
+
+
+def _locate_biome_xz(rcon: RconManager, cx: int, cz: int, biome: str) -> Optional[Tuple[int, int]]:
+    import re
+    try:
+        resp = rcon.command(f"execute positioned {cx} 80 {cz} run locate biome {biome}")
+    except Exception:
+        return None
+    m = re.search(r"\[\s*(-?\d+)\s*,\s*[^,\]]+\s*,\s*(-?\d+)\s*\]", str(resp or ""))
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2))
+
+
+def _verify_safe_spawn_spot(client: MinecraftAgentClient, status: Mapping[str, Any], *, require_trees: bool = True) -> bool:
+    pos = status.get("pos")
+    if not isinstance(pos, (list, tuple)) or len(pos) < 3:
+        return False
+    if status.get("in_water") or status.get("in_lava") or not 62.0 <= float(pos[1]) <= 92.0:
+        return False
+    fx = int(math.floor(float(pos[0])))
+    fy = int(math.floor(float(pos[1]) - 0.1))
+    fz = int(math.floor(float(pos[2])))
+    try:
+        ground = client.get_block([fx, fy, fz], timeout_seconds=5).get("result", {})
+        if ground.get("name") not in _SAFE_SPAWN_GROUND:
+            return False
+        feet = client.get_block([fx, fy + 1, fz], timeout_seconds=5).get("result", {})
+        head = client.get_block([fx, fy + 2, fz], timeout_seconds=5).get("result", {})
+        passable = {"air", "cave_air", "void_air", "short_grass", "tall_grass", "fern", "dandelion", "poppy", "leaf_litter"}
+        if feet.get("name") not in passable or head.get("name") not in passable:
+            return False
+        if require_trees:
+            logs = client.get_blocks(radius=24, types=_SPAWN_TREE_LOGS, limit=2)
+            if not logs:
+                return False
+        return True
+    except Exception:
+        return False
+
+
 def _prepare_and_spread(
     bot_entries: Sequence[Tuple[int, Dict[str, Any], Path, Path]],
     anchors: Sequence[Tuple[int, int]],
@@ -176,7 +219,12 @@ def _prepare_and_spread(
                     rcon.command(f"xp set {bot_name} 0 levels")
                     rcon.command(f"xp set {bot_name} 0 points")
                     rcon.command(f"effect clear {bot_name}")
-                    candidates = [
+                    candidates: List[Tuple[int, int]] = []
+                    for biome in ("minecraft:forest", "minecraft:birch_forest", "minecraft:taiga", "minecraft:plains"):
+                        located = _locate_biome_xz(rcon, gx, gz, biome)
+                        if located is not None:
+                            candidates.append(located)
+                    candidates.extend([
                         (gx, gz),
                         (gx + 500, gz + 500),
                         (gx - 500, gz - 500),
@@ -188,23 +236,27 @@ def _prepare_and_spread(
                         (-6000, -6000),
                         (6000, -6000),
                         (-6000, 6000),
-                    ]
+                    ])
                     st_after: Dict[str, Any] = {}
                     remaining_anchors = [a for a in anchors[idx:]]
-                    for cx, cz in candidates:
-                        if any(math.hypot(cx - p[0], cz - p[2]) < (min_dist + 300.0) for p in positions.values()):
-                            continue
-                        if (cx, cz) != (gx, gz) and any(math.hypot(cx - ax, cz - az) < (min_dist + 300.0) for ax, az in remaining_anchors):
-                            continue
-                        for mr in (32, 256):
-                            resp = rcon.command(f"spreadplayers {cx} {cz} 5 {mr} false {bot_name}")
-                            if "Spread" in resp:
-                                time.sleep(0.8)
-                                st_after = client.get_status(timeout_seconds=10).get("result", {})
-                                pos = st_after.get("pos") or status.get("pos")
-                                if pos and not st_after.get("in_water") and pos[1] >= 62.0:
-                                    break
-                        if st_after and not st_after.get("in_water") and (st_after.get("pos") or [0, 0, 0])[1] >= 62.0:
+                    safe_found = False
+                    for require_trees in (True, False):
+                        for cx, cz in candidates:
+                            if any(math.hypot(cx - p[0], cz - p[2]) < min_dist for p in positions.values()):
+                                continue
+                            if abs(cx - gx) > 800 and any(math.hypot(cx - ax, cz - az) < min_dist for ax, az in remaining_anchors):
+                                continue
+                            for mr, off_x, off_z in ((20, 0, 0), (36, 12, 0), (36, -12, 12), (48, 0, -16), (96, 24, 24)):
+                                resp = rcon.command(f"spreadplayers {cx + off_x} {cz + off_z} 2 {mr} false {bot_name}")
+                                if "Spread" in resp:
+                                    time.sleep(0.8)
+                                    st_after = client.get_status(timeout_seconds=10).get("result", {})
+                                    if _verify_safe_spawn_spot(client, st_after, require_trees=require_trees):
+                                        safe_found = True
+                                        break
+                            if safe_found:
+                                break
+                        if safe_found:
                             break
                     pos = st_after.get("pos") or status.get("pos")
                     if pos and len(pos) >= 3:

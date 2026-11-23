@@ -596,9 +596,21 @@ class DailySurvivalGoals:
              reason="No safe mature crop/passive animal or ready cooking input is currently available")
 
         wood = sum(counts.get(name, 0) for name in LOG_NAMES) + sum(counts.get(name, 0) for name in PLANK_NAMES) // 4
-        task("wood_reserve", 30 if (expedition_focus and wood >= 2) else 65, wood >= self.targets["wood_reserve"],
+        has_any_pick = any(counts.get(t + "_pickaxe", 0) > 0 for t in ("wooden", "stone", "iron", "diamond", "netherite"))
+        opening_need_trees = (
+            wood == 0
+            and sum(counts.get(name, 0) for name in PLANK_NAMES) < 3
+            and not has_any_pick
+            and (not fresh or (status.get("food", 20) > 6 and status.get("health", 20) > 8))
+        )
+        wood_action = self._gather(LOG_NAMES, observation, context, "wood_reserve")
+        if wood_action is None and opening_need_trees and bool(context.get("autonomy_llm_mode") is True):
+            wood_action = self._action("run_survival_task", {"task": "scout", "distance": 96},
+                                       "Explore to locate trees and forest as primary opening goal", "wood_reserve")
+        wood_prio = 92 if opening_need_trees else (30 if (expedition_focus and wood >= 2) else 65)
+        task("wood_reserve", wood_prio, wood >= self.targets["wood_reserve"],
              missing=[{"log_equivalents": max(0, self.targets["wood_reserve"] - wood)}],
-             action=self._gather(LOG_NAMES, observation, context, "wood_reserve"), proof={"log_equivalents": wood})
+             action=wood_action, proof={"log_equivalents": wood})
 
         progress = self.rules.progress(observation)
         starter_missing = ["stone_" + kind for kind in TOOL_KINDS if not progress["stone_" + kind]]

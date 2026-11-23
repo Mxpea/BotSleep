@@ -639,6 +639,9 @@ class DailyGoalsTests(unittest.TestCase):
         self.assertEqual(food_row["priority"], 35)
         self.assertEqual(wood_row["priority"], 30)
         self.assertNotEqual(board["active_task_id"], "food_reserve")
+        no_wood_obs = observation({}, food=20, health=20)
+        no_wood_board = self.goals.build(no_wood_obs)
+        self.assertEqual(next(r for r in no_wood_board["tasks"] if r["id"] == "wood_reserve")["priority"], 92)
         obs["status"]["food"] = 12
         hungry_board = self.goals.build(obs)
         hungry_food = next(r for r in hungry_board["tasks"] if r["id"] == "food_reserve")
