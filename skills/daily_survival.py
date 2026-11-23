@@ -46,7 +46,7 @@ class DailySurvivalSkills(SurvivalSkills):
     FUELS = SurvivalSkills.LOGS | SurvivalSkills.PLANKS | {"coal", "charcoal", "stick"}
     FURNACES = frozenset({"furnace", "smoker", "blast_furnace"})
     CONTAINERS = frozenset({"chest", "barrel"})
-    FOLIAGE = SurvivalSkills.RETREAT_LEAVES | {"azalea_leaves", "flowering_azalea_leaves", "vine"}
+    FOLIAGE = SurvivalSkills.RETREAT_LEAVES | {"azalea_leaves", "flowering_azalea_leaves", "vine", "bamboo", "bamboo_sapling"}
     UNKNOWN = frozenset({"request_timeout", "network_error", "invalid_json", "invalid_response",
                          "internal", "internal_error", "dig_unconfirmed", "action_unconfirmed"})
     ARGUMENTS = {**SurvivalSkills.ARGUMENTS,
@@ -321,7 +321,7 @@ class DailySurvivalSkills(SurvivalSkills):
         """Clear one adjacent body-height obstacle, without collecting or walking."""
         pos, name = self._pos(args["pos"], block=True), self._item(args["expected_name"])
         if name not in self.FOLIAGE:
-            raise _Failure("unsupported_foliage", "Only known leaves and vine may be cleared")
+            raise _Failure("unsupported_foliage", "Only known leaves, vine, and bamboo may be cleared")
         initial = self._prepare(context)
         initial_feet = [math.floor(value + 1e-4) for value in initial["pos"]]
 
@@ -342,7 +342,7 @@ class DailySurvivalSkills(SurvivalSkills):
                     or math.dist(status["pos"], pos) > 3):
                 raise _Failure("unsafe_target", "Only a horizontally adjacent eight-neighbor body-height foliage cell may be cleared")
             target = self._gather_guard(pos, name, status, context)
-            if name != "vine" and target.get("properties", {}).get("waterlogged") not in (False, "false"):
+            if name not in {"vine", "bamboo", "bamboo_sapling"} and target.get("properties", {}).get("waterlogged") not in (False, "false"):
                 raise _Failure("unsafe", "Leaves must be explicitly observed as not waterlogged")
             sight = trace_block_visibility(status["pos"], pos, lambda p: self._block(p, context), max_queries=24, max_distance=4)
             if sight["visible"] is not True:

@@ -62,6 +62,7 @@ class SurvivalSkills:
         )),
         "andesite", "granite", "diorite", "deepslate", "cobbled_deepslate",
         "tuff", "calcite", "dripstone_block", "snow_block", "moss_block", "pale_moss_block",
+        "mangrove_roots", "muddy_mangrove_roots", "lily_pad", "dirt_path", "farmland",
         "crafting_table", "furnace",
     }
     PLACEABLE = LOGS | PLANKS | {
@@ -890,7 +891,8 @@ class SurvivalSkills:
             try:
                 rows = self.client.get_blocks(
                     radius=20,
-                    types=["grass_block", "dirt", "sand", "stone", "gravel", "mud", "sandstone", "cobblestone"],
+                    types=["grass_block", "dirt", "sand", "stone", "gravel", "mud", "sandstone", "cobblestone",
+                           "mangrove_roots", "muddy_mangrove_roots", "lily_pad"],
                     limit=48,
                 )
             except (APIError, _Failure) as exc:

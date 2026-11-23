@@ -290,3 +290,18 @@ class ContinuousRecoveryTests(unittest.TestCase):
         self.world.last_write_at = now + 0.04
         self.assertFalse(h._check_action_watchdog(now + 0.06, d, self.world.status))
         h._task_child = False
+
+    def test_monitor_allows_shallow_water_and_stable_low_health_when_override_enabled(self):
+        settings = {**self.settings, "intent": "speedrun", "continuous": False, "llm_override_on_block": True}
+        h = SurvivalHarness(self.world, settings, DEFAULTS["sleep"], journal=self.journal)
+        self.addCleanup(h.close)
+        h._active_decision = Decision("move_to", {"pos": [4, 64, 0], "range": 1}, "Cross swamp water", "explore")
+        h._safety_baseline = {"health": 4.5, "dimension": "overworld", "last_death": None}
+        self.world.status.update({"in_water": True, "submerged": False, "oxygen": 20, "health": 4.5, "alive": True, "nearest_hostile": None})
+        h._next_monitor = 0.0
+        h._monitor()
+        self.assertFalse(h._cancel.is_set())
+        self.world.status["health"] = 3.5
+        h._next_monitor = 0.0
+        h._monitor()
+        self.assertTrue(h._cancel.is_set())

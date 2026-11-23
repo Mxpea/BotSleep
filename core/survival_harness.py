@@ -1772,23 +1772,35 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
             or status.get("last_death") != baseline.get("last_death")
             or status.get("health", 0) < baseline.get("health", 20))
         surface_expedition = self._task_child and decision is not None and decision.goal in {"deep_mine", "scout_surface"}
+        shallow_water_allowed = bool(
+            surface_expedition
+            or (self.llm_override_on_block and decision is not None
+                and decision.name not in {"water_escape", "auto_sleep"})
+        )
+        low_health_override = bool(
+            self.llm_override_on_block
+            and decision is not None
+            and self._safety_rules._number(baseline.get("health"))
+            and status.get("health", 20) >= baseline["health"]
+        )
         hit_preempts = attack is not None and not defending
         submerged_danger = bool(
             status.get("submerged")
             and (
-                not surface_expedition
+                not shallow_water_allowed
                 or (isinstance(status.get("oxygen"), (int, float)) and float(status.get("oxygen", 20)) <= 12)
             )
         )
-        hostile_limit = (
-            min(5.0, self._safety_rules._threat_distance(hostile.get("name")))
-            if decision is not None and decision.goal == "deep_mine" and status.get("health", 20) >= 16
-            else self._safety_rules._threat_distance(hostile.get("name"))
-        )
+        if decision is not None and decision.goal == "deep_mine" and status.get("health", 20) >= 16:
+            hostile_limit = min(5.0, self._safety_rules._threat_distance(hostile.get("name")))
+        elif self.llm_override_on_block and status.get("health", 20) >= 14:
+            hostile_limit = min(4.5, self._safety_rules._threat_distance(hostile.get("name")))
+        else:
+            hostile_limit = self._safety_rules._threat_distance(hostile.get("name"))
         danger = (hit_preempts or not status.get("alive") or status.get("in_lava") or status.get("on_fire")
-                  or submerged_danger or (status.get("in_water") and not surface_expedition)
+                  or submerged_danger or (status.get("in_water") and not shallow_water_allowed)
                   or status.get("health", 20) <= self.settings["low_health_threshold"]
-                     and not (food_turn or local_recovery_turn or relaxed_stable or advisory_stable or campaign_food)
+                     and not (food_turn or local_recovery_turn or relaxed_stable or advisory_stable or campaign_food or low_health_override)
                   or permit is not None and not relaxed_stable
                   or combat_changed
                   or (not (combat_action or campaign_encounter) and isinstance(hostile.get("dist"), (int, float))

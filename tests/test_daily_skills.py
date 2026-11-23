@@ -430,7 +430,7 @@ class DailySkillTests(unittest.TestCase):
         self.assertNotIn("oak_leaves", SurvivalSkills.GATHERABLE)
 
     def test_foliage_vine_and_azalea_are_supported(self):
-        for name in ("vine", "azalea_leaves", "flowering_azalea_leaves"):
+        for name in ("vine", "azalea_leaves", "flowering_azalea_leaves", "bamboo", "bamboo_sapling"):
             self.setUp()
             pos = self.foliage(name, [1, 65, 0])
             with self.subTest(name=name):
