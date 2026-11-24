@@ -435,7 +435,8 @@ class AutonomousTaskController:
         if observation is not None:
             for row in self.rules._blocks(observation):
                 key = self.rules._key(row["pos"])
-                if (row.get("can_see") is True and self._data["blocked_codes"].get(key) in {"target_occluded", "visibility_unknown"}):
+                if (row.get("name") != "water" and row.get("can_see") is True
+                        and self._data["blocked_codes"].get(key) in {"target_occluded", "visibility_unknown"}):
                     self._data["blocked"].pop(key, None)
                 if (row["name"] == "crafting_table" and self._data["blocked_codes"].get(key) == "move_unverified"
                         and self._fresh(observation) and observation["status"].get("on_ground") is True
@@ -666,14 +667,15 @@ class AutonomousTaskController:
         if counts.get("obsidian", 0) < 10 and counts.get("water_bucket", 0) < 1:
             if counts.get("bucket", 0) < 1:
                 return self._craft("bucket", 1, obs, context)
-            recent_water_fails = sum(
-                1 for row in self._data.get("recent_results", [])
-                if not row.get("success")
-                and (
+            recent_water_fails = 0
+            for row in reversed(self._data.get("recent_results", [])):
+                if row.get("success") and row.get("name") == "move_to" and row.get("goal") in {"nether_portal_water", "nether_portal_approach"}:
+                    break
+                if not row.get("success") and (
                     row.get("name") == "collect_liquid"
                     or (row.get("name") == "move_to" and row.get("goal") in {"nether_portal_approach", "nether_portal_water"})
-                )
-            )
+                ):
+                    recent_water_fails += 1
             waters = [
                 row for row in self.daily._safe_rows(obs, {"water"}, context=context, max_distance=24)
                 if not isinstance(row.get("properties"), dict)

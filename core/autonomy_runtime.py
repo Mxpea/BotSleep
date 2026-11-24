@@ -636,7 +636,7 @@ class AutonomyRuntime:
         pool.sort(key=lambda r: (
             0 if isinstance(r.get("properties"), dict) and str(r["properties"].get("level")) == "0" else 1,
             0 if float(r["pos"][1]) >= 56.0 else 1,
-            0 if math.dist(origin, r["pos"]) > 4.5 else 1,
+            0 if math.dist(origin, r["pos"]) > 6.0 else 1,
             0 if abs(float(r["pos"][1]) - float(origin[1])) <= 6 else 1,
             math.dist(origin, r["pos"]),
         ))
@@ -648,11 +648,13 @@ class AutonomyRuntime:
             shore = self._probe_dry_shore_for_water(cpos)
             walk_target = shore if shore is not None else [int(cpos[0]), int(cpos[1]) + 1, int(cpos[2])]
             walk_range = 1 if shore is not None else 3
+            if math.dist(origin, walk_target) <= walk_range + 0.5:
+                continue
             res = self._move_wide_candidate(walk_target, walk_range, cancel)
             last_res = res
-            if res.success:
-                return res
             data = res.data if isinstance(res.data, dict) else {}
+            if res.success and data.get("already_in_range") is not True:
+                return res
             if res.error_code in {"dead", "life_changed", "dimension_changed", "action_unconfirmed", "cancelled"} or data.get("action_state") == "unknown":
                 return res
 

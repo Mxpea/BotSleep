@@ -571,6 +571,49 @@ class OverflowAndLoopFixesTests(unittest.TestCase):
         self.assertEqual([int(moves[0][0][0]), int(moves[0][0][1]), int(moves[0][0][2])], [44, 63, 0])
         self.assertTrue(moves[0][1].get("allow_partial"))
 
+    def test_flowing_water_beside_collect_liquid_and_clay_support_and_relocation_reset(self):
+        from types import SimpleNamespace
+        from core.survival_harness import SurvivalHarness
+        from skills.buckets import BucketSkills
+        from test_buckets import LiquidWorld
+
+        policy = DailySafetyPolicy({"low_health_threshold": 8, "threat_radius": 8, "llm_override_on_block": True})
+        dummy = SimpleNamespace(daily=True, llm_override_on_block=True, _safety_rules=policy.rules, _safety_arbiter=None)
+        flow_obs = {
+            "status": _obs()["status"],
+            "blocks": [{"name": "flowing_water", "pos": [2, 63, 0]}],
+            "terrain": [],
+            "entities": [],
+        }
+        collect_d = Decision("collect_liquid", {"pos": [2, 62, 0], "expected_name": "water"}, "Fill", "nether_portal")
+        self.assertIsNone(SurvivalHarness._unsafe_destination(dummy, collect_d, flow_obs))
+
+        w = LiquidWorld()
+        w.counts = {"bucket": 1}
+        w.block([1, 63, 0], "clay")
+        w.block(w.source, "water", properties={"level": 0})
+        res = BucketSkills(w).execute("collect_liquid", {"pos": w.source, "expected_name": "water"})
+        self.assertTrue(res.success, res)
+
+        obs_w = auto_world({"bucket": 1, "iron_ingot": 1, "flint": 1, "cobblestone": 16, "iron_pickaxe": 1})
+        obs_w["blocks"] = [
+            {"name": "water", "pos": [2, 64, 0], "properties": {"level": 0}, "can_see": True},
+            {"name": "water", "pos": [2, 64, 1], "properties": {"level": 0}, "can_see": True},
+            {"name": "water", "pos": [6, 64, 0], "properties": {"level": 0}, "can_see": True},
+        ]
+        ctl = AutonomousTaskController({})
+        ctl.start({"task": "nether_portal"}, obs_w)
+        s1 = ctl.next_action(obs_w)
+        ctl.record_result(s1, SkillResult(False, "occ", {}, "target_occluded"), obs_w)
+        s2 = ctl.next_action(obs_w)
+        ctl.record_result(s2, SkillResult(False, "occ", {}, "target_occluded"), obs_w)
+        s_wide = ctl.next_action(obs_w)
+        self.assertEqual(s_wide.goal, "nether_portal_water")
+        ctl.record_result(s_wide, SkillResult(True, "Moved", {"executed": True}), obs_w)
+        s_after = ctl.next_action(obs_w)
+        self.assertIsNotNone(s_after)
+        self.assertEqual(s_after.goal, "nether_portal_approach")
+
 
 if __name__ == "__main__":
     unittest.main()

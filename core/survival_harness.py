@@ -543,7 +543,9 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
         for block in observation.get("blocks", []) + observation.get("terrain", []):
             pos = self._safety_rules._pos(block.get("pos"))
             if (decision.name == "collect_liquid"
-                    and block.get("name") == decision.args.get("expected_name")):
+                    and (block.get("name") == decision.args.get("expected_name")
+                         or (decision.args.get("expected_name") == "water"
+                             and block.get("name") in {"water", "flowing_water"}))):
                 continue  # The bucket skill verifies the source and safe stance.
             if (decision.goal in {"nether_portal", "nether_portal_water", "nether_portal_approach"}
                     and decision.name == "move_to"

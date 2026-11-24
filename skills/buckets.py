@@ -99,8 +99,12 @@ class BucketSkills(DailySurvivalSkills):
         feet = [math.floor(v) for v in status["pos"]]
         if feet[0] == pos[0] and feet[2] == pos[2]:
             raise _Failure("unsafe", "Never use liquid in the player's own column")
+        water_extra_support = frozenset({
+            "clay", "mossy_cobblestone", "dripstone_block", "packed_ice", "blue_ice",
+            "coal_ore", "iron_ore", "copper_ore", "deepslate_coal_ore", "deepslate_iron_ore", "deepslate_copper_ore",
+        })
         allowed_support = (
-            self.CONTAINMENT | DailySurvivalSkills.SUPPORT
+            self.CONTAINMENT | DailySurvivalSkills.SUPPORT | water_extra_support
             if (item == "bucket" and liquid_name == "water")
             else self.CONTAINMENT
         )
