@@ -512,7 +512,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
         return json.dumps({key: status.get(key) for key in ("last_death", "dimension", "alive")}, sort_keys=True)
 
     def _unsafe_destination(self, decision, observation):
-        if decision.goal == "scout_surface" and decision.name == "move_to":
+        if decision.name == "move_to" and decision.goal in {"scout_surface", "nether_portal_water", "nether_portal_gravel"}:
             return None
         target_actions = destination_checked_skills(daily=self.daily)
         if decision.name not in target_actions:
@@ -524,10 +524,21 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
             target = self._safety_rules._pos(decision.args.get("pos"))
         if target is None:
             return "A local target position is required"
+        llm_override = bool(getattr(self, "llm_override_on_block", False))
+        arbiter = getattr(self, "_safety_arbiter", None)
+        obs_status = (observation or {}).get("status") or {}
         for entity in observation.get("entities", []):
             pos = self._safety_rules._pos(entity.get("pos"))
-            if (entity.get("type") == "hostile" and pos is not None
-                    and math.dist(pos, target) <= self._safety_rules._threat_distance(entity.get("name"))):
+            if entity.get("type") != "hostile" or pos is None:
+                continue
+            if llm_override and abs(float(pos[1]) - float(target[1])) > 2.5:
+                continue
+            limit = (
+                arbiter.hostile_threat_limit(obs_status, entity, decision, planning=False)
+                if (llm_override and arbiter is not None)
+                else self._safety_rules._threat_distance(entity.get("name"))
+            )
+            if math.dist(pos, target) <= limit:
                 return "A hostile is close to the proposed destination"
         for block in observation.get("blocks", []) + observation.get("terrain", []):
             pos = self._safety_rules._pos(block.get("pos"))
@@ -2031,6 +2042,16 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
                            if type(until) in (int, float) and until > time.time()}
                 blocked[str(decision.args["entity_id"])] = time.time() + 30
                 self.context["combat_blocked_until"] = dict(list(blocked.items())[-8:])
+            if decision.name == "inspect_container" and not _uncertain_result(result) and self._safety_rules is not None:
+                cpos = self._safety_rules._pos((decision.args or {}).get("pos"))
+                if cpos is not None:
+                    now_ts = time.time()
+                    inspected = {
+                        k: u for k, u in self.context.get("food_inspected_containers", {}).items()
+                        if isinstance(u, (int, float)) and u > now_ts
+                    }
+                    inspected[self._safety_rules._key(cpos)] = now_ts + 120.0
+                    self.context["food_inspected_containers"] = dict(list(inspected.items())[-16:])
             self._daily_result(decision, result, observation)
             if self.competition and decision.name not in {"select_task", "update_progress", "finish_task", "force_exit_task", "end_competition"}:
                 self.competition.record_action(decision.name, decision.args, asdict(result), observation)

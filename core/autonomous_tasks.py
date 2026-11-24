@@ -628,9 +628,13 @@ class AutonomousTaskController:
         if counts.get("obsidian", 0) < 10 and counts.get("water_bucket", 0) < 1:
             if counts.get("bucket", 0) < 1:
                 return self._craft("bucket", 1, obs, context)
-            recent_bucket_fails = sum(
+            recent_water_fails = sum(
                 1 for row in self._data.get("recent_results", [])
-                if row.get("name") == "collect_liquid" and not row.get("success")
+                if not row.get("success")
+                and (
+                    row.get("name") == "collect_liquid"
+                    or (row.get("name") == "move_to" and row.get("goal") in {"nether_portal_approach", "nether_portal_water"})
+                )
             )
             waters = [
                 row for row in self.daily._safe_rows(obs, {"water"}, context=context, max_distance=24)
@@ -644,7 +648,10 @@ class AutonomousTaskController:
                 0 if abs(r["pos"][1] - origin[1]) <= 4 else 1,
                 math.dist(origin, r["pos"]),
             ))
-            if waters and not (recent_bucket_fails >= 2 and not self._data.get("water_searched")):
+            if waters and not (recent_water_fails >= 2 and not self._data.get("water_searched")):
+                if recent_water_fails >= 4 and self._data.get("water_searched"):
+                    self._escalate("water_unreachable_nearby")
+                    return None
                 target_w = waters[0]
                 if math.dist(origin, target_w["pos"]) <= 2.6:
                     return self._decision("collect_liquid", {"pos": list(target_w["pos"]), "expected_name": "water"},
@@ -654,6 +661,8 @@ class AutonomousTaskController:
             if not self._data.get("water_searched"):
                 return Decision("move_to", {"pos": list(origin), "range": 4},
                                 "Search wider radius (64 blocks) for water source to fill bucket", "nether_portal_water")
+            self._escalate("water_unreachable_nearby")
+            return None
         if counts.get("flint_and_steel", 0) < 1 and counts.get("fire_charge", 0) < 1:
             if counts.get("flint", 0) < 1:
                 gravels = [row for row in self.daily._safe_rows(obs, {"gravel"}, context=context, max_distance=24) if row.get("can_dig") is not False]
@@ -1992,7 +2001,7 @@ class AutonomousTaskController:
         self._data["pending_digest"] = None
         self._data["current_step"] = None
         code = result.error_code
-        recent = {"name": decision.name, "success": result.success is True, "error_code": str(code)[:80] if code else None,
+        recent = {"name": decision.name, "goal": decision.goal, "success": result.success is True, "error_code": str(code)[:80] if code else None,
                   "executed": data.get("executed") is True,
                   "target": self.rules._pos(data.get("target")) or self.rules._pos(decision.args.get("pos"))}
         self._data["recent_results"] = (self._data["recent_results"] + [recent])[-8:]
@@ -2143,7 +2152,7 @@ class AutonomousTaskController:
                                and data.get("executed") is False and preparation_evidence)
             if target and not stance_request and not negative_read:
                 tree = decision.args.get("expected_name") in LOG_NAMES
-                cooldown = 90 if not tree and code in (PATH_FAILURES | {"timeout"}) else 30
+                cooldown = 120 if (not tree and code == "out_of_reach") else (90 if not tree and code in (PATH_FAILURES | {"timeout"}) else 30)
                 self._data["blocked"][self.rules._key(target)] = time.time() + cooldown
                 self._data["blocked"] = dict(list(self._data["blocked"].items())[-16:])
                 self._data["blocked_codes"][self.rules._key(target)] = code or "no_movement"

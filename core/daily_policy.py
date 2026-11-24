@@ -482,8 +482,10 @@ class DailySafetyPolicy:
             return output.get("name") == item and type(output.get("count")) is int and output["count"] >= count
         return False
 
-    def _food_options(self, observation, *, low_health=False, task_board=None):
+    def _food_options(self, observation, *, low_health=False, task_board=None, context=None):
         candidates = []
+        inspected_food = (context or {}).get("food_inspected_containers") or {}
+        now_ts = time.time()
         if isinstance(task_board, dict):
             for row in self._rows(task_board.get("tasks")):
                 action = row.get("next_action")
@@ -493,6 +495,10 @@ class DailySafetyPolicy:
             if row["name"] in CROP_OUTPUT:
                 candidates.append(Decision("harvest_crop", {"pos": row["pos"], "expected_name": row["name"]}, "Current crop", "food"))
             if row["name"] in {"chest", "barrel", "furnace", "smoker", "blast_furnace"}:
+                rpos = self.rules._pos(row.get("pos"))
+                until = inspected_food.get(self.rules._key(rpos)) if rpos is not None else None
+                if isinstance(until, (int, float)) and until > now_ts:
+                    continue
                 candidates.append(Decision("inspect_container", {"pos": row["pos"]}, "Current nearby container", "food"))
         if self.rules._counts(observation).get("wheat", 0) >= 3:
             candidates.append(Decision("craft_item", {"item": "bread", "count": 1}, "Held wheat", "food"))
@@ -641,7 +647,7 @@ class DailySafetyPolicy:
         night = self._night(status)
         if not (low or hungry or night):
             return []
-        if low and status["food"] < 18 and ((not night and self._food_options(observation, low_health=True))
+        if low and status["food"] < 18 and ((not night and self._food_options(observation, low_health=True, context=context))
                                                   or self._food_search(observation, context)):
             return []
         if night and (self.sleep_policy == "strict" or self._bed(observation)):
@@ -669,7 +675,7 @@ class DailySafetyPolicy:
                 reason = "Existing safe food has priority"
             elif (status["health"] <= self.low_health and status["food"] < 18
                   and (not self._night(status) or self.sleep_policy == "opportunistic")
-                  and self._food_options(observation, low_health=True)):
+                  and self._food_options(observation, low_health=True, context=context)):
                 scenario, allowed, radius, model = "low_health", sorted(FOOD_ACTIONS - {"inspect_container"}), 2, False
                 reason = "Perform one directly verified nearby food action locally, then observe inventory"
             elif self._canopy(observation, context):
@@ -896,7 +902,7 @@ class DailySafetyPolicy:
             return chosen
         prev = context.get("_policy_wait_streaks") or {}
         if chosen is not None and chosen.name == "wait" and scenario != "normal":
-            streaks = {scenario: int(prev.get(scenario, 0)) + 1}
+            streaks = {**prev, scenario: int(prev.get(scenario, 0)) + 1}
             context["_policy_wait_streaks"] = streaks
             context.pop("_policy_wait_warning", None)
         else:
@@ -938,7 +944,7 @@ class DailySafetyPolicy:
             return self._record_choice_streak(context, "food", meal)
         status = observation["status"]
         if status["health"] <= self.low_health and status["food"] < 18 and (not self._night(status) or self.sleep_policy == "opportunistic"):
-            foods = self._food_options(observation, low_health=True, task_board=task_board)
+            foods = self._food_options(observation, low_health=True, task_board=task_board, context=context)
             if foods:
                 return self._record_choice_streak(context, "food_recovery", foods[0])
         if self._canopy(observation, context):
@@ -1060,7 +1066,7 @@ class DailySafetyPolicy:
             return NIGHT if status["health"] > self.low_health else None
         if (safety_decision.goal in {"recover", "food_recovery"} and status["health"] <= self.low_health
                 and status["food"] < 18 and (not self._night(status) or self.sleep_policy == "opportunistic")
-                and not self._food_options(observation, low_health=True)
+                and not self._food_options(observation, low_health=True, context=context)
                 and self._food_search(observation, context) is None):
             return LOW_HEALTH
         return None

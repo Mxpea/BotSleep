@@ -419,6 +419,83 @@ class OverflowAndLoopFixesTests(unittest.TestCase):
         self.assertIsNone(constraints["allowed_actions"])
         self.assertNotEqual(constraints["scenario"], "food_recovery_blocked")
 
+    def test_food_options_skips_recently_inspected_containers(self):
+        import time as _time
+        policy = DailySafetyPolicy({"low_health_threshold": 8, "threat_radius": 8, "llm_override_on_block": True})
+        obs = _obs(health=18.0, food=6)
+        obs["blocks"] = [{"name": "furnace", "pos": [1, 64, 0], "can_see": True}]
+        ctx = {}
+        first = policy._food_options(obs, low_health=False, context=ctx)
+        self.assertEqual([d.name for d in first], ["inspect_container"])
+        ctx["food_inspected_containers"] = {"1,64,0": _time.time() + 120.0}
+        second = policy._food_options(obs, low_health=False, context=ctx)
+        self.assertEqual(second, [])
+
+    def test_unstable_footing_streak_survives_interleaved_observe_wait(self):
+        policy = DailySafetyPolicy({"low_health_threshold": 8, "threat_radius": 8, "llm_override_on_block": True})
+        obs_air = _obs(on_ground=False, is_day=True)
+        obs_air["status"]["time_of_day"] = 1000
+        obs_air["blocks"] = [{"name": "dirt", "pos": [0, 62, 0]}]
+        ctx = {}
+        d1 = policy.choose(obs_air, Decision("wait", {"seconds": 1}, "b", "idle"), context=ctx)
+        self.assertEqual(d1.goal, "recover")
+        # Interleave an observe-scenario wait streak (like partial safety scan)
+        policy._record_choice_streak(ctx, "observe", Decision("wait", {"seconds": 1}, "obs", "observe"))
+        d2 = policy.choose(obs_air, Decision("wait", {"seconds": 1}, "b", "idle"), context=ctx)
+        self.assertEqual(d2.goal, "recover")
+        # Streak >= 2 -> releases to normal planning instead of Wait for stable footing forever
+        d3 = policy.choose(obs_air, Decision("wait", {"seconds": 1}, "b", "idle"), context=ctx)
+        self.assertIsNone(d3)
+
+    def test_unsafe_destination_uses_arbiter_limit_and_vertical_tolerance_when_llm_override(self):
+        from types import SimpleNamespace
+        from core.survival_harness import SurvivalHarness
+        from core.safety_arbiter import SafetyArbiter
+
+        policy = DailySafetyPolicy({"low_health_threshold": 8, "threat_radius": 8, "llm_override_on_block": True})
+        arbiter = SafetyArbiter(policy.rules, {"low_health_threshold": 8}, daily=True, llm_override_on_block=True, daily_policy=policy)
+        dummy = SimpleNamespace(daily=True, llm_override_on_block=True, _safety_rules=policy.rules, _safety_arbiter=arbiter)
+        obs = {
+            "status": _obs(health=20.0, food=20, pos=[0.5, 27.0, 0.5])["status"],
+            "blocks": [],
+            "terrain": [],
+            "entities": [{"id": 9, "type": "hostile", "name": "skeleton", "pos": [8.0, 27.0, 0.5]}],
+        }
+        place_furnace = Decision("place_item", {"item": "furnace", "pos": [2, 27, 0]}, "Place furnace", "nether_portal")
+        # Skeleton at [8, 27, 0.5] is 6.0m from [2, 27, 0] > 5.0m SafetyArbiter ranged limit -> allowed
+        self.assertIsNone(SurvivalHarness._unsafe_destination(dummy, place_furnace, obs))
+        # Close skeleton at 3.5m same Y -> still blocked
+        obs["entities"][0]["pos"] = [5.5, 27.0, 0.5]
+        self.assertIsNotNone(SurvivalHarness._unsafe_destination(dummy, place_furnace, obs))
+        # Different floor (|dy| > 2.5) -> ignored
+        obs["entities"][0]["pos"] = [3.0, 31.0, 0.5]
+        self.assertIsNone(SurvivalHarness._unsafe_destination(dummy, place_furnace, obs))
+
+    def test_nether_portal_escalates_when_cave_water_approaches_stay_unreachable(self):
+        obs = auto_world({"bucket": 1, "iron_ingot": 1, "flint": 1, "cobblestone": 16, "iron_pickaxe": 1})
+        obs["blocks"] = [
+            {"name": "water", "pos": [12, 50, 0], "properties": {"level": 0}, "can_see": True},
+            {"name": "water", "pos": [13, 50, 0], "properties": {"level": 0}, "can_see": True},
+            {"name": "water", "pos": [14, 50, 0], "properties": {"level": 0}, "can_see": True},
+            {"name": "water", "pos": [15, 50, 0], "properties": {"level": 0}, "can_see": True},
+        ]
+        ctl = AutonomousTaskController({})
+        ctl.start({"task": "nether_portal"}, obs)
+        for _ in range(2):
+            s = ctl.next_action(obs)
+            self.assertEqual(s.goal, "nether_portal_approach")
+            ctl.record_result(s, SkillResult(False, "stalled", {"executed": True}, "stalled"), obs)
+        s_wide = ctl.next_action(obs)
+        self.assertEqual(s_wide.goal, "nether_portal_water")
+        ctl.record_result(s_wide, SkillResult(False, "move_unverified", {"executed": True}, "move_unverified"), obs)
+        s4 = ctl.next_action(obs)
+        self.assertEqual(s4.goal, "nether_portal_approach")
+        ctl.record_result(s4, SkillResult(False, "stalled", {"executed": True}, "stalled"), obs)
+        self.assertIsNone(ctl.next_action(obs))
+        self.assertEqual(ctl.snapshot()["status"], "needs_ai")
+        self.assertIn(ctl.snapshot()["reason"], ("water_unreachable_nearby", "bounded_local_recovery_exhausted"))
+        self.assertLessEqual(ctl.snapshot()["steps"], 4)
+
 
 if __name__ == "__main__":
     unittest.main()

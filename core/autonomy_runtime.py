@@ -521,9 +521,13 @@ class AutonomyRuntime:
             rows = find_fn(types=[resource_type], radius=64, limit=limit) or []
         except Exception:
             rows = []
+        blocked_keys = set()
+        if getattr(self, "task_controller", None) is not None:
+            blocked_keys = set(self.task_controller.rules._blocked(getattr(self, "context", None)))
         valid_rows = [
             row for row in rows
             if isinstance(row, dict) and isinstance(row.get("pos"), (list, tuple)) and len(row["pos"]) == 3
+            and f"{int(row['pos'][0])},{int(row['pos'][1])},{int(row['pos'][2])}" not in blocked_keys
             and (
                 resource_type != "water"
                 or not isinstance(row.get("properties"), dict)
@@ -534,13 +538,15 @@ class AutonomyRuntime:
         if not valid_rows:
             return SkillResult(False, f"No {resource_type} found within 64 blocks", {"executed": False}, f"no_{resource_type}_found")
         if resource_type == "water":
-            valid_rows.sort(key=lambda r: (
+            distant_rows = [r for r in valid_rows if math.dist(origin, r["pos"]) > 4.5]
+            pool = distant_rows or valid_rows
+            pool.sort(key=lambda r: (
                 0 if isinstance(r.get("properties"), dict) and str(r["properties"].get("level")) == "0" else 1,
                 0 if float(r["pos"][1]) >= 56.0 else 1,
                 0 if abs(float(r["pos"][1]) - float(origin[1])) <= 6 else 1,
                 math.dist(origin, r["pos"]),
             ))
-            target = valid_rows[0]["pos"]
+            target = pool[0]["pos"]
         else:
             pts = [row["pos"] for row in valid_rows]
             pts.sort(key=lambda p: (0 if abs(float(p[1]) - float(origin[1])) <= 6 else 1, math.dist(origin, p)))
@@ -914,7 +920,7 @@ class AutonomyRuntime:
         if constraints.get("scenario") not in {"low_health", "critical_hunger"}:
             return None
         options = self.daily_policy._food_options(observation,
-            low_health=constraints["scenario"] == "low_health", task_board=self.daily_board)
+            low_health=constraints["scenario"] == "low_health", task_board=self.daily_board, context=self.context)
         for decision in options:
             if self.daily_policy.validate(decision, observation, context=self.context) is None:
                 return decision

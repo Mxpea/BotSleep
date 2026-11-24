@@ -768,10 +768,12 @@ class SurvivalSkills:
             origin=[fx, fy, fz],
             orientation="south",
         )
-        blocks_prio = tuple(SCAFFOLD_BLOCKS) + (
-            "stone", "andesite", "granite", "diorite", "deepslate",
-            "oak_planks", "birch_planks", "spruce_planks",
+        preferred = (
+            "cobblestone", "cobbled_deepslate", "stone_bricks", "stone",
+            "andesite", "granite", "diorite", "deepslate",
+            "oak_planks", "birch_planks", "spruce_planks", "dirt",
         )
+        blocks_prio = preferred + tuple(b for b in sorted(SCAFFOLD_BLOCKS) if b not in preferred)
         risen = 0
         for _ in range(4):
             self._check(context)
