@@ -688,7 +688,7 @@ class DailySafetyPolicy:
                 if self._bootstrap_ready(observation, context):
                     scenario, allowed, radius, model = "cautious_bootstrap", ["run_survival_task", "wait"], 3, True
                     reason = "Food search is exhausted; only a bounded nearby log or wooden-tool goal may be proposed"
-                elif status["food"] < 18:
+                elif status["food"] < 18 and not (self.llm_override_on_block and allowed is None):
                     search = self._food_search(observation, context)
                     scenario = "food_recovery" if search else "food_recovery_blocked"
                     allowed, radius = ([search.name, "wait"], 3) if search else (["wait"], 0)

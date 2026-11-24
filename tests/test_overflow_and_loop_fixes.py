@@ -337,6 +337,88 @@ class OverflowAndLoopFixesTests(unittest.TestCase):
         self.assertEqual(step.goal, "nether_portal_approach")
         self.assertEqual(step.args["range"], 2)
 
+    def test_harness_allows_nether_portal_approach_near_water_and_scout_surface(self):
+        from types import SimpleNamespace
+        from core.survival_harness import SurvivalHarness
+
+        rules = DailySafetyPolicy({"threat_radius": 8, "low_health_threshold": 8}).rules
+        dummy = SimpleNamespace(daily=True, _safety_rules=rules)
+        obs = {
+            "blocks": [{"name": "water", "pos": [5, 62, 0]}],
+            "terrain": [],
+            "entities": [{"id": 7, "type": "hostile", "name": "skeleton", "pos": [25, 62, 0]}],
+        }
+        approach = Decision("move_to", {"pos": [5, 62, 0], "range": 2}, "Approach water", "nether_portal_approach")
+        self.assertIsNone(SurvivalHarness._unsafe_destination(dummy, approach, obs))
+        close_skel_obs = {
+            "blocks": [{"name": "water", "pos": [5, 62, 0]}],
+            "terrain": [],
+            "entities": [{"id": 7, "type": "hostile", "name": "skeleton", "pos": [14, 62, 0]}],
+        }
+        scout = Decision("move_to", {"pos": [0.5, 64, 0.5], "range": 4, "scan_radius": 32, "distance": 64}, "Scout", "scout_surface")
+        self.assertIsNone(SurvivalHarness._unsafe_destination(dummy, scout, close_skel_obs))
+        lava_obs = {"blocks": [{"name": "lava", "pos": [5, 62, 0]}], "terrain": [], "entities": []}
+        self.assertIsNotNone(SurvivalHarness._unsafe_destination(dummy, approach, lava_obs))
+
+    def test_nether_portal_water_approach_reach_flowing_filter_and_wide_fallback(self):
+        obs = auto_world({"bucket": 1, "iron_ingot": 1, "flint": 1, "cobblestone": 16, "iron_pickaxe": 1})
+        obs["blocks"] = [
+            {"name": "water", "pos": [2, 64, 0], "properties": {"level": 3}, "can_see": True},
+            {"name": "water", "pos": [4, 64, 0], "properties": {"level": 0}, "can_see": True},
+        ]
+        ctl = AutonomousTaskController({})
+        ctl.start({"task": "nether_portal"}, obs)
+        step = ctl.next_action(obs)
+        self.assertEqual((step.name, step.goal), ("move_to", "nether_portal_approach"))
+        self.assertEqual(step.args["pos"], [4, 64, 0])
+        # Simulate two failed close-range collect_liquid attempts -> triggers wide search instead of exhausting 8 local steps
+        close_obs = auto_world({"bucket": 1, "iron_ingot": 1, "flint": 1, "cobblestone": 16, "iron_pickaxe": 1})
+        close_obs["blocks"] = [
+            {"name": "water", "pos": [2, 64, 0], "properties": {"level": 0}, "can_see": True},
+            {"name": "water", "pos": [2, 64, 1], "properties": {"level": 0}, "can_see": True},
+            {"name": "water", "pos": [1, 64, 1], "properties": {"level": 0}, "can_see": True},
+        ]
+        ctl2 = AutonomousTaskController({})
+        ctl2.start({"task": "nether_portal"}, close_obs)
+        s1 = ctl2.next_action(close_obs)
+        self.assertEqual(s1.name, "collect_liquid")
+        ctl2.record_result(s1, SkillResult(False, "flow", {}, "not_liquid_source"), close_obs)
+        s2 = ctl2.next_action(close_obs)
+        self.assertEqual(s2.name, "collect_liquid")
+        ctl2.record_result(s2, SkillResult(False, "occluded", {}, "target_occluded"), close_obs)
+        step2 = ctl2.next_action(close_obs)
+        self.assertEqual((step2.name, step2.goal), ("move_to", "nether_portal_water"))
+
+    def test_bucket_collect_water_allows_grass_bank_while_lava_requires_containment(self):
+        from skills.buckets import BucketSkills
+        from test_buckets import LiquidWorld
+
+        w = LiquidWorld()
+        w.counts = {"bucket": 1}
+        w.block([1, 63, 0], "grass_block")
+        w.block(w.source, "water", properties={"level": 0})
+        res_water = BucketSkills(w).execute("collect_liquid", {"pos": w.source, "expected_name": "water"})
+        self.assertTrue(res_water.success, res_water)
+
+        w2 = LiquidWorld()
+        w2.counts = {"bucket": 1}
+        w2.block([1, 63, 0], "grass_block")
+        w2.block(w2.source, "lava", properties={"level": 0})
+        res_lava = BucketSkills(w2).execute("collect_liquid", {"pos": w2.source, "expected_name": "lava"})
+        self.assertEqual(res_lava.error_code, "unsafe")
+
+    def test_daily_policy_low_health_release_does_not_force_wait_only_constraint(self):
+        policy = DailySafetyPolicy(
+            {"low_health_threshold": 8, "threat_radius": 8, "llm_override_on_block": True}
+        )
+        obs = _obs(health=3.0, food=17)
+        obs["counts"] = {"stone_pickaxe": 1, "shield": 1}
+        obs["blocks"] = [{"name": "stone", "pos": [0, 63, 0]}]
+        constraints = policy.constraints(obs, context={})
+        self.assertTrue(constraints["model_allowed"])
+        self.assertIsNone(constraints["allowed_actions"])
+        self.assertNotEqual(constraints["scenario"], "food_recovery_blocked")
+
 
 if __name__ == "__main__":
     unittest.main()

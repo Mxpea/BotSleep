@@ -628,11 +628,25 @@ class AutonomousTaskController:
         if counts.get("obsidian", 0) < 10 and counts.get("water_bucket", 0) < 1:
             if counts.get("bucket", 0) < 1:
                 return self._craft("bucket", 1, obs, context)
-            waters = [row for row in self.daily._safe_rows(obs, {"water"}, context=context, max_distance=24)]
-            waters.sort(key=lambda r: math.dist(origin, r["pos"]))
-            if waters:
+            recent_bucket_fails = sum(
+                1 for row in self._data.get("recent_results", [])
+                if row.get("name") == "collect_liquid" and not row.get("success")
+            )
+            waters = [
+                row for row in self.daily._safe_rows(obs, {"water"}, context=context, max_distance=24)
+                if not isinstance(row.get("properties"), dict)
+                or "level" not in row["properties"]
+                or str(row["properties"].get("level")) == "0"
+            ]
+            waters.sort(key=lambda r: (
+                0 if isinstance(r.get("properties"), dict) and str(r["properties"].get("level")) == "0" else 1,
+                0 if float(r["pos"][1]) >= 56.0 else 1,
+                0 if abs(r["pos"][1] - origin[1]) <= 4 else 1,
+                math.dist(origin, r["pos"]),
+            ))
+            if waters and not (recent_bucket_fails >= 2 and not self._data.get("water_searched")):
                 target_w = waters[0]
-                if math.dist(origin, target_w["pos"]) <= 4.5:
+                if math.dist(origin, target_w["pos"]) <= 2.6:
                     return self._decision("collect_liquid", {"pos": list(target_w["pos"]), "expected_name": "water"},
                                           "Fill bucket with water for Nether Portal speedrun casting")
                 return Decision("move_to", {"pos": list(target_w["pos"]), "range": 2},
@@ -1816,7 +1830,7 @@ class AutonomousTaskController:
                 return None
         if self._data["status"] == "needs_ai":
             return None
-        if decision and decision.goal not in {"deep_mine", "scout_logs", "scout_surface", "equip_loadout", "nether_portal", "nether_portal_water", "nether_portal_gravel"} and (
+        if decision and decision.goal not in {"deep_mine", "scout_logs", "scout_surface", "equip_loadout", "nether_portal", "nether_portal_water", "nether_portal_gravel", "nether_portal_approach"} and (
                 decision.goal == "explore" and decision.name != "position_for_task"
                 or decision.name == "move_to" and decision.args.get("pos") not in
                 [b["pos"] for b in self.rules._blocks(obs)] + [row.get("pos") for row in self.daily._rows(obs.get("entities"))]):

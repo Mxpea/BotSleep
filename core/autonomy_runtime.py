@@ -517,17 +517,34 @@ class AutonomyRuntime:
         if not callable(find_fn) or not isinstance(origin, (list, tuple)) or len(origin) != 3:
             return SkillResult(False, f"Cannot search wide {resource_type}", {"executed": False}, "search_unavailable")
         try:
-            rows = find_fn(types=[resource_type], radius=64, limit=32) or []
+            limit = 128 if resource_type == "water" else 32
+            rows = find_fn(types=[resource_type], radius=64, limit=limit) or []
         except Exception:
             rows = []
-        pts = [
-            row.get("pos") for row in rows
+        valid_rows = [
+            row for row in rows
             if isinstance(row, dict) and isinstance(row.get("pos"), (list, tuple)) and len(row["pos"]) == 3
+            and (
+                resource_type != "water"
+                or not isinstance(row.get("properties"), dict)
+                or "level" not in row["properties"]
+                or str(row["properties"].get("level")) == "0"
+            )
         ]
-        if not pts:
+        if not valid_rows:
             return SkillResult(False, f"No {resource_type} found within 64 blocks", {"executed": False}, f"no_{resource_type}_found")
-        pts.sort(key=lambda p: (0 if abs(float(p[1]) - float(origin[1])) <= 6 else 1, math.dist(origin, p)))
-        target = pts[0]
+        if resource_type == "water":
+            valid_rows.sort(key=lambda r: (
+                0 if isinstance(r.get("properties"), dict) and str(r["properties"].get("level")) == "0" else 1,
+                0 if float(r["pos"][1]) >= 56.0 else 1,
+                0 if abs(float(r["pos"][1]) - float(origin[1])) <= 6 else 1,
+                math.dist(origin, r["pos"]),
+            ))
+            target = valid_rows[0]["pos"]
+        else:
+            pts = [row["pos"] for row in valid_rows]
+            pts.sort(key=lambda p: (0 if abs(float(p[1]) - float(origin[1])) <= 6 else 1, math.dist(origin, p)))
+            target = pts[0]
         from skills.survival import SurvivalSkills
         return SurvivalSkills(self.client).execute(
             "move_to",

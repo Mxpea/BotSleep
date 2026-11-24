@@ -512,6 +512,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
         return json.dumps({key: status.get(key) for key in ("last_death", "dimension", "alive")}, sort_keys=True)
 
     def _unsafe_destination(self, decision, observation):
+        if decision.goal == "scout_surface" and decision.name == "move_to":
+            return None
         target_actions = destination_checked_skills(daily=self.daily)
         if decision.name not in target_actions:
             return None
@@ -532,7 +534,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
             if (decision.name == "collect_liquid"
                     and block.get("name") == decision.args.get("expected_name")):
                 continue  # The bucket skill verifies the source and safe stance.
-            if (decision.goal in {"nether_portal", "nether_portal_water"}
+            if (decision.goal in {"nether_portal", "nether_portal_water", "nether_portal_approach"}
                     and decision.name == "move_to"
                     and block.get("name") in {"water", "flowing_water"}):
                 continue  # Approaching water shoreline for bucket fill during portal crafting.
