@@ -110,6 +110,7 @@ class SurfaceScoutSkill(BaseSkill):
             "structures": {},
             "chests": {},
             "lava": {},
+            "water": {},
             "ores": {},
             "wood": {},
             "food": {},
@@ -128,7 +129,7 @@ class SurfaceScoutSkill(BaseSkill):
 
             cur_st = st0
             cur_pos = list(origin)
-            self._scan_checkpoint(guard, cur_pos, dim, scan_r, findings, origin=origin)
+            self._scan_checkpoint(guard, cur_pos, dim, scan_r, findings, origin=origin, goal_focus=focus)
 
             if self._should_stop_early(findings, prefer_wood=prefer_wood, goal_focus=focus):
                 early_stop_reason = self._discovery_reason(findings, goal_focus=focus)
@@ -165,7 +166,7 @@ class SurfaceScoutSkill(BaseSkill):
                     travelled += math.hypot(landing[0] - cur_pos[0], landing[2] - cur_pos[2])
                     cur_pos = landing
                     waypoints.append([round(cur_pos[0], 2), round(cur_pos[1], 2), round(cur_pos[2], 2)])
-                    self._scan_checkpoint(guard, cur_pos, dim, scan_r, findings, origin=origin)
+                    self._scan_checkpoint(guard, cur_pos, dim, scan_r, findings, origin=origin, goal_focus=focus)
                     if self._should_stop_early(findings, prefer_wood=prefer_wood, goal_focus=focus):
                         early_stop_reason = self._discovery_reason(findings, goal_focus=focus)
                         break
@@ -267,10 +268,13 @@ class SurfaceScoutSkill(BaseSkill):
         findings: Dict[str, Dict[Tuple[int, int, int], Dict[str, Any]]],
         *,
         origin: Optional[Sequence[float]] = None,
+        goal_focus: str = "auto",
     ) -> None:
         self._query_blocks(guard, STRUCTURE_AND_ORE_TYPES, scan_r, findings, cur_pos, dim, origin=origin)
         self._query_blocks(guard, WOOD_FOOD_STICK_TYPES, scan_r, findings, cur_pos, dim, origin=origin)
         self._query_blocks(guard, LAVA_TYPES, scan_r, findings, cur_pos, dim, origin=origin)
+        if goal_focus == "water":
+            self._query_blocks(guard, ("water",), scan_r, findings, cur_pos, dim, origin=origin)
         if self.memory is not None and len(findings["lava"]) >= 4:
             pts = [row["pos"] for row in findings["lava"].values()]
             anchor = min(pts, key=lambda p: math.dist(cur_pos, p))
@@ -333,6 +337,10 @@ class SurfaceScoutSkill(BaseSkill):
                     self.memory.record_landmark(name=name, category=category, pos=list(key), dimension=dim)
             elif name == "lava":
                 findings["lava"][key] = entry
+            elif name == "water":
+                props = row.get("properties") if isinstance(row.get("properties"), dict) else {}
+                if "level" not in props or str(props.get("level")) == "0":
+                    findings["water"][key] = entry
             elif name in SURFACE_ORE_TYPES:
                 findings["ores"][key] = entry
             elif name in SurvivalSkills.LOGS:
@@ -352,6 +360,8 @@ class SurfaceScoutSkill(BaseSkill):
         if goal_focus == "lava":
             has_portal = any(row.get("name") in PORTAL_RELIC_TYPES for row in findings["structures"].values())
             return len(findings["lava"]) >= 4 or has_portal
+        if goal_focus == "water":
+            return any(r["pos"][1] >= 56 for r in findings.get("water", {}).values())
         if goal_focus in {"village", "chest"}:
             has_village_marker = any(row.get("name") in VILLAGE_MARKER_TYPES for row in findings["structures"].values())
             return bool(findings["chests"] or findings["villagers"] or has_village_marker)
@@ -371,6 +381,8 @@ class SurfaceScoutSkill(BaseSkill):
     ) -> str:
         if goal_focus == "lava" and len(findings["lava"]) >= 4:
             return "lava_pool_found"
+        if goal_focus == "water" and findings.get("water"):
+            return "water_source_found"
         if goal_focus in {"village", "chest"} and findings["chests"]:
             return "chest_or_village_found"
         if findings["structures"] or findings["villagers"]:
@@ -397,6 +409,7 @@ class SurfaceScoutSkill(BaseSkill):
         structures = sorted_cat("structures")
         chests = sorted_cat("chests")
         lava = sorted_cat("lava")
+        water = sorted_cat("water") if "water" in findings else []
         villagers = sorted_cat("villagers")
         wood = sorted_cat("wood")
         ores = sorted_cat("ores")
@@ -426,6 +439,7 @@ class SurfaceScoutSkill(BaseSkill):
             "found_structures": structures,
             "found_chests": chests,
             "found_lava": lava,
+            "found_water": water,
             "found_villagers": villagers,
             "found_wood": wood,
             "found_ores": ores,

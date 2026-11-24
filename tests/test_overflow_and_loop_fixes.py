@@ -496,6 +496,81 @@ class OverflowAndLoopFixesTests(unittest.TestCase):
         self.assertIn(ctl.snapshot()["reason"], ("water_unreachable_nearby", "bounded_local_recovery_exhausted"))
         self.assertLessEqual(ctl.snapshot()["steps"], 4)
 
+    def test_nether_portal_picks_dry_shore_stand_and_collects_at_2_85m(self):
+        obs = auto_world({"bucket": 1, "iron_ingot": 1, "flint": 1, "cobblestone": 16, "iron_pickaxe": 1})
+        obs["blocks"] = [
+            {"name": "water", "pos": [6, 63, 0], "properties": {"level": 0}, "can_see": True},
+            {"name": "grass_block", "pos": [5, 62, 0], "can_see": True},
+        ]
+        obs["safe_stand_candidates"] = [{"pos": [5.5, 63.0, 0.5], "support": "grass_block"}]
+        ctl = AutonomousTaskController({})
+        ctl.start({"task": "nether_portal"}, obs)
+        step = ctl.next_action(obs)
+        self.assertEqual((step.name, step.goal), ("move_to", "nether_portal_approach"))
+        self.assertEqual(step.args["pos"], [5.5, 63.0, 0.5])
+        self.assertEqual(step.args["range"], 1)
+
+        # Within 2.85m (e.g. 2.80m after water_escape), must scoop instead of walking back into water
+        obs_edge = auto_world({"bucket": 1, "iron_ingot": 1, "flint": 1, "cobblestone": 16, "iron_pickaxe": 1}, pos=[0.5, 64.0, 0.5])
+        obs_edge["blocks"] = [{"name": "water", "pos": [3, 63, 0], "properties": {"level": 0}, "can_see": True}]
+        ctl2 = AutonomousTaskController({})
+        ctl2.start({"task": "nether_portal"}, obs_edge)
+        step_scoop = ctl2.next_action(obs_edge)
+        self.assertEqual(step_scoop.name, "collect_liquid")
+        self.assertEqual(step_scoop.args["expected_name"], "water")
+
+    def test_wide_find_water_clusters_probes_shore_and_handles_gt_32m(self):
+        from types import SimpleNamespace
+        from core.autonomy_runtime import AutonomyRuntime
+
+        moves = []
+
+        class _FakeClient:
+            def get_status(self):
+                return {"ok": True, "result": {"pos": [0.5, 64.0, 0.5], "dimension": "overworld", "alive": True, "ready": True, "on_ground": True}}
+
+            def get_block(self, x, y, z, **kw):
+                # Cave pool near [10, 52, 0] is covered by stone; distant lake at [45, 62, 0] has dry grass_block shore at [44, 63, 0]
+                if (x, y, z) == (44, 62, 0):
+                    return {"ok": True, "result": {"name": "grass_block"}}
+                if (x, y, z) in ((44, 63, 0), (44, 64, 0)):
+                    return {"ok": True, "result": {"name": "air"}}
+                return {"ok": True, "result": {"name": "stone"}}
+
+            def find_blocks(self, types=None, radius=64, limit=256):
+                # Fill first results with blocked cave pool, then distant surface lake at 45m (>32m!)
+                rows = [{"name": "water", "pos": [10, 52, dz], "properties": {"level": 0}} for dz in range(4)]
+                rows.append({"name": "water", "pos": [45, 62, 0], "properties": {"level": 0}})
+                return rows
+
+            def move_to(self, x, y, z, **kw):
+                moves.append(([x, y, z], kw))
+                return {"ok": True, "result": {"pos": [44.5, 63.0, 0.5]}}
+
+        rt = AutonomyRuntime()
+        rt.client = _FakeClient()
+        rt.context = {}
+        rt._cancel = None
+        rt.task_controller = SimpleNamespace(rules=SimpleNamespace(_blocked=lambda ctx: {"10,52,0": 9999999999.0}))
+        obs = {"status": {"pos": [0.5, 64.0, 0.5]}}
+        # Override second get_status inside _move_wide_candidate to return arrived pos
+        calls = {"n": 0}
+        orig_status = rt.client.get_status
+
+        def _seq_status():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return orig_status()
+            return {"ok": True, "result": {"pos": [44.5, 63.0, 0.5], "dimension": "overworld", "alive": True, "ready": True, "on_ground": True}}
+
+        rt.client.get_status = _seq_status
+        res = rt._run_task_wide_find(Decision("move_to", {"pos": [0.5, 64.0, 0.5], "range": 4}, "find", "nether_portal_water"), obs, "water")
+        self.assertTrue(res.success, res)
+        self.assertTrue(moves)
+        # Verify it jumped past the blocked [10, 52, *] cluster to the [44, 63, 0] shore of [45, 62, 0]
+        self.assertEqual([int(moves[0][0][0]), int(moves[0][0][1]), int(moves[0][0][2])], [44, 63, 0])
+        self.assertTrue(moves[0][1].get("allow_partial"))
+
 
 if __name__ == "__main__":
     unittest.main()

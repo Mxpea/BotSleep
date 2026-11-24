@@ -608,6 +608,44 @@ class AutonomousTaskController:
             missing.append(piece)
         return self._craft(missing[0], 1, obs, context) if missing else None
 
+    def _water_shore_stand(self, water_pos, obs, context):
+        """Return a dry walkable shoreline stand cell within bucket reach of water_pos, if visible."""
+        blocked = self.rules._blocked(context)
+        water_blocks = {
+            tuple(map(int, row["pos"]))
+            for row in self.daily._rows(obs.get("blocks")) + self.daily._rows(obs.get("terrain"))
+            if isinstance(row.get("pos"), (list, tuple)) and len(row["pos"]) == 3
+            and row.get("name") in {"water", "flowing_water", "lava", "flowing_lava"}
+        }
+        dry_support = DailySurvivalSkills.SUPPORT - {"water", "flowing_water", "lava", "flowing_lava", "lily_pad"}
+        candidates = []
+        for cand in self.daily._rows(obs.get("safe_stand_candidates")):
+            pos = self.rules._pos(cand.get("pos"))
+            if (pos is None or cand.get("support") not in dry_support
+                    or self.rules._key(pos) in blocked):
+                continue
+            c = [math.floor(pos[0]), math.floor(pos[1]), math.floor(pos[2])]
+            if (c[0], c[1] - 1, c[2]) in water_blocks or tuple(c) in water_blocks:
+                continue
+            if abs(float(pos[1]) - float(water_pos[1])) <= 1.5 and math.dist(pos, water_pos) <= 2.75:
+                candidates.append(([pos[0], pos[1], pos[2]], math.dist(obs["status"]["pos"], pos)))
+        if not candidates:
+            for row in self.daily._rows(obs.get("blocks")):
+                pos = self.rules._pos(row.get("pos"))
+                if pos is None or row.get("name") not in dry_support:
+                    continue
+                stand = [int(pos[0]), int(pos[1]) + 1, int(pos[2])]
+                if (stand[0], stand[1], stand[2]) in water_blocks or (stand[0], stand[1] + 1, stand[2]) in water_blocks:
+                    continue
+                if self.rules._key(stand) in blocked:
+                    continue
+                if abs(float(stand[1]) - float(water_pos[1])) <= 1.5 and math.dist([stand[0] + 0.5, stand[1], stand[2] + 0.5], water_pos) <= 2.75:
+                    candidates.append((stand, math.dist(obs["status"]["pos"], stand)))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda pair: pair[1])
+        return list(candidates[0][0])
+
     def _nether_portal(self, obs, context):
         counts = obs["counts"]
         origin = obs["status"]["pos"]
@@ -652,10 +690,15 @@ class AutonomousTaskController:
                 if recent_water_fails >= 4 and self._data.get("water_searched"):
                     self._escalate("water_unreachable_nearby")
                     return None
-                target_w = waters[0]
-                if math.dist(origin, target_w["pos"]) <= 2.6:
-                    return self._decision("collect_liquid", {"pos": list(target_w["pos"]), "expected_name": "water"},
+                collect_w = next((w for w in waters if math.dist(origin, w["pos"]) <= 2.85), None)
+                if collect_w is not None:
+                    return self._decision("collect_liquid", {"pos": list(collect_w["pos"]), "expected_name": "water"},
                                           "Fill bucket with water for Nether Portal speedrun casting")
+                target_w = waters[0]
+                shore_target = self._water_shore_stand(target_w["pos"], obs, context)
+                if shore_target is not None:
+                    return Decision("move_to", {"pos": shore_target, "range": 1},
+                                    "Move to dry shoreline within reach of water source to fill bucket", "nether_portal_approach")
                 return Decision("move_to", {"pos": list(target_w["pos"]), "range": 2},
                                 "Move within reach of water source to fill bucket", "nether_portal_approach")
             if not self._data.get("water_searched"):

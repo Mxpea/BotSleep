@@ -511,52 +511,178 @@ class AutonomyRuntime:
         data = dict(res.data or {}) if isinstance(res.data, dict) else {}
         return SkillResult(bool(res.success), str(res.message), data, res.error_code)
 
+    def _probe_dry_shore_for_water(self, water_pos):
+        get_block = getattr(self.client, "get_block", None)
+        if not callable(get_block):
+            return None
+        from skills.daily_survival import DailySurvivalSkills
+        dry_support = DailySurvivalSkills.SUPPORT - {"water", "flowing_water", "lava", "flowing_lava", "lily_pad"}
+        wx, wy, wz = int(water_pos[0]), int(water_pos[1]), int(water_pos[2])
+
+        def _blk_name(x, y, z):
+            try:
+                raw = get_block(x, y, z)
+                blk = raw.get("result") if isinstance(raw, dict) and "result" in raw else raw
+                return (blk or {}).get("name") if isinstance(blk, dict) else None
+            except Exception:
+                return None
+
+        for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1), (2, 0), (-2, 0), (0, 2), (0, -2)):
+            for dy in (1, 0, 2):
+                sx, sy, sz = wx + dx, wy + dy, wz + dz
+                floor_name = _blk_name(sx, sy - 1, sz)
+                if floor_name not in dry_support:
+                    continue
+                if _blk_name(sx, sy, sz) not in DailySurvivalSkills.AIR:
+                    continue
+                if _blk_name(sx, sy + 1, sz) not in DailySurvivalSkills.AIR:
+                    continue
+                if math.dist([sx + 0.5, sy, sz + 0.5], [wx, wy, wz]) <= 2.85:
+                    return [sx, sy, sz]
+        return None
+
+    def _move_wide_candidate(self, walk_target, walk_range, cancel_event):
+        from skills.survival import SurvivalSkills
+        status_raw = None
+        try:
+            status_raw = self.client.get_status()
+        except Exception:
+            pass
+        st = status_raw.get("result") if isinstance(status_raw, dict) and "result" in status_raw else status_raw
+        cur_pos = (st or {}).get("pos") if isinstance(st, dict) else None
+        if isinstance(cur_pos, (list, tuple)) and len(cur_pos) == 3 and math.dist(cur_pos, walk_target) > 30.0:
+            try:
+                self.client.move_to(
+                    float(walk_target[0]),
+                    float(walk_target[1]),
+                    float(walk_target[2]),
+                    range=max(2, int(walk_range)),
+                    allow_partial=True,
+                    timeout_ms=18000,
+                )
+                after_raw = self.client.get_status()
+                after = after_raw.get("result") if isinstance(after_raw, dict) and "result" in after_raw else after_raw
+                apos = (after or {}).get("pos") if isinstance(after, dict) else None
+                if isinstance(apos, (list, tuple)) and len(apos) == 3:
+                    moved = math.dist(cur_pos, apos)
+                    if moved >= 3.0 or math.dist(apos, walk_target) <= 30.0:
+                        return SkillResult(True, "Moved partway toward distant target", {"pos": list(apos), "moved": round(moved, 2), "executed": True})
+            except Exception as exc:
+                code = getattr(exc, "code", None)
+                if code in {"dead", "life_changed", "dimension_changed", "action_unconfirmed", "cancelled"}:
+                    return SkillResult(False, str(exc), {"executed": True}, code)
+            return SkillResult(False, "Long-range water approach did not advance", {"executed": True}, "move_unverified")
+        return SurvivalSkills(self.client).execute(
+            "move_to",
+            {"pos": list(walk_target), "range": int(walk_range)},
+            cancel_event=cancel_event,
+        )
+
     def _run_task_wide_find(self, decision, observation, resource_type: str):
         find_fn = getattr(self.client, "find_blocks", None) or getattr(self.client, "get_blocks", None)
         origin = ((observation.get("status") or {}).get("pos") if isinstance(observation, dict) else None)
         if not callable(find_fn) or not isinstance(origin, (list, tuple)) or len(origin) != 3:
             return SkillResult(False, f"Cannot search wide {resource_type}", {"executed": False}, "search_unavailable")
         try:
-            limit = 128 if resource_type == "water" else 32
+            limit = 256 if resource_type == "water" else 32
             rows = find_fn(types=[resource_type], radius=64, limit=limit) or []
         except Exception:
             rows = []
         blocked_keys = set()
+        blocked_pts = []
         if getattr(self, "task_controller", None) is not None:
             blocked_keys = set(self.task_controller.rules._blocked(getattr(self, "context", None)))
+            for bkey in blocked_keys:
+                parts = str(bkey).split(",")
+                if len(parts) == 3:
+                    try:
+                        blocked_pts.append([float(parts[0]), float(parts[1]), float(parts[2])])
+                    except ValueError:
+                        pass
         valid_rows = [
             row for row in rows
             if isinstance(row, dict) and isinstance(row.get("pos"), (list, tuple)) and len(row["pos"]) == 3
             and f"{int(row['pos'][0])},{int(row['pos'][1])},{int(row['pos'][2])}" not in blocked_keys
             and (
                 resource_type != "water"
-                or not isinstance(row.get("properties"), dict)
-                or "level" not in row["properties"]
-                or str(row["properties"].get("level")) == "0"
+                or (
+                    not any(math.dist(row["pos"], bp) <= 5.0 for bp in blocked_pts)
+                    and (
+                        not isinstance(row.get("properties"), dict)
+                        or "level" not in row["properties"]
+                        or str(row["properties"].get("level")) == "0"
+                    )
+                )
             )
         ]
-        if not valid_rows:
-            return SkillResult(False, f"No {resource_type} found within 64 blocks", {"executed": False}, f"no_{resource_type}_found")
-        if resource_type == "water":
-            distant_rows = [r for r in valid_rows if math.dist(origin, r["pos"]) > 4.5]
-            pool = distant_rows or valid_rows
-            pool.sort(key=lambda r: (
-                0 if isinstance(r.get("properties"), dict) and str(r["properties"].get("level")) == "0" else 1,
-                0 if float(r["pos"][1]) >= 56.0 else 1,
-                0 if abs(float(r["pos"][1]) - float(origin[1])) <= 6 else 1,
-                math.dist(origin, r["pos"]),
-            ))
-            target = pool[0]["pos"]
-        else:
+        cancel = getattr(self, "_cancel", None)
+        if resource_type != "water":
+            if not valid_rows:
+                return SkillResult(False, f"No {resource_type} found within 64 blocks", {"executed": False}, f"no_{resource_type}_found")
             pts = [row["pos"] for row in valid_rows]
             pts.sort(key=lambda p: (0 if abs(float(p[1]) - float(origin[1])) <= 6 else 1, math.dist(origin, p)))
             target = pts[0]
-        from skills.survival import SurvivalSkills
-        return SurvivalSkills(self.client).execute(
-            "move_to",
-            {"pos": [int(target[0]), int(target[1]) + 1, int(target[2])], "range": 3},
-            cancel_event=getattr(self, "_cancel", None),
-        )
+            return self._move_wide_candidate([int(target[0]), int(target[1]) + 1, int(target[2])], 3, cancel)
+
+        # Deduplicate into 6m spatial water clusters so one cave pool never fills all candidates.
+        clusters = {}
+        for row in valid_rows:
+            p = row["pos"]
+            cid = (int(math.floor(p[0])) // 6, int(math.floor(p[1])) // 4, int(math.floor(p[2])) // 6)
+            prev = clusters.get(cid)
+            if prev is None or math.dist(origin, p) < math.dist(origin, prev["pos"]):
+                clusters[cid] = row
+        pool = list(clusters.values())
+        pool.sort(key=lambda r: (
+            0 if isinstance(r.get("properties"), dict) and str(r["properties"].get("level")) == "0" else 1,
+            0 if float(r["pos"][1]) >= 56.0 else 1,
+            0 if math.dist(origin, r["pos"]) > 4.5 else 1,
+            0 if abs(float(r["pos"][1]) - float(origin[1])) <= 6 else 1,
+            math.dist(origin, r["pos"]),
+        ))
+        last_res = None
+        for cand in pool[:5]:
+            if cancel is not None and cancel.is_set():
+                break
+            cpos = cand["pos"]
+            shore = self._probe_dry_shore_for_water(cpos)
+            walk_target = shore if shore is not None else [int(cpos[0]), int(cpos[1]) + 1, int(cpos[2])]
+            walk_range = 1 if shore is not None else 3
+            res = self._move_wide_candidate(walk_target, walk_range, cancel)
+            last_res = res
+            if res.success:
+                return res
+            data = res.data if isinstance(res.data, dict) else {}
+            if res.error_code in {"dead", "life_changed", "dimension_changed", "action_unconfirmed", "cancelled"} or data.get("action_state") == "unknown":
+                return res
+
+        # Surface scout fallback when nearby water is sealed underground or absent within 64 blocks.
+        if cancel is None or not cancel.is_set():
+            from core.memory import MemoryEngine
+            from skills.scouting import SurfaceScoutSkill
+            scout_mem = MemoryEngine(str(self.journal.directory / "scout_memory")) if getattr(self, "journal", None) else None
+            attempt = int(self.context.get("water_scout_attempts", 0))
+            self.context["water_scout_attempts"] = attempt + 1
+            scout_res = SurfaceScoutSkill(self.client, memory=scout_mem).execute(
+                scan_radius=64,
+                hop_distance=56.0,
+                max_hops=3,
+                prefer_wood=False,
+                goal_focus="water",
+                attempt=attempt,
+                timeout_seconds=45.0,
+                cancel_event=cancel,
+            )
+            sdata = scout_res.data if isinstance(scout_res.data, dict) else {}
+            found_water = sdata.get("found_water") or []
+            if scout_res.success and found_water:
+                wpos = found_water[0]["pos"]
+                shore = self._probe_dry_shore_for_water(wpos)
+                wt = shore if shore is not None else [int(wpos[0]), int(wpos[1]) + 1, int(wpos[2])]
+                return self._move_wide_candidate(wt, 1 if shore is not None else 3, cancel)
+            if last_res is None:
+                return SkillResult(False, "No reachable water source found within 64 blocks", {"executed": bool(sdata.get("executed"))}, "no_water_found")
+        return last_res or SkillResult(False, "No reachable water source found within 64 blocks", {"executed": False}, "no_water_found")
 
     def _enter_lit_portal(self):
         find_fn = getattr(self.client, "find_blocks", None) or getattr(self.client, "get_blocks", None)
