@@ -57,6 +57,10 @@ class OpenAIBrain:
         gate_wait_seconds: float = 600.0,
         recover_uncertain_transport: bool = True,
         global_concurrency: bool = True,
+        scope_id: Optional[str] = None,
+        overflow_brain: Optional["OpenAIBrain"] = None,
+        primary_wait_seconds: float = 1.5,
+        primary_cooldown_seconds: float = 45.0,
         request_gate=_AUTO_GATE,
         recorder=None,
     ):
@@ -71,6 +75,12 @@ class OpenAIBrain:
         self.tls_version = tls_version
         self.recover_uncertain_transport = bool(recover_uncertain_transport)
         self.global_concurrency = bool(global_concurrency)
+        self.scope_id = scope_id
+        self.overflow_brain = overflow_brain
+        self.primary_wait_seconds = max(0.1, float(primary_wait_seconds))
+        self.primary_cooldown_seconds = max(1.0, float(primary_cooldown_seconds))
+        self._primary_cooldown_until: float = 0.0
+        self.recorder = recorder
         self.request_gate = (
             ModelRequestGate(
                 self.base_url,
@@ -79,6 +89,7 @@ class OpenAIBrain:
                 recorder=recorder,
                 global_concurrency=self.global_concurrency,
                 auto_recover_uncertain=self.recover_uncertain_transport,
+                scope_id=self.scope_id,
             )
             if request_gate is _AUTO_GATE else request_gate
         )
@@ -131,6 +142,8 @@ class OpenAIBrain:
                     self._session.close()
                 finally:
                     self._session = None
+        if self.overflow_brain is not None:
+            self.overflow_brain.close()
 
     @property
     def headers(self) -> Dict[str, str]:
@@ -139,6 +152,33 @@ class OpenAIBrain:
             headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
 
+    def _call_overflow(
+        self,
+        reason: str,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        *,
+        cancel_event=None,
+    ) -> Dict[str, Any]:
+        if self.recorder is not None:
+            try:
+                self.recorder.record("INFO", "llm", "MODEL_OVERFLOW_ROUTED", {
+                    "reason": reason,
+                    "overflow_model": self.overflow_brain.model,
+                })
+            except Exception:
+                pass
+        data = self.overflow_brain.chat_completion(messages, tools, cancel_event=cancel_event)
+        meta = dict(getattr(self.overflow_brain, "last_request_meta", {}) or {})
+        meta.update({
+            "route": "overflow",
+            "overflow_reason": reason,
+            "request_model": self.overflow_brain.model,
+            "actual_model": data.get("model") if isinstance(data, dict) else None,
+        })
+        self.last_request_meta = meta
+        return data
+
     def chat_completion(
         self,
         messages: List[Dict[str, Any]],
@@ -146,16 +186,39 @@ class OpenAIBrain:
         *,
         cancel_event=None,
     ) -> Dict[str, Any]:
-        """Serialize every production model request; never replay an unknown one."""
+        """Serialize every production model request; overflow only on busy/explicit error."""
         if self.request_gate is None:  # Explicit injection for isolated transport tests.
-            return self._chat_completion(messages, tools, cancel_event=cancel_event)
+            data = self._chat_completion(messages, tools, cancel_event=cancel_event)
+            self.last_request_meta.setdefault("route", "primary")
+            if isinstance(data, dict) and data.get("model"):
+                self.last_request_meta.setdefault("actual_model", data.get("model"))
+            return data
+        if self.overflow_brain is not None and time.monotonic() < self._primary_cooldown_until:
+            return self._call_overflow("primary_cooldown", messages, tools, cancel_event=cancel_event)
+        wait_limit = self.primary_wait_seconds if self.overflow_brain is not None else None
         try:
-            with self.request_gate.request(cancel_event):
-                return self._chat_completion(messages, tools, cancel_event=cancel_event)
+            with self.request_gate.request(cancel_event, wait_seconds=wait_limit):
+                data = self._chat_completion(messages, tools, cancel_event=cancel_event)
+                self.last_request_meta.update({
+                    "route": "primary",
+                    "request_model": self.model,
+                    "actual_model": data.get("model") if isinstance(data, dict) else None,
+                })
+                return data
         except ModelGateError as error:
+            if self.overflow_brain is not None and error.code == "llm_busy":
+                return self._call_overflow("primary_busy", messages, tools, cancel_event=cancel_event)
             raise LLMError(error.code, str(error), error.details) from None
         except LLMError as error:
+            if self.overflow_brain is not None and error.code in {"llm_http_error", "llm_invalid_response"}:
+                self._primary_cooldown_until = time.monotonic() + self.primary_cooldown_seconds
+                return self._call_overflow(f"primary_{error.code}", messages, tools, cancel_event=cancel_event)
             if error.code in {"llm_timeout", "llm_network_error"}:
+                if self.overflow_brain is not None:
+                    self._primary_cooldown_until = max(
+                        self._primary_cooldown_until,
+                        time.monotonic() + self.primary_cooldown_seconds,
+                    )
                 if self.recover_uncertain_transport:
                     raise
                 details = {"transport_error": error.code, "executed": False}

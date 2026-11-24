@@ -42,9 +42,14 @@ class ModelRequestGate:
         recorder=None,
         global_concurrency=True,
         auto_recover_uncertain=False,
+        scope_id=None,
     ):
         identity = endpoint.rstrip("/").removesuffix("/chat/completions")
-        digest = hashlib.sha256((identity + "\0" + api_key).encode()).hexdigest()
+        raw_identity = identity + "\0" + api_key
+        if not global_concurrency and scope_id:
+            # Bot-scoped overflow ledgers isolate concurrent agents without sharing one slot lock.
+            raw_identity += "\0" + str(scope_id)
+        digest = hashlib.sha256(raw_identity.encode()).hexdigest()
         self.directory = Path(directory or Path(tempfile.gettempdir()) / "botsleep-model-gates")
         self.directory.mkdir(parents=True, exist_ok=True)
         self.lock_path = self.directory / (digest + ".lock")
@@ -203,8 +208,9 @@ class ModelRequestGate:
         return handle
 
     @contextmanager
-    def _locked(self, cancel_event=None):
-        deadline = time.monotonic() + self.wait_seconds
+    def _locked(self, cancel_event=None, *, wait_seconds=None):
+        timeout = self.wait_seconds if wait_seconds is None else max(0.05, float(wait_seconds))
+        deadline = time.monotonic() + timeout
         ticket_id = uuid.uuid4().hex
         global_thread_acquired = False
         cred_thread_acquired = False
@@ -274,8 +280,8 @@ class ModelRequestGate:
             raise ModelGateError("llm_busy", "Another local request still owns the model slot")
 
     @contextmanager
-    def request(self, cancel_event=None):
-        with self._locked(cancel_event):
+    def request(self, cancel_event=None, *, wait_seconds=None):
+        with self._locked(cancel_event, wait_seconds=wait_seconds):
             previous = self._read()
             if self._retry_due(previous):
                 self._record("MODEL_TRANSPORT_WINDOW_EXPIRED", {"error_code": previous["error_code"]})

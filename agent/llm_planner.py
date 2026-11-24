@@ -3,6 +3,7 @@
 import copy
 import json
 import math
+import os
 import re
 import time
 import unicodedata
@@ -14,6 +15,7 @@ from .brain import LLMError, OpenAIBrain
 from .survival_planner import Decision, SurvivalPlanner
 from .tools import TOOL_DEFINITIONS, TOOL_SCHEMAS, tools_for_objective
 from core.intent_compiler import IntentCompiler
+from core.loop_supervisor import LoopSupervisor
 from skills.daily_survival import DailySurvivalSkills
 
 
@@ -131,6 +133,10 @@ class LLMSurvivalPlanner:
         self.settings = settings
         self.recorder = recorder
         self._secret = _setting(settings, "api_key", "") or ""
+        overflow_cfg = _setting(settings, "overflow", {})
+        if not isinstance(overflow_cfg, dict):
+            overflow_cfg = {}
+        self._overflow_secret = str(overflow_cfg.get("api_key") or "")
         self.rules = SurvivalPlanner(survival_settings)
         self.objective = survival_settings.get("objective", "starter")
         if self.objective in {"daily", "competition"}:
@@ -171,6 +177,29 @@ If that goal tool is unavailable, use only the currently advertised tools.
         self.max_repair_attempts = self._limit(settings, "max_repair_attempts", 1, 0, 3)
         if _setting(settings, "enabled", False) is not True:
             raise LLMError("llm_disabled", "Model planning is not enabled")
+        overflow_enabled = bool(
+            overflow_cfg.get("enabled") is True
+            and (self.objective != "competition" or overflow_cfg.get("allow_in_competition") is True)
+            and overflow_cfg.get("base_url")
+            and overflow_cfg.get("model")
+        )
+        overflow_brain = None
+        if brain is None and overflow_enabled:
+            scope_id = str(survival_settings.get("world_id") or os.getpid())
+            overflow_brain = OpenAIBrain(
+                base_url=str(overflow_cfg["base_url"]),
+                api_key=self._overflow_secret,
+                model=str(overflow_cfg["model"]),
+                temperature=_setting(settings, "temperature", 0.3),
+                max_tokens=_setting(settings, "max_tokens", 2048),
+                timeout_seconds=float(overflow_cfg.get("timeout_seconds", 45)),
+                tls_version=str(overflow_cfg.get("tls_version", "auto")),
+                gate_wait_seconds=float(_setting(settings, "gate_wait_seconds", 600.0)),
+                recover_uncertain_transport=bool(_setting(settings, "recover_uncertain_transport", True)),
+                global_concurrency=False,
+                scope_id=scope_id,
+                recorder=recorder,
+            )
         self.brain = brain if brain is not None else OpenAIBrain(
             base_url=_setting(settings, "base_url", ""), api_key=self._secret,
             model=_setting(settings, "model", ""), temperature=_setting(settings, "temperature", 0.3),
@@ -179,6 +208,9 @@ If that goal tool is unavailable, use only the currently advertised tools.
             tls_version=_setting(settings, "tls_version", "auto"),
             gate_wait_seconds=_setting(settings, "gate_wait_seconds", 600.0),
             recover_uncertain_transport=bool(_setting(settings, "recover_uncertain_transport", True)),
+            overflow_brain=overflow_brain,
+            primary_wait_seconds=float(overflow_cfg.get("primary_wait_seconds", 1.5)),
+            primary_cooldown_seconds=float(overflow_cfg.get("cooldown_seconds", 45.0)),
             recorder=recorder)
         self._turns = []
         self._pending = None
@@ -209,8 +241,11 @@ If that goal tool is unavailable, use only the currently advertised tools.
                 str(key)) else self._redact(item)) for key, item in value.items()}
         if isinstance(value, (list, tuple)):
             return [self._redact(item) for item in value]
-        if isinstance(value, str) and self._secret:
-            return value.replace(self._secret, "[REDACTED]")
+        if isinstance(value, str):
+            for secret in (self._secret, self._overflow_secret):
+                if secret:
+                    value = value.replace(secret, "[REDACTED]")
+            return value
         return value
 
     def _record(self, level, event, data):
@@ -806,8 +841,10 @@ If that goal tool is unavailable, use only the currently advertised tools.
         # Deterministically normalize model plurals/aliases, smelt inputs, and speedrun/cooldown guardrails
         # before strict JSON schema validation runs.
         args, compile_err = self._compiler.compile_tool_call(name, args, observation, context)
+        failed_sig = LoopSupervisor.action_signature_parts(name, args if isinstance(args, dict) else None)
+        sig_details = {"failed_signature": failed_sig} if failed_sig else None
         if compile_err is not None:
-            raise LLMError(compile_err[0], compile_err[1])
+            raise LLMError(compile_err[0], compile_err[1], sig_details)
         self._validate(args, allowed_schemas[name])
         args = copy.deepcopy(args)
         content = message.get("content")
@@ -938,7 +975,12 @@ If that goal tool is unavailable, use only the currently advertised tools.
         decision = Decision(name, args, reason, goal)
         failure = self._failed_actions.get(self._signature(decision))
         if failure and self._unchanged_failure(failure, observation, decision):
-            raise LLMError("llm_repeated_failure", "This action at this target already failed without relevant progress; choose a different action or target")
+            failed_sig = LoopSupervisor.action_signature_parts(name, args)
+            raise LLMError(
+                "llm_repeated_failure",
+                f"Action {failed_sig or name} already failed without relevant progress; pick a different goal/target",
+                {"failed_signature": failed_sig} if failed_sig else None,
+            )
         return decision
 
     @staticmethod
@@ -1047,6 +1089,9 @@ If that goal tool is unavailable, use only the currently advertised tools.
             pos = status.get("pos")
             if isinstance(pos, (list, tuple)) and len(pos) == 3 and pos[1] < 56:
                 warnings.append("UNDERGROUND_NO_SCOUT: You are underground (y < 56); do NOT call scout. Dig raw_iron/smelt/craft or dig up cleanly.")
+            blocked_sigs = prompt_context.get("blocked_task_signatures")
+            if isinstance(blocked_sigs, dict) and blocked_sigs:
+                warnings.append("BLOCKED_TARGETS_COOLDOWN: Do NOT call temporarily cooled targets: " + ", ".join(sorted(blocked_sigs)))
             if warnings:
                 prompt_context["safety_warnings"] = warnings
             prompt_context["failed_actions"] = [{"action": failure["decision"].name, "args": failure["decision"].args,
@@ -1122,6 +1167,12 @@ If that goal tool is unavailable, use only the currently advertised tools.
                         response_event["session_reused"] = bool(meta["session_reused"])
                     if "payload_bytes" in meta:
                         response_event["payload_bytes"] = meta["payload_bytes"]
+                    if "route" in meta:
+                        response_event["route"] = meta["route"]
+                    if "overflow_reason" in meta:
+                        response_event["overflow_reason"] = meta["overflow_reason"]
+                    if meta.get("actual_model"):
+                        response_event["actual_model"] = meta["actual_model"]
                 self._record("INFO", "LLM_RESPONSE", response_event)
                 self._undelivered_result = False
                 self._check_cancel(cancel_event)

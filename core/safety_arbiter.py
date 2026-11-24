@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from core.campaign import dimension as campaign_dimension
-from core.domain import finite_number
+from core.domain import RANGED_HOSTILES, finite_number
 
 
 # Actions that genuinely resolve or hold an active emergency inside a short safety observation.
@@ -69,12 +69,20 @@ class SafetyArbiter:
     ) -> float:
         """Return the unified hostile proximity radius for the active mode/decision."""
         raw_limit = self.safety_rules._threat_distance(hostile.get("name"))
+        if planning and self.llm_override_on_block:
+            # Planning HTTP wait never mutates world state; post-LLM re-observe enforces
+            # full execution safety. Only preempt on immediate close-range danger (<=2.2m)
+            # or actual injury/hit/environmental hazards.
+            return min(2.2, raw_limit)
         health = status.get("health", 20)
         if decision is not None and getattr(decision, "goal", None) == "deep_mine" and health >= 16:
             return min(5.0, raw_limit)
-        if self.llm_override_on_block and health >= 14:
-            # Keep planning and execution aligned when LLM override mode tolerates distant mobs.
-            return min(4.5, raw_limit)
+        if self.llm_override_on_block:
+            is_ranged = hostile.get("name") in RANGED_HOSTILES
+            low_hp = self.settings.get("low_health_threshold", 8)
+            if health > low_hp:
+                return min(5.0 if is_ranged else 2.5, raw_limit)
+            return min(6.5 if is_ranged else 4.5, raw_limit)
         return raw_limit
 
     def should_use_short_safety(

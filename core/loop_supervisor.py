@@ -223,20 +223,26 @@ class LoopSupervisor:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def action_signature(decision: Any) -> Optional[str]:
+    def action_signature_parts(name: str, args: Optional[dict[str, Any]] = None) -> Optional[str]:
+        """Build a stable canonical signature from tool name and argument dict."""
+        payload = args if isinstance(args, dict) else {}
+        if name == "run_survival_task":
+            task = str(payload.get("task") or "")
+            target = str(payload.get("item") or payload.get("resource") or "")
+            return f"run_survival_task:{task}:{target}"
+        if name in {"craft_item", "smelt_start", "place_item"}:
+            return f"{name}:{payload.get('item') or payload.get('input_item') or ''}"
+        if name in {"plan_shelter", "build_shelter_step"}:
+            return f"{name}"
+        return None
+
+    @classmethod
+    def action_signature(cls, decision: Any) -> Optional[str]:
         """Build a stable canonical signature for task/tool failure deduplication."""
         if decision is None:
             return None
-        args = decision.args if isinstance(getattr(decision, "args", None), dict) else {}
-        if decision.name == "run_survival_task":
-            task = str(args.get("task") or "")
-            target = str(args.get("item") or args.get("resource") or "")
-            return f"run_survival_task:{task}:{target}"
-        if decision.name in {"craft_item", "smelt_start", "place_item"}:
-            return f"{decision.name}:{args.get('item') or args.get('input_item') or ''}"
-        if decision.name in {"plan_shelter", "build_shelter_step"}:
-            return f"{decision.name}"
-        return None
+        args = decision.args if isinstance(getattr(decision, "args", None), dict) else None
+        return cls.action_signature_parts(str(getattr(decision, "name", "") or ""), args)
 
     def sync_inventory_counts(self, counts: Any) -> None:
         """Clear bad-args/repeated-failure cooldowns whenever real inventory counts change."""
@@ -326,21 +332,43 @@ class LoopSupervisor:
         if sig is not None:
             is_placement_or_shelter = sig.startswith(("place_item:", "plan_shelter", "build_shelter_step"))
             tracked_errors = (
-                {"bad_args", "llm_invalid_arguments", "llm_repeated_failure", "unsafe", "unsafe_site", "safety_changed", "place_unverified", "no_place_candidate"}
+                {"bad_args", "llm_invalid_arguments", "llm_repeated_failure", "llm_no_progress", "unsafe", "unsafe_site", "safety_changed", "place_unverified", "no_place_candidate"}
                 if is_placement_or_shelter
-                else {"bad_args", "llm_invalid_arguments", "llm_repeated_failure"}
+                else {"bad_args", "llm_invalid_arguments", "llm_repeated_failure", "llm_no_progress"}
             )
             if not success and code in tracked_errors:
                 prev_cnt, _, _ = self._signature_failures.get(sig, (0, 0.0, ""))
                 new_cnt = prev_cnt + 1
-                cooldown_until = now_wall + 120.0 if new_cnt >= 2 else 0.0
+                cooldown_until = now_wall + 180.0 if (new_cnt >= 2 or code == "llm_repeated_failure") else 0.0
                 hint = str(getattr(result, "message", "") or code)
                 self._signature_failures[sig] = (new_cnt, cooldown_until, hint)
-                if new_cnt == 2:
-                    self._emit("WARN", "LOOP_ACTION_COOLDOWN", {"signature": sig, "reason": code, "cooldown_seconds": 120})
+                if cooldown_until > now_wall and prev_cnt < 2:
+                    self._emit("WARN", "LOOP_ACTION_COOLDOWN", {"signature": sig, "reason": code, "cooldown_seconds": 180})
             elif success:
                 self._signature_failures.pop(sig, None)
 
+        self._export_blocked_signatures(now_wall, context)
+
+    def record_planner_rejection(
+        self,
+        signature: Optional[str],
+        code: str,
+        message: str,
+        now_wall: float,
+        context: dict[str, Any],
+    ) -> None:
+        """Record planner-level rejection (e.g. `llm_repeated_failure`) into L2 cooldowns."""
+        if not signature or code not in {"bad_args", "llm_invalid_arguments", "llm_repeated_failure", "llm_no_progress"}:
+            return
+        prev_cnt, _, _ = self._signature_failures.get(signature, (0, 0.0, ""))
+        new_cnt = prev_cnt + 1
+        cooldown_until = now_wall + 180.0 if (new_cnt >= 2 or code == "llm_repeated_failure") else 0.0
+        self._signature_failures[signature] = (new_cnt, cooldown_until, str(message or code))
+        if cooldown_until > now_wall:
+            self._emit("WARN", "LOOP_ACTION_COOLDOWN", {"signature": signature, "reason": code, "cooldown_seconds": 180})
+        self._export_blocked_signatures(now_wall, context)
+
+    def _export_blocked_signatures(self, now_wall: float, context: dict[str, Any]) -> None:
         # Export active L2 cooldowns cleanly into context for planner/compiler introspection.
         active_blocked = {
             k: round(exp - now_wall, 1)

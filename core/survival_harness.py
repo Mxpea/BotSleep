@@ -2254,6 +2254,15 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
                 elif result.success:
                     self._continuous_retries = 0
             self.phase = "paused" if self.paused else "complete" if self.completed else "waiting"
+            if (not result.success and isinstance(result.data, dict)
+                    and result.data.get("failed_signature")):
+                self._loop_supervisor.record_planner_rejection(
+                    result.data["failed_signature"],
+                    str(result.error_code or ""),
+                    str(result.message or ""),
+                    time.time(),
+                    self.context,
+                )
             self._loop_supervisor.record_step_outcome(
                 time.monotonic(),
                 time.time(),

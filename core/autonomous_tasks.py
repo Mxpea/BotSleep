@@ -645,7 +645,11 @@ class AutonomousTaskController:
                 gravels = [row for row in self.daily._safe_rows(obs, {"gravel"}, context=context, max_distance=24) if row.get("can_dig") is not False]
                 gravels.sort(key=lambda r: (0 if abs(r["pos"][1] - origin[1]) <= 4 else 1, math.dist(origin, r["pos"])))
                 if gravels:
-                    return self._decision("gather_block", {"pos": list(gravels[0]["pos"]), "expected_name": "gravel"},
+                    target_g = gravels[0]
+                    if math.dist(origin, target_g["pos"]) > 4.0 or abs(float(target_g["pos"][1]) - float(origin[1])) > 2.5:
+                        return Decision("move_to", {"pos": list(target_g["pos"]), "range": 2},
+                                        "Move within reach of gravel to dig flint", "nether_portal_approach")
+                    return self._decision("gather_block", {"pos": list(target_g["pos"]), "expected_name": "gravel"},
                                           "Dig gravel for flint to craft flint_and_steel")
                 if counts.get("gravel", 0) >= 1:
                     for cand in self.daily._rows(obs.get("placement_candidates"))[:8]:

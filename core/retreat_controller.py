@@ -95,6 +95,13 @@ class RetreatController:
         health, old_health = observation["status"].get("health"), basis.get("health")
         if finite_number(health) and finite_number(old_health) and health < old_health:
             return True
+        origin = parse_pos(observation["status"].get("pos"))
+        old_origin = parse_pos(basis.get("pos"))
+        moved_dist = math.dist(origin, old_origin) if (origin and old_origin) else 0.0
+        # Once 2+ consecutive retreat cooldowns have fired in place without damage or movement,
+        # ignore minor enemy coordinate wander so boxed-in bots do not thrash endlessly.
+        if int(recovery.get("cooldown_cycles") or 0) >= 2 and moved_dist < 2.0:
+            return False
         old_rows = basis.get("nearby_threats")
         if isinstance(old_rows, list):
             previous = {(row.get("id"), row.get("name")): row.get("distance")
@@ -105,11 +112,9 @@ class RetreatController:
                 # failed search; sub-block coordinate noise does not.
                 if old_gap is None or finite_number(old_gap) and row["distance"] <= old_gap - 2:
                     return True
-        origin = parse_pos(observation["status"].get("pos"))
-        old_origin = parse_pos(basis.get("pos"))
         old_threat = parse_pos(basis.get("threat_pos"))
         if origin and old_origin and (
-            math.dist(origin, old_origin) >= 1
+            moved_dist >= 1
             or any(math.floor(a) != math.floor(b) for a, b in zip(origin, old_origin))
         ):
             return True

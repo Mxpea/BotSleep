@@ -17,7 +17,7 @@ from .survival import SurvivalSkills, _Failure
 class DailySurvivalSkills(SurvivalSkills):
     PICKUP_DISTANCE = 8
     PICKUP_SETTLE_SECONDS = 1.4
-    PLACEABLE = SurvivalSkills.PLACEABLE | {"barrel", "smoker", "blast_furnace"}
+    PLACEABLE = SurvivalSkills.PLACEABLE | {"gravel", "barrel", "smoker", "blast_furnace"}
     FOODS = SurvivalSkills.FOODS | {"beef", "porkchop", "rabbit", "mutton", "cod", "salmon", "potato"}
     CROPS = {"wheat": ("wheat", "wheat_seeds"), "carrots": ("carrot", "carrot"),
              "potatoes": ("potato", "potato"), "beetroots": ("beetroot", "beetroot_seeds")}

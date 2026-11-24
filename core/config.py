@@ -89,7 +89,18 @@ DEFAULTS: Dict[str, Any] = {
             "timeout_seconds": 60, "max_history_turns": 10, "max_repair_attempts": 1,
             "tls_version": "auto", "gate_wait_seconds": 600,
             "recover_uncertain_transport": True,
-            "retry_backoff_seconds": [4, 16, 32, 64, 128, 256]},
+            "retry_backoff_seconds": [4, 16, 32, 64, 128, 256],
+            "overflow": {
+                "enabled": False,
+                "allow_in_competition": False,
+                "base_url": "https://doro.lat/v1",
+                "api_key": "",
+                "model": "deepseek-v4.1-flash",
+                "primary_wait_seconds": 1.5,
+                "cooldown_seconds": 45,
+                "timeout_seconds": 45,
+                "tls_version": "auto",
+            }},
     "mining": {
         "targets": {
             "iron": {"count": 24, "min_tool": "stone_pickaxe"},
@@ -403,6 +414,36 @@ def _validate(config: Dict[str, Any], config_dir: Path) -> None:
         _positive(entry, "llm.retry_backoff_seconds entry")
         if entry > 600:
             raise ConfigError("llm.retry_backoff_seconds entries must not exceed 600")
+    overflow = _mapping(llm["overflow"], "llm.overflow")
+    if set(overflow) - set(DEFAULTS["llm"]["overflow"]):
+        raise ConfigError("llm.overflow contains unsupported options")
+    _boolean(overflow["enabled"], "llm.overflow.enabled")
+    _boolean(overflow["allow_in_competition"], "llm.overflow.allow_in_competition")
+    if survival["objective"] == "competition" and not overflow["allow_in_competition"]:
+        overflow["enabled"] = False
+    _string(overflow["api_key"], "llm.overflow.api_key", allow_empty=True)
+    ov_active = bool(llm["enabled"] and overflow["enabled"])
+    _string(overflow["model"], "llm.overflow.model", allow_empty=not ov_active)
+    ov_url = _string(overflow["base_url"], "llm.overflow.base_url", allow_empty=not ov_active).strip().rstrip("/")
+    try:
+        ov_parsed = urlsplit(ov_url)
+        ov_valid = (not ov_url and not ov_active) or (
+            ov_parsed.scheme in ("http", "https") and bool(ov_parsed.hostname)
+            and not any(c.isspace() for c in ov_url) and ov_parsed.username is None
+            and ov_parsed.password is None and not ov_parsed.query and not ov_parsed.fragment
+            and (ov_parsed.port is None or 1 <= ov_parsed.port <= 65535)
+        )
+    except ValueError:
+        ov_valid = False
+    if not ov_valid:
+        raise ConfigError("llm.overflow.base_url must be an HTTP(S) URL without credentials, query or fragment")
+    overflow["base_url"] = ov_url
+    for key, maximum in (("primary_wait_seconds", 60), ("cooldown_seconds", 600), ("timeout_seconds", 120)):
+        _positive(overflow[key], f"llm.overflow.{key}")
+        if overflow[key] > maximum:
+            raise ConfigError(f"llm.overflow.{key} must not exceed {maximum}")
+    if overflow["tls_version"] not in ("auto", "1.2"):
+        raise ConfigError("llm.overflow.tls_version must be auto or the string 1.2")
 
     mining = _mapping(config["mining"], "mining")
     if set(mining) - set(DEFAULTS["mining"]):
@@ -480,6 +521,21 @@ def load_config(
     ):
         if variable in environment:
             config[section][key] = environment[variable]
+    for variable, ov_key in (
+        ("BOTSLEEP_LLM_OVERFLOW_API_KEY", "api_key"),
+        ("BOTSLEEP_LLM_OVERFLOW_BASE_URL", "base_url"),
+        ("BOTSLEEP_LLM_OVERFLOW_MODEL", "model"),
+    ):
+        if variable in environment:
+            config["llm"]["overflow"][ov_key] = environment[variable]
+    if "BOTSLEEP_LLM_OVERFLOW_ENABLED" in environment:
+        raw_ov = str(environment["BOTSLEEP_LLM_OVERFLOW_ENABLED"]).strip().lower()
+        if raw_ov in {"1", "true", "yes", "on"}:
+            config["llm"]["overflow"]["enabled"] = True
+        elif raw_ov in {"0", "false", "no", "off"}:
+            config["llm"]["overflow"]["enabled"] = False
+        else:
+            raise ConfigError("BOTSLEEP_LLM_OVERFLOW_ENABLED must be a boolean")
     if username is not None:
         config["agent"]["name"] = username
 
