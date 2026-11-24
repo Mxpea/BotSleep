@@ -584,7 +584,7 @@ class AutonomyRuntime:
         if not callable(find_fn) or not isinstance(origin, (list, tuple)) or len(origin) != 3:
             return SkillResult(False, f"Cannot search wide {resource_type}", {"executed": False}, "search_unavailable")
         try:
-            limit = 256 if resource_type == "water" else 32
+            limit = 256 if resource_type == "water" else 128
             rows = find_fn(types=[resource_type], radius=64, limit=limit) or []
         except Exception:
             rows = []
@@ -603,15 +603,13 @@ class AutonomyRuntime:
             row for row in rows
             if isinstance(row, dict) and isinstance(row.get("pos"), (list, tuple)) and len(row["pos"]) == 3
             and f"{int(row['pos'][0])},{int(row['pos'][1])},{int(row['pos'][2])}" not in blocked_keys
+            and not any(math.dist(row["pos"], bp) <= (5.0 if resource_type == "water" else 3.5) for bp in blocked_pts)
             and (
                 resource_type != "water"
                 or (
-                    not any(math.dist(row["pos"], bp) <= 5.0 for bp in blocked_pts)
-                    and (
-                        not isinstance(row.get("properties"), dict)
-                        or "level" not in row["properties"]
-                        or str(row["properties"].get("level")) == "0"
-                    )
+                    not isinstance(row.get("properties"), dict)
+                    or "level" not in row["properties"]
+                    or str(row["properties"].get("level")) == "0"
                 )
             )
         ]
@@ -619,10 +617,35 @@ class AutonomyRuntime:
         if resource_type != "water":
             if not valid_rows:
                 return SkillResult(False, f"No {resource_type} found within 64 blocks", {"executed": False}, f"no_{resource_type}_found")
-            pts = [row["pos"] for row in valid_rows]
-            pts.sort(key=lambda p: (0 if abs(float(p[1]) - float(origin[1])) <= 6 else 1, math.dist(origin, p)))
-            target = pts[0]
-            return self._move_wide_candidate([int(target[0]), int(target[1]) + 1, int(target[2])], 3, cancel)
+            clusters = {}
+            for row in valid_rows:
+                p = row["pos"]
+                cid = (int(math.floor(p[0])) // 6, int(math.floor(p[1])) // 4, int(math.floor(p[2])) // 6)
+                prev = clusters.get(cid)
+                if prev is None or math.dist(origin, p) < math.dist(origin, prev["pos"]):
+                    clusters[cid] = row
+            pool = list(clusters.values())
+            pool.sort(key=lambda r: (
+                0 if float(r["pos"][1]) >= 63.0 else 1,
+                0 if abs(float(r["pos"][1]) - float(origin[1])) <= 6 else 1,
+                math.dist(origin, r["pos"]),
+            ))
+            last_res = None
+            for cand in pool[:5]:
+                if cancel is not None and cancel.is_set():
+                    break
+                p = cand["pos"]
+                wt = [int(p[0]), int(p[1]) + 1, int(p[2])]
+                if math.dist(origin, wt) <= 3.5:
+                    continue
+                res = self._move_wide_candidate(wt, 3, cancel)
+                last_res = res
+                data = res.data if isinstance(res.data, dict) else {}
+                if res.success and data.get("already_in_range") is not True:
+                    return res
+                if res.error_code in {"dead", "life_changed", "dimension_changed", "action_unconfirmed", "cancelled"} or data.get("action_state") == "unknown":
+                    return res
+            return last_res or SkillResult(False, f"No reachable {resource_type} found within 64 blocks", {"executed": False}, f"no_{resource_type}_found")
 
         # Deduplicate into 6m spatial water clusters so one cave pool never fills all candidates.
         clusters = {}

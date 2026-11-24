@@ -614,6 +614,33 @@ class OverflowAndLoopFixesTests(unittest.TestCase):
         self.assertIsNotNone(s_after)
         self.assertEqual(s_after.goal, "nether_portal_approach")
 
+    def test_gather_block_supports_gravel_flint_drop_and_carried_gravel_placement(self):
+        from skills.survival import SurvivalSkills
+        from test_survival_skills import World as FakeWorld, envelope
+
+        self.assertIn("gravel", SurvivalSkills.GATHERABLE)
+        w = FakeWorld()
+        w.counts = {}
+        w.set_block([2, 64, 0], "gravel", can_dig=True, can_see=True)
+
+        def dig_gravel(pos):
+            w.blocks.pop(tuple(pos), None)
+            w.counts["flint"] = w.counts.get("flint", 0) + 1
+            return envelope({"gained": {"flint": 1}})
+
+        w.dig_effect = dig_gravel
+        res = SurvivalSkills(w).execute("gather_block", {"pos": [2, 64, 0], "expected_name": "gravel"})
+        self.assertTrue(res.success, res)
+        self.assertEqual(res.data["gained"], {"flint": 1})
+
+        obs_g = auto_world({"water_bucket": 1, "iron_ingot": 1, "gravel": 2, "cobblestone": 16, "iron_pickaxe": 1})
+        obs_g["blocks"] = [{"name": "gravel", "pos": [14, 64, 0], "can_see": True, "can_dig": True}]
+        obs_g["placement_candidates"] = [{"pos": [2, 64, 0], "support": "stone"}]
+        ctl = AutonomousTaskController({})
+        ctl.start({"task": "nether_portal"}, obs_g)
+        step = ctl.next_action(obs_g)
+        self.assertEqual((step.name, step.args["item"]), ("place_item", "gravel"))
+
 
 if __name__ == "__main__":
     unittest.main()

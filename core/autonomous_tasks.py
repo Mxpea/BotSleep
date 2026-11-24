@@ -710,9 +710,41 @@ class AutonomousTaskController:
             return None
         if counts.get("flint_and_steel", 0) < 1 and counts.get("fire_charge", 0) < 1:
             if counts.get("flint", 0) < 1:
+                recent_gravel_fails = 0
+                for row in reversed(self._data.get("recent_results", [])):
+                    if row.get("success") and (
+                        row.get("goal") == "nether_portal_gravel"
+                        or row.get("name") == "gather_block"
+                    ):
+                        break
+                    if not row.get("success") and (
+                        (row.get("name") == "gather_block")
+                        or (row.get("name") == "move_to" and row.get("goal") in {"nether_portal_approach", "nether_portal_gravel"})
+                    ):
+                        recent_gravel_fails += 1
                 gravels = [row for row in self.daily._safe_rows(obs, {"gravel"}, context=context, max_distance=24) if row.get("can_dig") is not False]
-                gravels.sort(key=lambda r: (0 if abs(r["pos"][1] - origin[1]) <= 4 else 1, math.dist(origin, r["pos"])))
-                if gravels:
+                gravels.sort(key=lambda r: (
+                    0 if float(r["pos"][1]) >= 63.0 else 1,
+                    0 if abs(r["pos"][1] - origin[1]) <= 4 else 1,
+                    -float(r["pos"][1]),
+                    math.dist(origin, r["pos"]),
+                ))
+                prefer_carried_gravel = (
+                    counts.get("gravel", 0) >= 1
+                    and (not gravels or recent_gravel_fails >= 2 or math.dist(origin, gravels[0]["pos"]) > 6.0)
+                )
+                if prefer_carried_gravel:
+                    for cand in self.daily._rows(obs.get("placement_candidates"))[:8]:
+                        cpos = self.rules._pos(cand.get("pos"))
+                        if cpos is not None and 1.0 <= math.dist(origin, cpos) <= 4.0:
+                            step = self._decision("place_item", {"item": "gravel", "pos": list(cpos)},
+                                                  "Place carried gravel so it can be mined for flint")
+                            if self.safety_policy.validate(step, obs, context) is None:
+                                return step
+                if gravels and not (recent_gravel_fails >= 2 and not self._data.get("gravel_searched")):
+                    if recent_gravel_fails >= 4 and self._data.get("gravel_searched"):
+                        self._escalate("gravel_unreachable_nearby")
+                        return None
                     target_g = gravels[0]
                     if math.dist(origin, target_g["pos"]) > 4.0 or abs(float(target_g["pos"][1]) - float(origin[1])) > 2.5:
                         return Decision("move_to", {"pos": list(target_g["pos"]), "range": 2},
@@ -730,6 +762,8 @@ class AutonomousTaskController:
                 if not self._data.get("gravel_searched"):
                     return Decision("move_to", {"pos": list(origin), "range": 4},
                                     "Search wider radius (64 blocks) for gravel to obtain flint", "nether_portal_gravel")
+                self._escalate("gravel_unreachable_nearby")
+                return None
             return self._craft("flint_and_steel", 1, obs, context)
         scaffold_total = sum(counts.get(name, 0) for name in ("cobblestone", "stone", "cobbled_deepslate", "dirt"))
         if counts.get("obsidian", 0) < 10 and scaffold_total < 10:

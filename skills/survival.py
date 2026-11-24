@@ -30,7 +30,7 @@ class SurvivalSkills:
     WOODS = ("oak", "spruce", "birch", "jungle", "acacia", "dark_oak", "mangrove", "cherry", "pale_oak")
     LOGS = frozenset(wood + "_log" for wood in WOODS)
     PLANKS = frozenset(wood + "_planks" for wood in WOODS)
-    GATHERABLE = LOGS | {"stone", "cobblestone", "coal_ore", "deepslate_coal_ore", "dead_bush", "sand"}
+    GATHERABLE = LOGS | {"stone", "cobblestone", "coal_ore", "deepslate_coal_ore", "dead_bush", "sand", "gravel"}
     PICKAXES = frozenset(tier + "_pickaxe" for tier in ("wooden", "copper", "stone", "iron", "golden", "diamond", "netherite"))
     AIR = frozenset({"air", "cave_air", "void_air"})
     # Verified zero-collision, replaceable targets in Minecraft 1.21.11.
@@ -303,7 +303,7 @@ class SurvivalSkills:
         status = self._status(context)
         target = self._gather_guard(pos, name, status, context)
         before, items = self._inventory(context)
-        if name not in self.LOGS | {"dead_bush"}:
+        if name not in self.LOGS | {"dead_bush", "sand", "gravel"}:
             usable = [item for item in items if item["name"] in self.PICKAXES and item["count"] > 0
                       and (not item.get("durability") or item["durability"][0] > 0)]
             if not usable:
@@ -340,6 +340,8 @@ class SurvivalSkills:
             expected_drops.add("coal")
         if name == "dead_bush":
             expected_drops = {"stick", "dead_bush"}
+        elif name == "gravel":
+            expected_drops.add("flint")
         try:
             dig_result = self._action(context, self.client.dig, pos,
                                       collect=not (context.get("cautious") or context.get("relaxed_work")))
