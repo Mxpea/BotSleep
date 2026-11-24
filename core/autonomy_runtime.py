@@ -488,6 +488,32 @@ class AutonomyRuntime:
             cancel_event=window,
         )
         data = dict(res.data or {}) if isinstance(res.data, dict) else {}
+        origin_pos = (observation.get("status") or {}).get("pos") if isinstance(observation, dict) else None
+        if (res.success and float(data.get("waypoint_distance") or 0.0) < 2.0
+                and isinstance(origin_pos, (list, tuple)) and len(origin_pos) == 3
+                and float(origin_pos[1]) < 62.0 and window.remaining() > 12.0):
+            ascend = self._escape_underground_to_surface(
+                origin_pos,
+                cancel_event=window,
+                timeout_seconds=min(36.0, max(6.0, window.remaining() - 6.0)),
+            )
+            if ascend is not None:
+                adata = ascend.data if isinstance(ascend.data, dict) else {}
+                if adata.get("action_state") == "unknown" or ascend.error_code == "action_unconfirmed":
+                    return ascend
+                if ascend.success and adata.get("risen", 0) > 0 and window.remaining() > 14.0:
+                    res = SurfaceScoutSkill(self.client, memory=memory).execute(
+                        scan_radius=scan_radius,
+                        hop_distance=64.0,
+                        max_hops=max_hops,
+                        distance=distance,
+                        prefer_wood=prefer_wood,
+                        goal_focus=goal_focus,
+                        attempt=attempt,
+                        timeout_seconds=window.remaining(),
+                        cancel_event=window,
+                    )
+                    data = dict(res.data or {}) if isinstance(res.data, dict) else {}
         mem_store = getattr(self, "memory", None)
         if res.success and goal_focus == "lava" and not data.get("found_lava") and callable(getattr(mem_store, "recall_lava_candidates", None)):
             remembered = mem_store.recall_lava_candidates(observation, limit=4)
@@ -578,16 +604,20 @@ class AutonomyRuntime:
             cancel_event=cancel_event,
         )
 
+    def _escape_underground_to_surface(self, origin, *, cancel_event=None, timeout_seconds=36.0):
+        if not isinstance(origin, (list, tuple)) or len(origin) != 3 or float(origin[1]) >= 62.0:
+            return None
+        from skills.survival import SurvivalSkills
+        return SurvivalSkills(self.client).escape_to_surface(
+            timeout_seconds=timeout_seconds,
+            cancel_event=cancel_event,
+        )
+
     def _run_task_wide_find(self, decision, observation, resource_type: str):
         find_fn = getattr(self.client, "find_blocks", None) or getattr(self.client, "get_blocks", None)
         origin = ((observation.get("status") or {}).get("pos") if isinstance(observation, dict) else None)
         if not callable(find_fn) or not isinstance(origin, (list, tuple)) or len(origin) != 3:
             return SkillResult(False, f"Cannot search wide {resource_type}", {"executed": False}, "search_unavailable")
-        try:
-            limit = 256 if resource_type == "water" else 128
-            rows = find_fn(types=[resource_type], radius=64, limit=limit) or []
-        except Exception:
-            rows = []
         blocked_keys = set()
         blocked_pts = []
         if getattr(self, "task_controller", None) is not None:
@@ -599,22 +629,28 @@ class AutonomyRuntime:
                         blocked_pts.append([float(parts[0]), float(parts[1]), float(parts[2])])
                     except ValueError:
                         pass
-        valid_rows = [
-            row for row in rows
-            if isinstance(row, dict) and isinstance(row.get("pos"), (list, tuple)) and len(row["pos"]) == 3
-            and f"{int(row['pos'][0])},{int(row['pos'][1])},{int(row['pos'][2])}" not in blocked_keys
-            and not any(math.dist(row["pos"], bp) <= (5.0 if resource_type == "water" else 3.5) for bp in blocked_pts)
-            and (
-                resource_type != "water"
-                or (
-                    not isinstance(row.get("properties"), dict)
-                    or "level" not in row["properties"]
-                    or str(row["properties"].get("level")) == "0"
-                )
-            )
-        ]
         cancel = getattr(self, "_cancel", None)
-        if resource_type != "water":
+        limit = 256 if resource_type == "water" else 128
+
+        def _search_once(cur_origin):
+            try:
+                rows = find_fn(types=[resource_type], radius=64, limit=limit) or []
+            except Exception:
+                rows = []
+            valid_rows = [
+                row for row in rows
+                if isinstance(row, dict) and isinstance(row.get("pos"), (list, tuple)) and len(row["pos"]) == 3
+                and f"{int(row['pos'][0])},{int(row['pos'][1])},{int(row['pos'][2])}" not in blocked_keys
+                and not any(math.dist(row["pos"], bp) <= (5.0 if resource_type == "water" else 3.5) for bp in blocked_pts)
+                and (
+                    resource_type != "water"
+                    or (
+                        not isinstance(row.get("properties"), dict)
+                        or "level" not in row["properties"]
+                        or str(row["properties"].get("level")) == "0"
+                    )
+                )
+            ]
             if not valid_rows:
                 return SkillResult(False, f"No {resource_type} found within 64 blocks", {"executed": False}, f"no_{resource_type}_found")
             clusters = {}
@@ -622,64 +658,79 @@ class AutonomyRuntime:
                 p = row["pos"]
                 cid = (int(math.floor(p[0])) // 6, int(math.floor(p[1])) // 4, int(math.floor(p[2])) // 6)
                 prev = clusters.get(cid)
-                if prev is None or math.dist(origin, p) < math.dist(origin, prev["pos"]):
+                if prev is None or math.dist(cur_origin, p) < math.dist(cur_origin, prev["pos"]):
                     clusters[cid] = row
             pool = list(clusters.values())
+            if resource_type != "water":
+                pool.sort(key=lambda r: (
+                    0 if float(r["pos"][1]) >= 63.0 else 1,
+                    0 if abs(float(r["pos"][1]) - float(cur_origin[1])) <= 6 else 1,
+                    math.dist(cur_origin, r["pos"]),
+                ))
+                last_res = None
+                for cand in pool[:5]:
+                    if cancel is not None and cancel.is_set():
+                        break
+                    p = cand["pos"]
+                    wt = [int(p[0]), int(p[1]) + 1, int(p[2])]
+                    if math.dist(cur_origin, wt) <= 3.5:
+                        continue
+                    res = self._move_wide_candidate(wt, 3, cancel)
+                    last_res = res
+                    data = res.data if isinstance(res.data, dict) else {}
+                    if res.success and data.get("already_in_range") is not True:
+                        return res
+                    if res.error_code in {"dead", "life_changed", "dimension_changed", "action_unconfirmed", "cancelled"} or data.get("action_state") == "unknown":
+                        return res
+                return last_res or SkillResult(False, f"No reachable {resource_type} found within 64 blocks", {"executed": False}, f"no_{resource_type}_found")
+
             pool.sort(key=lambda r: (
-                0 if float(r["pos"][1]) >= 63.0 else 1,
-                0 if abs(float(r["pos"][1]) - float(origin[1])) <= 6 else 1,
-                math.dist(origin, r["pos"]),
+                0 if isinstance(r.get("properties"), dict) and str(r["properties"].get("level")) == "0" else 1,
+                0 if float(r["pos"][1]) >= 56.0 else 1,
+                0 if math.dist(cur_origin, r["pos"]) > 6.0 else 1,
+                0 if abs(float(r["pos"][1]) - float(cur_origin[1])) <= 6 else 1,
+                math.dist(cur_origin, r["pos"]),
             ))
             last_res = None
             for cand in pool[:5]:
                 if cancel is not None and cancel.is_set():
                     break
-                p = cand["pos"]
-                wt = [int(p[0]), int(p[1]) + 1, int(p[2])]
-                if math.dist(origin, wt) <= 3.5:
+                cpos = cand["pos"]
+                shore = self._probe_dry_shore_for_water(cpos)
+                walk_target = shore if shore is not None else [int(cpos[0]), int(cpos[1]) + 1, int(cpos[2])]
+                walk_range = 1 if shore is not None else 3
+                if math.dist(cur_origin, walk_target) <= walk_range + 0.5:
                     continue
-                res = self._move_wide_candidate(wt, 3, cancel)
+                res = self._move_wide_candidate(walk_target, walk_range, cancel)
                 last_res = res
                 data = res.data if isinstance(res.data, dict) else {}
                 if res.success and data.get("already_in_range") is not True:
                     return res
                 if res.error_code in {"dead", "life_changed", "dimension_changed", "action_unconfirmed", "cancelled"} or data.get("action_state") == "unknown":
                     return res
-            return last_res or SkillResult(False, f"No reachable {resource_type} found within 64 blocks", {"executed": False}, f"no_{resource_type}_found")
+            return last_res or SkillResult(False, "No reachable water source found within 64 blocks", {"executed": False}, "no_water_found")
 
-        # Deduplicate into 6m spatial water clusters so one cave pool never fills all candidates.
-        clusters = {}
-        for row in valid_rows:
-            p = row["pos"]
-            cid = (int(math.floor(p[0])) // 6, int(math.floor(p[1])) // 4, int(math.floor(p[2])) // 6)
-            prev = clusters.get(cid)
-            if prev is None or math.dist(origin, p) < math.dist(origin, prev["pos"]):
-                clusters[cid] = row
-        pool = list(clusters.values())
-        pool.sort(key=lambda r: (
-            0 if isinstance(r.get("properties"), dict) and str(r["properties"].get("level")) == "0" else 1,
-            0 if float(r["pos"][1]) >= 56.0 else 1,
-            0 if math.dist(origin, r["pos"]) > 6.0 else 1,
-            0 if abs(float(r["pos"][1]) - float(origin[1])) <= 6 else 1,
-            math.dist(origin, r["pos"]),
-        ))
-        last_res = None
-        for cand in pool[:5]:
-            if cancel is not None and cancel.is_set():
-                break
-            cpos = cand["pos"]
-            shore = self._probe_dry_shore_for_water(cpos)
-            walk_target = shore if shore is not None else [int(cpos[0]), int(cpos[1]) + 1, int(cpos[2])]
-            walk_range = 1 if shore is not None else 3
-            if math.dist(origin, walk_target) <= walk_range + 0.5:
-                continue
-            res = self._move_wide_candidate(walk_target, walk_range, cancel)
-            last_res = res
-            data = res.data if isinstance(res.data, dict) else {}
-            if res.success and data.get("already_in_range") is not True:
-                return res
-            if res.error_code in {"dead", "life_changed", "dimension_changed", "action_unconfirmed", "cancelled"} or data.get("action_state") == "unknown":
-                return res
+        last_res = _search_once(origin)
+        ldata = last_res.data if isinstance(last_res.data, dict) else {}
+        if last_res.success or last_res.error_code in {"dead", "life_changed", "dimension_changed", "action_unconfirmed", "cancelled"} or ldata.get("action_state") == "unknown":
+            return last_res
+
+        if float(origin[1]) < 62.0 and (cancel is None or not cancel.is_set()):
+            ascend = self._escape_underground_to_surface(origin, cancel_event=cancel, timeout_seconds=36.0)
+            if ascend is not None:
+                adata = ascend.data if isinstance(ascend.data, dict) else {}
+                if adata.get("action_state") == "unknown" or ascend.error_code == "action_unconfirmed":
+                    return ascend
+                if ascend.success and adata.get("risen", 0) > 0:
+                    surf_pos = adata.get("pos") or origin
+                    res2 = _search_once(surf_pos)
+                    r2data = res2.data if isinstance(res2.data, dict) else {}
+                    if res2.success or res2.error_code in {"dead", "life_changed", "dimension_changed", "action_unconfirmed", "cancelled"} or r2data.get("action_state") == "unknown":
+                        return res2
+                    last_res = res2
+
+        if resource_type != "water":
+            return last_res
 
         # Surface scout fallback when nearby water is sealed underground or absent within 64 blocks.
         if cancel is None or not cancel.is_set():
@@ -699,14 +750,14 @@ class AutonomyRuntime:
                 cancel_event=cancel,
             )
             sdata = scout_res.data if isinstance(scout_res.data, dict) else {}
+            if sdata.get("action_state") == "unknown" or scout_res.error_code == "action_unconfirmed":
+                return scout_res
             found_water = sdata.get("found_water") or []
             if scout_res.success and found_water:
                 wpos = found_water[0]["pos"]
                 shore = self._probe_dry_shore_for_water(wpos)
                 wt = shore if shore is not None else [int(wpos[0]), int(wpos[1]) + 1, int(wpos[2])]
                 return self._move_wide_candidate(wt, 1 if shore is not None else 3, cancel)
-            if last_res is None:
-                return SkillResult(False, "No reachable water source found within 64 blocks", {"executed": bool(sdata.get("executed"))}, "no_water_found")
         return last_res or SkillResult(False, "No reachable water source found within 64 blocks", {"executed": False}, "no_water_found")
 
     def _enter_lit_portal(self):
@@ -863,6 +914,23 @@ class AutonomyRuntime:
                                                  cancel_event=window)
                         data = dict(res.data or {}) if isinstance(res.data, dict) else {}
                         data["executed"] = True
+                if not res.success and not approached and float(origin[1]) < 60.0 and window.remaining() > 28:
+                    ascend = self._escape_underground_to_surface(
+                        origin,
+                        cancel_event=window,
+                        timeout_seconds=min(36.0, max(6.0, window.remaining() - 20.0)),
+                    )
+                    if ascend is not None:
+                        adata = ascend.data if isinstance(ascend.data, dict) else {}
+                        if adata.get("action_state") == "unknown" or ascend.error_code == "action_unconfirmed":
+                            return ascend
+                        if ascend.success and adata.get("risen", 0) > 0:
+                            surf_res = skill.build_portal(timeout_seconds=min(180, window.remaining()), allow_damage=True,
+                                                          cancel_event=window)
+                            if surf_res.success:
+                                return surf_res
+                            res = surf_res
+                            data = dict(res.data or {}) if isinstance(res.data, dict) else {}
                 if not res.success and not approached and window.remaining() > 25:
                     memory = MemoryEngine(str(self.journal.directory / "scout_memory"))
                     attempt = int(self.context.get("lava_scout_attempts", 0))

@@ -641,6 +641,57 @@ class OverflowAndLoopFixesTests(unittest.TestCase):
         step = ctl.next_action(obs_g)
         self.assertEqual((step.name, step.args["item"]), ("place_item", "gravel"))
 
+    def test_collect_liquid_allows_water_pickup_at_moderate_low_health_but_blocks_lava(self):
+        from skills.buckets import BucketSkills
+        from test_buckets import LiquidWorld
+
+        w = LiquidWorld()
+        w.status.update(health=6.5, food=14)
+        w.counts = {"bucket": 1}
+        w.block(w.source, "water", properties={"level": 0})
+        water_res = BucketSkills(w).execute("collect_liquid", {"pos": w.source, "expected_name": "water"})
+        self.assertTrue(water_res.success, water_res)
+        self.assertEqual(w.counts.get("water_bucket"), 1)
+
+        w2 = LiquidWorld()
+        w2.status.update(health=6.5, food=14)
+        w2.counts = {"bucket": 1}
+        w2.block(w2.source, "lava", properties={"level": 0})
+        lava_res = BucketSkills(w2).execute("collect_liquid", {"pos": w2.source, "expected_name": "lava"})
+        self.assertFalse(lava_res.success)
+        self.assertEqual(lava_res.error_code, "unsafe")
+
+    def test_escape_to_surface_climbs_underground_ceiling_and_aborts_before_hazard(self):
+        from skills.survival import SurvivalSkills
+        from test_v22_live_fixes import _BurrowMineWorld
+
+        w = _BurrowMineWorld(bot_pos=(0.5, 58.0, 0.5), surface_y=64)
+        w.blocks.clear()
+        w.items = {"cobblestone": 16, "stone_pickaxe": 1}
+        w.status["held"] = {"name": "cobblestone", "count": 16}
+        w.blocks[(0, 57, 0)] = {"name": "stone", "properties": {}}
+        for yy in range(60, 63):
+            w.blocks[(0, yy, 0)] = {"name": "stone", "properties": {}}
+        # Surrounded below y=63 so only surface exit is at y=63 along +x.
+        for yy in range(58, 63):
+            for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                w.blocks[(dx, yy, dz)] = {"name": "stone", "properties": {}}
+        w.blocks[(1, 62, 0)] = {"name": "grass_block", "properties": {}}
+        res = SurvivalSkills(w).escape_to_surface(max_climb=10, timeout_seconds=15.0)
+        self.assertTrue(res.success, res)
+        self.assertGreaterEqual(res.data["risen"], 5)
+        self.assertGreaterEqual(w.status["pos"][1], 63.0)
+
+        w_haz = _BurrowMineWorld(bot_pos=(0.5, 58.0, 0.5), surface_y=64)
+        w_haz.blocks.clear()
+        w_haz.items = {"cobblestone": 16, "stone_pickaxe": 1}
+        w_haz.blocks[(0, 57, 0)] = {"name": "stone", "properties": {}}
+        w_haz.blocks[(0, 60, 0)] = {"name": "stone", "properties": {}}
+        w_haz.blocks[(0, 61, 0)] = {"name": "water", "properties": {}}
+        res_haz = SurvivalSkills(w_haz).escape_to_surface(max_climb=10, timeout_seconds=15.0)
+        self.assertFalse(res_haz.success)
+        self.assertEqual(res_haz.error_code, "hazard_detected")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -815,6 +815,165 @@ class SurvivalSkills:
         after = self._status(context)
         return {"exited": True, "risen": risen, "pos": after["pos"], "executed": context.get("write_sent") is True}
 
+    def escape_to_surface(self, *, max_climb=26, timeout_seconds=36.0, cancel_event=None):
+        """Safely pillar up out of a pit or underground cave until reaching open-sky surface ground."""
+        from skills.action_workflow import (
+            WorkflowContext,
+            WorkflowGuard,
+            WorkflowStepError,
+            WorkflowUncertainError,
+            pillar_up,
+        )
+        from core.structure_spec import CAVE_DIGGABLE_BLOCKS, DEFAULT_REPLACEABLE, MINE_DIGGABLE_BLOCKS, MINE_SHAFT_SPEC, SCAFFOLD_BLOCKS
+
+        soft_blocks = frozenset({
+            "dirt", "grass_block", "coarse_dirt", "rooted_dirt", "podzol", "mycelium", "mud",
+            "packed_mud", "sand", "red_sand", "gravel", "clay", "moss_block", "pale_moss_block",
+            "moss_carpet", "leaf_litter", "snow", "snow_block",
+        })
+        leaves_set = self.RETREAT_LEAVES | {"azalea_leaves", "flowering_azalea_leaves"}
+        head_allowed = set(CAVE_DIGGABLE_BLOCKS) | set(MINE_DIGGABLE_BLOCKS) | set(leaves_set) | set(soft_blocks)
+        preferred = (
+            "cobblestone", "cobbled_deepslate", "stone_bricks", "stone",
+            "andesite", "granite", "diorite", "deepslate",
+            "oak_planks", "birch_planks", "spruce_planks", "dirt",
+        )
+        blocks_prio = preferred + tuple(b for b in sorted(SCAFFOLD_BLOCKS) if b not in preferred)
+        liquid_hazards = {"water", "flowing_water", "lava", "flowing_lava", "fire", "soul_fire"}
+        overhead_unsafe = liquid_hazards | {"sand", "red_sand", "gravel", "suspicious_sand", "suspicious_gravel"}
+
+        guard = WorkflowGuard(
+            self.client,
+            cancel_event=cancel_event,
+            timeout_seconds=max(6.0, float(timeout_seconds)),
+            max_reads=320,
+            allow_damage=True,
+        )
+        context = {"cancel": cancel_event, "deadline": time.monotonic() + max(6.0, float(timeout_seconds)),
+                   "reads": 0, "acted": False, "write_sent": False}
+
+        def _blk_name(x, y, z):
+            try:
+                raw = guard.read(self.client.get_block, int(x), int(y), int(z), timeout_seconds=guard.remaining_timeout(2.0))
+                blk = raw.get("result") if isinstance(raw, dict) and "result" in raw else raw
+                return str((blk or {}).get("name") or "air")
+            except WorkflowStepError:
+                return "air"
+
+        def _has_open_sky(x, y, z, span=14):
+            top_y = min(256, int(y) + int(span) + 2)
+            for yy in range(int(y) + 2, top_y):
+                nm = _blk_name(x, yy, z)
+                if nm in liquid_hazards:
+                    return False
+                if nm not in DEFAULT_REPLACEABLE and nm not in leaves_set:
+                    return False
+            return True
+
+        def _find_open_surface_side(cx, cy, cz):
+            for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                nx, nz = cx + dx, cz + dz
+                feet_n = _blk_name(nx, cy, nz)
+                head_n = _blk_name(nx, cy + 1, nz)
+                floor_n = _blk_name(nx, cy - 1, nz)
+                if (feet_n in DEFAULT_REPLACEABLE and head_n in DEFAULT_REPLACEABLE
+                        and floor_n not in DEFAULT_REPLACEABLE and floor_n not in liquid_hazards
+                        and floor_n not in self.HAZARDS and _has_open_sky(nx, cy, nz)):
+                    return [nx + 0.5, float(cy), nz + 0.5]
+            return None
+
+        risen = 0
+        try:
+            initial = guard.check_status(require_safe=True)
+            dim = str(initial.get("dimension") or "").lower()
+            if dim not in {"overworld", "minecraft:overworld"}:
+                return SkillResult(False, "Surface ascent requires the overworld", {"executed": False}, "unsafe_dimension")
+            if initial.get("in_water") or initial.get("in_lava"):
+                return SkillResult(False, "Cannot pillar to surface while in liquid", {"executed": False}, "unsafe")
+            pos0 = initial.get("pos") or [0, 64, 0]
+            fx = math.floor(float(pos0[0]) + 0.0001)
+            fy = math.floor(float(pos0[1]) + 0.0001)
+            fz = math.floor(float(pos0[2]) + 0.0001)
+            if fy >= 60 and _has_open_sky(fx, fy, fz) and _find_open_surface_side(fx, fy, fz) is not None:
+                return SkillResult(True, "Already on open surface ground", {"exited": True, "risen": 0, "pos": list(pos0), "executed": False})
+
+            wf_ctx = WorkflowContext(guard=guard, spec=MINE_SHAFT_SPEC, origin=[fx, fy, fz], orientation="south")
+            shifted = False
+            for _ in range(max(1, int(max_climb))):
+                if cancel_event is not None and cancel_event.is_set():
+                    break
+                if guard.remaining_timeout(float(timeout_seconds)) < 3.5:
+                    break
+                cur = guard.check_status(require_safe=True)
+                if cur.get("in_water") or cur.get("in_lava"):
+                    break
+                cpos = cur["pos"]
+                cx = math.floor(float(cpos[0]) + 0.0001)
+                cy = math.floor(float(cpos[1]) + 0.0001)
+                cz = math.floor(float(cpos[2]) + 0.0001)
+                if (cy >= 60 or (risen >= 3 and cy >= 58)) and _has_open_sky(cx, cy, cz):
+                    open_side = _find_open_surface_side(cx, cy, cz)
+                    if open_side is not None:
+                        try:
+                            guard.write(self.client.move_to, open_side[0], open_side[1], open_side[2], range=0.8, timeout_ms=4000)
+                        except WorkflowStepError:
+                            pass
+                        break
+                head2_name = _blk_name(cx, cy + 2, cz)
+                above3_name = _blk_name(cx, cy + 3, cz)
+                side_hazard = any(_blk_name(cx + dx, cy + 2, cz + dz) in liquid_hazards for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)))
+                if (head2_name in liquid_hazards | {"bedrock", "chest", "trapped_chest", "spawner"}
+                        or above3_name in overhead_unsafe or side_hazard):
+                    if risen == 0 and not shifted:
+                        moved_aside = False
+                        for dx, dz in ((2, 0), (-2, 0), (0, 2), (0, -2), (1, 1), (-1, -1)):
+                            tx, tz = cx + dx, cz + dz
+                            if (_blk_name(tx, cy, tz) in DEFAULT_REPLACEABLE
+                                    and _blk_name(tx, cy + 1, tz) in DEFAULT_REPLACEABLE
+                                    and _blk_name(tx, cy - 1, tz) not in DEFAULT_REPLACEABLE | liquid_hazards):
+                                try:
+                                    guard.write(self.client.move_to, tx + 0.5, float(cy), tz + 0.5, range=0.8, timeout_ms=4000)
+                                    moved_aside = True
+                                    shifted = True
+                                    break
+                                except WorkflowStepError:
+                                    continue
+                        if moved_aside:
+                            continue
+                    return SkillResult(risen > 0, f"Stopped surface ascent safely before overhead hazard ({head2_name}/{above3_name})",
+                                       {"exited": risen > 0, "risen": risen, "pos": list(cpos), "executed": guard.writes > 0},
+                                       None if risen > 0 else "hazard_detected")
+                if head2_name not in DEFAULT_REPLACEABLE and head2_name not in soft_blocks and head2_name not in leaves_set:
+                    inv_raw = guard.read(self.client.inventory, timeout_seconds=guard.remaining_timeout(2.0))
+                    rows = (inv_raw.get("result") or {}).get("items") if isinstance(inv_raw, dict) else []
+                    has_pick = any(isinstance(r, dict) and r.get("name") in self.PICKAXES and r.get("count", 0) > 0 for r in (rows or []))
+                    if not has_pick:
+                        return SkillResult(risen > 0, "Missing pickaxe for surface ascent",
+                                           {"exited": risen > 0, "risen": risen, "pos": list(cpos), "executed": guard.writes > 0},
+                                           None if risen > 0 else "missing_pickaxe")
+                if wf_ctx.select_item(blocks_prio) is None:
+                    return SkillResult(risen > 0, "Inventory lacks scaffold blocks for surface ascent",
+                                       {"exited": risen > 0, "risen": risen, "pos": list(cpos), "executed": guard.writes > 0},
+                                       None if risen > 0 else "missing_building_block")
+                pillar_up(
+                    wf_ctx,
+                    steps=1,
+                    blocks=blocks_prio,
+                    allow_dig_headroom=True,
+                    allowed_headroom_blocks=head_allowed,
+                )
+                risen += 1
+            after = guard.check_status(require_safe=False)
+            apos = list(after.get("pos") or pos0)
+            return SkillResult(risen > 0, f"Ascended {risen} blocks toward open surface",
+                               {"exited": risen > 0, "risen": risen, "pos": apos, "executed": guard.writes > 0},
+                               None if risen > 0 else "surface_ascent_no_progress")
+        except WorkflowUncertainError as exc:
+            return SkillResult(False, str(exc), {"exited": False, "risen": risen, "executed": guard.writes > 0, **exc.data}, exc.code)
+        except WorkflowStepError as exc:
+            return SkillResult(risen > 0, str(exc), {"exited": risen > 0, "risen": risen, "executed": guard.writes > 0},
+                               None if risen > 0 else (exc.code or "surface_ascent_failed"))
+
     @staticmethod
     def _hurt_interruption(error):
         """Only a complete official response proves this move's backend termination."""

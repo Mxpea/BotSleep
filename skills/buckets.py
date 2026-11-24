@@ -90,7 +90,10 @@ class BucketSkills(DailySurvivalSkills):
 
     def _station(self, pos, context, *, item="bucket", liquid_name=None):
         status = self._prepare(context)
-        if status["health"] < 12 or status.get("food", 0) < 8:
+        is_water_pickup = item == "bucket" and liquid_name == "water"
+        min_health = 3 if is_water_pickup else 12
+        min_food = 4 if is_water_pickup else 8
+        if status["health"] < min_health or status.get("food", 0) < min_food:
             raise _Failure("unsafe", "Bucket use requires adequate health and food")
         if math.dist(status["pos"], context["origin"]) > .25:
             raise _Failure("unsafe", "Bucket stance changed")
