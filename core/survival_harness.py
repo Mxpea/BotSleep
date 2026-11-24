@@ -709,6 +709,17 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
                 self.context.pop("task_execution", None)
             else:
                 self.context["task_execution"] = self._task_snapshot()
+        burrow = self.context.get("night_burrow")
+        if isinstance(burrow, dict):
+            cur_status = observation.get("status") or {}
+            bpos = burrow.get("pos")
+            cpos = cur_status.get("pos")
+            if (burrow.get("generation") != self.context.get("life_generation")
+                    or not isinstance(bpos, (list, tuple)) or len(bpos) != 3
+                    or not isinstance(cpos, (list, tuple)) or len(cpos) != 3
+                    or abs(cpos[0] - bpos[0]) > 2.5 or abs(cpos[2] - bpos[2]) > 2.5
+                    or cpos[1] > bpos[1] + 1.5):
+                self.context.pop("night_burrow", None)
         if observation.get("observation_scope") == "safety":
             # Empty fields mean unobserved, not an empty backpack or lost goals.
             self.context.setdefault("milestones", {})
@@ -859,7 +870,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
         names = {"select_task", "update_progress", "finish_task", "force_exit_task", "end_competition"}
         if decision.name not in names:
             if self.competition.snapshot().get("active_goal_id") is None and decision.name not in {
-                "wait", "retreat_from", "canopy_escape", "water_escape", "emergency_burrow", "clear_burial", "eat_food", "auto_sleep", "fight_hostile"}:
+                "wait", "retreat_from", "canopy_escape", "water_escape", "emergency_burrow", "exit_burrow", "clear_burial", "eat_food", "auto_sleep", "fight_hostile"}:
                 if (decision.goal == "food_recovery" and decision.name in {"position_for_task", "clear_food_headroom"}
                         and self.daily_policy and decision == self.daily_policy._food_search(observation, self.context)
                         and self.daily_policy.validate(decision, observation, self.context) is None):
@@ -1045,6 +1056,8 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
                 self.context.pop("retreat_recovery", None)
             elif not result.success:
                 self.context["emergency_burrow_cooldown"] = time.time() + 120.0
+        elif decision.name == "exit_burrow" and result.success:
+            self.context.pop("night_burrow", None)
         if observation and observation.get("observation_scope") == "safety":
             if decision.name == "fight_hostile" and self.memory:
                 self.memory.record_result(decision, result, observation)
@@ -1536,7 +1549,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
                 else:
                     runner = resolve_skill_runner(self, decision.name)
                     if (self.llm_override_on_block
-                            and decision.name not in {"retreat_from", "canopy_escape", "water_escape", "emergency_burrow", "auto_sleep"}
+                            and decision.name not in {"retreat_from", "canopy_escape", "water_escape", "emergency_burrow", "exit_burrow", "auto_sleep"}
                             and runner in {self.skills, self.combat_skills, self.bucket_skills}):
                         options["force_override"] = True
                     result = runner.execute(decision.name, decision.args, cancel_event=self._cancel, **options)
@@ -1583,7 +1596,7 @@ class SurvivalHarness(AutonomyRuntime, LocalRecoveryRuntime, ContinuousRecovery)
         except LLMError as exc:
             if exc.code == "llm_preempted":
                 decision = Decision("wait", {"seconds": 0.25}, str(exc), "safety")
-                return decision, SkillResult(True, str(exc), {"executed": False, "model_pending": True}), observation
+                return decision, SkillResult(True, str(exc), {"executed": False, "model_pending": True, "preempt_code": "llm_preempted"}), observation
             return decision, SkillResult(False, str(exc), {"executed": False, **getattr(exc, "details", {})}, exc.code), observation
         except APIError as exc:
             # Reuse the existing session so upstream death-loop protection stays

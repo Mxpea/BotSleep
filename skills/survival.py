@@ -84,6 +84,7 @@ class SurvivalSkills:
         "canopy_escape": (set(), set()),
         "water_escape": (set(), set()),
         "emergency_burrow": (set(), set()),
+        "exit_burrow": (set(), set()),
         "clear_burial": ({"pos"}, {"pos"}),
     }
 
@@ -723,6 +724,92 @@ class SurvivalSkills:
         context["placement_verified"] = True
         return {"burrow_feet": [fx, expected_feet_y, fz], "cap_pos": cap_pos, "cap_item": cap_item,
                 "estimated_seconds": round(estimated_sec, 1), "night_burrow": True}
+
+    def _exit_burrow(self, args, context):
+        """Uncap an emergency burrow or shallow 1x1 pit and climb cleanly back to open ground."""
+        from skills.action_workflow import WorkflowContext, WorkflowGuard, WorkflowStepError, pillar_up
+        from core.structure_spec import CAVE_DIGGABLE_BLOCKS, MINE_DIGGABLE_BLOCKS, MINE_SHAFT_SPEC, SCAFFOLD_BLOCKS
+
+        initial = self._status(context)
+        self._overworld(initial)
+        if initial.get("in_water") or initial.get("in_lava"):
+            raise _Failure("unsafe", "Cannot pillar out of burrow while in liquid")
+        fx = math.floor(initial["pos"][0] + 0.0001)
+        fy = math.floor(initial["pos"][1] + 0.0001)
+        fz = math.floor(initial["pos"][2] + 0.0001)
+
+        head_allowed = (
+            set(CAVE_DIGGABLE_BLOCKS)
+            | set(MINE_DIGGABLE_BLOCKS)
+            | {
+                "oak_leaves", "birch_leaves", "spruce_leaves", "dark_oak_leaves",
+                "acacia_leaves", "jungle_leaves", "mangrove_leaves", "cherry_leaves",
+                "pale_oak_leaves", "azalea_leaves", "flowering_azalea_leaves",
+                "moss_block", "pale_moss_block", "moss_carpet", "leaf_litter",
+            }
+        )
+        # Clear overhead burrow cap at fy+2 first (also freeing cramped leaf/dirt traps).
+        cap_pos = [fx, fy + 2, fz]
+        cap_blk = self._block(cap_pos, context)
+        if cap_blk["name"] not in self.AIR:
+            if not self._safe_block(cap_blk):
+                raise _Failure("unsafe", "Hazard overhead prevents exiting burrow", {"pos": cap_pos, "block": cap_blk["name"]})
+            self._action(context, self.client.dig, cap_pos, collect=True)
+
+        guard = WorkflowGuard(
+            self.client,
+            cancel_event=context.get("cancel"),
+            timeout_seconds=18.0,
+            allow_damage=True,
+        )
+        wf_ctx = WorkflowContext(
+            guard=guard,
+            spec=MINE_SHAFT_SPEC,
+            origin=[fx, fy, fz],
+            orientation="south",
+        )
+        blocks_prio = tuple(SCAFFOLD_BLOCKS) + (
+            "stone", "andesite", "granite", "diorite", "deepslate",
+            "oak_planks", "birch_planks", "spruce_planks",
+        )
+        risen = 0
+        for _ in range(4):
+            self._check(context)
+            cur = self._status(context)
+            cx = math.floor(cur["pos"][0] + 0.0001)
+            cy = math.floor(cur["pos"][1] + 0.0001)
+            cz = math.floor(cur["pos"][2] + 0.0001)
+            open_side = None
+            for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                feet_n = self._block([cx + dx, cy, cz + dz], context)
+                head_n = self._block([cx + dx, cy + 1, cz + dz], context)
+                floor_n = self._block([cx + dx, cy - 1, cz + dz], context)
+                if (feet_n["name"] in self.AIR and head_n["name"] in self.AIR
+                        and floor_n["name"] not in self.AIR and self._safe_block(floor_n)):
+                    open_side = [cx + dx + 0.5, float(cy), cz + dz + 0.5]
+                    break
+            if open_side is not None and (risen > 0 or cy >= fy + 1):
+                try:
+                    self._action(context, self.client.move_to, open_side[0], open_side[1], open_side[2], range=0.8, timeout_ms=4000)
+                except (_Failure, APIError):
+                    pass
+                break
+            try:
+                pillar_up(
+                    wf_ctx,
+                    steps=1,
+                    blocks=blocks_prio,
+                    allow_dig_headroom=True,
+                    allowed_headroom_blocks=head_allowed,
+                )
+                context["write_sent"] = True
+                risen += 1
+            except WorkflowStepError as exc:
+                if risen > 0:
+                    break
+                raise _Failure(exc.code or "unsafe", str(exc))
+        after = self._status(context)
+        return {"exited": True, "risen": risen, "pos": after["pos"], "executed": context.get("write_sent") is True}
 
     @staticmethod
     def _hurt_interruption(error):

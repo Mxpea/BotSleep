@@ -905,6 +905,8 @@ class MineShaftSkill(BaseSkill):
         result.data["torches_placed"] = int(ctx.extra.get("torches_placed", 0))
         result.data["stop_reason"] = stop_reason
         result.data["home_reason"] = home_reason
+        result.data["origin"] = list(int_origin)
+        result.data["orientation"] = norm_orient
         result.data["mining_progress"] = progress_snapshot
 
         if stop_reason == "return_home" and home_reason:
@@ -1202,10 +1204,28 @@ class MineShaftSkill(BaseSkill):
         world = ctx.world_pos(rel_pos, integer=True) if relative else [int(rel_pos[0]), int(rel_pos[1]), int(rel_pos[2])]
         dug = 0
         allowed = set(MINE_DIGGABLE_BLOCKS | DEFAULT_REPLACEABLE | (allowed_extra or set()))
+        soft_without_pick = set(DEFAULT_REPLACEABLE) | {
+            "dirt", "grass_block", "coarse_dirt", "rooted_dirt", "podzol", "mycelium",
+            "sand", "red_sand", "gravel", "clay", "snow", "snow_block",
+            "moss_block", "pale_moss_block", "mud", "muddy_mangrove_roots",
+            "soul_sand", "soul_soil", "oak_leaves", "birch_leaves",
+            "spruce_leaves", "dark_oak_leaves", "acacia_leaves", "jungle_leaves",
+            "mangrove_leaves", "cherry_leaves", "pale_oak_leaves",
+            "azalea_leaves", "flowering_azalea_leaves", "torch", "wall_torch",
+        }
         for _attempt in range(5):
             bname = self._check_cell_and_neighbors_safe(ctx, world)
             if bname in AIR:
                 break
+            if ctx.extra.get("require_pickaxe", True) and bname not in soft_without_pick:
+                if ctx.select_item(PICKAXE_PRIORITY) is None:
+                    raise WorkflowStepError(
+                        "missing_pickaxe",
+                        f"No usable pickaxe available to mine {bname}; aborting before barehanded digging",
+                        blocker_type="missing_pickaxe",
+                        blocker_pos=list(world),
+                        blocker_block=bname,
+                    )
             above_name = str(self._cached_read(ctx, [world[0], world[1] + 1, world[2]]).get("name") or "air")
             aim_at(ctx, world, relative=False)
             # Preserve iron/diamond pickaxe durability on soft upper stone unless descending for deep diamonds.
@@ -2054,6 +2074,11 @@ class MineShaftSkill(BaseSkill):
             else ([list(cur_foot)] if ctx.extra.get("underground_reentry") else [ctx.world_pos((0, -5, 8), integer=True)])
         )
         if saved_trail and len(saved_trail) > 1:
+            # If resuming an existing shaft from the surface hub, descend the 5 entrance stairs first.
+            live_now = WorldNavigator.sync_live_pos(ctx)
+            if not ctx.extra.get("underground_reentry") and live_now is not None and live_now[1] >= int(ctx.origin[1]) - 1:
+                for stair_rel in ((0.5, 0.0, -0.5), (0.5, -3.0, 2.5), (0.5, -5.0, 4.5)):
+                    self._step_to(ctx, stair_rel, tolerance=0.95)
             self._retreat_downsampled(ctx, saved_trail, step_stride=1, reverse=False)
         elif tuple(cur_foot) != tuple(trail[0]):
             stand_cell(ctx, cur_foot, tolerance=1.0)
@@ -3038,11 +3063,60 @@ class MineShaftSkill(BaseSkill):
             return None
         return sorted(CARDINAL_ORIENTATIONS, key=lambda o: used_counts[o])
 
+    def _find_reusable_shaft(self, start_surface: Sequence[int]) -> Optional[Dict[str, Any]]:
+        """Return the latest nearby mine_shaft episode anchor unless marked exhausted/unsafe."""
+        ep_path = getattr(getattr(self, "memory", None), "episodes_file", None)
+        if not isinstance(ep_path, (str, os.PathLike)) or not os.path.exists(ep_path):
+            return None
+        try:
+            with open(ep_path, "r", encoding="utf-8") as fh:
+                lines = fh.readlines()[-120:]
+        except Exception:
+            return None
+        terminal_errors = {"no_mine_site_found", "unreachable_mine_site", "unsafe_site", "cave_abandoned", "bands_exhausted"}
+        dead_origins: set = set()
+        for line in reversed(lines):
+            try:
+                row = json.loads(line)
+            except Exception:
+                continue
+            if row.get("event_type") != "mine_shaft":
+                continue
+            details = row.get("details") if isinstance(row.get("details"), dict) else {}
+            raw_origin = details.get("origin") or row.get("pos")
+            if not isinstance(raw_origin, list) or len(raw_origin) != 3:
+                continue
+            try:
+                ox, oy, oz = int(round(raw_origin[0])), int(round(raw_origin[1])), int(round(raw_origin[2]))
+            except (TypeError, ValueError):
+                continue
+            key = (ox, oy, oz)
+            stop_r = str(details.get("stop_reason") or "")
+            if stop_r in terminal_errors:
+                dead_origins.add(key)
+                continue
+            if key in dead_origins:
+                continue
+            if math.hypot(ox - start_surface[0], oz - start_surface[2]) > 48.0:
+                continue
+            if abs(oy - start_surface[1]) > 12:
+                continue
+            orient = details.get("orientation")
+            prog = details.get("mining_progress") if isinstance(details.get("mining_progress"), dict) else None
+            return {
+                "origin": [ox, oy, oz],
+                "orientation": str(orient) if orient else None,
+                "resume_progress": prog,
+            }
+        return None
+
     @_uncertain_boundary
     def mine_targets_from_surface(
         self,
         origin: Optional[Sequence[int]] = None,
         *,
+        orientation: Optional[str] = None,
+        resume_progress: Optional[Mapping[str, Any]] = None,
         targets: Optional[Mapping[str, Any]] = None,
         cave_policy: Optional[Mapping[str, Any]] = None,
         home_thresholds: Optional[Mapping[str, Any]] = None,
@@ -3153,6 +3227,26 @@ class MineShaftSkill(BaseSkill):
                 return SkillResult(False, "Could not verify the surface before starting the shaft",
                                    error_code="surface_return_failed", data={"surface_return": entry_check})
             rot_orients = None if underground_start else self._preferred_shaft_orientations(start_surface)
+            reuse_origin: Optional[List[int]] = list(start_surface) if origin is not None else None
+            reuse_orient: Optional[str] = (
+                str(orientation)
+                if orientation is not None
+                else (
+                    str(resume_progress.get("orientation"))
+                    if isinstance(resume_progress, Mapping) and resume_progress.get("orientation")
+                    else None
+                )
+            )
+            reuse_progress: Optional[Dict[str, Any]] = (
+                dict(resume_progress) if isinstance(resume_progress, Mapping) else None
+            )
+            if not underground_start and origin is None:
+                reusable = self._find_reusable_shaft(start_surface)
+                if reusable is not None:
+                    reuse_origin = reusable.get("origin")
+                    reuse_orient = reuse_orient or reusable.get("orientation")
+                    if reuse_progress is None:
+                        reuse_progress = reusable.get("resume_progress")
             shaft_kwargs: Dict[str, Any] = {
                 "radius": 20,
                 "branch_length": 4,
@@ -3172,7 +3266,26 @@ class MineShaftSkill(BaseSkill):
                 "cancel_event": cancel_event,
                 "allow_damage": allow_damage,
             }
-            if rot_orients:
+            if not underground_start and (reuse_origin is not None or reuse_progress is not None):
+                res = self.build_mine_shaft(
+                    **shaft_kwargs,
+                    origin=reuse_origin,
+                    orientation=reuse_orient,
+                    resume_progress=reuse_progress,
+                )
+                if not _unknown_result(res) and res.error_code in {
+                    "no_mine_site_found",
+                    "unreachable_mine_site",
+                    "unsafe_site",
+                    "cave_abandoned",
+                }:
+                    if rot_orients:
+                        res = self.build_mine_shaft(**shaft_kwargs, orientations=rot_orients[:1])
+                        if not _unknown_result(res) and res.error_code in {"no_mine_site_found", "unreachable_mine_site", "unsafe_site"}:
+                            res = self.build_mine_shaft(**shaft_kwargs)
+                    else:
+                        res = self.build_mine_shaft(**shaft_kwargs)
+            elif rot_orients:
                 res = self.build_mine_shaft(**shaft_kwargs, orientations=rot_orients[:1])
                 if not _unknown_result(res) and res.error_code in {"no_mine_site_found", "unreachable_mine_site", "unsafe_site"}:
                     res = self.build_mine_shaft(**shaft_kwargs)
@@ -3180,7 +3293,8 @@ class MineShaftSkill(BaseSkill):
                 res = self.build_mine_shaft(**shaft_kwargs)
             if _unknown_result(res) or res.error_code in EXPEDITION_INTERRUPTS:
                 return res
-            retreat_trail = ((res.data or {}).get("mining_progress") or {}).get("deep_trail") or []
+            res_data = dict(res.data or {}) if isinstance(res.data, dict) else {}
+            retreat_trail = (res_data.get("mining_progress") or {}).get("deep_trail") or []
             surface_chk = self._ensure_returned_to_surface(
                 start_surface,
                 retreat_trail=retreat_trail,
@@ -3220,15 +3334,27 @@ class MineShaftSkill(BaseSkill):
         done_ok = bool(final_surface.get("on_surface") and (stop_reason == "target_reached" or (target_ore_gained > 0 and shaft_ok)))
         if not final_surface.get("on_surface"):
             stop_reason = "surface_return_failed"
+        out_data: Dict[str, Any] = {
+            "harvested": final_net,
+            "stop_reason": stop_reason,
+            "underground_reentry": underground_start,
+            "phases": phase_reports,
+            "surface_return": final_surface,
+        }
+        if bands:
+            if res_data.get("origin") is not None:
+                out_data["origin"] = res_data.get("origin")
+            if res_data.get("orientation") is not None:
+                out_data["orientation"] = res_data.get("orientation")
+            if res_data.get("mining_progress") is not None:
+                out_data["mining_progress"] = res_data.get("mining_progress")
+        elif origin is not None:
+            out_data["origin"] = list(start_surface)
+            if orientation is not None:
+                out_data["orientation"] = str(orientation)
         return SkillResult(
             done_ok,
             f"Surface stratified mining finished (stop={stop_reason}, on_surface={final_surface.get('on_surface')}, harvested={final_net})",
             error_code=None if done_ok else stop_reason,
-            data={
-                "harvested": final_net,
-                "stop_reason": stop_reason,
-                "underground_reentry": underground_start,
-                "phases": phase_reports,
-                "surface_return": final_surface,
-            },
+            data=out_data,
         )

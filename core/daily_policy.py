@@ -751,18 +751,32 @@ class DailySafetyPolicy:
             for row in (observation.get("entities") or [])
         )
 
+    def _in_active_night_burrow(self, observation, context=None):
+        """Return True when the bot is currently standing inside its tracked night_burrow pit."""
+        ctx = context or {}
+        burrow = ctx.get("night_burrow")
+        status = (observation or {}).get("status") or {}
+        pos = self._point(status.get("pos"))
+        if not isinstance(burrow, dict) or pos is None:
+            return False
+        if burrow.get("generation") != ctx.get("life_generation"):
+            return False
+        b_pos = burrow.get("pos") or burrow.get("burrow_feet")
+        return bool(
+            isinstance(b_pos, (list, tuple))
+            and len(b_pos) == 3
+            and abs(pos[0] - b_pos[0]) <= 2.5
+            and abs(pos[2] - b_pos[2]) <= 2.5
+            and pos[1] <= b_pos[1] + 1.5
+        )
+
     def _is_sealed_underground(self, observation, context=None):
         status = observation.get("status") or {}
         pos = self._point(status.get("pos"))
         if pos is None:
             return False
-        ctx = context or {}
-        burrow = ctx.get("night_burrow")
-        if isinstance(burrow, dict) and burrow.get("generation") == ctx.get("life_generation"):
-            b_pos = burrow.get("pos")
-            if (isinstance(b_pos, (list, tuple)) and len(b_pos) == 3
-                    and abs(pos[0] - b_pos[0]) <= 2.5 and abs(pos[2] - b_pos[2]) <= 2.5 and pos[1] <= b_pos[1] + 1.5):
-                return True
+        if self._in_active_night_burrow(observation, context):
+            return True
         fx, fy, fz = (math.floor(pos[0]), math.floor(pos[1]), math.floor(pos[2]))
         blocks = {
             cell: row
@@ -878,6 +892,11 @@ class DailySafetyPolicy:
             return None
         if self._night(status) and (home := self._return_home(observation)):
             return home
+        if (self._in_active_night_burrow(observation, context)
+                and status.get("is_day") is True and status.get("time_of_day", 0) < 12000
+                and not self._visible_dangerous_hostiles(observation, status["pos"], context)):
+            return Decision("exit_burrow", {},
+                "Daytime returned; uncap and exit night_burrow pit cleanly before surface work", "safety")
         if self._should_emergency_burrow(observation, context):
             return Decision("emergency_burrow", {},
                 "Dig 3 blocks down and cap 1 overhead to survive night without combat gear", "safety")
@@ -916,7 +935,7 @@ class DailySafetyPolicy:
                 return None
             if forced.name == "retreat_from" and decision.name == forced.name and self._point(decision.args.get("pos")) == forced.args["pos"]:
                 return None
-            if forced.name in {"auto_sleep", "water_escape", "emergency_burrow"} and decision.name == forced.name and (forced.name not in {"water_escape", "emergency_burrow"} or not decision.args):
+            if forced.name in {"auto_sleep", "water_escape", "emergency_burrow", "exit_burrow"} and decision.name == forced.name and (forced.name not in {"water_escape", "emergency_burrow", "exit_burrow"} or not decision.args):
                 return None
             return scenario
         status = observation["status"]

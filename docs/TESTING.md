@@ -1,5 +1,24 @@
 # 配置、客户端、生存、赛事与监控验证
 
+## 1.5 小时 9-Bot 分散出生实服测试（`nether_bench_v22`）与六类问题修复（2026-11-24）
+
+基线在 `develop-tianya/api-model-opt`（`a951a3b` 之后）对全新重置的 Leaves 1.21.11 世界（`Seed: [-3196205548112340014]`、`difficulty=easy`、`mc-agent-api` 1.3.19，`intent="speedrun"`、`llm_override_on_block=True`）执行了 **5400s（1.5 小时）零手动介入、9-Bot 分散出生测试（`nether_bench_v22`）**：
+
+- **`nether_bench_v22` 实服结果（`SleepBot1..9`，`min_dist=1609.9`，`y=64..88`）**：
+  - 全员 **9/9** 在 5400s 预算到达后以 `rc=2` 正常退出（`0` 次运行时永久冻结、`ACTION_WATCHDOG_TIMEOUT=0`，`AUTO_PAUSED_GAME_RECOVERED` 在 `bot_3=4`、`bot_6=2`、`bot_8=2`、`bot_4/5/7=1` 自动恢复）。
+  - 服务端累计 **`minecraft:story/*` 成就 35 项**（`SleepBot3`/`6` 均达 5 项含 `iron_tools`；`SleepBot1`/`4`/`7`/`8` 各 4 项含 `smelt_iron`；`SleepBot2`/`5`/`9` 各 3 项）、总死亡 **52 次**（`SleepBot1=0`、`SleepBot8=1`、`SleepBot9=2`、`SleepBot7=3`、`SleepBot4/5=6`、`SleepBot6=9`、`SleepBot3=11`、`SleepBot2=14`）、**进入下界 `0/9`**。
+  - **日志与旁观截屏定位的根因 + 6 类行为问题**（已在当前工作树修复，**尚未在实服复测**）：
+    1. **复用已有矿道与开局阶梯**（[skills/mining.py](../skills/mining.py)、[core/autonomy_runtime.py](../core/autonomy_runtime.py)、[core/starter_mining_task.py](../core/starter_mining_task.py)）：`mine_targets_from_surface` 新增 `_find_reusable_shaft` 并转发 `origin`/`orientation`/`resume_progress`（失败再回退新选址），`_wf_deep_fishbone` 地表续挖先下 5 层楼梯再回放 `deep_trail`；`AutonomyRuntime` 持久化 `deep_mine_site`；`StarterMiningTask.survey` 复用 24×6 格内未废弃 `last_site`（补齐缺失 `import math`）。
+    2. **禁止重复制造工作台**（[agent/llm_planner.py](../agent/llm_planner.py)、[core/intent_compiler.py](../core/intent_compiler.py)）：背包已持工作台或 16 水平格 / 4 垂直格内已可见工作台时拒绝重复 `craft_item` / `run_survival_task(craft crafting_table)`；`should_prefer_local_workstation` 放宽为 `max_horiz=16.0, max_dy=4.0`。
+    3. **放置缺少空间不再死重试**（[core/autonomous_tasks.py](../core/autonomous_tasks.py)、[core/loop_supervisor.py](../core/loop_supervisor.py)、[agent/llm_planner.py](../agent/llm_planner.py)）：工作台/熔炉 `placement_candidates` 为空时先调用 `_clear_adjacent_placement_foliage` 清枝叶或有界 `_explore` 换位；`LoopSupervisor` 纳管 `place_item`/`plan_shelter`/`build_shelter_step` 空间失败签名冷却。
+    4. **无镐禁止手挖岩石与矿石**（[skills/mining.py](../skills/mining.py)、[agent/llm_planner.py](../agent/llm_planner.py)）：将 `stone`/`cobblestone` 等岩石移出 `_dig_cell_safely` 的 `soft_without_pick` 集合（无镐触发 `missing_pickaxe`）；`LLMSurvivalPlanner` 在原子 `gather_block` / `gather_resource` 前校检对应镐阶。
+    5. **已开矿脉挖净余矿**（[skills/ore_harvester.py](../skills/ore_harvester.py)）：`OreHarvester.mine_vein` 开启 `finish_vein=True`，已开挖同种矿脉（`dug > 0`）即使满足配额也挖完相连可见余块，不再新开其他矿脉。
+    6. **夜间 `night_burrow` 地坑卡死与 `nether_portal` `v22` 故障修复**（[core/safety_arbiter.py](../core/safety_arbiter.py)、[core/loop_supervisor.py](../core/loop_supervisor.py)、[core/daily_policy.py](../core/daily_policy.py)、[skills/survival.py](../skills/survival.py)、[core/survival_harness.py](../core/survival_harness.py)、[core/autonomous_tasks.py](../core/autonomous_tasks.py)、[core/autonomy_runtime.py](../core/autonomy_runtime.py)）：
+       - 兼容 `night_burrow.pos` 与 `burrow_feet`；处于密封坑内且未受击/掉血/危险方块时不再因地表头顶僵尸重复 `llm_cancelled`（`SleepBot1` 曾达 1951 次），并在 `SkillResult.data["preempt_code"]` 透传给 `LoopSupervisor` 触发护盾；
+       - 新增白天无危险时自动出坑动作 `exit_burrow`（使用 `MINE_SHAFT_SPEC` 清顶帽并搭柱爬出），禁止在 `night_burrow` 坑内放置工作台/熔炉；
+       - `nether_portal` 取水靠近改用 `goal="nether_portal_approach", range=2` 避免被 `move_to(goal="nether_portal")` 劫持，`AutonomyRuntime` 的 `move_to` 范围从 `5` 修正为 `4`（满足 `SurvivalSkills._move_to` `0.5..4` 上界）。
+- 新增离线回归测试 [tests/test_v22_live_fixes.py](../tests/test_v22_live_fixes.py)（9 项），并在当前基线运行离线全量测试 `BOTSLEEP_RUN_LIVE_TESTS=0 .\.venv\Scripts\python.exe -B -m unittest discover -s tests -q`（**`2161` 项通过、跳过 `10` 项**，详见提交后最终复验结果；实服 `nether_bench_v23` 复测待下一轮启动）。
+
 ## 端侧 API 过夜 9-Bot 长跑与「LLM 优先接管 + 警告降级」方案（2026-11-23）
 
 基线为 `develop-tianya/api-model-opt`（提交 `0b02c21` 至 `9824e80` 实测，以及最新未提交/待推的 `llm_override_on_block` 改造）。Windows / Python 3.13，Leaves 1.21.11（`difficulty=easy`）+ 单端口 `mc-agent-api`（`18900`，未改动源码）+ 默认端侧 API（`https://api.nju-aia.com/v1`，`model: default`），跨 9 个 Bot 启用全局并发=1 FIFO 门禁与 `[4, 16, 32, 64, 128, 256]` 秒自动退避重试（`gate_wait_seconds: 600`、`recover_uncertain_transport: true`、`max_runtime_seconds: 4680`）。

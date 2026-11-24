@@ -635,8 +635,8 @@ class AutonomousTaskController:
                 if math.dist(origin, target_w["pos"]) <= 4.5:
                     return self._decision("collect_liquid", {"pos": list(target_w["pos"]), "expected_name": "water"},
                                           "Fill bucket with water for Nether Portal speedrun casting")
-                return Decision("move_to", {"pos": list(target_w["pos"]), "range": 3},
-                                "Move within reach of water source to fill bucket", "nether_portal")
+                return Decision("move_to", {"pos": list(target_w["pos"]), "range": 2},
+                                "Move within reach of water source to fill bucket", "nether_portal_approach")
             if not self._data.get("water_searched"):
                 return Decision("move_to", {"pos": list(origin), "range": 4},
                                 "Search wider radius (64 blocks) for water source to fill bucket", "nether_portal_water")
@@ -945,6 +945,45 @@ class AutonomousTaskController:
                     return self._decision("harvest_crop", {"pos": row["pos"], "expected_name": "wheat"}, "Harvest currently mature wheat")
         return None
 
+    def _in_active_night_burrow(self, obs, context):
+        """Return True while the bot remains sealed inside its 1x1x3 night_burrow pit."""
+        ctx = context if isinstance(context, dict) else {}
+        burrow = ctx.get("night_burrow")
+        status = (obs or {}).get("status") or {}
+        origin = self.rules._pos(status.get("pos"))
+        if not isinstance(burrow, dict) or origin is None:
+            return False
+        if burrow.get("generation") != ctx.get("life_generation"):
+            return False
+        bpos = self.rules._pos(burrow.get("pos"))
+        return bool(
+            bpos is not None
+            and abs(origin[0] - bpos[0]) <= 2.5
+            and abs(origin[2] - bpos[2]) <= 2.5
+            and origin[1] <= bpos[1] + 1.5
+        )
+
+    def _clear_adjacent_placement_foliage(self, obs, context):
+        """Clear one nearby foliage/leaf block at body height to free workstation placement room."""
+        origin = obs["status"]["pos"]
+        fy = math.floor(origin[1] + 0.0001)
+        blocked = self.rules._blocked(context)
+        foliage = {"short_grass", "tall_grass", "fern", "large_fern", "vine", "moss_carpet", "leaf_litter"}
+        for row in self.rules._blocks(obs):
+            name = row.get("name") or ""
+            pos = self.rules._pos(row.get("pos"))
+            if pos is None or (not name.endswith("_leaves") and name not in foliage):
+                continue
+            if not (fy <= pos[1] <= fy + 1 and math.dist(origin, pos) <= 2.5):
+                continue
+            if self.rules._key(pos) in blocked:
+                continue
+            step = self._decision("clear_foliage", {"pos": list(pos), "expected_name": name},
+                                  "Clear nearby foliage to open room for placing workstation")
+            if self.safety_policy.validate(step, obs, context) is None:
+                return step
+        return None
+
     def _resource_child(self, decision, obs, context):
         """Board/workstation prerequisites use the same fresh resource recovery."""
         if decision and decision.name in {"gather_block", "gather_resource"}:
@@ -964,6 +1003,9 @@ class AutonomousTaskController:
         if decision and (local_table_for_door or decision.name == "place_item" and decision.args.get("item") == "crafting_table"
                 or decision.name == "wait" and decision.goal == "crafting_table" and obs["counts"].get("crafting_table", 0)):
             origin = obs["status"]["pos"]
+            if self._in_active_night_burrow(obs, context):
+                self._escalate("night_burrow_no_workstation_space")
+                return None
             if not self._fresh(obs) or obs.get("local_geometry_origin") != origin:
                 return None
             feet = [math.floor(v) for v in origin]
@@ -980,6 +1022,13 @@ class AutonomousTaskController:
                                            "Place the held workstation at one freshly verified close empty cell")
                 if self.safety_policy.validate(candidate, obs, context) is None:
                     return candidate
+            # Missing space: clear adjacent foliage at body/head height or relocate to open ground once.
+            foliage = self._clear_adjacent_placement_foliage(obs, context)
+            if foliage is not None:
+                return foliage
+            moved = self._explore(obs, context)
+            if moved is not None:
+                return moved
             return None
         return decision
 
@@ -1149,7 +1198,13 @@ class AutonomousTaskController:
                 return self._decision("inspect_container", {"pos": job["pos"]}, "Inspect the current pending furnace job")
         if not self.daily._safe_rows(obs, {"furnace"}, context=context) or should_prefer_local_workstation("furnace", obs, context):
             if counts.get("furnace", 0):
-                return self._row_decision(self.daily._place("furnace", obs, self._data["task"], context))
+                if self._in_active_night_burrow(obs, context):
+                    self._escalate("night_burrow_no_workstation_space")
+                    return None
+                placed = self.daily._place("furnace", obs, self._data["task"], context)
+                if placed and placed.get("name") == "wait":
+                    return self._clear_adjacent_placement_foliage(obs, context) or self._explore(obs, context) or self._row_decision(placed)
+                return self._row_decision(placed)
             if not self.daily._safe_rows(obs, {"furnace"}, context=context) or counts.get("cobblestone", 0) >= 8:
                 self._recipe_gaps.append(f"{item} needs furnace x1")
                 furnace = self._craft("furnace", 1, obs, context, depth + 1)

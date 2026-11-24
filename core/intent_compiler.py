@@ -209,8 +209,8 @@ def should_prefer_local_workstation(
     observation: dict[str, Any],
     context: Optional[dict[str, Any]] = None,
     *,
-    max_horiz: float = 6.5,
-    max_dy: float = 2.5,
+    max_horiz: float = 16.0,
+    max_dy: float = 4.0,
 ) -> bool:
     """Return True when building/placing a local workstation beats trekking to a distant/high one.
 

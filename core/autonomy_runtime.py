@@ -379,7 +379,36 @@ class AutonomyRuntime:
         # so the staircase descent leaves time for horizontal rib mining.
         total_t = min({"diamond": 1140, "raw_iron": 720, "coal": 540}[resource], window.remaining())
         band_t = min({"diamond": 960, "raw_iron": 600, "coal": 460}[resource], total_t * .84)
+        # Reuse the active existing mine shaft on the same dimension/life unless previously blocked.
+        status_now = observation.get("status") or {}
+        cur_pos = parse_pos(status_now.get("pos"))
+        dim_now = status_now.get("dimension")
+        gen_now = self.context.get("life_generation")
+        saved_site = self.context.get("deep_mine_site")
+        failed_origins = [list(p) for p in (self.context.get("failed_deep_mine_origins") or [])]
+        reuse_origin = None
+        reuse_orient = None
+        reuse_progress = None
+        if (
+            isinstance(saved_site, dict)
+            and saved_site.get("dimension") == dim_now
+            and saved_site.get("generation") == gen_now
+            and isinstance(saved_site.get("origin"), list)
+            and len(saved_site["origin"]) == 3
+            and list(saved_site["origin"]) not in failed_origins
+            and cur_pos is not None
+            and cur_pos[1] > 52.0
+            and math.hypot(cur_pos[0] - saved_site["origin"][0], cur_pos[2] - saved_site["origin"][2]) <= 48.0
+        ):
+            reuse_origin = list(saved_site["origin"])
+            reuse_orient = saved_site.get("orientation")
+            rp = saved_site.get("resume_progress")
+            if isinstance(rp, dict):
+                reuse_progress = {**copy.deepcopy(rp), "deep_retreat_done": False}
+
         res = miner.mine_targets_from_surface(
+            origin=reuse_origin,
+            orientation=reuse_orient,
             targets=targets,
             cave_policy={"explore_timeout_seconds": min(60.0 if resource == "raw_iron" else 220.0, total_t), "allow_tall_cave_subgraph": True},
             home_thresholds=deep_home_thresholds,
@@ -392,10 +421,28 @@ class AutonomyRuntime:
             max_trunk_steps=36 if resource == "diamond" else 28 if resource == "raw_iron" else 10,
             band_timeout_seconds=band_t,
             total_timeout_seconds=total_t,
+            resume_progress=reuse_progress,
             cancel_event=window,
             allow_damage=True,
         )
         data = dict(res.data or {}) if isinstance(res.data, dict) else {}
+        if reuse_origin is not None and not res.success and res.error_code in {
+            "no_mine_site_found", "unreachable_mine_site", "unsafe_site", "cave_abandoned", "bands_exhausted"
+        }:
+            # Mark exhausted/blocked old shaft and clear it so next run can safely pick a new plot.
+            failed_origins.append(list(reuse_origin))
+            self.context["failed_deep_mine_origins"] = failed_origins[-8:]
+            self.context.pop("deep_mine_site", None)
+        elif isinstance(data.get("origin"), list) and len(data["origin"]) == 3:
+            prog = dict(data.get("mining_progress") or {})
+            prog.pop("deep_retreat_done", None)
+            self.context["deep_mine_site"] = {
+                "origin": list(data["origin"]),
+                "orientation": data.get("orientation") or reuse_orient or "south",
+                "dimension": dim_now,
+                "generation": gen_now,
+                "resume_progress": prog or None,
+            }
         data.setdefault("executed", True)
         return SkillResult(bool(res.success), str(res.message), data, res.error_code)
 
@@ -633,7 +680,7 @@ class AutonomyRuntime:
                     if math.dist(origin, nearest) > 12:
                         x, y, z = map(math.floor, nearest)
                         moved = SurvivalSkills(self.client).execute(
-                            "move_to", {"pos": [x, y + 1, z], "range": 5}, cancel_event=window)
+                            "move_to", {"pos": [x, y + 1, z], "range": 4}, cancel_event=window)
                         if not moved.success:
                             return moved
                         approached = True
@@ -671,7 +718,7 @@ class AutonomyRuntime:
                     if lava_pts and window.remaining() > 15:
                         best = lava_pts[0]
                         mv = SurvivalSkills(self.client).execute(
-                            "move_to", {"pos": [int(best[0]), int(best[1]) + 1, int(best[2])], "range": 5}, cancel_event=window)
+                            "move_to", {"pos": [int(best[0]), int(best[1]) + 1, int(best[2])], "range": 4}, cancel_event=window)
                         if not mv.success:
                             return mv
                         res = skill.build_portal(timeout_seconds=min(180, window.remaining()), allow_damage=True,

@@ -19,6 +19,7 @@ ACTIVE_SAFETY_ACTIONS = frozenset({
     "retreat_from",
     "water_escape",
     "emergency_burrow",
+    "exit_burrow",
     "clear_burial",
     "fight_hostile",
     "wait",
@@ -341,6 +342,35 @@ class SafetyArbiter:
             )
         )
 
+        sealed_burrow = False
+        if self.daily_policy is not None and callable(getattr(self.daily_policy, "_in_active_night_burrow", None)):
+            sealed_burrow = bool(self.daily_policy._in_active_night_burrow({"status": status}, context))
+        elif isinstance(context.get("night_burrow"), dict):
+            burrow = context["night_burrow"]
+            bpos = burrow.get("pos") or burrow.get("burrow_feet")
+            pos_now = status.get("pos")
+            sealed_burrow = bool(
+                burrow.get("generation") == context.get("life_generation")
+                and isinstance(bpos, (list, tuple))
+                and len(bpos) == 3
+                and isinstance(pos_now, (list, tuple))
+                and len(pos_now) == 3
+                and abs(pos_now[0] - bpos[0]) <= 2.5
+                and abs(pos_now[2] - bpos[2]) <= 2.5
+                and pos_now[1] <= bpos[1] + 1.5
+            )
+        burrow_safe = bool(
+            sealed_burrow
+            and not hit_preempts
+            and not status.get("in_lava")
+            and not status.get("on_fire")
+            and not status.get("in_water")
+            and finite_number(baseline.get("health"))
+            and finite_number(status.get("health"))
+            and status["health"] >= baseline["health"]
+            and (not finite_number(status.get("oxygen")) or float(status.get("oxygen", 20)) >= 16)
+        )
+
         reasons: list[str] = []
         if hit_preempts:
             reasons.append("hit_preempt")
@@ -365,7 +395,7 @@ class SafetyArbiter:
         if combat_changed:
             reasons.append("combat_changed")
         if (
-            not (combat_action or campaign_encounter)
+            not (combat_action or campaign_encounter or burrow_safe)
             and finite_number(hostile.get("dist"))
             and hostile["dist"] <= hostile_limit
         ):

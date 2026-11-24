@@ -232,8 +232,10 @@ class LoopSupervisor:
             task = str(args.get("task") or "")
             target = str(args.get("item") or args.get("resource") or "")
             return f"run_survival_task:{task}:{target}"
-        if decision.name in {"craft_item", "smelt_start"}:
+        if decision.name in {"craft_item", "smelt_start", "place_item"}:
             return f"{decision.name}:{args.get('item') or args.get('input_item') or ''}"
+        if decision.name in {"plan_shelter", "build_shelter_step"}:
+            return f"{decision.name}"
         return None
 
     def sync_inventory_counts(self, counts: Any) -> None:
@@ -256,10 +258,13 @@ class LoopSupervisor:
     ) -> None:
         """Update L2 thrash, wait-streak, and repeated failure trackers after each step."""
         code = getattr(result, "error_code", None)
+        res_data = getattr(result, "data", None)
+        preempt_code = res_data.get("preempt_code") if isinstance(res_data, dict) else None
+        effective_cancel = code if code in {"llm_cancelled", "llm_preempted"} else preempt_code
         success = bool(getattr(result, "success", False))
 
         # 1. Detect rapid `llm_cancelled` / `llm_preempted` burst thrash (`>=3` in `15s`).
-        if code in {"llm_cancelled", "llm_preempted"}:
+        if effective_cancel in {"llm_cancelled", "llm_preempted"}:
             self._cancel_timestamps.append(now_mono)
             while self._cancel_timestamps and now_mono - self._cancel_timestamps[0] > 15.0:
                 self._cancel_timestamps.popleft()
@@ -268,7 +273,7 @@ class LoopSupervisor:
                 self._emit(
                     "WARN",
                     "LOOP_PREEMPT_SHIELD_ACTIVE",
-                    {"burst_count": len(self._cancel_timestamps), "shield_seconds": 10.0, "code": code},
+                    {"burst_count": len(self._cancel_timestamps), "shield_seconds": 10.0, "code": effective_cancel},
                 )
         elif success and decision is not None and decision.name not in {"wait", "observe"}:
             # Successful forward action clears prior cancel burst memory.
@@ -319,7 +324,13 @@ class LoopSupervisor:
         # 3. Track identical tool/task `bad_args` & `llm_repeated_failure` streaks.
         sig = self.action_signature(decision)
         if sig is not None:
-            if not success and code in {"bad_args", "llm_invalid_arguments", "llm_repeated_failure"}:
+            is_placement_or_shelter = sig.startswith(("place_item:", "plan_shelter", "build_shelter_step"))
+            tracked_errors = (
+                {"bad_args", "llm_invalid_arguments", "llm_repeated_failure", "unsafe", "unsafe_site", "safety_changed", "place_unverified", "no_place_candidate"}
+                if is_placement_or_shelter
+                else {"bad_args", "llm_invalid_arguments", "llm_repeated_failure"}
+            )
+            if not success and code in tracked_errors:
                 prev_cnt, _, _ = self._signature_failures.get(sig, (0, 0.0, ""))
                 new_cnt = prev_cnt + 1
                 cooldown_until = now_wall + 120.0 if new_cnt >= 2 else 0.0

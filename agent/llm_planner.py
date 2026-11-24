@@ -843,6 +843,20 @@ If that goal tool is unavailable, use only the currently advertised tools.
                 if name == "clear_foliage" and pos[1] < math.floor(origin[1] + .0001):
                     message += "; this target is below feet level and cannot be cleared as a body-height obstacle"
                 raise LLMError("llm_unsafe_action", message)
+            if name in {"gather_block", "gather_resource"}:
+                exp = str(args.get("expected_name") or "")
+                diamond_plus = counts.get("diamond_pickaxe", 0) >= 1 or counts.get("netherite_pickaxe", 0) >= 1
+                iron_plus = diamond_plus or counts.get("iron_pickaxe", 0) >= 1
+                stone_plus = iron_plus or counts.get("stone_pickaxe", 0) >= 1
+                wood_plus = stone_plus or counts.get("wooden_pickaxe", 0) >= 1 or counts.get("golden_pickaxe", 0) >= 1
+                if exp == "obsidian" and not diamond_plus:
+                    raise LLMError("llm_unsafe_action", "Cannot mine obsidian without diamond_pickaxe; use bucket casting or craft diamond_pickaxe.")
+                if exp in {"diamond_ore", "deepslate_diamond_ore", "gold_ore", "deepslate_gold_ore", "redstone_ore", "deepslate_redstone_ore", "emerald_ore", "deepslate_emerald_ore"} and not iron_plus:
+                    raise LLMError("llm_unsafe_action", f"Cannot hand-mine {exp} without iron_pickaxe; craft/equip iron_pickaxe first.")
+                if exp in {"iron_ore", "deepslate_iron_ore", "copper_ore", "deepslate_copper_ore", "lapis_ore", "deepslate_lapis_ore"} and not stone_plus:
+                    raise LLMError("llm_unsafe_action", f"Cannot hand-mine {exp} without stone_pickaxe or better; craft stone_pickaxe first.")
+                if exp in {"stone", "cobblestone", "cobbled_deepslate", "deepslate", "coal_ore", "deepslate_coal_ore", "andesite", "granite", "diorite", "tuff", "furnace"} and not wood_plus:
+                    raise LLMError("llm_unsafe_action", f"Cannot hand-mine {exp} without a pickaxe; craft wooden_pickaxe or stone_pickaxe first.")
         if name in ("place_item", "eat_food", "plant_crop", "place_bed", "place_door", "equip_armor") and counts.get(args["item"], 0) <= 0:
             raise LLMError("llm_unsafe_action", "Placing or eating requires an item in the current inventory")
         if name == "retreat_from" and not any(isinstance(e, dict) and e.get("type") == "hostile" and
@@ -884,10 +898,28 @@ If that goal tool is unavailable, use only the currently advertised tools.
         if ((name == "craft_item" and args.get("item") == "furnace")
                 or (name == "run_survival_task" and args.get("task") == "craft" and args.get("item") == "furnace")) and counts.get("furnace", 0) >= 1:
             raise LLMError("llm_no_progress", "Inventory already holds >= 1 furnace; do not craft another furnace or use craft_item to place it. Proceed with gather(raw_iron), iron_tools, or smelt(iron_ingot).")
-        if (self.objective in {"daily", "competition"}
-                and name == "run_survival_task" and args.get("task") == "craft"
-                and args.get("item") == "crafting_table" and counts.get("crafting_table", 0) >= 1):
-            raise LLMError("llm_no_progress", "Inventory already holds >= 1 crafting_table; run craft/smelt/tools goals directly instead of crafting another crafting_table.")
+        has_nearby_table = any(
+            b.get("name") == "crafting_table"
+            and math.hypot(float(b["pos"][0]) - float(origin[0]), float(b["pos"][2]) - float(origin[2])) <= 16.0
+            and abs(float(b["pos"][1]) - float(origin[1])) <= 4.0
+            for b in blocks
+        )
+        is_craft_table = (
+            (name == "craft_item" and args.get("item") == "crafting_table")
+            or (name == "run_survival_task" and args.get("task") == "craft" and args.get("item") == "crafting_table")
+        )
+        if is_craft_table and (counts.get("crafting_table", 0) >= 1 or has_nearby_table):
+            raise LLMError(
+                "llm_no_progress",
+                "A crafting_table is already held or safely nearby (<=16 blocks); move to and reuse the existing table instead of crafting a duplicate.",
+            )
+        if name == "run_survival_task" and args.get("task") == "shelter":
+            blocked_sigs = context.get("blocked_task_signatures") or {}
+            if "plan_shelter" in blocked_sigs or "build_shelter_step" in blocked_sigs:
+                raise LLMError(
+                    "llm_repeated_failure",
+                    "Shelter placement repeatedly lacked open ground nearby; scout or move to flatter ground before retrying shelter.",
+                )
         offhand_name = (status.get("offhand") or {}).get("name") if isinstance(status.get("offhand"), dict) else None
         if (self.objective in {"daily", "competition"}
                 and name == "run_survival_task" and args.get("task") == "craft"
