@@ -288,7 +288,7 @@ class AutonomyRuntime:
                 and observation["status"].get("dimension") not in {"overworld", "minecraft:overworld"}):
             return SkillResult(False, "Surface expeditions require the overworld", {"executed": False}, "unsafe_dimension")
         runners = {"deep_mine": (self._run_task_deep_mine, 1140),
-                   "scout_surface": (self._run_task_scout, 55),
+                   "scout_surface": (self._run_task_scout, 95),
                    "equip_loadout": (self._run_task_equip_loadout, 30),
                    "nether_portal": (self._run_task_nether_portal, 390)}
         run, cap = runners[decision.goal]
@@ -495,12 +495,21 @@ class AutonomyRuntime:
             ascend = self._escape_underground_to_surface(
                 origin_pos,
                 cancel_event=window,
-                timeout_seconds=min(36.0, max(6.0, window.remaining() - 6.0)),
+                timeout_seconds=min(55.0, max(6.0, window.remaining() - 6.0)),
             )
             if ascend is not None:
                 adata = ascend.data if isinstance(ascend.data, dict) else {}
                 if adata.get("action_state") == "unknown" or ascend.error_code == "action_unconfirmed":
                     return ascend
+                if not ascend.success and adata.get("risen", 0) == 0 and ascend.error_code in {
+                    "missing_pickaxe", "missing_building_block", "hazard_detected"
+                }:
+                    return SkillResult(
+                        False,
+                        ascend.message,
+                        {**data, "surface_ascent_error": ascend.error_code, "executed": bool(data.get("executed") or adata.get("executed"))},
+                        ascend.error_code,
+                    )
                 if ascend.success and adata.get("risen", 0) > 0 and window.remaining() > 14.0:
                     res = SurfaceScoutSkill(self.client, memory=memory).execute(
                         scan_radius=scan_radius,
@@ -604,7 +613,7 @@ class AutonomyRuntime:
             cancel_event=cancel_event,
         )
 
-    def _escape_underground_to_surface(self, origin, *, cancel_event=None, timeout_seconds=36.0):
+    def _escape_underground_to_surface(self, origin, *, cancel_event=None, timeout_seconds=55.0):
         if not isinstance(origin, (list, tuple)) or len(origin) != 3 or float(origin[1]) >= 62.0:
             return None
         from skills.survival import SurvivalSkills
@@ -676,8 +685,9 @@ class AutonomyRuntime:
                     if math.dist(cur_origin, wt) <= 3.5:
                         continue
                     res = self._move_wide_candidate(wt, 3, cancel)
-                    last_res = res
                     data = res.data if isinstance(res.data, dict) else {}
+                    if data.get("already_in_range") is not True:
+                        last_res = res
                     if res.success and data.get("already_in_range") is not True:
                         return res
                     if res.error_code in {"dead", "life_changed", "dimension_changed", "action_unconfirmed", "cancelled"} or data.get("action_state") == "unknown":
@@ -702,8 +712,9 @@ class AutonomyRuntime:
                 if math.dist(cur_origin, walk_target) <= walk_range + 0.5:
                     continue
                 res = self._move_wide_candidate(walk_target, walk_range, cancel)
-                last_res = res
                 data = res.data if isinstance(res.data, dict) else {}
+                if data.get("already_in_range") is not True:
+                    last_res = res
                 if res.success and data.get("already_in_range") is not True:
                     return res
                 if res.error_code in {"dead", "life_changed", "dimension_changed", "action_unconfirmed", "cancelled"} or data.get("action_state") == "unknown":
@@ -715,8 +726,9 @@ class AutonomyRuntime:
         if last_res.success or last_res.error_code in {"dead", "life_changed", "dimension_changed", "action_unconfirmed", "cancelled"} or ldata.get("action_state") == "unknown":
             return last_res
 
+        surf_pos = list(origin)
         if float(origin[1]) < 62.0 and (cancel is None or not cancel.is_set()):
-            ascend = self._escape_underground_to_surface(origin, cancel_event=cancel, timeout_seconds=36.0)
+            ascend = self._escape_underground_to_surface(origin, cancel_event=cancel, timeout_seconds=55.0)
             if ascend is not None:
                 adata = ascend.data if isinstance(ascend.data, dict) else {}
                 if adata.get("action_state") == "unknown" or ascend.error_code == "action_unconfirmed":
@@ -754,10 +766,29 @@ class AutonomyRuntime:
                 return scout_res
             found_water = sdata.get("found_water") or []
             if scout_res.success and found_water:
-                wpos = found_water[0]["pos"]
-                shore = self._probe_dry_shore_for_water(wpos)
-                wt = shore if shore is not None else [int(wpos[0]), int(wpos[1]) + 1, int(wpos[2])]
-                return self._move_wide_candidate(wt, 1 if shore is not None else 3, cancel)
+                cur_origin = sdata.get("final_pos") or surf_pos
+                for wrow in found_water[:5]:
+                    wpos = wrow.get("pos") if isinstance(wrow, dict) else None
+                    if not isinstance(wpos, (list, tuple)) or len(wpos) != 3:
+                        continue
+                    wkey = f"{int(wpos[0])},{int(wpos[1])},{int(wpos[2])}"
+                    if wkey in blocked_keys or any(math.dist(wpos, bp) <= 5.0 for bp in blocked_pts):
+                        continue
+                    if math.dist(surf_pos, wpos) <= 5.5:
+                        continue
+                    shore = self._probe_dry_shore_for_water(wpos)
+                    wt = shore if shore is not None else [int(wpos[0]), int(wpos[1]) + 1, int(wpos[2])]
+                    wrange = 1 if shore is not None else 3
+                    if math.dist(cur_origin, wt) <= wrange + 0.5:
+                        continue
+                    wres = self._move_wide_candidate(wt, wrange, cancel)
+                    wdata = wres.data if isinstance(wres.data, dict) else {}
+                    if wres.success and wdata.get("already_in_range") is not True:
+                        return wres
+                    if wdata.get("already_in_range") is not True:
+                        last_res = wres
+                    if wres.error_code in {"dead", "life_changed", "dimension_changed", "action_unconfirmed", "cancelled"} or wdata.get("action_state") == "unknown":
+                        return wres
         return last_res or SkillResult(False, "No reachable water source found within 64 blocks", {"executed": False}, "no_water_found")
 
     def _enter_lit_portal(self):

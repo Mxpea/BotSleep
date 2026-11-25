@@ -521,6 +521,7 @@ class OverflowAndLoopFixesTests(unittest.TestCase):
 
     def test_wide_find_water_clusters_probes_shore_and_handles_gt_32m(self):
         from types import SimpleNamespace
+        from unittest.mock import patch
         from core.autonomy_runtime import AutonomyRuntime
 
         moves = []
@@ -679,7 +680,7 @@ class OverflowAndLoopFixesTests(unittest.TestCase):
         w.blocks[(1, 62, 0)] = {"name": "grass_block", "properties": {}}
         res = SurvivalSkills(w).escape_to_surface(max_climb=10, timeout_seconds=15.0)
         self.assertTrue(res.success, res)
-        self.assertGreaterEqual(res.data["risen"], 5)
+        self.assertGreaterEqual(res.data["risen"], 4)
         self.assertGreaterEqual(w.status["pos"][1], 63.0)
 
         w_haz = _BurrowMineWorld(bot_pos=(0.5, 58.0, 0.5), surface_y=64)
@@ -691,6 +692,63 @@ class OverflowAndLoopFixesTests(unittest.TestCase):
         res_haz = SurvivalSkills(w_haz).escape_to_surface(max_climb=10, timeout_seconds=15.0)
         self.assertFalse(res_haz.success)
         self.assertEqual(res_haz.error_code, "hazard_detected")
+
+    def test_wide_find_water_skips_close_already_in_range_and_climbs_underground_and_canopy_near_hostile_releases(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from core.autonomy_runtime import AutonomyRuntime
+        from core.local_recovery_runtime import LocalRecoveryRuntime
+        from skills import SkillResult
+        from skills.survival import SurvivalSkills
+
+        rt = AutonomyRuntime()
+        rt.client = SimpleNamespace(
+            find_blocks=lambda **kw: [{"name": "water", "pos": [-2, 45, 1], "properties": {"level": 0}}],
+            get_block=lambda *a, **kw: {"ok": True, "result": {"name": "stone"}},
+        )
+        rt.context = {}
+        rt._cancel = None
+        rt.task_controller = SimpleNamespace(rules=SimpleNamespace(_blocked=lambda ctx: {}))
+        obs = {
+            "status": {"pos": [0.5, 46.0, 0.5], "dimension": "overworld", "alive": True, "ready": True, "on_ground": True},
+            "counts": {"bucket": 1, "cobblestone": 32, "stone_pickaxe": 1},
+            "blocks": [],
+        }
+        with patch.object(rt, "_move_wide_candidate", return_value=SkillResult(
+            True, "Already within the requested range; no movement was performed",
+            {"already_in_range": True, "executed": False}, None,
+        )), patch.object(SurvivalSkills, "escape_to_surface", return_value=SkillResult(
+            True, "Ascended", {"exited": True, "risen": 18, "pos": [1.5, 64.0, 0.5], "executed": True}, None,
+        )) as mock_esc, patch("skills.scouting.SurfaceScoutSkill.execute", return_value=SkillResult(
+            True, "Scout", {"found_water": [{"name": "water", "pos": [-2, 45, 1]}], "final_pos": [0.5, 46.0, 0.5], "executed": True}, None,
+        )):
+            res = rt._run_task_wide_find(Decision("move_to", {"pos": [0.5, 46.0, 0.5], "range": 4}, "", "nether_portal_water"), obs, "water")
+        mock_esc.assert_called_once()
+        self.assertFalse(res.data.get("already_in_range") is True and res.success)
+
+        # Near_hostile repeats during canopy_escape should increment stalled_unsafe and release cleanly.
+        class _DummyRecovery(LocalRecoveryRuntime):
+            def __init__(self):
+                self.settings = {"target_cooldown_seconds": 30, "low_health_threshold": 8}
+                self.context = {"life_generation": 1}
+                self.daily = True
+                self.daily_policy = DailySafetyPolicy({"low_health_threshold": 8, "threat_radius": 8})
+                self._safety_rules = self.daily_policy.rules
+                self._records = []
+
+            def _record(self, level, event, data):
+                self._records.append((level, event, data))
+
+        rec = _DummyRecovery()
+        for _ in range(4):
+            rec._local_recovery_result(
+                Decision("canopy_escape", {}, "", "safety"),
+                SkillResult(False, "Hostile nearby", {"executed": False}, "near_hostile"),
+                {"status": {"pos": [0.5, 70.0, 0.5], "dimension": "overworld"}, "fresh": True, "footing": {"name": "oak_leaves"}},
+            )
+        state = rec.context.get("canopy_recovery") or {}
+        self.assertIs(state.get("evacuating"), False)
+        self.assertEqual(state.get("reason"), "canopy_stalled_released")
 
 
 if __name__ == "__main__":

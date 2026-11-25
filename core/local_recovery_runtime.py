@@ -394,8 +394,8 @@ class LocalRecoveryRuntime:
             current_pos = observation["status"]["pos"]
             unchanged = previous_origin is not None and math.dist(current_pos, previous_origin) < 0.2
             state["search_origin"] = list(current_pos)
-            state["retry_after"] = time.time() + 15
-            if canopy and result.error_code == "unsafe":
+            state["retry_after"] = time.time() + (5 if canopy and result.error_code == "near_hostile" else 15)
+            if canopy and result.error_code in {"unsafe", "near_hostile"}:
                 state["stalled_unsafe"] = int(state.get("stalled_unsafe", 0)) + 1 if unchanged else 1
                 footing = self.daily_policy._footing(observation)
                 is_trunk = isinstance(footing, dict) and footing.get("name") in SurvivalSkills.RETREAT_TRUNKS

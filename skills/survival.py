@@ -815,7 +815,7 @@ class SurvivalSkills:
         after = self._status(context)
         return {"exited": True, "risen": risen, "pos": after["pos"], "executed": context.get("write_sent") is True}
 
-    def escape_to_surface(self, *, max_climb=26, timeout_seconds=36.0, cancel_event=None):
+    def escape_to_surface(self, *, max_climb=28, timeout_seconds=55.0, cancel_event=None):
         """Safely pillar up out of a pit or underground cave until reaching open-sky surface ground."""
         from skills.action_workflow import (
             WorkflowContext,
@@ -846,7 +846,7 @@ class SurvivalSkills:
             self.client,
             cancel_event=cancel_event,
             timeout_seconds=max(6.0, float(timeout_seconds)),
-            max_reads=320,
+            max_reads=900,
             allow_damage=True,
         )
         context = {"cancel": cancel_event, "deadline": time.monotonic() + max(6.0, float(timeout_seconds)),
@@ -871,15 +871,17 @@ class SurvivalSkills:
             return True
 
         def _find_open_surface_side(cx, cy, cz):
-            for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                nx, nz = cx + dx, cz + dz
-                feet_n = _blk_name(nx, cy, nz)
-                head_n = _blk_name(nx, cy + 1, nz)
-                floor_n = _blk_name(nx, cy - 1, nz)
-                if (feet_n in DEFAULT_REPLACEABLE and head_n in DEFAULT_REPLACEABLE
-                        and floor_n not in DEFAULT_REPLACEABLE and floor_n not in liquid_hazards
-                        and floor_n not in self.HAZARDS and _has_open_sky(nx, cy, nz)):
-                    return [nx + 0.5, float(cy), nz + 0.5]
+            for dy in (0, -1, -2, -3):
+                ly = cy + dy
+                for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    nx, nz = cx + dx, cz + dz
+                    feet_n = _blk_name(nx, ly, nz)
+                    head_n = _blk_name(nx, ly + 1, nz)
+                    floor_n = _blk_name(nx, ly - 1, nz)
+                    if (feet_n in DEFAULT_REPLACEABLE and head_n in DEFAULT_REPLACEABLE
+                            and floor_n not in DEFAULT_REPLACEABLE and floor_n not in liquid_hazards
+                            and floor_n not in self.HAZARDS and _has_open_sky(nx, ly, nz)):
+                        return [nx + 0.5, float(ly), nz + 0.5]
             return None
 
         risen = 0
@@ -965,6 +967,18 @@ class SurvivalSkills:
                 risen += 1
             after = guard.check_status(require_safe=False)
             apos = list(after.get("pos") or pos0)
+            ax = math.floor(float(apos[0]) + 0.0001)
+            ay = math.floor(float(apos[1]) + 0.0001)
+            az = math.floor(float(apos[2]) + 0.0001)
+            if risen > 0 and ay >= 58 and _has_open_sky(ax, ay, az):
+                open_side = _find_open_surface_side(ax, ay, az)
+                if open_side is not None:
+                    try:
+                        guard.write(self.client.move_to, open_side[0], open_side[1], open_side[2], range=0.8, timeout_ms=4000)
+                        after = guard.check_status(require_safe=False)
+                        apos = list(after.get("pos") or open_side)
+                    except WorkflowStepError:
+                        pass
             return SkillResult(risen > 0, f"Ascended {risen} blocks toward open surface",
                                {"exited": risen > 0, "risen": risen, "pos": apos, "executed": guard.writes > 0},
                                None if risen > 0 else "surface_ascent_no_progress")
