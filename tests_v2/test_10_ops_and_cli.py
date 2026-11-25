@@ -318,3 +318,50 @@ class TestOpsAndCliCutover(unittest.TestCase):
             finally:
                 client.close()
                 db.close()
+
+    def test_multihop_stalled_no_displacement_blacklists_and_l4_exhaustion_yields_needs_ai(self) -> None:
+        from tests_v2.sim.virtual_mc_api import VirtualMcApiServer, VirtualMcHttpServer
+        from v2.bt.blackboard import Blackboard
+        from v2.bt.branches.unstuck import PhysicalUnstuckBranch
+        from v2.bt.kernel import Status
+        from v2.gateway import VirtualWorldGateway
+        from v2.gateway.multihop_navigator import MultiHopNavigator
+        from v2.kernel import MinecraftAgentClient, PendingTransactionJournal, UnifiedWorldDB
+
+        sim = VirtualMcApiServer(spawn_pos=(0.5, 64.0, 0.5))
+        sim.fill(-4, 63, -4, 4, 63, 4, "stone")
+        with tempfile.TemporaryDirectory() as td, VirtualMcHttpServer(sim) as srv:
+            db = UnifiedWorldDB.for_scope(td, srv.base_url, "Stall9Bot", "w1")
+            client = MinecraftAgentClient(srv.base_url, "Stall9Bot", "pw")
+            try:
+                client.login()
+                journal = PendingTransactionJournal(db)
+                gw = VirtualWorldGateway(client, db=db)
+                nav = MultiHopNavigator(gw, journal)
+                # Force 6 stationary ticks at the same unreachable target cell -> must blacklist instead of spinning
+                nav._last_pos_for_target[("overworld", (5, 64, 0))] = (0.5, 64.0, 0.5)
+                nav._stall_counts[("overworld", (5, 64, 0))] = 5
+                out = nav.step_toward((5.5, 64.0, 0.5), {"pos": [0.5, 64.0, 0.5], "dimension": "overworld"}, inventory_counts={})
+                self.assertEqual(out.status, "BLOCKED")
+                self.assertEqual(out.reason, "stalled_no_displacement")
+                self.assertTrue(gw.unreachable.is_blocked("overworld", (5, 64, 0), "navigate"))
+
+                # PhysicalUnstuckBranch L4 relocation fails twice with zero displacement -> NEEDS_AI
+                from types import SimpleNamespace
+                unstuck = PhysicalUnstuckBranch(gw, journal)
+                unstuck.navigator.step_toward = lambda *a, **kw: SimpleNamespace(status="BLOCKED", action_taken="move_to_fallback_3d", reason="timeout")  # type: ignore[method-assign]
+                bb = Blackboard()
+                bb.status = {"pos": [0.5, 64.0, 0.5], "dimension": "overworld"}
+                bb.active_goal_name = "acquire:raw_ironx8"
+                bb.goal_status = "RUNNING"
+                bb.set("unstuck_level", 4, writer="test")
+                bb.set("unstuck_needed", True, writer="test")
+                self.assertEqual(unstuck.update(bb), Status.RUNNING)
+                bb.set("unstuck_level", 4, writer="test")
+                bb.set("unstuck_needed", True, writer="test")
+                self.assertEqual(unstuck.update(bb), Status.FAILURE)
+                self.assertEqual(bb.goal_status, "NEEDS_AI")
+                self.assertEqual(bb.last_failure_reason, "unstuck_l4_exhausted")
+            finally:
+                client.close()
+                db.close()

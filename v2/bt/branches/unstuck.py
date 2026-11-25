@@ -77,6 +77,8 @@ class PhysicalUnstuckBranch(Node):
         self.navigator = navigator or MultiHopNavigator(gateway, journal, pathfinder=self.pathfinder)
         self._l1_cycle: int = 0
         self._l4_bearing_idx: int = 0
+        self._l4_consecutive_fails: int = 0
+        self._l4_last_pos: Optional[Tuple[float, float, float]] = None
 
     def _write_action(
         self,
@@ -456,9 +458,26 @@ class PhysicalUnstuckBranch(Node):
             return Status.RUNNING
         bb.last_action_outcome = f"unstuck_l4_relocate:{out.status.lower()}"
         bb.log_event(self.name, "l4_relocate", f"excluded={cur_sector} target=({chosen_target[0]},{chosen_target[2]})")
+        no_progress = (
+            out.status == "BLOCKED"
+            or out.action_taken == "move_to_fallback_3d"
+            or (self._l4_last_pos is not None and dist3(bb.pos, self._l4_last_pos) < 1.5)
+        )
+        self._l4_last_pos = bb.pos
+        if no_progress:
+            self._l4_consecutive_fails += 1
+        else:
+            self._l4_consecutive_fails = 0
         # Reset ladder level after L4 so future stalls escalate cleanly from L1
         bb.set("unstuck_level", 0, writer=self.name)
         bb.set("unstuck_origin", None, writer=self.name)
+        if self._l4_consecutive_fails >= 2:
+            self._l4_consecutive_fails = 0
+            self._l4_last_pos = None
+            if bb.active_goal_name:
+                bb.goal_status = "NEEDS_AI"
+            bb.last_failure_reason = "unstuck_l4_exhausted"
+            return Status.FAILURE
         return Status.RUNNING
 
     def update(self, bb: Blackboard) -> Status:

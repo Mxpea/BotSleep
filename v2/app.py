@@ -62,6 +62,7 @@ def _build_brain(config: Dict[str, Any], recorder: Optional[FlightRecorder], *, 
             max_tokens=llm["max_tokens"],
             tls_version=ov["tls_version"],
             gate=ov_gate,
+            recorder=recorder,
         )
     return OpenAIBrain(
         llm["base_url"],
@@ -74,6 +75,7 @@ def _build_brain(config: Dict[str, Any], recorder: Optional[FlightRecorder], *, 
         gate=primary_gate,
         overflow_brain=overflow_brain,
         primary_wait_seconds=ov.get("primary_wait_seconds", 1.5),
+        recorder=recorder,
     )
 
 

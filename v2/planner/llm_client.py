@@ -66,6 +66,7 @@ class OpenAIBrain:
         gate: Optional[ModelRequestGate] = None,
         overflow_brain: Optional["OpenAIBrain"] = None,
         primary_wait_seconds: float = 1.5,
+        recorder: Any = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
@@ -76,6 +77,7 @@ class OpenAIBrain:
         self.gate = gate or ModelRequestGate(self.base_url, self.api_key, wait_seconds=60.0)
         self.overflow_brain = overflow_brain
         self.primary_wait_seconds = float(primary_wait_seconds)
+        self.recorder = recorder
         self._session = requests.Session()
         if tls_version == "1.2":
             self._session.mount("https://", _TLS12Adapter())
@@ -165,6 +167,21 @@ class OpenAIBrain:
             if name:
                 parsed_calls.append(LLMToolCall(id=str(raw_tc.get("id") or f"call_{len(parsed_calls)}"), name=name, arguments=args))
 
+        if self.recorder is not None:
+            self.recorder.record(
+                "INFO",
+                "v2.llm",
+                "LLM_HTTP",
+                {
+                    "route": route,
+                    "requested_model": self.model,
+                    "confirmed_model": confirmed_model,
+                    "latency_ms": latency_ms,
+                    "prompt_tokens": pt,
+                    "completion_tokens": ct,
+                    "tool_calls": [tc.name for tc in parsed_calls],
+                },
+            )
         return LLMResponse(
             requested_model=self.model,
             confirmed_model=confirmed_model,

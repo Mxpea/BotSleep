@@ -273,6 +273,11 @@ class MultiHopNavigator:
         stalled = prev_pos is not None and dist3(prev_pos, cur_p) < self.MIN_PROGRESS_METERS
         if stalled:
             self._stall_counts[key] = self._stall_counts.get(key, 0) + 1
+            if self._stall_counts[key] >= 6:
+                self._stall_counts[key] = 0
+                self.gateway.unreachable.record_failure(dim, tgt_cell, "navigate", "stalled_no_displacement")
+                self.gateway.unreachable.record_failure(dim, tgt_cell, "navigate", "stalled_no_displacement")
+                return NavOutcome("BLOCKED", action_taken="move_to", reason="stalled_no_displacement")
         elif prev_pos is not None:
             self._stall_counts[key] = 0
         self._last_pos_for_target[key] = cur_p
@@ -427,6 +432,6 @@ class MultiHopNavigator:
             if err_out.status == "BLOCKED":
                 self.gateway.unreachable.record_blocked_edge(dim, start_cell, step.stand_after)
             return err_out
-        if not has_following_non_walk:
+        if not has_following_non_walk and not stalled:
             self._stall_counts[key] = 0
         return NavOutcome("PROGRESSED", action_taken="move_to", reason="3d_walk_step", details={"to": list(walk_end)})
