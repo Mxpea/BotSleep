@@ -200,3 +200,19 @@ class TestOpsAndCliCutover(unittest.TestCase):
         replan.update(bb)
         self.assertEqual(worker.submitted, 1)
         self.assertEqual(bb.last_action_outcome, "llm_error_backoff")
+
+        # Verify competition snapshot formatting in DepsPlanner never raises KeyError
+        from unittest.mock import patch
+        from v2.planner.deps_planner import DepsPlanner
+        from v2.planner.horizon_selector import HorizonSelector
+        from v2.planner.intent_compiler import IntentCompiler
+        from v2.tasks.catalogue import TaskCatalogue
+        from v2.tasks.competition import CompetitionManager
+
+        cat = TaskCatalogue()
+        comp = CompetitionManager(cat)
+        comp_compiler = IntentCompiler(MagicMock(), cat, objective="competition", competition=comp)
+        comp_horizon = HorizonSelector(cat, objective="competition", competition=comp)
+        dp = DepsPlanner(None, comp_compiler, comp_horizon)
+        msgs, _tools = dp.build_request_payload(bb)
+        self.assertIn("comp_score=0", msgs[-1]["content"])

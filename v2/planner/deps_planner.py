@@ -73,7 +73,7 @@ class DepsPlanner:
         comp_str = ""
         if self.compiler.objective == "competition" and self.compiler.competition is not None:
             snap = self.compiler.competition.snapshot()
-            comp_str = f" comp_score={snap['score']} active={snap['active_task_id']} comp_done={len(snap['completed_ids'])}"
+            comp_str = f" comp_score={snap['total_score']} active={snap['active_task_id']} comp_done={snap['completed_count']}"
         return (
             f"STATE: dim={bb.dimension} pos={pos} hp={bb.health:.1f} food={bb.food} ox={bb.oxygen}"
             f"{comp_str} inv=[{inv_str}]"
