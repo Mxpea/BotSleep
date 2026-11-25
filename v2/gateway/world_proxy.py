@@ -291,9 +291,11 @@ class VirtualWorldGateway:
         *,
         radius: int = 24,
         limit: int = 64,
+        properties: Optional[Dict[str, Any]] = None,
+        mature: Optional[bool] = None,
     ) -> List[Dict[str, Any]]:
-        """Run typed find_blocks and automatically populate the voxel cache."""
-        rows = self.client.find_blocks(types, radius=radius, limit=limit)
+        """Run typed find_blocks (optionally filtered by properties/mature) and populate the voxel cache."""
+        rows = self.client.find_blocks(types, radius=radius, limit=limit, properties=properties, mature=mature)
         self.ingest_find_blocks(dimension, rows)
         return rows
 
@@ -345,14 +347,24 @@ class VirtualWorldGateway:
                             candidates.append((sx, sy, sz))
 
         py_floor = math.floor(float(player_pos[1]))
-        candidates.sort(
-            key=lambda c: (
-                abs(c[1] - py_floor),
-                dist3((c[0] + 0.5, float(c[1]), c[2] + 0.5), player_pos),
+        if mode == "pour":
+            # For pouring, prefer downward-LOS stances (sy near ty-1 so eye_y = sy+1.62 > ty clears rims/molds)
+            candidates.sort(
+                key=lambda c: (
+                    abs(c[1] - (ty - 1)),
+                    abs(c[1] - py_floor),
+                    dist3((c[0] + 0.5, float(c[1]), c[2] + 0.5), player_pos),
+                )
             )
-        )
-        # Prefetch stance cells + ray cells for top 36 candidates in ONE batch call!
-        top_candidates = candidates[:36]
+        else:
+            candidates.sort(
+                key=lambda c: (
+                    abs(c[1] - py_floor),
+                    dist3((c[0] + 0.5, float(c[1]), c[2] + 0.5), player_pos),
+                )
+            )
+        # Prefetch stance cells + ray cells for top 56 candidates in ONE batch call!
+        top_candidates = candidates[:56]
         needed: List[Coord3] = list(verify_coords)
         ray_map: Dict[Coord3, List[Coord3]] = {}
         for c in top_candidates:

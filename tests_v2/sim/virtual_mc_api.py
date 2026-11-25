@@ -549,6 +549,7 @@ class VirtualMcApiServer:
             limit = int(payload.get("limit", 64))
             types = payload.get("types")
             type_set = set(types) if isinstance(types, list) and types else None
+            prop_filter = payload.get("properties") if isinstance(payload.get("properties"), dict) else None
             px, py, pz = self.pos
             found: List[Dict[str, Any]] = []
             for (bx, by, bz), rec in self.blocks.items():
@@ -557,6 +558,10 @@ class VirtualMcApiServer:
                     continue
                 if type_set is not None and name not in type_set:
                     continue
+                if prop_filter is not None:
+                    props = rec.get("properties") or {}
+                    if any(str(props.get(k)) != str(v) for k, v in prop_filter.items()):
+                        continue
                 d = math.dist((px, py, pz), (bx + 0.5, by + 0.5, bz + 0.5))
                 if d > radius:
                     continue
@@ -613,6 +618,12 @@ class VirtualMcApiServer:
             return {"ready": True, "advancements": rows}
 
         if ep == "move_to":
+            if self.in_vehicle is not None:
+                tx = float(payload.get("x", self.pos[0]))
+                tz = float(payload.get("z", self.pos[2]))
+                self.pos = [tx, self.pos[1], tz]
+                self._update_environmental_flags()
+                return {"arrived": True, "pos": [round(c, 1) for c in self.pos], "drove": True}
             if "entity_id" in payload:
                 ent = next((e for e in self.entities if e["id"] == payload["entity_id"]), None)
                 if ent is None:
@@ -660,14 +671,31 @@ class VirtualMcApiServer:
 
         if ep == "place":
             item = str(payload["item"])
-            bx, by, bz = int(math.floor(payload["x"])), int(math.floor(payload["y"])), int(math.floor(payload["z"]))
             if self.inventory_counts.get(item, 0) < 1:
                 raise SimAPIError("missing_item", f"no {item} in inventory")
+            fx, fy, fz = self._feet_cell()
+            if payload.get("x") is None:
+                # Upstream autoPlaceSite(s): find free spot with solid ground within 3 blocks
+                site = None
+                for oy in (0, 1, -1):
+                    for ox, oz in ((1, 0), (-1, 0), (0, 1), (0, -1), (2, 0), (-2, 0), (0, 2), (0, -2), (1, 1), (-1, 1), (1, -1), (-1, -1)):
+                        cx, cy, cz = fx + ox, fy + oy, fz + oz
+                        if (cx, cy, cz) in {(fx, fy, fz), (fx, fy + 1, fz)}:
+                            continue
+                        if self.block_name(cx, cy, cz) in AIR_BLOCKS and self._is_solid(cx, cy - 1, cz):
+                            site = (cx, cy, cz)
+                            break
+                    if site is not None:
+                        break
+                if site is None:
+                    raise SimAPIError("no_support", "no free spot with solid ground within 3 blocks")
+                bx, by, bz = site
+            else:
+                bx, by, bz = int(math.floor(payload["x"])), int(math.floor(payload["y"])), int(math.floor(payload["z"]))
             if math.dist(self.pos, (bx + 0.5, by + 0.5, bz + 0.5)) > 5.0:
                 raise SimAPIError("out_of_range", "place target too far")
             if self.block_name(bx, by, bz) not in NON_SOLID_BLOCKS:
                 raise SimAPIError("occupied", "target cell already occupied")
-            fx, fy, fz = self._feet_cell()
             if (bx, by, bz) in {(fx, fy, fz), (fx, fy + 1, fz)}:
                 raise SimAPIError("blocked_by_self", "bot is standing in target cell")
             self.consume(item, 1)
@@ -676,9 +704,18 @@ class VirtualMcApiServer:
                 self.containers[(bx, by, bz)] = {"type": "furnace", "input": None, "fuel": None, "output": None, "remaining_ticks": 0}
             elif item == "chest":
                 self.containers[(bx, by, bz)] = {"type": "chest", "items": {}}
-            return {"placed": item, "pos": [bx, by, bz]}
+            return {"placed": item, "pos": [bx, by, bz], "sneaked": True}
 
         if ep == "interact":
+            if payload.get("entity_id") is not None:
+                eid = int(payload["entity_id"])
+                ent = next((e for e in self.entities if e["id"] == eid), None)
+                if ent is None:
+                    raise SimAPIError("no_such_entity", f"entity {eid} not visible")
+                if ent["name"].endswith("_boat") or ent["name"] in {"boat", "bamboo_raft"}:
+                    self.in_vehicle = {"id": eid, "name": ent["name"]}
+                    return {"mounted": ent["name"], "entity_id": eid}
+                return {"interacted_entity": eid}
             raw_pos = payload.get("pos")
             item = payload.get("item")
             if raw_pos is None:
@@ -858,8 +895,24 @@ class VirtualMcApiServer:
                 "sections": {"container": items_list},
             }
 
+        def _resolve_window_pos(target: Dict[str, Any]) -> Tuple[int, int, int]:
+            if isinstance(target.get("pos"), list) and len(target["pos"]) == 3:
+                return tuple(int(v) for v in target["pos"])  # type: ignore[return-value]
+            if isinstance(target.get("block"), str):
+                want = target["block"]
+                matches = [
+                    (math.dist(self.pos, (bx + 0.5, by + 0.5, bz + 0.5)), (bx, by, bz))
+                    for (bx, by, bz), rec in self.blocks.items()
+                    if rec["name"] == want
+                ]
+                if not matches:
+                    raise SimAPIError("no_such_block", f"no {want} nearby")
+                matches.sort(key=lambda pair: pair[0])
+                return matches[0][1]
+            raise SimAPIError("bad_args", "unsupported window target")
+
         if ep == "window/view":
-            pos = tuple(int(v) for v in payload["target"]["pos"])
+            pos = _resolve_window_pos(payload.get("target") or {})
             c = self.containers.get(pos)
             if c is None:
                 blk = self.block_name(*pos)
@@ -874,7 +927,7 @@ class VirtualMcApiServer:
             return _describe_container(c, pos)
 
         if ep == "window/act":
-            pos = tuple(int(v) for v in payload["target"]["pos"])
+            pos = _resolve_window_pos(payload.get("target") or {})
             ops = payload.get("ops", [])
             c = self.containers.setdefault(pos, {"type": self.block_name(*pos), "input": None, "fuel": None, "output": None, "items": {}, "remaining_ticks": 0})
             done: List[Dict[str, Any]] = []
@@ -956,6 +1009,13 @@ class VirtualMcApiServer:
             item = str(payload["item"])
             if self.inventory_counts.get(item, 0) < 1:
                 raise SimAPIError("missing_item", f"no {item}")
+            if item.endswith("_boat") or item == "bamboo_raft":
+                self.consume(item, 1)
+                tgt = payload.get("target") or {}
+                bpos = tgt.get("pos") if isinstance(tgt.get("pos"), list) else [self.pos[0], self.pos[1], self.pos[2]]
+                eid = 9000 + len(self.entities) + 1
+                self.add_entity(eid, item, [float(bpos[0]) + 0.5, float(bpos[1]), float(bpos[2]) + 0.5], kind="object")
+                return {"placed": item, "entity_id": eid, "pos": [float(bpos[0]) + 0.5, float(bpos[1]), float(bpos[2]) + 0.5]}
             if item in FOOD_RESTORE:
                 food_gain, sat_gain = FOOD_RESTORE[item]
                 self.consume(item, 1)
@@ -1024,15 +1084,19 @@ class VirtualMcApiServer:
             return {"hits": 1, "killed": killed}
 
         if ep == "shoot":
-            eid = int(payload["entity_id"])
-            ent = next((e for e in self.entities if e["id"] == eid), None)
-            if ent is None:
-                raise SimAPIError("not_found", "entity not found")
-            ent["health"] -= 8.0
-            killed = ent["health"] <= 0
-            if killed:
-                self.entities = [e for e in self.entities if e["id"] != eid]
-            return {"fired": True, "killed": killed}
+            if payload.get("entity_id") is not None:
+                eid = int(payload["entity_id"])
+                ent = next((e for e in self.entities if e["id"] == eid), None)
+                if ent is None:
+                    raise SimAPIError("not_found", "entity not found")
+                ent["health"] -= 8.0
+                killed = ent["health"] <= 0
+                if killed:
+                    self.entities = [e for e in self.entities if e["id"] != eid]
+                return {"fired": True, "killed": killed}
+            if all(payload.get(k) is not None for k in ("x", "y", "z")):
+                return {"fired": True, "target": [float(payload["x"]), float(payload["y"]), float(payload["z"])]}
+            raise SimAPIError("bad_args", "provide entity_id or numeric x, y and z")
 
         if ep == "drop":
             item = str(payload["item"])

@@ -72,7 +72,7 @@ GATHER_TABLE: Dict[str, GatherEntry] = {
     "mangrove_log": GatherEntry("mangrove_log", ("mangrove_log",)),
     "cherry_log": GatherEntry("cherry_log", ("cherry_log",)),
     "pale_oak_log": GatherEntry("pale_oak_log", ("pale_oak_log",)),
-    "cobblestone": GatherEntry("cobblestone", ("stone", "cobblestone"), min_pickaxe="wooden_pickaxe", preferred_y=56),
+    "cobblestone": GatherEntry("cobblestone", ("stone",), min_pickaxe="wooden_pickaxe", preferred_y=56),
     "coal": GatherEntry("coal", ("coal_ore", "deepslate_coal_ore"), min_pickaxe="wooden_pickaxe", preferred_y=48),
     "raw_iron": GatherEntry("raw_iron", ("iron_ore", "deepslate_iron_ore"), min_pickaxe="stone_pickaxe", preferred_y=16),
     "raw_gold": GatherEntry("raw_gold", ("gold_ore", "deepslate_gold_ore"), min_pickaxe="iron_pickaxe", preferred_y=-16),

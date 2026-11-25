@@ -225,7 +225,13 @@ class AcquireItemTask(Task):
     def _acquire_liquid_bucket(self, bb: Blackboard, liquid_name: str) -> str:
         if bb.inventory_counts.get("bucket", 0) < 1:
             return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, "bucket", 1, _depth=self._depth + 1))
-        rows = self.ctx.gateway.scan_blocks(bb.dimension, [liquid_name], radius=48, limit=24)
+        rows = self.ctx.gateway.scan_blocks(
+            bb.dimension,
+            [liquid_name],
+            radius=48,
+            limit=24,
+            properties={"level": 0},
+        )
         sources: List[Coord3] = []
         for r in rows:
             pos = r.get("pos")
@@ -239,7 +245,9 @@ class AcquireItemTask(Task):
                 bb,
                 ExploreUntilTask(
                     self.ctx,
-                    lambda _bb, gw: bool(gw.scan_blocks(_bb.dimension, [liquid_name], radius=32, limit=4)),
+                    lambda _bb, gw: bool(
+                        gw.scan_blocks(_bb.dimension, [liquid_name], radius=32, limit=4, properties={"level": 0})
+                    ),
                     name=f"find_{liquid_name}",
                 ),
             )

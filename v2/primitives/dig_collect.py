@@ -62,13 +62,14 @@ class DigCollectPrimitive:
         py = bb.pos[1]
         fx, fy, fz = int(bb.pos[0] // 1), int(bb.pos[1] // 1), int(bb.pos[2] // 1)
         under_feet = (fx, fy - 1, fz)
+        protected = set(bb.get("protected_cells") or ())
         candidates: List[Coord3] = []
         for row in rows:
             raw_p = row.get("pos")
             if isinstance(raw_p, list) and len(raw_p) == 3:
                 c = (int(raw_p[0]), int(raw_p[1]), int(raw_p[2]))
                 # Minecraft Rule #1: never dig directly under own feet into a 1x1 pit!
-                if c == under_feet:
+                if c == under_feet or c in protected:
                     continue
                 if max_dy is not None:
                     # Never dig blocks >= 2 below feet through a solid floor (drops fall into sealed caves!)

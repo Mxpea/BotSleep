@@ -41,7 +41,10 @@ class MineResourceTask(Task):
     def is_finished(self, bb: Blackboard) -> bool:
         return bb.inventory_counts.get(self.item, 0) >= self.count
 
-    PROTECTED_STATIONS = frozenset({"crafting_table", "furnace", "chest", "blast_furnace", "smoker"})
+    PROTECTED_STATIONS = frozenset({
+        "crafting_table", "furnace", "chest", "blast_furnace", "smoker",
+        "obsidian", "nether_portal",
+    })
 
     def _is_safe_to_dig(self, bb: Blackboard, cell: Coord3) -> bool:
         cx, cy, cz = cell
@@ -71,48 +74,59 @@ class MineResourceTask(Task):
             return "RUNNING"
 
         fx, fy, fz = block_coord(bb.pos)
-        dx, dz = self._dirs[self._dir_idx % len(self._dirs)]
 
-        # 3) Step-driven staircase descent toward target_y: clear 3-high column (fy+1, fy, fy-1) ahead, then step down!
+        # 3) Step-driven staircase descent toward target_y: try all 4 cardinal directions in 1 tick (never spin in place!)
         if fy > self.target_y:
-            stair_cells = [(fx + dx, fy + 1, fz + dz), (fx + dx, fy, fz + dz), (fx + dx, fy - 1, fz + dz)]
-            floor_after = (fx + dx, fy - 2, fz + dz)
-            fetched = self.ctx.gateway.prefetch_blocks(bb.dimension, stair_cells + [floor_after], max_age=3.0)
-            floor_ent = fetched.get(floor_after)
+            for _ in range(len(self._dirs)):
+                dx, dz = self._dirs[self._dir_idx % len(self._dirs)]
+                stair_cells = [(fx + dx, fy + 1, fz + dz), (fx + dx, fy, fz + dz), (fx + dx, fy - 1, fz + dz)]
+                floor_after = (fx + dx, fy - 2, fz + dz)
+                fetched = self.ctx.gateway.prefetch_blocks(bb.dimension, stair_cells + [floor_after], max_age=3.0)
+                floor_ent = fetched.get(floor_after)
+                if floor_ent is None or floor_ent.name in NON_SOLID_BLOCKS or floor_ent.name in HAZARD_BLOCKS:
+                    self._dir_idx += 1
+                    continue
+                blocked_by_hazard = False
+                for cell in stair_cells:
+                    ent = fetched.get(cell)
+                    if ent is not None and ent.name not in AIR_BLOCKS:
+                        if not self._is_safe_to_dig(bb, cell):
+                            blocked_by_hazard = True
+                            break
+                        d_out = self._dig.dig_block(bb, cell, collect=True)
+                        return "RUNNING" if d_out.status in {"OK", "PROGRESSED"} else d_out.status
+                if blocked_by_hazard:
+                    self._dir_idx += 1
+                    continue
+                n_out = self._nav.step_to(bb, (fx + dx + 0.5, float(fy - 1), fz + dz + 0.5), tolerance=0.6)
+                return "RUNNING" if n_out.status in {"OK", "PROGRESSED"} else n_out.status
+            # All 4 staircase directions blocked by drops/hazards -> try horizontal 2-high tunnel instead of spinning!
+
+        # 4) Horizontal 2-high tunnel (head then feet) trying all 4 directions in 1 tick
+        for _ in range(len(self._dirs)):
+            dx, dz = self._dirs[self._dir_idx % len(self._dirs)]
+            head_cell = (fx + dx, fy + 1, fz + dz)
+            feet_cell = (fx + dx, fy, fz + dz)
+            floor_cell = (fx + dx, fy - 1, fz + dz)
+            fetched = self.ctx.gateway.prefetch_blocks(bb.dimension, [head_cell, feet_cell, floor_cell], max_age=3.0)
+            floor_ent = fetched.get(floor_cell)
             if floor_ent is None or floor_ent.name in NON_SOLID_BLOCKS or floor_ent.name in HAZARD_BLOCKS:
                 self._dir_idx += 1
-                bb.last_action_outcome = "mine_stair_turn_avoid_drop"
-                return "RUNNING"
-            for cell in stair_cells:
+                continue
+            blocked_by_hazard = False
+            for cell in (head_cell, feet_cell):
                 ent = fetched.get(cell)
                 if ent is not None and ent.name not in AIR_BLOCKS:
                     if not self._is_safe_to_dig(bb, cell):
-                        self._dir_idx += 1
-                        bb.last_action_outcome = "mine_stair_turn_avoid_hazard"
-                        return "RUNNING"
+                        blocked_by_hazard = True
+                        break
                     d_out = self._dig.dig_block(bb, cell, collect=True)
                     return "RUNNING" if d_out.status in {"OK", "PROGRESSED"} else d_out.status
-            n_out = self._nav.step_to(bb, (fx + dx + 0.5, float(fy - 1), fz + dz + 0.5), tolerance=0.6)
+            if blocked_by_hazard:
+                self._dir_idx += 1
+                continue
+            n_out = self._nav.step_to(bb, (fx + dx + 0.5, float(fy), fz + dz + 0.5), tolerance=0.6)
             return "RUNNING" if n_out.status in {"OK", "PROGRESSED"} else n_out.status
 
-        # 4) At target Y-band: dig 2-high tunnel (head then feet) and step forward into it!
-        head_cell = (fx + dx, fy + 1, fz + dz)
-        feet_cell = (fx + dx, fy, fz + dz)
-        floor_cell = (fx + dx, fy - 1, fz + dz)
-        fetched = self.ctx.gateway.prefetch_blocks(bb.dimension, [head_cell, feet_cell, floor_cell], max_age=3.0)
-        floor_ent = fetched.get(floor_cell)
-        if floor_ent is None or floor_ent.name in NON_SOLID_BLOCKS or floor_ent.name in HAZARD_BLOCKS:
-            self._dir_idx += 1
-            bb.last_action_outcome = "mine_tunnel_turn_avoid_pit"
-            return "RUNNING"
-        for cell in (head_cell, feet_cell):
-            ent = fetched.get(cell)
-            if ent is not None and ent.name not in AIR_BLOCKS:
-                if not self._is_safe_to_dig(bb, cell):
-                    self._dir_idx += 1
-                    bb.last_action_outcome = "mine_tunnel_turn_avoid_hazard"
-                    return "RUNNING"
-                d_out = self._dig.dig_block(bb, cell, collect=True)
-                return "RUNNING" if d_out.status in {"OK", "PROGRESSED"} else d_out.status
-        n_out = self._nav.step_to(bb, (fx + dx + 0.5, float(fy), fz + dz + 0.5), tolerance=0.6)
-        return "RUNNING" if n_out.status in {"OK", "PROGRESSED"} else n_out.status
+        bb.last_failure_reason = "mine:all_directions_blocked"
+        return "NEEDS_AI"

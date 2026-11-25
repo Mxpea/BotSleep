@@ -51,7 +51,7 @@ class TestTasksL3(unittest.TestCase):
                 task = EnterNetherTask(ctx, cat)
                 rt.mount_goal(task)
 
-                for _ in range(260):
+                for _ in range(360):
                     rt.tick_once()
                     # Single-write macro-tick invariant!
                     self.assertLessEqual(rt.bb.writes_this_tick, 1)

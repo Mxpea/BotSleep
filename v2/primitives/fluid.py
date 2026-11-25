@@ -73,7 +73,7 @@ class FluidPrimitive:
         eye = (bb.pos[0], bb.pos[1] + 1.62, bb.pos[2])
         aim = (target[0] + 0.5, target[1] - 0.01, target[2] + 0.5)
         if dist3(eye, aim) > 4.45:
-            return self._nav.step_to(bb, (target[0] + 0.5, bb.pos[1], target[2] + 1.5), tolerance=2.2, xz_only=True)
+            return self._nav.step_to(bb, (target[0] + 0.5, float(target[1]), target[2] + 1.5), tolerance=2.5)
 
         plan = self.ctx.gateway.plan_liquid_interaction(bb.dimension, target, bb.pos, mode="pour")
         if plan.status == "CLEAR_OCCLUDER" and plan.occluder_pos is not None:

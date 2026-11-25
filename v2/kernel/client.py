@@ -669,13 +669,19 @@ class MinecraftAgentClient:
     def place_block(
         self,
         item: str,
-        x: float,
-        y: float,
-        z: float,
+        x: Optional[float] = None,
+        y: Optional[float] = None,
+        z: Optional[float] = None,
         *,
         stop_on: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {"item": item, "x": x, "y": y, "z": z}
+        payload: Dict[str, Any] = {"item": item}
+        if x is not None or y is not None or z is not None:
+            if x is None or y is None or z is None:
+                raise APIError("bad_args", "place_block requires either all of x, y, z or none (autoPlaceSite)")
+            payload["x"] = x
+            payload["y"] = y
+            payload["z"] = z
         if stop_on is not None:
             payload["stop_on"] = stop_on
         return self._request("POST", "place", payload=payload, timeout_seconds=self._action_timeout(self.PATHFINDING_SECONDS))
@@ -709,23 +715,75 @@ class MinecraftAgentClient:
     def craft(self, item: str, count: int = 1) -> Dict[str, Any]:
         return self._request("POST", "craft", payload={"item": item, "count": int(count)}, timeout_seconds=self._action_timeout(415.0))
 
-    def window_view(self, pos: Sequence[int], *, timeout_seconds: Optional[float] = None) -> Dict[str, Any]:
-        budget = self._action_timeout(65.0) if timeout_seconds is None else self._positive(timeout_seconds, "timeout_seconds")
-        return self._request("POST", "window/view", payload={"target": {"pos": list(pos)}}, timeout_seconds=budget)
+    @staticmethod
+    def _build_window_target(
+        pos: Optional[Sequence[int]] = None,
+        *,
+        block: Optional[str] = None,
+        entity_id: Optional[int] = None,
+        target: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        if isinstance(target, dict) and target:
+            return dict(target)
+        if pos is not None:
+            return {"pos": list(pos)}
+        if block is not None:
+            return {"block": str(block)}
+        if entity_id is not None:
+            return {"entity_id": int(entity_id)}
+        raise APIError("bad_args", "window target requires pos, block, entity_id, or target dict")
 
-    def window_act(self, pos: Sequence[int], ops: List[Dict[str, Any]], *, timeout_seconds: Optional[float] = None) -> Dict[str, Any]:
+    def window_view(
+        self,
+        pos: Optional[Sequence[int]] = None,
+        *,
+        block: Optional[str] = None,
+        entity_id: Optional[int] = None,
+        target: Optional[Dict[str, Any]] = None,
+        timeout_seconds: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        tgt = self._build_window_target(pos, block=block, entity_id=entity_id, target=target)
+        budget = self._action_timeout(65.0) if timeout_seconds is None else self._positive(timeout_seconds, "timeout_seconds")
+        return self._request("POST", "window/view", payload={"target": tgt}, timeout_seconds=budget)
+
+    def window_act(
+        self,
+        pos: Optional[Sequence[int]] = None,
+        ops: Optional[List[Dict[str, Any]]] = None,
+        *,
+        block: Optional[str] = None,
+        entity_id: Optional[int] = None,
+        target: Optional[Dict[str, Any]] = None,
+        timeout_seconds: Optional[float] = None,
+    ) -> Dict[str, Any]:
         if not isinstance(ops, list) or not 1 <= len(ops) <= 8:
             raise APIError("bad_args", "window_act requires 1 to 8 operations")
+        tgt = self._build_window_target(pos, block=block, entity_id=entity_id, target=target)
         budget = self._action_timeout(115.0) if timeout_seconds is None else self._positive(timeout_seconds, "timeout_seconds")
-        return self._request("POST", "window/act", payload={"target": {"pos": list(pos)}, "ops": ops}, timeout_seconds=budget)
+        return self._request("POST", "window/act", payload={"target": tgt, "ops": ops}, timeout_seconds=budget)
 
     def equip(self, item: str, slot: str = "hand", *, timeout_seconds: Optional[float] = None) -> Dict[str, Any]:
         return self._request("POST", "equip", payload={"item": item, "slot": slot}, timeout_seconds=timeout_seconds)
 
-    def use_item(self, item: str, ms: Optional[int] = None, *, stop_on: Optional[List[str]] = None) -> Dict[str, Any]:
+    def use_item(
+        self,
+        item: str,
+        ms: Optional[int] = None,
+        *,
+        target: Optional[Dict[str, Any]] = None,
+        timeout_ms: Optional[int] = None,
+        source: Optional[str] = None,
+        stop_on: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
         payload: Dict[str, Any] = {"item": item}
         if ms is not None:
             payload["ms"] = int(ms)
+        if target is not None:
+            payload["target"] = dict(target)
+        if timeout_ms is not None:
+            payload["timeout"] = int(timeout_ms)
+        if source is not None:
+            payload["source"] = str(source)
         if stop_on is not None:
             payload["stop_on"] = stop_on
         return self._request("POST", "use_item", payload=payload, timeout_seconds=self._action_timeout(self.PATHFINDING_SECONDS))
@@ -748,19 +806,34 @@ class MinecraftAgentClient:
         sprint: bool = False,
         yaw: Optional[float] = None,
         pitch: Optional[float] = None,
-        ms: int = 50,
-        hit: Optional[int] = None,
+        ms: Optional[int] = 50,
+        hit: Optional[Union[bool, int]] = None,
         hit_interval_ms: Optional[int] = None,
         wait: bool = True,
         timeout_seconds: Optional[float] = None,
     ) -> Dict[str, Any]:
-        if type(ms) is not int or not 50 <= ms <= 3000:
-            raise APIError("bad_args", "control ms must be an integer from 50 to 3000")
+        is_release = (
+            wait is False
+            and not any((forward, back, left, right, jump, sneak, sprint))
+            and not hit
+            and yaw is None
+            and pitch is None
+        )
+        if ms is not None:
+            if type(ms) is not int or not 50 <= ms <= 3000:
+                raise APIError("bad_args", "control ms must be an integer from 50 to 3000")
+        elif not is_release:
+            raise APIError("bad_args", "control ms is required unless releasing held keys with wait=False")
+        if hit is not None and not isinstance(hit, bool):
+            if type(hit) is not int or not 1 <= hit <= 20:
+                raise APIError("bad_args", "control hit must be a bool or integer from 1 to 20")
         payload: Dict[str, Any] = {
             "forward": forward, "back": back, "left": left, "right": right,
             "jump": jump, "sneak": sneak, "sprint": sprint,
-            "ms": ms, "wait": wait, "stop_on": ["hurt", "death"],
+            "wait": wait, "stop_on": ["hurt", "death"],
         }
+        if ms is not None:
+            payload["ms"] = ms
         if yaw is not None:
             payload["yaw"] = yaw
         if pitch is not None:
@@ -769,7 +842,8 @@ class MinecraftAgentClient:
             payload["hit"] = hit
         if hit_interval_ms is not None:
             payload["hit_interval_ms"] = hit_interval_ms
-        budget = self._action_timeout(ms / 1000.0) if timeout_seconds is None else self._positive(timeout_seconds, "timeout_seconds")
+        budget_ms = (ms if ms is not None else 500) / 1000.0
+        budget = self._action_timeout(budget_ms) if timeout_seconds is None else self._positive(timeout_seconds, "timeout_seconds")
         return self._request("POST", "control", payload=payload, timeout_seconds=budget)
 
     def attack(self, entity_id: int, *, timeout_ms: int = 6000, max_hits: int = 6) -> Dict[str, Any]:
@@ -781,16 +855,38 @@ class MinecraftAgentClient:
             timeout_seconds=self._action_timeout(deadline + 35.0),
         )
 
-    def shoot(self, entity_id: int, *, weapon: str = "bow", charge_ms: Optional[int] = None, timeout_seconds: Optional[float] = None) -> Dict[str, Any]:
+    def shoot(
+        self,
+        entity_id: Optional[int] = None,
+        *,
+        pos: Optional[Sequence[float]] = None,
+        x: Optional[float] = None,
+        y: Optional[float] = None,
+        z: Optional[float] = None,
+        weapon: Optional[str] = "bow",
+        charge_ms: Optional[int] = None,
+        timeout_seconds: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {"stop_on": ["hurt", "death"]}
+        if entity_id is not None:
+            payload["entity_id"] = int(entity_id)
+        elif pos is not None and len(pos) == 3:
+            payload["x"] = float(pos[0])
+            payload["y"] = float(pos[1])
+            payload["z"] = float(pos[2])
+        elif x is not None and y is not None and z is not None:
+            payload["x"] = float(x)
+            payload["y"] = float(y)
+            payload["z"] = float(z)
+        else:
+            raise APIError("bad_args", "shoot requires entity_id, pos, or x/y/z")
+        if weapon is not None:
+            payload["weapon"] = str(weapon)
         if charge_ms is None:
             charge_ms = 1400 if weapon == "crossbow" else 1100
+        payload["charge_ms"] = int(charge_ms)
         budget = self._action_timeout(charge_ms / 1000.0 + 1.0) if timeout_seconds is None else self._positive(timeout_seconds, "timeout_seconds")
-        return self._request(
-            "POST",
-            "shoot",
-            payload={"entity_id": int(entity_id), "weapon": weapon, "charge_ms": int(charge_ms), "stop_on": ["hurt", "death"]},
-            timeout_seconds=budget,
-        )
+        return self._request("POST", "shoot", payload=payload, timeout_seconds=budget)
 
     def drop(self, item: str, count: Optional[int] = None) -> Dict[str, Any]:
         payload: Dict[str, Any] = {"item": item}

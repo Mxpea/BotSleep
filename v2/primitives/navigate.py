@@ -23,12 +23,23 @@ class NavigatePrimitive:
         prefer_3d: bool = False,
         xz_only: bool = False,
     ) -> ActionOutcome:
+        protected = bb.get("protected_cells")
+        if protected:
+            base_avoid = avoid_block_breaking
+            avoid_fn: Optional[Callable[[Coord3], bool]] = (
+                (lambda c, _p=protected, _b=base_avoid: (c in _p) or _b(c))
+                if base_avoid is not None
+                else (lambda c, _p=protected: c in _p)
+            )
+        else:
+            avoid_fn = avoid_block_breaking
+
         out = self.ctx.navigator.step_toward(
             target,
             bb.status,
             tolerance=tolerance,
             inventory_counts=bb.inventory_counts,
-            avoid_block_breaking=avoid_block_breaking,
+            avoid_block_breaking=avoid_fn,
             prefer_3d=prefer_3d,
             xz_only=xz_only,
             threat_positions=bb.get("active_threat_positions"),
