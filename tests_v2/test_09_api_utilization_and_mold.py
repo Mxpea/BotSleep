@@ -9,9 +9,11 @@ from unittest.mock import patch
 from tests_v2.sim.virtual_mc_api import VirtualMcApiServer, VirtualMcHttpServer
 from v2.bt import BTRuntime
 from v2.bt.blackboard import Blackboard
+from v2.bt.watchdog import LoopWatchdogNode
 from v2.gateway import VirtualWorldGateway
+from v2.gateway.multihop_navigator import MultiHopNavigator
 from v2.kernel import APIError, MinecraftAgentClient, PendingTransactionJournal, UnifiedWorldDB
-from v2.primitives import DigCollectPrimitive, PlaceBuildPrimitive, PrimitiveContext
+from v2.primitives import DigCollectPrimitive, NavigatePrimitive, PlaceBuildPrimitive, PrimitiveContext
 from v2.tasks import EnterNetherTask, TaskCatalogue
 
 
@@ -124,7 +126,7 @@ class TestApiUtilizationAndMold(unittest.TestCase):
 
     def test_nether_portal_properties_lava_query_and_protected_mold_non_cannibalization(self) -> None:
         sim = VirtualMcApiServer(spawn_pos=(0.5, 64.0, 0.5))
-        sim.fill(-10, 60, -10, 20, 63, 12, "stone")
+        sim.fill(-10, 56, -10, 20, 63, 12, "stone")
         # Flowing lava (level=1) closer at x=4 must be ignored in favor of source lava (level=0) at x=8..13
         sim.set_block(4, 63, 0, "lava", properties={"level": 1})
         for x in range(8, 14):
@@ -156,9 +158,19 @@ class TestApiUtilizationAndMold(unittest.TestCase):
                 self.assertNotIn((4, 63, 0), lava_coords)
                 self.assertIn((8, 63, 0), lava_coords)
 
+                # Verify _select_portal_anchor picks a site >= 8 Manhattan blocks from lava (outside 7-block water spread)
+                anchor_check = task._select_portal_anchor(rt.bb, [tuple(r["pos"]) for r in lava_sources])
+                min_dist = min(
+                    abs(anchor_check[0] + dx - lv[0]) + abs(anchor_check[2] + dz - lv[2])
+                    for dx in (0, 1)
+                    for dz in (0, 1)
+                    for lv in lava_coords
+                )
+                self.assertGreaterEqual(min_dist, 8)
+
                 rt.goal_mount.mount(task, rt.bb)
                 saw_protected = False
-                for _ in range(320):
+                for _ in range(440):
                     rt.tick_once()
                     self.assertLessEqual(rt.bb.writes_this_tick, 1)
                     if rt.bb.get("protected_cells"):
@@ -181,6 +193,154 @@ class TestApiUtilizationAndMold(unittest.TestCase):
                 out = dig.dig_nearest_of_types(bb_guard, ["cobblestone"], radius=4)
                 self.assertEqual(out.status, "FAILED_LOCAL")
                 self.assertEqual(sim.block_name(1, 64, 0), "cobblestone")
+            finally:
+                client.close()
+                db.close()
+
+    def test_water_pit_containment_and_wet_feet_pour_fallback(self) -> None:
+        sim = VirtualMcApiServer(spawn_pos=(0.5, 64.0, 0.5))
+        # Thick multi-layer stone terrain so a 1x1 contained pit at y=63 has solid stone below (y=62) and all 4 walls
+        sim.fill(-6, 61, -6, 10, 63, 10, "stone")
+
+        with tempfile.TemporaryDirectory() as td, VirtualMcHttpServer(sim) as srv:
+            db = UnifiedWorldDB.for_scope(td, srv.base_url, "PitBot", "w1")
+            client = MinecraftAgentClient(srv.base_url, "PitBot", "pass")
+            try:
+                client.login()
+                journal = PendingTransactionJournal(db)
+                gw = VirtualWorldGateway(client, db=db)
+                ctx = PrimitiveContext(gw, journal)
+                task = EnterNetherTask(ctx, TaskCatalogue())
+                bb = Blackboard()
+                _sync_bb(bb, sim)
+
+                anchor = (2, 65, 0)
+                mode, pit = task._find_or_prepare_water_pit(bb, anchor)
+                self.assertEqual(mode, "DIG")
+                self.assertIsNotNone(pit)
+                assert pit is not None
+                # Pit sits at surface floor level y=63 (= anchor[1] - 2)
+                self.assertEqual(pit[1], 63)
+
+                # Once pit is dug air, _find_or_prepare_water_pit returns READY at same coordinate
+                sim.set_block(*pit, "air")
+                gw.write_through_dig("overworld", pit)
+                mode2, pit2 = task._find_or_prepare_water_pit(bb, anchor)
+                self.assertEqual(mode2, "READY")
+                self.assertEqual(pit2, pit)
+
+                # Wet-feet fallback: if all stances around (2, 64, 0) have shallow runoff water, pour STILL finds READY!
+                for dx in range(-3, 4):
+                    for dz in range(-3, 4):
+                        if (dx, dz) != (0, 0):
+                            sim.set_block(2 + dx, 64, dz, "water")
+                gw.invalidate_unknown_radius("overworld", (2, 64, 0), radius=3)
+                plan = gw.plan_liquid_interaction("overworld", (2, 64, 0), (0.5, 64.0, 0.5), mode="pour")
+                self.assertEqual(plan.status, "READY")
+            finally:
+                client.close()
+                db.close()
+
+    def test_multihop_bridges_go_near_deadband_without_noop_stall(self) -> None:
+        sim = VirtualMcApiServer(spawn_pos=(201.7, 64.0, 205.5))
+        sim.fill(198, 63, 202, 206, 63, 208, "stone")
+        with tempfile.TemporaryDirectory() as td, VirtualMcHttpServer(sim) as srv:
+            db = UnifiedWorldDB.for_scope(td, srv.base_url, "LiveBot", "w1")
+            client = MinecraftAgentClient(srv.base_url, "LiveBot", "pw")
+            try:
+                client.login()
+                journal = PendingTransactionJournal(db)
+                gw = VirtualWorldGateway(client, db=db)
+                nav = MultiHopNavigator(gw, journal)
+                ctx = PrimitiveContext(gw, journal, nav)
+                nprim = NavigatePrimitive(ctx)
+                bb = Blackboard()
+
+                target = (202.5, 64.0, 205.5)
+                reached = False
+                for _ in range(6):
+                    _sync_bb(bb, sim)
+                    out = nprim.step_to(bb, target, tolerance=0.35)
+                    if out.status == "OK":
+                        reached = True
+                        break
+                self.assertTrue(reached, f"failed to cross 0.80m goNear deadband: pos={sim.pos} last={bb.last_action_outcome}")
+                self.assertLessEqual(abs(sim.pos[0] - 202.5) + abs(sim.pos[2] - 205.5), 0.35)
+            finally:
+                client.close()
+                db.close()
+
+    def test_nether_portal_wait_does_not_trigger_watchdog_false_stall(self) -> None:
+        sim = VirtualMcApiServer(spawn_pos=(0.5, 64.0, 0.5))
+        sim.fill(-3, 63, -3, 3, 63, 3, "stone")
+        with tempfile.TemporaryDirectory() as td, VirtualMcHttpServer(sim) as srv:
+            db = UnifiedWorldDB.for_scope(td, srv.base_url, "PortalWaitBot", "w1")
+            client = MinecraftAgentClient(srv.base_url, "PortalWaitBot", "pw")
+            try:
+                client.login()
+                sim.set_block(0, 64, 0, "nether_portal")
+                sim.set_block(0, 65, 0, "nether_portal")
+                journal = PendingTransactionJournal(db)
+                gw = VirtualWorldGateway(client, db=db)
+                ctx = PrimitiveContext(gw, journal)
+                task = EnterNetherTask(ctx, TaskCatalogue())
+                wd = LoopWatchdogNode(max_repeats=6)
+                bb = Blackboard()
+                bb.set("active_goal_name", "enter_nether", writer="test")
+
+                for i in range(10):
+                    _sync_bb(bb, sim)
+                    res = task.on_tick(bb)
+                    wd.update(bb)
+                    self.assertFalse(bool(bb.get("watchdog_stalled")))
+                    self.assertFalse(bool(bb.get("unstuck_needed")))
+                    if i == 0:
+                        self.assertEqual(res, "RUNNING")
+                        self.assertEqual(bb.last_action_outcome, "nether_portal_waiting")
+                    else:
+                        self.assertEqual(res, "COMPLETED")
+                # Also verify LoopWatchdog never trips over 10 repeated wait ticks in overworld
+                sim.dimension = "overworld"
+                for _ in range(10):
+                    bb.begin_tick()
+                    bb.status = {"pos": [0.5, 64.0, 0.5], "dimension": "overworld", "health": 20.0, "food": 20, "oxygen": 20}
+                    bb.last_action_outcome = "nether_portal_waiting"
+                    wd.update(bb)
+                    self.assertFalse(bool(bb.get("watchdog_stalled")))
+                    self.assertFalse(bool(bb.get("unstuck_needed")))
+            finally:
+                client.close()
+                db.close()
+
+    def test_pick_quench_cell_clears_blocking_mold_and_handles_distant_player(self) -> None:
+        sim = VirtualMcApiServer(spawn_pos=(-8.5, 64.0, 0.5))
+        sim.fill(-12, 63, -4, 6, 63, 4, "stone")
+        with tempfile.TemporaryDirectory() as td, VirtualMcHttpServer(sim) as srv:
+            db = UnifiedWorldDB.for_scope(td, srv.base_url, "QuenchBot", "w1")
+            client = MinecraftAgentClient(srv.base_url, "QuenchBot", "pw")
+            try:
+                client.login()
+                journal = PendingTransactionJournal(db)
+                gw = VirtualWorldGateway(client, db=db)
+                ctx = PrimitiveContext(gw, journal)
+                task = EnterNetherTask(ctx, TaskCatalogue())
+                task._portal_anchor = (0, 64, 0)
+                bb = Blackboard()
+                _sync_bb(bb, sim)
+                target = (2, 67, 0)
+                # Completely enclose target horizontally with cobblestone mold -> blocker fallback finds (2, 67, 1)
+                for adj in ((2, 67, 1), (2, 67, -1), (1, 67, 0), (3, 67, 0)):
+                    sim.set_block(*adj, "cobblestone")
+                q, sup = task._pick_quench_cell(bb, target)
+                self.assertIsNone(q)
+                blocker = task._find_removable_quench_blocker(bb, target)
+                self.assertEqual(blocker, (2, 67, 1))
+                # Clear blocker and confirm pass 2 returns (2, 67, 1) even though bot is 11m away
+                sim.set_block(2, 67, 1, "air")
+                gw.write_through_dig("overworld", (2, 67, 1))
+                q2, sup2 = task._pick_quench_cell(bb, target)
+                self.assertEqual(q2, (2, 67, 1))
+                self.assertEqual(sup2, (2, 66, 1))
             finally:
                 client.close()
                 db.close()

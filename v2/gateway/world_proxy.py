@@ -347,24 +347,30 @@ class VirtualWorldGateway:
                             candidates.append((sx, sy, sz))
 
         py_floor = math.floor(float(player_pos[1]))
+        cur_cell = block_coord(player_pos)
         if mode == "pour":
-            # For pouring, prefer downward-LOS stances (sy near ty-1 so eye_y = sy+1.62 > ty clears rims/molds)
+            # Prefer current cell if valid, then stances near player elevation and target +/- 1,
+            # never burying reachable stances behind deep underground coordinates!
             candidates.sort(
                 key=lambda c: (
-                    abs(c[1] - (ty - 1)),
+                    0 if c == cur_cell else 1,
+                    0 if (ty - 1) <= c[1] <= (ty + 1) else 1,
+                    1 if (c[1] == ty and abs(c[0] - tx) + abs(c[2] - tz) <= 1) else 0,
                     abs(c[1] - py_floor),
+                    abs(c[1] - (ty - 1)),
                     dist3((c[0] + 0.5, float(c[1]), c[2] + 0.5), player_pos),
                 )
             )
         else:
             candidates.sort(
                 key=lambda c: (
+                    0 if c == cur_cell else 1,
                     abs(c[1] - py_floor),
                     dist3((c[0] + 0.5, float(c[1]), c[2] + 0.5), player_pos),
                 )
             )
-        # Prefetch stance cells + ray cells for top 56 candidates in ONE batch call!
-        top_candidates = candidates[:56]
+        # Prefetch stance cells + ray cells for top candidates in ONE batch call!
+        top_candidates = candidates[:96]
         needed: List[Coord3] = list(verify_coords)
         ray_map: Dict[Coord3, List[Coord3]] = {}
         for c in top_candidates:
@@ -387,8 +393,11 @@ class VirtualWorldGateway:
                 return BucketSightPlan("UNREACHABLE", (tx, ty, tz), reason="no_solid_support")
 
         best_occluder_plan: Optional[BucketSightPlan] = None
+        best_wet_plan: Optional[BucketSightPlan] = None
         for c in top_candidates:
             sx, sy, sz = c
+            if c != cur_cell and self.unreachable.is_blocked(dimension, c, "move_to"):
+                continue
             floor_b = fetched.get((sx, sy - 1, sz))
             feet_b = fetched.get((sx, sy, sz))
             head_b = fetched.get((sx, sy + 1, sz))
@@ -396,14 +405,15 @@ class VirtualWorldGateway:
                 continue
             if feet_b is None or head_b is None:
                 continue
-            # Allow standing if feet is air/soft grass (which could also be cleared) and head is air
+            # Allow standing if feet is air/soft grass (or fallback shallow water), head is air
             if head_b.name not in AIR_BLOCKS:
                 continue
-            if feet_b.name not in (AIR_BLOCKS | SOFT_OCCLUDERS):
+            is_wet_feet = feet_b.name == "water"
+            if feet_b.name not in (AIR_BLOCKS | SOFT_OCCLUDERS) and not is_wet_feet:
                 continue
 
             blockers: List[Tuple[Coord3, str]] = []
-            if feet_b.name not in AIR_BLOCKS:
+            if not is_wet_feet and feet_b.name not in AIR_BLOCKS:
                 blockers.append(((sx, sy, sz), feet_b.name))
             for rcell in ray_map[c]:
                 if rcell == (tx, ty, tz) or (mode == "pour" and rcell == (tx, ty - 1, tz)):
@@ -413,13 +423,19 @@ class VirtualWorldGateway:
                     blockers.append((rcell, "unknown"))
                     break
                 if rb.name not in AIR_BLOCKS:
+                    if mode == "pour" and rb.name == "water":
+                        continue
                     if (rcell, rb.name) not in blockers:
                         blockers.append((rcell, rb.name))
 
             if not blockers:
-                return BucketSightPlan("READY", (tx, ty, tz), stand_pos=c, aim_point=aim)
+                if not is_wet_feet:
+                    return BucketSightPlan("READY", (tx, ty, tz), stand_pos=c, aim_point=aim)
+                if best_wet_plan is None:
+                    best_wet_plan = BucketSightPlan("READY", (tx, ty, tz), stand_pos=c, aim_point=aim)
+                continue
 
-            if len(blockers) == 1 and best_occluder_plan is None:
+            if not is_wet_feet and len(blockers) == 1 and best_occluder_plan is None:
                 bpos, bname = blockers[0]
                 if bname in SOFT_OCCLUDERS and not self.unreachable.is_blocked(dimension, bpos, "dig"):
                     best_occluder_plan = BucketSightPlan(
@@ -434,6 +450,8 @@ class VirtualWorldGateway:
 
         if best_occluder_plan is not None:
             return best_occluder_plan
+        if best_wet_plan is not None:
+            return best_wet_plan
         return BucketSightPlan("UNREACHABLE", (tx, ty, tz), reason="no_clear_or_clearable_stance")
 
     # ---- Persistence Flush to UnifiedWorldDB ----

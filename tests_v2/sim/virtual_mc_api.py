@@ -630,10 +630,18 @@ class VirtualMcApiServer:
                     raise SimAPIError("not_found", "entity not found")
                 gx, gy, gz = int(math.floor(ent["pos"][0])), int(math.floor(ent["pos"][1])), int(math.floor(ent["pos"][2]))
             else:
-                gx = int(math.floor(payload["x"]))
-                gy = int(math.floor(payload["y"])) if "y" in payload and payload["y"] is not None else None
-                gz = int(math.floor(payload["z"]))
+                tx = float(payload["x"])
+                ty = float(payload["y"]) if "y" in payload and payload["y"] is not None else None
+                tz = float(payload["z"])
+                gx = int(math.floor(tx))
+                gy = int(math.floor(ty)) if ty is not None else None
+                gz = int(math.floor(tz))
             goal_range = float(payload.get("range", 1.0))
+            if "entity_id" not in payload and ty is not None:
+                d_cur = math.sqrt((self.pos[0] - tx) ** 2 + (self.pos[1] - ty) ** 2 + (self.pos[2] - tz) ** 2)
+                if d_cur <= goal_range + 0.5:
+                    # Mirror upstream mc-agent-api/src/session.js:778 goNear() early-return deadband
+                    return {"arrived": True, "pos": [round(c, 1) for c in self.pos]}
             path = self._pathfind((gx, gy, gz), goal_range=goal_range)
             if path is None:
                 raise SimAPIError("path_not_found", "no path with canDig=false")
@@ -658,6 +666,17 @@ class VirtualMcApiServer:
                 self.pos = [dest[0] + 0.5, float(dest[1]), dest[2] + 0.5]
             self.set_block(bx, by, bz, "air")
             self._apply_gravity(bx, by, bz)
+            fx, fy, fz = self._feet_cell()
+            if (bx, by, bz) == (fx, fy - 1, fz):
+                drop_y = fy
+                while drop_y > -60 and self.block_name(fx, drop_y - 1, fz) in AIR_BLOCKS:
+                    drop_y -= 1
+                if drop_y < fy:
+                    fall_dist = fy - drop_y
+                    self.pos[1] = float(drop_y)
+                    if fall_dist > 3 and self.block_name(fx, drop_y - 1, fz) != "water":
+                        self.health = max(0.0, self.health - float(fall_dist - 3))
+                        self.push_event("hurt", source="fall", health=self.health)
             drop = DROP_MAP.get(name, name)
             if name == "gravel":
                 self._gravel_digs += 1
@@ -773,7 +792,7 @@ class VirtualMcApiServer:
                     if cell in {(tx, ty, tz), (tx, ty - 1, tz)}:
                         break
                     cname = self.block_name(*cell)
-                    if cname not in AIR_BLOCKS:
+                    if cname not in (AIR_BLOCKS | {"water"}):
                         raise SimAPIError("target_occluded", f"pour ray blocked by {cname} at {cell}", {"blocker": list(cell)})
                 liquid = "water" if item == "water_bucket" else "lava"
                 self.consume(item, 1)
@@ -1041,10 +1060,14 @@ class VirtualMcApiServer:
             return {"yaw": round(self.yaw, 3)}
 
         if ep == "control":
+            has_key = any(bool(payload.get(k)) for k in ("forward", "back", "left", "right", "jump", "sneak", "sprint"))
+            if not has_key and not payload.get("hit") and payload.get("wait", True) is not False:
+                raise SimAPIError("bad_args", "set at least one of forward/back/left/right/jump/sneak/sprint or hit")
             ms = int(payload.get("ms", 100))
             yaw = float(payload["yaw"]) if payload.get("yaw") is not None else self.yaw
             self.yaw = yaw
-            step_dist = min(1.5, (ms / 1000.0) * 4.3)
+            speed = 1.3 if payload.get("sneak") else 4.3
+            step_dist = min(1.5, (ms / 1000.0) * speed)
             if payload.get("forward"):
                 # Exact mineflayer forward vector (session.js:896): (-sin(yaw), -cos(yaw))
                 dx = -math.sin(yaw) * step_dist

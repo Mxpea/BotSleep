@@ -38,11 +38,20 @@ class FluidPrimitive:
 
         cur_cell = block_coord(bb.pos)
         if cur_cell != plan.stand_pos:
+            sig = ("pickup", tuple(round(v, 1) for v in bb.pos), plan.stand_pos)
+            prev = getattr(self, "_fluid_nav_stall", None)
+            if prev is not None and prev[0] == sig and prev[1] >= 4:
+                self.ctx.gateway.unreachable.record_failure(bb.dimension, plan.stand_pos, "move_to", "fluid_stance_stall")
+                self.ctx.gateway.unreachable.record_failure(bb.dimension, target, "fluid_pickup", "fluid_stance_stall")
+                self._fluid_nav_stall = None
+                return ActionOutcome("FAILED_LOCAL", "fluid_pickup", reason="fluid_stance_stall")
+            self._fluid_nav_stall = (sig, (prev[1] + 1) if prev is not None and prev[0] == sig else 1)
             return self._nav.step_to(
                 bb,
                 (plan.stand_pos[0] + 0.5, float(plan.stand_pos[1]), plan.stand_pos[2] + 0.5),
                 tolerance=0.35,
             )
+        self._fluid_nav_stall = None
 
         out = self.ctx.execute_write(
             bb,
@@ -83,11 +92,19 @@ class FluidPrimitive:
             self.ctx.gateway.unreachable.record_failure(bb.dimension, target, "fluid_pour", plan.reason)
             return ActionOutcome("FAILED_LOCAL", "fluid_pour", reason=plan.reason)
         if block_coord(bb.pos) != plan.stand_pos:
+            sig = ("pour", tuple(round(v, 1) for v in bb.pos), plan.stand_pos)
+            prev = getattr(self, "_fluid_nav_stall", None)
+            if prev is not None and prev[0] == sig and prev[1] >= 4:
+                self.ctx.gateway.unreachable.record_failure(bb.dimension, plan.stand_pos, "move_to", "fluid_stance_stall")
+                self._fluid_nav_stall = None
+                return ActionOutcome("FAILED_LOCAL", "fluid_pour", reason="fluid_stance_stall")
+            self._fluid_nav_stall = (sig, (prev[1] + 1) if prev is not None and prev[0] == sig else 1)
             return self._nav.step_to(
                 bb,
                 (plan.stand_pos[0] + 0.5, float(plan.stand_pos[1]), plan.stand_pos[2] + 0.5),
                 tolerance=0.35,
             )
+        self._fluid_nav_stall = None
 
         out = self.ctx.execute_write(
             bb,
@@ -107,6 +124,11 @@ class FluidPrimitive:
                 return ActionOutcome("FAILED_LOCAL", "fluid_pour", reason="pour_no_change", details=out.details)
             # Invalidate 3x3x3 neighborhood because poured fluid flows and may cast obsidian on neighbors
             self.ctx.gateway.invalidate_unknown_radius(bb.dimension, target, radius=1)
+            self.ctx.gateway.write_through_place(
+                bb.dimension,
+                target,
+                "lava" if bucket_item == "lava_bucket" else "water",
+            )
         return out
 
     def ignite(self, bb: Blackboard, target_pos: Coord3) -> ActionOutcome:

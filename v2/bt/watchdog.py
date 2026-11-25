@@ -79,7 +79,7 @@ class LoopWatchdogNode(Node):
             bb.paused
             or bool(bb.get("pending_frozen"))
             or bool(bb.status.get("is_sleeping", False))
-            or bb.last_action_outcome == "smelt_waiting_furnace"
+            or bb.last_action_outcome in {"smelt_waiting_furnace", "nether_portal_waiting"}
             or bb.active_branch in {"HardSafetyBranch", "PendingUnknownGuard"}
             or (not bb.active_goal_name and unstuck_level == 0)
         )
@@ -116,7 +116,7 @@ class LoopWatchdogNode(Node):
             bb.set("bounding_sphere_stalled", False, writer=self.name)
 
         # Count exact occurrences of current signature in recent window
-        if bb.active_goal_name and bb.last_action_outcome != "smelt_waiting_furnace":
+        if bb.active_goal_name and bb.last_action_outcome not in {"smelt_waiting_furnace", "nether_portal_waiting"}:
             repeats = sum(1 for s in self._signatures if s == sig)
             if repeats >= self.max_repeats:
                 self.stalled = True

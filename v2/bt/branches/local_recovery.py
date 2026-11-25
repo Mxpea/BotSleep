@@ -16,6 +16,7 @@ from v2.domain import (
     FOOD_ITEMS,
     HAZARD_BLOCKS,
     LEAF_BLOCKS,
+    LOG_BLOCKS,
     NON_SOLID_BLOCKS,
     block_coord,
     dist3,
@@ -162,6 +163,26 @@ class LocalRecoveryBranch(Node):
             lateral_res = self._unstuck.try_canopy_lateral_to_trunk(bb)
             if lateral_res is not None:
                 return lateral_res
+        elif below is not None and below.name in LOG_BLOCKS:
+            trunk_probe = [(fx, fy - 2, fz)] + [
+                (fx + dx, fy - d, fz + dz)
+                for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1))
+                for d in (1, 2)
+            ]
+            fetched_t = self.gateway.prefetch_blocks(bb.dimension, trunk_probe)
+            sub_log = fetched_t.get((fx, fy - 2, fz))
+            if sub_log is not None and sub_log.name in LOG_BLOCKS:
+                has_low_step = any(
+                    (ent := fetched_t.get((fx + dx, fy - d, fz + dz))) is not None
+                    and ent.name not in NON_SOLID_BLOCKS
+                    and ent.name not in LEAF_BLOCKS
+                    for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1))
+                    for d in (1, 2)
+                )
+                if not has_low_step:
+                    trunk_res = self._unstuck.try_canopy_lateral_to_trunk(bb)
+                    if trunk_res is not None:
+                        return trunk_res
 
         # 4) Opportunistic auto-sleep at night using cached/throttled typed gateway bed scan
         if self.enable_auto_sleep and not st.get("is_sleeping", False):

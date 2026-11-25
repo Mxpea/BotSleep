@@ -95,10 +95,20 @@ class Pathfinder3D:
                 for oz in range(-corridor_xz, corridor_xz + 1):
                     for oy in (-1, 0, 1, 2):
                         probe_coords.append((cx + ox, cy + oy, cz + oz))
+        for ox in range(-3, 4):
+            for oz in range(-3, 4):
+                for oy in (-2, -1, 0, 1, 2, 3):
+                    probe_coords.append((start[0] + ox, start[1] + oy, start[2] + oz))
         gw.prefetch_blocks(dimension, probe_coords)
 
+        lazy_fetches = 0
+
         def block_name(c: Coord3) -> Optional[str]:
+            nonlocal lazy_fetches
             e = gw.peek_block(dimension, c)
+            if e is None and lazy_fetches < 48:
+                lazy_fetches += 1
+                e = gw.get_block(dimension, c, max_age=30.0)
             return e.name if e is not None else None
 
         def is_safe_solid(c: Coord3) -> bool:

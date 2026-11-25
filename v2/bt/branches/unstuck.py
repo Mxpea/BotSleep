@@ -173,10 +173,17 @@ class PhysicalUnstuckBranch(Node):
             self.gateway.write_through_dig(bb.dimension, target)
         return status
 
-    def _safe_drop_depth(self, dimension: str, cell: Coord3, fetched: Dict[Coord3, Any]) -> Optional[int]:
+    def _safe_drop_depth(
+        self,
+        dimension: str,
+        cell: Coord3,
+        fetched: Dict[Coord3, Any],
+        *,
+        start_d: int = 1,
+    ) -> Optional[int]:
         """Return drop distance (0..4) to safe solid/water below `cell`, or None if lethal/hazard."""
         cx, cy, cz = cell
-        for d in range(1, 6):
+        for d in range(start_d, 6):
             ent = fetched.get((cx, cy - d, cz))
             if ent is None:
                 return None
@@ -280,23 +287,25 @@ class PhysicalUnstuckBranch(Node):
                     else:
                         continue
 
-                # Score: strongly favor stepping closer to trunk, or stepping onto a cell with safe <=4m drop
+                # Score: strongly favor stepping closer to trunk, or stepping onto a cell with safe <=4m drop BELOW its floor
                 step_score = 100.0
                 if trunk_xz is not None:
                     nd = math.hypot(nx - trunk_xz[0], nz - trunk_xz[1])
                     if nd < cur_trunk_dist - 0.1 or (floor_ent.name in LOG_BLOCKS and nd <= 1.5):
                         step_score = nd
-                drop_d = self._safe_drop_depth(bb.dimension, (nx, fy, nz), fetched)
+                drop_d = self._safe_drop_depth(bb.dimension, (nx, fy, nz), fetched, start_d=2)
                 if drop_d is not None and drop_d <= 4:
                     step_score = min(step_score, float(drop_d) * 0.5)
                 if step_score < 50.0:
                     if best_step is None or step_score < best_step[0]:
                         best_step = (step_score, (nx, fy, nz), blocker)
 
-            # Candidate 2: neighbor is air with a safe <= 4m drop or water landing directly below!
+            # Candidate 2: neighbor is air with a safe drop or water landing directly below!
+            # When standing on a solid trunk (LOG_BLOCKS), only hop off for <=2m steps so we climb safely to the base.
             elif floor_ent.name in AIR_BLOCKS and feet_ent.name in AIR_BLOCKS and head_ent.name in AIR_BLOCKS:
                 drop_d = self._safe_drop_depth(bb.dimension, (nx, fy, nz), fetched)
-                if drop_d is not None and drop_d <= 4 and abs(dx) <= 1 and abs(dz) <= 1:
+                max_air_drop = 2 if below.name in LOG_BLOCKS else 4
+                if drop_d is not None and drop_d <= max_air_drop and abs(dx) <= 1 and abs(dz) <= 1:
                     landing_y = fy - drop_d
                     if best_step is None or (-1.0) < best_step[0]:
                         best_step = (-1.0, (nx, landing_y, nz), None)
@@ -333,12 +342,35 @@ class PhysicalUnstuckBranch(Node):
                 self.gateway.write_through_dig(bb.dimension, blocker)
             return status
 
+        last_req = getattr(self, "_last_canopy_req", None)
+        stall_count = int(getattr(self, "_canopy_stall_count", 0))
+        if last_req == ((fx, fy, fz), target_cell):
+            stall_count += 1
+        else:
+            stall_count = 0
+        self._last_canopy_req = ((fx, fy, fz), target_cell)
+        self._canopy_stall_count = stall_count
+
+        if stall_count >= 2:
+            self.gateway.unreachable.record_failure(bb.dimension, target_cell, "move_to", "canopy_stall")
+            dx_t = (target_cell[0] + 0.5) - bb.pos[0]
+            dz_t = (target_cell[2] + 0.5) - bb.pos[2]
+            yaw = math.degrees(math.atan2(-dx_t, -dz_t))
+            status, _ = self._write_action(
+                bb,
+                "control",
+                {"forward": True, "yaw": yaw, "ms": 350, "wait": True},
+                lambda y=yaw: self.gateway.client.control(forward=True, yaw=y, ms=350, wait=True),
+                outcome_label="unstuck_l3_canopy_lateral_to_trunk",
+            )
+            return status
+
         status, _ = self._write_action(
             bb,
             "move_to",
-            {"x": target_cell[0] + 0.5, "y": target_cell[1], "z": target_cell[2] + 0.5, "range": 0.6},
+            {"x": target_cell[0] + 0.5, "y": target_cell[1], "z": target_cell[2] + 0.5, "range": 0.35},
             lambda tc=target_cell: self.gateway.client.move_to(
-                x=tc[0] + 0.5, y=float(tc[1]), z=tc[2] + 0.5, range=0.6, timeout_ms=5000
+                x=tc[0] + 0.5, y=float(tc[1]), z=tc[2] + 0.5, range=0.35, timeout_ms=5000
             ),
             unknown_center=target_cell,
             outcome_label="unstuck_l3_canopy_lateral_to_trunk",

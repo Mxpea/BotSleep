@@ -226,6 +226,38 @@ class TestAntiDeadlockAndHysteresis(unittest.TestCase):
                 client.close()
                 db.close()
 
+    def test_tall_canopy_leaf_roof_moves_to_trunk_not_corner_and_steps_down(self) -> None:
+        sim = VirtualMcApiServer(spawn_pos=(0.5, 72.0, 0.5))
+        sim.fill(-4, 63, -4, 8, 63, 4, "stone")
+        # 8-block trunk at (5, 64..71, 0) and 7x5 leaf roof at y=71
+        sim.fill(5, 64, 0, 5, 71, 0, "oak_log")
+        sim.fill(0, 71, -2, 6, 71, 2, "oak_leaves")
+        sim.set_block(5, 71, 0, "oak_log")
+
+        with tempfile.TemporaryDirectory() as td, VirtualMcHttpServer(sim) as srv:
+            db = UnifiedWorldDB.for_scope(td, srv.base_url, "Canopy7mBot", "w1")
+            client = MinecraftAgentClient(srv.base_url, "Canopy7mBot", "pass")
+            try:
+                client.login()
+                journal = PendingTransactionJournal(db)
+                gw = VirtualWorldGateway(client, db=db)
+                rt = BTRuntime(gw, journal, enable_auto_sleep=False)
+
+                # Tick 1 must step east toward trunk x=5, NEVER retreat to leaf corner (-2/-2)
+                rt.tick_once()
+                self.assertGreater(sim.pos[0], 0.5)
+                self.assertEqual(rt.bb.last_action_outcome, "unstuck_l3_canopy_lateral_to_trunk")
+
+                for _ in range(30):
+                    rt.tick_once()
+                    if sim.pos[1] <= 66.0:
+                        break
+                self.assertLessEqual(sim.pos[1], 66.0)
+                self.assertGreater(sim.health, 14.0)
+            finally:
+                client.close()
+                db.close()
+
 
 if __name__ == "__main__":
     unittest.main()

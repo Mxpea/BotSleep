@@ -77,6 +77,37 @@ class MultiHopNavigator:
         self.journal.resolve_write(tx_id, "confirmed")
         return res, None
 
+    def _precision_nudge(
+        self,
+        dim: str,
+        cur_p: Tuple[float, float, float],
+        tgt: Tuple[float, float, float],
+    ) -> NavOutcome:
+        """Bridge upstream goNear() <= (range + 0.5)m deadband with one bounded edge-safe sneak pulse."""
+        dx = float(tgt[0]) - cur_p[0]
+        dz = float(tgt[2]) - cur_p[2]
+        d_xz = math.hypot(dx, dz)
+        if d_xz < 1e-4:
+            return NavOutcome("PROGRESSED", action_taken="none", reason="precision_aligned")
+        yaw = math.atan2(-dx, -dz)
+        ms = max(140, min(420, int((d_xz / 1.3) * 1000)))
+        payload = {"forward": True, "sneak": True, "yaw": round(yaw, 3), "ms": ms}
+        res, err_out = self._run_write(
+            "control",
+            payload,
+            dim,
+            cur_p,
+            lambda: self.client.control(forward=True, sneak=True, yaw=yaw, ms=ms, wait=True),
+        )
+        if err_out is not None:
+            return err_out
+        return NavOutcome(
+            "PROGRESSED",
+            action_taken="control",
+            reason="precision_nudge",
+            details=res.get("result", {}) if res else {},
+        )
+
     @staticmethod
     def _deflect_waypoint_from_threats(
         cur_p: Tuple[float, float, float],
@@ -262,7 +293,14 @@ class MultiHopNavigator:
                 wx, wz, deflected = self._deflect_waypoint_from_threats(cur_p, tgt[0], tgt[2], threats)
                 ry = None if (xz_only or deflected) else tgt[1]
                 w_range = 2.0 if deflected else tolerance
-                payload = {"x": round(wx, 1), "y": ry, "z": round(wz, 1), "range": w_range, "timeout_ms": 10000}
+                if (not deflected) and (not xz_only) and ry is not None and abs(float(ry) - cur_p[1]) < 0.5:
+                    d_exact = dist3(cur_p, tgt)
+                    d_xz = dist2_xz(cur_p, tgt)
+                    if d_exact <= 0.55 or (stalled and d_xz <= 1.15 and tolerance < 0.6):
+                        return self._precision_nudge(dim, cur_p, tgt)
+                    if d_exact <= w_range + 0.55:
+                        w_range = 0.0
+                payload = {"x": round(wx, 2), "y": ry, "z": round(wz, 2), "range": w_range, "timeout_ms": 10000}
                 res, err_out = self._run_write(
                     "move_to", payload, dim, cur_p,
                     lambda: self.client.move_to(x=payload["x"], y=ry, z=payload["z"], range=w_range, timeout_ms=10000),
@@ -375,9 +413,13 @@ class MultiHopNavigator:
                 has_following_non_walk = True
                 break
             walk_end = s.stand_after
+        walk_center = (walk_end[0] + 0.5, float(walk_end[1]), walk_end[2] + 0.5)
+        if abs(walk_center[1] - cur_p[1]) < 0.5 and dist3(cur_p, walk_center) <= 0.55:
+            return self._precision_nudge(dim, cur_p, walk_center)
+        walk_range = 0.0 if dist3(cur_p, walk_center) <= 0.95 else 0.4
         res, err_out = self._run_write(
-            "move_to", {"x": walk_end[0], "y": walk_end[1], "z": walk_end[2], "range": 0.4}, dim, cur_p,
-            lambda: self.client.move_to(x=walk_end[0], y=walk_end[1], z=walk_end[2], range=0.4, timeout_ms=8000),
+            "move_to", {"x": walk_center[0], "y": walk_center[1], "z": walk_center[2], "range": walk_range}, dim, cur_p,
+            lambda: self.client.move_to(x=walk_center[0], y=walk_center[1], z=walk_center[2], range=walk_range, timeout_ms=8000),
         )
         if err_out is not None:
             if err_out.status == "BLOCKED":
