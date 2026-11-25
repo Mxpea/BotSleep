@@ -11,8 +11,8 @@
 |---|---|---|---|---|
 | **P0** | Branch, `v2/` skeleton, AST layer guard, `VirtualMcApiServer` simulator | `.\.venv\Scripts\python.exe -B -m unittest discover -s tests_v2 -v` | `DONE` | (see git log) |
 | **P1** | `v2/kernel/` (`config`, dual-pool `client`, WAL `storage`/`journal`, `model_gate`) | `.\.venv\Scripts\python.exe -B -m unittest discover -s tests_v2/kernel -v` | `DONE` | (see git log) |
-| **P2** | `v2/gateway/` (`VirtualWorldGateway`, `BlockUnreachableTracker`, `Pathfinder3D`, `MultiHopNavigator`, `SurfaceSwimExecutor`) | `.\.venv\Scripts\python.exe -B -m unittest discover -s tests_v2/gateway -v` | `IN_PROGRESS` | — |
-| **P3** | `v2/bt/` (`kernel`, `blackboard`, `watchdog`, `hard_safety`, `local_recovery`, `goal_mount`, `runtime`) | `.\.venv\Scripts\python.exe -B -m unittest discover -s tests_v2/bt -v` | `PENDING` | — |
+| **P2** | `v2/gateway/` (`VirtualWorldGateway`, `BlockUnreachableTracker`, `Pathfinder3D`, `MultiHopNavigator`, `SurfaceSwimExecutor`) | `.\.venv\Scripts\python.exe -B -m unittest discover -s tests_v2/gateway -v` | `DONE` | (see git log) |
+| **P3** | `v2/bt/` (`kernel`, `blackboard`, `watchdog`, `hard_safety`, `local_recovery`, `goal_mount`, `runtime`) | `.\.venv\Scripts\python.exe -B -m unittest discover -s tests_v2/bt -v` | `IN_PROGRESS` | — |
 | **P4** | `v2/primitives/` (8 orthogonal primitives) + `v2/tasks/` (`TaskCatalogue` 886-DAG, stateless recursive tasks, `competition` bridge) | `.\.venv\Scripts\python.exe -B -m unittest discover -s tests_v2/tasks -v` | `PENDING` | — |
 | **P5** | `v2/planner/` (`DepsPlanner`, `HorizonSelector`, `BM25SkillRetriever`, `SemanticCompactor`, `IntentCompiler`, `SerialModelWorker`) + `skills_kb/*.md` | `.\.venv\Scripts\python.exe -B -m unittest discover -s tests_v2/planner -v` | `PENDING` | — |
 | **P6** | Cutover `main.py` (`bot_sleep.py` & `client.py` shims preserved), `v2/observability/`, archive legacy v1 dead modules, sync `docs/` | `.\.venv\Scripts\python.exe -B -m unittest discover -s tests_v2 -v && .\.venv\Scripts\python.exe main.py --check-config` | `PENDING` | — |
