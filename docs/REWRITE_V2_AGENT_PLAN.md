@@ -9,13 +9,13 @@
 
 | Phase | Scope | Gate Command | Status | Commit |
 |---|---|---|---|---|
-| **P0** | Branch, `v2/` skeleton, AST layer guard, `VirtualMcApiServer` simulator | `.\.venv\Scripts\python.exe -B -m unittest discover -s tests_v2 -v` | `DONE` | (see git log) |
-| **P1** | `v2/kernel/` (`config`, dual-pool `client`, WAL `storage`/`journal`, `model_gate`) | `.\.venv\Scripts\python.exe -B -m unittest discover -s tests_v2/kernel -v` | `DONE` | (see git log) |
-| **P2** | `v2/gateway/` (`VirtualWorldGateway`, `BlockUnreachableTracker`, `Pathfinder3D`, `MultiHopNavigator`, `SurfaceSwimExecutor`) | `.\.venv\Scripts\python.exe -B -m unittest discover -s tests_v2/gateway -v` | `DONE` | (see git log) |
-| **P3** | `v2/bt/` (`kernel`, `blackboard`, `watchdog`, `hard_safety`, `local_recovery`, `goal_mount`, `runtime`) | `.\.venv\Scripts\python.exe -B -m unittest discover -s tests_v2/bt -v` | `DONE` | (see git log) |
-| **P4** | `v2/primitives/` (8 orthogonal primitives) + `v2/tasks/` (`TaskCatalogue` 886-DAG, stateless recursive tasks, `competition` bridge) | `.\.venv\Scripts\python.exe -B -m unittest discover -s tests_v2/tasks -v` | `DONE` | (see git log) |
-| **P5** | `v2/planner/` (`DepsPlanner`, `HorizonSelector`, `BM25SkillRetriever`, `SemanticCompactor`, `IntentCompiler`, `SerialModelWorker`) + `skills_kb/*.md` | `.\.venv\Scripts\python.exe -B -m unittest discover -s tests_v2/planner -v` | `DONE` | (see git log) |
-| **P6** | Cutover `main.py` (`bot_sleep.py` & `client.py` shims preserved), `v2/observability/`, archive legacy v1 dead modules, sync `docs/` | `.\.venv\Scripts\python.exe -B -m unittest discover -s tests_v2 -v && .\.venv\Scripts\python.exe main.py --check-config` | `DONE` | (see git log) |
+| **P0** | Branch, `v2/` skeleton, AST layer guard, `VirtualMcApiServer` simulator | `.\.venv\Scripts\python.exe -B -m unittest discover -s tests_v2 -v` | `DONE` | `2385ae5`, `4534af1` |
+| **P1** | `v2/kernel/` (`config`, dual-pool `client`, WAL `storage`/`journal`, `model_gate`) | `.\.venv\Scripts\python.exe -B -m unittest discover -s tests_v2/kernel -v` | `DONE` | `bf4d34f` |
+| **P2** | `v2/gateway/` (`VirtualWorldGateway`, `BlockUnreachableTracker`, `Pathfinder3D`, `MultiHopNavigator`, `SurfaceSwimExecutor`) | `.\.venv\Scripts\python.exe -B -m unittest discover -s tests_v2/gateway -v` | `DONE` | `a9ef242` |
+| **P3** | `v2/bt/` (`kernel`, `blackboard`, `watchdog`, `hard_safety`, `local_recovery`, `goal_mount`, `runtime`) | `.\.venv\Scripts\python.exe -B -m unittest discover -s tests_v2/bt -v` | `DONE` | `87628a3` |
+| **P4** | `v2/primitives/` (8 orthogonal primitives) + `v2/tasks/` (`TaskCatalogue` 886-DAG, stateless recursive tasks, `competition` bridge) | `.\.venv\Scripts\python.exe -B -m unittest discover -s tests_v2/tasks -v` | `DONE` | `2a934c9` |
+| **P5** | `v2/planner/` (`DepsPlanner`, `HorizonSelector`, `BM25SkillRetriever`, `SemanticCompactor`, `IntentCompiler`, `SerialModelWorker`) + `skills_kb/*.md` | `.\.venv\Scripts\python.exe -B -m unittest discover -s tests_v2/planner -v` | `DONE` | `396b502` |
+| **P6+** | Cutover `main.py` (`bot_sleep.py` & `client.py` shims), observability, live Leaves physics fixes (`goNear` deadband / mold / canopy / portal wait), decouple `scripts/` & `integrations/`, archive v1 to `legacy/`, sync docs | `.\.venv\Scripts\python.exe -B -m unittest discover -s tests_v2 -v && .\.venv\Scripts\python.exe main.py --config config.example.yaml --check-config` | `DONE` | `0f38072`, `dbd873b`, `c410e82`, `ed53ec3`, `3e48e92`, `52f6aa8` |
 
 ---
 
@@ -203,7 +203,7 @@ v2/
 3. Assert in `tests_v2/planner/` that serialized request payloads stay `<= 6,600` bytes across 50+ simulated turns while preserving valid tool_call/tool_result pairing.
 
 ### Phase 6: Cutover, Observability, Legacy Cleanup & Final Verification
-1. Wire `main.py` to `v2` (`sleep`, `survival/starter`, `survival/daily`, `survival/competition`), keeping `bot_sleep.py`, `client.py`, `scripts/botctl.py`, and `scripts/multi_bot_runner.py` working seamlessly.
-2. Upgrade `v2/observability/monitor.py` & `debug/monitor.html` with live BT active path, cache hit ratio, and prompt/completion token ratio.
-3. Move superseded `v1` procedural modules/tests to `legacy/` (or delete dead code per `REWRITE_V2_MASTERPLAN.md` Section 5 once all `tests_v2` pass).
-4. Update `docs/ARCHITECTURE.md`, `docs/SKILL_SPEC.md`, and `docs/TESTING.md` (strictly distinguishing offline simulation pass vs live server verification).
+1. Wire `main.py` to `v2` (`sleep`, `survival/starter`, `survival/daily`, `survival/competition`), keeping `bot_sleep.py`, `client.py`, `scripts/botctl.py`, `scripts/multi_bot_runner.py`, and `integrations/ninjabrain/` working without v1 runtime imports.
+2. Provide `v2/observability/monitor.py` (with BT active branch, cache hit ratio, token summary, pending/gate telemetry; legacy `debug/monitor.html` archived in `legacy/debug/`).
+3. Archive superseded `v1` modules and tests via `git mv` under `legacy/` (`legacy/core/`, `legacy/agent/`, `legacy/skills/`, `legacy/debug/`, `legacy/probe_api.py`, `legacy/tests/`).
+4. Update `docs/REWRITE_V2_MASTERPLAN.md`, `docs/REWRITE_V2_AGENT_PLAN.md`, `docs/ARCHITECTURE.md`, and `docs/TESTING.md` (strictly distinguishing offline simulation pass vs live server verification).

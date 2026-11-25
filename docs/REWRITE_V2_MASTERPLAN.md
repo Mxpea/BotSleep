@@ -2,6 +2,7 @@
 
 > **基线与分支**：基于 `main` (`c6859dcaf7a23efe3794298cac082bb60b3efeb5`) 拉出 `develop-tianya/rewrite-v2`。
 > **硬性前提**：相邻上游仓库 `mc-agent-api` 保持**绝对零本地源码修改**；一切虚拟化、缓存、多跳路由与容错均在 `BotSleep` 内闭环。
+> **落地状态（2026-11-26）**：已完成 `L0–L4` 全层重构与主入口切流（`2385ae5` → `52f6aa8`），旧版 `core/`、`agent/`、`skills/`、`debug/`、`probe_api.py`、`tests/` 已通过 `git mv` 归档至 `legacy/`，核心源码按设计收敛。`tests_v2` 72 项离线回归全绿，Leaves 1.21.11 单机重开世界实服专项用例 `A / B1 / B2 / C` 全数通过（详见 [TESTING.md](TESTING.md)）；实网远端大模型 9-Bot 90 分钟长跑压测仍待单独执行。
 
 ---
 

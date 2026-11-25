@@ -1,136 +1,48 @@
 # BotSleep 架构与实现状态
 
-更新：2026-11-19。本页描述整合 `main` 与 `develop-tianya/ai-iron-diamond-loop` 后的运行路径，包含自主目标、战斗、浅水/树冠本地恢复、洞穴优先采铁与批炼、200 格前向侦察与装备管理，以及结构工作流、3D 世界记忆和独立分层采矿。模型绑定与独立能力分开列出；验证结果见 [TESTING.md](TESTING.md)，交接边界与进度见 [HANDOFF.md](../HANDOFF.md)。
+更新：2026-11-26（`develop-tianya/rewrite-v2` 完成 L0–L4 重写切流与 `legacy/` 归档，对应总纲见 [REWRITE_V2_MASTERPLAN.md](REWRITE_V2_MASTERPLAN.md) 与 [REWRITE_V2_AGENT_PLAN.md](REWRITE_V2_AGENT_PLAN.md)）。验证结果见 [TESTING.md](TESTING.md)，历史交接背景见 [HANDOFF.md](../HANDOFF.md)。
 
-## 1. 当前入口与运行模式
+## 1. 当前入口与运行模式（BotSleep v2）
 
-`main.py` → `core/config.py` 加载默认值、YAML、环境变量及命令行覆盖，创建一个配置作用域内的游戏客户端。`bot_sleep.py` 与根 `client.py` 是兼容转发，不是第二套实现。普通依赖为 `requirements.txt` 中的 requests/PyYAML；RCON 只用于可选开发测试，主循环不依赖它。
+`main.py` → `v2/kernel/config.py` 加载默认值、YAML、环境变量与命令行覆盖，初始化单向五层微内核并在 `v2/orchestrator/runtime.py` 中运行。根目录 `bot_sleep.py`（转发 `main.py`）与 `client.py`（转发 `v2.kernel.client`）保留兼容薄壳，不再复制实现；普通依赖为 `requirements.txt` 中的 `requests` 与 `PyYAML`。
 
-| 模式 | 控制器/规划器 | 完成与退出 |
+旧版过程式代码与旧测试套件（原 `core/`、`agent/`、`skills/`、`debug/`、`probe_api.py`、`tests/`）已全部通过 `git mv` 归档至 `legacy/`，除 `scripts/botctl.py` 可选只读检查 `legacy.core.survival_state` 外，现网入口、`v2/`、`scripts/` 与 `integrations/` 已实现零旧模块依赖（由 `tests_v2/test_10_ops_and_cli.py` AST 守护）。
+
+| 模式 | 控制器 / 规划器 | 完成与退出 |
 |---|---|---|
-| sleep（默认） | `SleepController` + 睡眠技能 | 夜间/雷暴找床、验证入睡及醒来；可取消，有超时 |
-| survival/starter | `SurvivalHarness` + 规则或 `LLMSurvivalPlanner` | 根据当前物品/工作站核验初期石器目标；受步骤/时间/死亡预算限制 |
-| survival/daily | 同一 harness + 日常任务板和本地策略 | 13 项任务动态重算，35 个模型工具；持续维护，无 starter 的最终 goal_complete |
-| survival/competition | 同一 harness + `CompetitionTasks`、服务器 advancement 和 LLM | 40 个注册工具，125 项规则目录；99 个可能计分项均有任务说明，13 项接有工具路线，另 86 项为不可选蓝图；只认服务端计分证据 |
+| `sleep`（默认） | `BTRuntime` + `LocalRecoveryBranch`（夜间自动寻床入睡） | 夜间/雷暴就近寻床入睡与醒来；可 `#stop` 暂停，有超时 |
+| `survival/starter` | `BTRuntime` + `DepsPlanner`（规则或 `OpenAIBrain`） | 核验开局采集/制作石器与基础工具链；受步骤/时间/死亡预算限制 |
+| `survival/daily` | `BTRuntime` + 15 张 `skills_kb/*.md` + `TaskCatalogue`（886 配方） | 行为树反应式抢占 + `SerialModelWorker` 非阻塞异步规划 + `SemanticCompactor`（`<= 6.6KB`） |
+| `survival/competition` | 同一 `BTRuntime` + `v2/tasks/competition/`（5 工具与服务端 `/advancements`） | 45 无条件 + 54 条件 override 门禁；`--new-competition` 重置；只认服务端计分真值 |
 
-开启模型需 `agent.mode: survival` 且 `llm.enabled: true`。`--check-config` 只检查配置，不连接服务。`.env` 不由主程序自动加载。主入口退出会关闭控制器、等待工作线程清理并登出；这不是设计中“模型对话 handoff 保持游戏会话”的实现。
+开启模型规划需同时设置 `agent.mode: survival` 与 `llm.enabled: true`。`--check-config` 只校验配置，不连接服务器；`--keep-connected` / `mc_api.keep_session_on_exit` 控制退出时是否保持游戏连接。
 
-## 2. 当前执行链
+## 2. L0–L4 单向五层执行链（由 `test_00_layer_boundaries.py` AST 强制约束）
 
 ```mermaid
 flowchart TD
-    A[配置与唯一游戏客户端] --> B[SurvivalHarness.tick]
-    B --> C[新鲜状态与资源观察]
-    C --> D[starter / daily / competition 目标与受限记忆]
-    D --> E[规则规划或串行模型 worker]
-    E --> F[重新观察与本地安全门禁]
-    F --> G[写 pending 后执行已注册技能]
-    G --> H[后验核验与原生工具反馈]
-    H --> I[检查点与有界 SQLite 记忆]
-    I --> B
-    S[主线程安全监测] --> F
-    H --> R[事件日志与只读监控]
+    L4["L4 v2/planner/: DepsPlanner + HorizonSelector + BM25 skills_kb + SemanticCompactor + Async SerialModelWorker"]
+    L3["L3 v2/tasks/ & v2/primitives/: 8 正交原语 + TaskCatalogue(886) + 无状态递归 Task (<=1 写/宏帧)"]
+    L2["L2 v2/bt/: SyncBlackboard -> LoopWatchdog -> PrioritySelector(PendingGuard > HardSafety > LocalRecovery > ActiveGoal > AsyncReplan)"]
+    L1["L1 v2/gateway/: VirtualWorldGateway(三源体素缓存) + BlockUnreachableTracker + Pathfinder3D + MultiHopNavigator + SurfaceSwim"]
+    L0["L0 v2/kernel/: UnifiedWorldDB(WAL SQLite) + PendingTransactionJournal + InstanceLock + AsyncReadPool + ModelRequestGate"]
+    L4 --> L3 --> L2 --> L1 --> L0
 ```
 
-`DailySurvivalGoals`、`CompetitionTasks` 是本地任务组件，不是模型 subagent；`SurvivalPlaybook` 从已有观察补充有界阶段建议，也不发额外模型或游戏请求。当前无“多专项模型派发”运行时。主循环也没有把传送门、整树伐木或独立配方规划器接入模型分派。
+## 3. 核心模块职责与安全契约
 
-近敌时，本地策略可以直接选择一次符合当前装备、生命、目标与地形条件的 `fight_hostile`，不等待慢模型。规则与模型路径共享撤退锁存、目标冷却和安全门禁；模型在途提案可被取消消费，但远端请求仍须排空。短安全观察仅增加有限库存核验以判断武器/盾，不据此执行生产。已知战斗失败要求撤退时立即重新观察并交回撤退，保留失败反馈，不被普通生产失败熔断阻断；未知结果仍暂停。
-
-`starter` 的孤立僵尸反击由 Harness 本地触发，不新增模型工具；`daily` / `competition` 注册 `fight_hostile`。现有 `craft` 目标能用已持有的骨头制作骨粉；它不创建跨目标的掉落需求，也不插入拾取移动。顺路拾取和主动打怪取材料仍是提案。见 [现行战斗接口](COMBAT_AND_HUNTING.md) 与 [随行拾取设计](COMBAT_AND_LOOT_DESIGN.md)。
-
-另有开发路径：`--debug --radar` 创建 `ContinuousRadarSkill` 并开启 daemon 线程，读取客户端、将 POI/航迹写入 `MemoryEngine`。单独 `--radar` 不创建该对象。门户浇筑、独立合成与伐木需由程序显式调用；聊天的 `chop_skill`、`craft_skill` 注入槽在 `main.py` 尚未赋值。它们不继承生存 harness 的动作互斥、pending 和取消恢复保证。
-
-
-模型每轮只提一个已注册的工具。普通动作沿原有单步/最多 8 步小批技能派发；daily/competition 的 `run_survival_task` 则授权一个高层目标，`AutonomousTaskController` 从每次新观察中计算一个原子步骤，不保存可重放的动作队列。`AutonomyRuntime` 复用 harness 的本地安全、技能派发、逐动作 pending 和后验结果，并在目标边界反馈原始模型调用一次。模型文本自报“完成”、API 返回 ok 或路径目标点存在，均不能替代实际效果核验。
-
-目标程序有 14 类、默认 128 步/600 秒及局部失败/无进展/探索上限。正常子步骤不发模型请求；已知失败允许有界换候选，安全抢占保留目标意图，恢复时重查状态而不续跑旧路线。unknown 子动作冻结目标并保留游戏 pending；显式恢复须新鲜完整观察后放弃未确认目标，不重放旧写入。完整接口与不支持范围见 [AUTONOMOUS_TASKS.md](AUTONOMOUS_TASKS.md)。
-
-## 3. 模块职责
-
-| 模块 | 已有职责 |
+| 层级与目录 | 核心职责与硬性不变量 |
 |---|---|
-| `core/client.py` | 统一端点、认证、HTTP/业务错误与超时；保留原响应封装，列表型方法做结构转换 |
-| `core/autonomous_tasks.py`、`core/autonomy_runtime.py` | 目标程序与主链路适配：单目标预算、前置材料规划、fresh 子步、已知失败恢复、未知冻结及延迟配对反馈；不另建模型或游戏客户端 |
-| `core/radar.py` | 3D 方块全景雷达测绘与关键 POI 定向扫描 |
-| `core/recipes.py`、`data/recipes.json` | 886 个可合成产物的配方目录及前置解析；独立 `CraftItemSkill` 使用，不替换模型 `craft_item` |
-| `skills/portal_speedrun.py` | 独立分步浇筑、点火与门框读取；坐标和阶段由调用者提供，未绑定模型工具 |
-| `skills/portal_telemetry.py`、`skills/lava_lake_generator.py` | 前者主动读取门户动作前后状态并导出 JSON，后者通过 RCON 生成专用测试地形；不是只读 EventMonitor |
-| `skills/crafting.py` | 智能 2x2/3x3 工作台调度合成与工作台自动回收 |
-| `skills/mining.py` | `ChopTreeSkill`（整树连续伐木）与 `MineShaftSkill`（5 层斜井、工作站、地下暗河跨步绕行、`target_ys` 分层采矿与返表兜底） |
-| `skills/action_workflow.py`、`skills/shelter.py`、`skills/container.py` | 确定性动作工作流引擎（`ActionWorkflowRunner`、`pillar_up`/`pillar_down`、`scaffold_drop`、`escape_to_surface`）、庇护所施工与双箱/熔炉窗口操作 |
-| `core/world_3d.py`、`core/pathfinder_3d.py`、`core/cave_probe.py`、`core/mining_targets.py` | 通用持久化 3D 体素世界记忆（`VoxelWorld3D` SQLite chunk-zlib）、3D A* 与锚定搭桥规划器、洞腔探查与主世界 Y 层矿脉带规划 |
-| `skills/world_navigator.py`、`skills/ore_harvester.py`、`skills/cave_explore.py` | 统一 3D 导航/微掘/疾跑合并/4 级有界撤退执行器、矿脉踩捡收割器与可持久化多分支洞穴探索（未绑定模型目录） |
-| `core/structure_spec.py` | 标准结构蓝图（庇护所/矿井坐标变换、安全选址与结构验收）与挖掘/危险/可替代方块常量 |
-| `skills/exploration.py` | 可开关后台雷达，约每秒读取状态，默认位移 6 格后扫描；不是寻路或导航执行器 |
-| `skills/daily_survival.py`、`skills/equipment.py`、`skills/scouting.py` | 日常生存技能库（作物、狩猎、铁矿、熔炼、储物、床门、5x5 庇护所）、装备与副手穿戴（`EquipmentSkill`）及 200 格前向航点侦察（`SurfaceScoutSkill`） |
-| `skills/positioning.py`、`skills/shelter_preparation.py` | 内部短距站位与住所相邻台阶；独立只读天然场地准备计划、每次至多一格土块清理，随后重新勘测基地；不调用独立整套建筑工作流 |
-| `skills/combat.py` | `fight_hostile` 短步近战/远程/撤退；按交战预算复查伤害与击杀，安全解除本技能持有的盾姿态 |
-| `skills/buckets.py` | `collect_liquid` 与受限 `hunt_with_lava`；核验源方块、桶转移、源回收和实际库存收益 |
-| `core/survival_playbook.py` | 按 `survival.intent` 生成 survival/speedrun 阶段建议、前置、已绑定动作及未实现缺口 |
-| `core/domain.py` | 共享领域常量（木种、床色、食物点、危险方块）、纯坐标/体素键解析、背包计数提取与 `TypedDict` 契约 |
-| `core/skill_registry.py` | starter / daily / competition 技能注册表（目标作用域、终点安全复核标记、执行器槽位分发），包含自主任务、战斗与桶类入口；内部住所准备目录不暴露给模型 |
-| `core/retreat_controller.py` | 树冠/近敌分段撤退恢复状态机、失败落点冷却与中继恢复判定 |
-| `core/survival_harness.py` | 串行任务推进、单游戏动作线程、独立模型 worker、安全复查、取消、失败退避和检查点；安全门禁委托 `SafetyArbiter`，动作/跨步看门狗委托 `LoopSupervisor` |
-| `core/safety_arbiter.py` | 统一监控抢占基线与紧急状态判定（`SafetyArbiter`、`ThreatAssessment`）：严格模式保留硬门禁，放开 `llm_override_on_block` 时保证 `planning=True` 低血等警告对称放行，并在连续 `>=2` 次被动 `observation_scope="safety"` `wait(1)` 滞留后强制升级完整观测 |
-| `core/loop_supervisor.py` | 两级活锁看门狗（`LoopSupervisor`）：L1 单动作/工作流 `action_watchdog_seconds` 超时熔断，L2 跨步检查 `llm_cancelled` 高频抢占震荡护盾、静止 `wait` 提醒、无库存变化时的重复参数/失败签名冷却（库存变化即自动清除），以及夜间连续死亡热点 `recover_drops` 暂停 |
-| `core/intent_compiler.py` | 模型意图编译与本地工作台兜底（`IntentCompiler`、`resolve_plank_species`、`should_prefer_local_workstation`）：规范化复数与常见别称（`sticks->stick`）、`smelt` 输入映射与速通禁用铜/金提示、裁剪 `playbook.next_actions` 使之对齐当前可见工具集，并在工作台/熔炉过远或高差过大时优先本地合成放置 |
-| `agent/llm_planner.py`、`agent/tools.py` | 完整注册 starter 9 / daily 35 / competition 40 工具；autonomy 正常规划仅暴露目标及安全/赛事元工具，needs_ai 开放原子修复；通过 `IntentCompiler` 归一化并保留配对工具反馈 |
-| `core/competition_rules.py`、`core/competition_tasks.py` | 读取规则目录、计算可用性和服务器 advancement 证据、管理选择/完成/强退/终止及得分；不执行游戏动作 |
-| `core/model_worker.py`、`core/model_gate.py` | 慢模型异步等待；同服务/凭据作用域的本机线程与进程门禁；未知请求持久化锁定 |
-| `core/survival_state.py` | 有界观察、跨进程文件锁与原子检查点，按 API/账号/world_id 隔离并提供单实例 `instance_lock()`；pending 不自动重放 |
-| `scripts/botctl.py` | 离线只读运维工具，检查生存实例锁、`pending` 意图及 `ModelRequestGate` 状态（`status` / `check-ready-to-replace`） |
-| `agent/daily_survival.py` | 根据当前证据生成日常任务板、依赖、缺口、多炉批炼动作及建议；competition 中仅作生存辅助，不是计分来源 |
-| `core/daily_observation.py`、`core/daily_policy.py` | 日常证据采集、安全情境、树冠/浅水触发（`canopy_escape` / `water_escape`）与模型放行条件；未知资源不当成可执行目标 |
-| `skills/survival.py`、`skills/daily_survival.py` 等 | 采集、制作、移动、撤退、树冠/浅水脱离（含 `water_escape`）、农业、熔炼、住所、容器等执行及后验验证 |
-| `core/survival_memory.py` | 有界 SQLite 事件、地点和失败策略记忆；召回候选仍须重新观察 |
-| `debug/` | 白名单聊天调试、脱敏日志、本机只读监控；不是人工比赛控制方案 |
-| `integrations/ninjabrain/` | 独立末影之眼采样和官方计算核心；未绑定 starter/daily 模型目录 |
+| `v2/domain.py` | 纯共享常量、坐标/朝向变换、四朝向 `StructureSpec`、威胁半径与方块分类 |
+| `v2/kernel/`（L0） | `config.py` 配置加载；`client.py` 拆分单线程写 Session 与 `threading.local()` 只读池；`storage.py` + `journal.py` 维护作用域 WAL 库、实例锁与写前 `pending_tx`（`unknown` 冻结不重放）；`model_gate.py` 保证跨进程模型请求串行并发=1 与 30s 传输恢复窗口 |
+| `v2/gateway/`（L1） | `world_proxy.py` 融合 `find_blocks`、`get_block` 与站位推断并做 `y+0.85`/`y-0.01` 桶视线规划；`unreachable.py` 按 `(dim, pos, action)` 持久化 TTL 黑名单；`pathfinder_3d.py` 维护起点 3×3 预取、按需补读与 `avoid_block_breaking`；`multihop_navigator.py` 切片多跳、3D 微掘/搭柱/搭桥并经 `_precision_nudge` 桥接上游 `goNear()` `<= range + 0.5` 盲区 |
+| `v2/bt/`（L2） | `SyncBlackboard` 每帧并发拉取状态/库存/实体/增量 `/events`；`Node.stop(bb)` 立法**纯内存零网络写**；`HardSafety` 含热危害避让与举盾进出半径迟滞；`LocalRecovery` 含饮食、浮水与树冠寻树干安全下树；`LoopWatchdog` 追踪 Bounding-Sphere 停滞并豁免 `smelt_waiting_furnace` 与有界 `nether_portal_waiting` |
+| `v2/primitives/` & `v2/tasks/`（L3） | `Navigate / DigCollect / PlaceBuild / Craft / Container / Fluid / Combat / Utility` 八大单写原语与无状态递归任务；`EnterNetherTask` 实现保护区防门前挖坑、先水后岩浆浇筑 10 格模具、远距离取水点回退及有界进门等待 |
+| `v2/planner/` & `skills_kb/`（L4） | `DEPS` 失败诊断、`HorizonSelector`（含 `PORTAL_GATE_READY`）、15 张 `skills_kb/*.md` 零依赖 BM25 召回、`SemanticCompactor`（`ProgressCard` + 最近 2 组工具事务 `<= 6.6KB`）及 `IntentCompiler` |
+| `v2/observability/`、`scripts/`、`integrations/` | `FlightRecorder` 脱敏日志、`MonitorServer` 只读面板、`ChatDebugger`、`scripts/botctl.py` 运维检查、`scripts/multi_bot_runner.py` 多实例编排、与旧版解耦的 `integrations/ninjabrain/` |
 
-旧 `agent/loop.py` 和 `core/telemetry.py.ReflexDaemon` 仍有 TODO，但不是当前生存主循环。`core/memory.py` 与 `data/game_logic/` 现被开发雷达/独立伐木复用，但不是当前生存检查点或 SQLite 记忆。默认数据目录不按 API/账号/world_id 隔离，其中部分文件受版本控制，调试后须检查 diff。维护时不要据旧骨架推断整个系统未实现。
-
-## 4. 模型请求与游戏动作的两套未知状态
-
-**模型侧**：`ModelRequestGate` 在进程内/本机跨进程串行化请求。安全事件可取消旧模型提案的消费，但不能证明远端生成已结束；worker 等请求返回后排空，不执行过期提案。传输超时/连接中断留下 `uncertain`，重启不会自动放行。只有确认 provider 无在途请求后才可 `--acknowledge-model-idle`；不能用此参数试探解锁。明确 HTTP 错误按当前策略处理，模型失败不回退为规则采集。
-
-**游戏侧**：动作前写 pending，结果不明则保存并暂停；`--resume` 重新观察后规划，不重发旧动作。不能用它解除模型请求未知状态。`stop` 是停止请求，不是服务器已释放动作锁的保证；本地取消也不能立即杀掉同步 HTTP。主进程退出可能等待请求超时，运行预算不是进程强杀期限。
-
-战斗和桶类未知写结果分别可标记 `cleanup_skipped: combat_unknown/unknown_bucket`，与 `disconnected_unknown` 一样禁止上层再补 stop、攻击或收桶来试探状态。安全解除盾姿态是独立记录 pending 的内部步骤，只在本技能确实举盾、无既有 pending 且重新确认无近敌时执行；解除结果不明也须保留 pending。
-
-两者都不是“失败即可重试”。同一机器人之外的外部进程控制权，以及通用分布式动作调度，尚未由当前实现全面解决。
-
-## 5. 上下文、进度与记忆
-
-当前规划器发送精简观察、目标板、受限记忆和最近完整原生工具事务；按历史轮数和请求 JSON 字节预算裁剪。starter 默认上限 30,000 字节，daily/competition 48,000 字节（含工具定义），不是 provider 的 token 窗口。最近未交付工具结果受保护；当前输入本身过大则报 `llm_context_limit`，不发送请求。competition 选择时只发送当前证据解锁的短候选，执行时展开当前目标；完整目录仍供本地计分、终态检测和监控。有工具的模型请求要求一次调用，禁止并行；不兼容时不会自动降级为 `auto`。
-
-`context.playbook` 提供阶段建议。完整观察更新建议，短安全观察标记 `fresh=false`。显式启用 `daily + speedrun + campaign` 时，`core/campaign.py` 按真实维度与库存选择通关目标，现有 harness 写入检查点并交给 `skills/campaign.py` 执行。门户、要塞和末地动作属于本地通关控制器，模型工具目录沿用原有权限。详见 [CAMPAIGN.md](CAMPAIGN.md) 和 [SURVIVAL_PLAYBOOK.md](SURVIVAL_PLAYBOOK.md)。
-
-这不是访谈确定的 Pi/OMP token-aware、模型语义摘要与持久化边界的自动 compact；显式 handoff、动态 SKILL.md 加载、重复输出→compact→force-exit 的完整机制也尚未实现。已有重复失败/目标冷却不应命名为完整 attention-collapse 检测。
-
-当前 `SurvivalJournal` 保存 context/pending/last_result，并把 competition 状态按 API/账号/world_id 保存；终态重启后保持退出，非终态恢复仍需新鲜观察，pending 不自动重放。SQLite 记忆另有容量/召回预算。模型历史未作为跨进程对话自动恢复协议持久化。
-
-## 6. 安全与导航边界
-
-已有安全监测能识别近敌、生命、火/岩浆、水中和死亡等变化，取消过期模型提案或请求停止动作；日常策略可选择进食、睡眠、撤退和短安全观察。现场安全可能只能返回 unsafe/等待，不能宣称一定脱困。
-
-在 `daily` / `competition` 的模型执行链，单纯的夜间等待或无可用食物恢复路线的低血等待，可以让已提交的原地制作及就近采木继续。每步依据新观察授权，技能在写入前再次检查现场。权限由 Harness 内部传递，记录 `SOFT_POLICY_RELAXED`。执行范围和检查条件见 [目标程序](AUTONOMOUS_TASKS.md)。
-
-短步战斗不等于自动击杀：攻击已发、伤害已证实、目标消失、击杀和实际掉落分别记录。低血、多敌、未知目标或危险地形不放行进攻；苦力怕缺少引信证据，未开放近战击杀。普通狩猎先接近再重新观察，技能只做 2.8 格内站定攻击。岩浆狩猎仅限已核验的不燃容纳坑并立即核验回收源，不能当作开放地面通用攻击。条件和验收边界见 [COMBAT_AND_HUNTING.md](COMBAT_AND_HUNTING.md)。
-
-现有生存模型内建移动/撤退技能仍以局部几何、支撑、净空、危险地形及位置后验检查为主；独立工作流层 `Pathfinder3D` / `WorldNavigator` / `ActionWorkflow` 已提供 3D A*、`blocked_edges` 规避、锚定跨涧搭桥、`pillar_up`/`pillar_down`、`scaffold_drop` 与 `escape_to_surface`。**生存模型主循环内的通用水面优先导航、surface_swim 与高频反射仍待正式接入**；普通 `move_to` 仍不保证自动浮水，也不依赖外部 API 补丁。
-
-用户已确认的未来导航方向仍是：harness 全权规划、安全水面优先、不潜没时不计氧气、必要时按资源预算搭路；下意识行为可消耗资源应急，核验后续接原任务意图。实现前必须处理观察覆盖不足和动作互斥，不借用相邻 API 补丁。
-
-## 7. 验证与下一步
-
-当前 pull 后的源码状态和本轮离线复核与历史实服结果分别记录于 [TESTING.md](TESTING.md)。本轮不连接游戏/模型，不能据本轮离线复核宣布新版自然地图完整生存成功。
-
-后续先复用现有配置、客户端、模型门禁、后验验证和检查点机制，再补语义 compact/handoff、阶段 skill 加载与水面/搭路导航执行器；competition 任务选择和退出的基础闭环已实现。不要并行新建第二套无人维护的调度/认证体系；未来接口名见 [HARNESS_INTERFACES.md](HARNESS_INTERFACES.md)，未实现入口不得广告给模型。
-
-## 8. 协作开发与分支规范
-
-为保障多人协作与版本隔离：
+## 4. 协作开发与分支规范
 
 - **主分支 (`main`)**：保持纯净且可稳定部署的代码基准。
-- **个人工作分支 (`develop-tianya`)**：用于 TianYa 的个人功能开发、测试与阶段性提交。
-- **存档隔离原则**：Minecraft 运行世界（`world/`）与庞大二进制必须物理隔绝在独立服务端，严禁推送到 Git 仓库。
-- **密钥安全**：本地配置文件（`config.yaml`）已配置 `.gitignore` 绝不入库，示例见 `config.example.yaml`。
+- **个人工作分支 (`develop-tianya/rewrite-v2`)**：当前 L0–L4 重写与实服验证所在分支（归档旧代码于 `legacy/`）；外部 `mc-agent-api` 始终保持零源码改动。
+- **存档与密钥安全**：Minecraft 运行世界（`world/`）物理隔绝在独立服务端；`config.yaml`、`.env`、`.venv/` 与 `logs/` 已配置 `.gitignore` 绝不入库，示例见 `config.example.yaml`。
