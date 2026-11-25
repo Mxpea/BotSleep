@@ -116,11 +116,12 @@ def run_v2_session(
             print(f"[v2] Live monitor: {monitor.address}")
 
         fr_cfg = dbg_cfg["flight_recorder"]
+        overflow_key = str((config["llm"].get("overflow") or {}).get("api_key") or "")
         if fr_cfg["enabled"] or monitor is not None or mon_cfg["console"]:
             recorder = FlightRecorder(
                 fr_cfg["output_dir"],
                 enabled=fr_cfg["enabled"],
-                secrets=(agent_cfg["password"], config["llm"]["api_key"]),
+                secrets=tuple(s for s in (agent_cfg["password"], config["llm"]["api_key"], overflow_key) if s),
                 sink=monitor.publish if monitor else None,
                 console=mon_cfg["console"],
             )
@@ -213,12 +214,89 @@ def run_v2_session(
                 else (surv_cfg["competition"]["max_seconds"] if objective == "competition" else surv_cfg["max_runtime_seconds"])
             )
 
-            for _ in range(max_ticks):
+            last_logged_resp = None
+            last_logged_err: Any = None
+            last_comp_key: Optional[tuple] = comp_mgr.snapshot() and (comp_mgr.total_score, len(comp_mgr.completed_ids)) if comp_mgr is not None else None
+            last_dim: Optional[str] = status.get("dimension")
+
+            for tick_idx in range(max_ticks):
                 if time.monotonic() >= deadline or rt.bb.stop_requested:
                     break
                 tick_status = rt.tick_once()
                 if chat_dbg is not None:
                     chat_dbg.process_events(rt.bb)
+
+                if comp_mgr is not None and (rt.bb.goal_status == "COMPLETED" or tick_idx % 20 == 19):
+                    try:
+                        comp_mgr.sync_server_advancements(client)
+                    except APIError:
+                        pass
+                    comp_key = (comp_mgr.total_score, len(comp_mgr.completed_ids))
+                    if comp_key != last_comp_key:
+                        last_comp_key = comp_key
+                        if recorder:
+                            recorder.record("INFO", "v2.competition", "COMPETITION_SCORE", comp_mgr.snapshot())
+                        print(
+                            f"[v2] [{client.username}] score={comp_mgr.total_score} done={len(comp_mgr.completed_ids)} active={comp_mgr.active_task_id}",
+                            flush=True,
+                        )
+
+                if replan_node is not None:
+                    resp = replan_node.last_response
+                    if resp is not None and resp is not last_logged_resp:
+                        last_logged_resp = resp
+                        plan_res = rt.bb.get("last_plan_result")
+                        if recorder:
+                            recorder.record("INFO", "v2.llm", "LLM_RESPONSE", {
+                                "route": resp.route,
+                                "requested_model": resp.requested_model,
+                                "confirmed_model": resp.confirmed_model,
+                                "latency_ms": resp.latency_ms,
+                                "prompt_tokens": resp.prompt_tokens,
+                                "completion_tokens": resp.completion_tokens,
+                                "tool_calls": [tc.name for tc in resp.tool_calls],
+                                "plan_result": plan_res,
+                            })
+                        print(
+                            f"[v2] [{client.username}] LLM({resp.route}/{resp.confirmed_model}) {resp.latency_ms}ms "
+                            f"pt={resp.prompt_tokens} ct={resp.completion_tokens} tools={[tc.name for tc in resp.tool_calls]}",
+                            flush=True,
+                        )
+                    cur_err = rt.bb.get("last_llm_error")
+                    if cur_err and cur_err != last_logged_err:
+                        last_logged_err = cur_err
+                        if recorder:
+                            recorder.record("WARN", "v2.llm", "LLM_ERROR", {"error": str(cur_err)})
+                        print(f"[v2] [{client.username}] LLM_ERROR: {cur_err}", flush=True)
+
+                if tick_idx % 20 == 0 or rt.bb.dimension != last_dim or rt.bb.goal_status == "COMPLETED":
+                    last_dim = rt.bb.dimension
+                    summary = {
+                        "tick": tick_idx,
+                        "pos": [round(float(v), 1) for v in rt.bb.pos],
+                        "dim": rt.bb.dimension,
+                        "hp": round(float(rt.bb.health), 1),
+                        "food": int(rt.bb.food),
+                        "branch": rt.bb.active_branch,
+                        "goal": rt.bb.active_goal_name,
+                        "goal_status": rt.bb.goal_status,
+                        "out": rt.bb.last_action_outcome,
+                        "fail": rt.bb.last_failure_reason,
+                        "cache_hit_ratio": round(gateway.cache_hit_ratio, 3),
+                        "primary_calls": brain.primary_calls if brain else 0,
+                        "overflow_calls": brain.overflow_calls if brain else 0,
+                        "prompt_tokens": brain.total_prompt_tokens if brain else 0,
+                        "completion_tokens": brain.total_completion_tokens if brain else 0,
+                        "comp_score": comp_mgr.total_score if comp_mgr else 0,
+                    }
+                    if recorder:
+                        recorder.record("INFO", "v2.app", "TICK_SUMMARY", summary)
+                    print(
+                        f"[v2] [{client.username}] t={tick_idx} pos={summary['pos']} dim={summary['dim']} hp={summary['hp']} "
+                        f"goal={summary['goal']}:{summary['goal_status']} out={summary['out']} score={summary['comp_score']}",
+                        flush=True,
+                    )
+
                 if monitor is not None:
                     monitor.update_snapshot(
                         bt=rt.bb.snapshot(),
@@ -233,6 +311,8 @@ def run_v2_session(
                                 if (replan_node and replan_node.last_response)
                                 else "未确认"
                             ),
+                            "primary_calls": brain.primary_calls if brain else 0,
+                            "overflow_calls": brain.overflow_calls if brain else 0,
                             "prompt_tokens": brain.total_prompt_tokens if brain else 0,
                             "completion_tokens": brain.total_completion_tokens if brain else 0,
                             "ratio": round(brain.prompt_completion_ratio, 2) if brain else 0.0,

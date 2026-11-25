@@ -47,6 +47,9 @@ class RconManager:
     def execute(self, cmd: str) -> str:
         return self.command(cmd)
 
+    def disconnect(self) -> None:
+        return None
+
 DEFAULT_SPREAD_GRID: Tuple[Tuple[int, int], ...] = (
     (0, 0),
     (2000, 0),

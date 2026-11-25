@@ -123,3 +123,80 @@ class TestOpsAndCliCutover(unittest.TestCase):
         self.assertEqual(drops, {7: [1.5, 64.0, -2.5]})
         res = eye_recovery.recover_eye(None, None, {"pos": [0.0, 64.0, 0.0]}, 1, None, {}, {"eye_of_ender"})
         self.assertEqual(res, {"status": "flight_position_unknown"})
+
+    def test_rcon_manager_disconnect_and_overflow_stats_redaction(self) -> None:
+        from unittest.mock import patch
+        from v2.observability.logger import FlightRecorder
+        from v2.kernel.model_gate import ModelGateError
+        from v2.planner.llm_client import LLMResponse, OpenAIBrain
+
+        rm = multi_bot_runner.RconManager("127.0.0.1", 25575, "pw")
+        rm.disconnect()
+
+        with tempfile.TemporaryDirectory() as td:
+            fr = FlightRecorder(td, enabled=True, secrets=("prim-secret", "ov-secret-xyz"))
+            fr.record("INFO", "test", "EVT", {"msg": "leaked ov-secret-xyz and prim-secret"})
+            content = next(Path(td).glob("*.jsonl")).read_text(encoding="utf-8")
+            self.assertNotIn("ov-secret-xyz", content)
+            self.assertNotIn("prim-secret", content)
+
+        primary = OpenAIBrain("http://127.0.0.1:9", "k1", "m1")
+        overflow = OpenAIBrain("http://127.0.0.1:9", "k2", "m2")
+        primary.overflow_brain = overflow
+        try:
+            ov_resp = LLMResponse("m2", "m2", "", [], prompt_tokens=120, completion_tokens=15, route="overflow", latency_ms=20)
+            with patch.object(primary, "_call_single", side_effect=ModelGateError("llm_busy", "busy")), \
+                 patch.object(overflow, "_call_single", return_value=ov_resp):
+                got = primary.chat([{"role": "user", "content": "hi"}])
+            self.assertEqual(got.route, "overflow")
+            self.assertEqual(primary.primary_calls, 0)
+            self.assertEqual(primary.overflow_calls, 1)
+            self.assertEqual(primary.total_prompt_tokens, 120)
+            self.assertEqual(primary.total_completion_tokens, 15)
+        finally:
+            primary.close()
+
+    def test_async_replan_main_thread_compile_and_error_backoff(self) -> None:
+        from unittest.mock import MagicMock
+        from v2.bt.blackboard import Blackboard
+        from v2.bt.goal_mount import ActiveGoalMount
+        from v2.planner.deps_planner import AsyncLLMReplanNode
+        from v2.planner.model_worker import WorkerResult
+
+        class _StubWorker:
+            def __init__(self) -> None:
+                self.is_busy = False
+                self.submitted = 0
+                self.pending: list = []
+
+            def submit(self, job_id, ctx_ver, fn) -> bool:
+                self.submitted += 1
+                try:
+                    self.pending.append(WorkerResult(job_id, ctx_ver, True, value=fn()))
+                except Exception as exc:
+                    self.pending.append(WorkerResult(job_id, ctx_ver, False, error=exc))
+                return True
+
+            def poll(self, expected_context_version=None):
+                return self.pending.pop(0) if self.pending else None
+
+        planner = MagicMock()
+        planner.brain = MagicMock()
+        planner.build_request_payload.return_value = ([{"role": "user", "content": "hi"}], [])
+        planner.brain.chat.side_effect = RuntimeError("rate_limited")
+
+        worker = _StubWorker()
+        replan = AsyncLLMReplanNode(planner, ActiveGoalMount(), worker=worker)
+        bb = Blackboard()
+        bb.begin_tick()
+        # Tick 1 submits once (worker executes immediately and stores error result)
+        replan.update(bb)
+        self.assertEqual(worker.submitted, 1)
+        # Tick 2 collects error & arms exponential backoff
+        replan.update(bb)
+        self.assertEqual(bb.get("last_llm_error"), "rate_limited")
+        self.assertEqual(replan._error_streak, 1)
+        # Tick 3 skips immediate resubmission during backoff window
+        replan.update(bb)
+        self.assertEqual(worker.submitted, 1)
+        self.assertEqual(bb.last_action_outcome, "llm_error_backoff")

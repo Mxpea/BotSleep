@@ -81,6 +81,8 @@ class OpenAIBrain:
             self._session.mount("https://", _TLS12Adapter())
         self.total_prompt_tokens = 0
         self.total_completion_tokens = 0
+        self.primary_calls = 0
+        self.overflow_calls = 0
 
     def close(self) -> None:
         self._session.close()
@@ -176,10 +178,18 @@ class OpenAIBrain:
 
     def chat(self, messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]] = None) -> LLMResponse:
         if self.overflow_brain is None:
-            return self._call_single(messages, tools, route="primary")
+            resp = self._call_single(messages, tools, route="primary")
+            self.primary_calls += 1
+            return resp
         try:
-            return self._call_single(messages, tools, route="primary", wait_seconds=self.primary_wait_seconds)
+            resp = self._call_single(messages, tools, route="primary", wait_seconds=self.primary_wait_seconds)
+            self.primary_calls += 1
+            return resp
         except ModelGateError as err:
             if err.code != "llm_busy":
                 raise
-            return self.overflow_brain._call_single(messages, tools, route="overflow")
+            resp = self.overflow_brain._call_single(messages, tools, route="overflow")
+            self.overflow_calls += 1
+            self.total_prompt_tokens += resp.prompt_tokens
+            self.total_completion_tokens += resp.completion_tokens
+            return resp

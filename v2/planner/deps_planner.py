@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -69,9 +70,13 @@ class DepsPlanner:
         top_inv = sorted(bb.inventory_counts.items(), key=lambda kv: -kv[1])[:12]
         inv_str = ", ".join(f"{k}:{v}" for k, v in top_inv) or "empty"
         pos = [round(v, 1) for v in bb.pos]
+        comp_str = ""
+        if self.compiler.objective == "competition" and self.compiler.competition is not None:
+            snap = self.compiler.competition.snapshot()
+            comp_str = f" comp_score={snap['score']} active={snap['active_task_id']} comp_done={len(snap['completed_ids'])}"
         return (
-            f"STATE: dim={bb.dimension} pos={pos} hp={bb.health:.1f} food={bb.food} ox={bb.oxygen} "
-            f"inv=[{inv_str}]"
+            f"STATE: dim={bb.dimension} pos={pos} hp={bb.health:.1f} food={bb.food} ox={bb.oxygen}"
+            f"{comp_str} inv=[{inv_str}]"
         )
 
     def build_request_payload(
@@ -124,6 +129,21 @@ class DepsPlanner:
 
         return messages, tools
 
+    def apply_llm_response(self, resp: LLMResponse, bb: Blackboard) -> Tuple[Optional[Any], Dict[str, Any], LLMResponse]:
+        if not resp.tool_calls:
+            return None, {"ok": True, "action": "wait", "content": resp.content[:120]}, resp
+
+        tc = resp.tool_calls[0]
+        task, res = self.compiler.compile_tool_call(tc.name, tc.arguments, bb)
+        self.compactor.record_tool_turn(
+            call_id=tc.id,
+            tool_name=tc.name,
+            arguments=tc.arguments,
+            result_summary=res,
+            succeeded=bool(res.get("ok")),
+        )
+        return task, res, resp
+
     def plan_once(self, bb: Blackboard, *, needs_ai: bool = False) -> Tuple[Optional[Any], Dict[str, Any], Optional[LLMResponse]]:
         """Execute one planning step: LLM if enabled, else deterministic HorizonSelector fallback."""
         if self.brain is None:
@@ -139,19 +159,7 @@ class DepsPlanner:
 
         messages, tools = self.build_request_payload(bb, needs_ai=needs_ai)
         resp = self.brain.chat(messages, tools=tools)
-        if not resp.tool_calls:
-            return None, {"ok": True, "action": "wait", "content": resp.content[:120]}, resp
-
-        tc = resp.tool_calls[0]
-        task, res = self.compiler.compile_tool_call(tc.name, tc.arguments, bb)
-        self.compactor.record_tool_turn(
-            call_id=tc.id,
-            tool_name=tc.name,
-            arguments=tc.arguments,
-            result_summary=res,
-            succeeded=bool(res.get("ok")),
-        )
-        return task, res, resp
+        return self.apply_llm_response(resp, bb)
 
 
 class AsyncLLMReplanNode(Node):
@@ -169,6 +177,8 @@ class AsyncLLMReplanNode(Node):
         self.worker = worker or SerialModelWorker()
         self._context_version: int = 0
         self.last_response: Optional[LLMResponse] = None
+        self._error_streak: int = 0
+        self._next_retry_at: float = 0.0
 
     def bump_context_version(self) -> None:
         self._context_version += 1
@@ -177,18 +187,32 @@ class AsyncLLMReplanNode(Node):
         if bb.get("pending_frozen"):
             return Status.RUNNING
 
-        # 1) Check if an async model result is ready
+        # 1) Check if an async model result is ready (compile & record on main BT thread!)
         ready = self.worker.poll(expected_context_version=self._context_version)
         if ready is not None:
-            if ready.ok and isinstance(ready.value, tuple):
+            if ready.ok and isinstance(ready.value, LLMResponse):
+                task, res, llm_resp = self.planner.apply_llm_response(ready.value, bb)
+                self.last_response = llm_resp
+                self._error_streak = 0
+                self._next_retry_at = 0.0
+                bb.set("last_plan_result", res, writer=self.name)
+                if task is not None:
+                    self.goal_mount.mount(task, bb)
+                    bb.last_failure_reason = ""
+                    return Status.SUCCESS
+            elif ready.ok and isinstance(ready.value, tuple):
                 task, res, llm_resp = ready.value
                 self.last_response = llm_resp
+                self._error_streak = 0
+                self._next_retry_at = 0.0
                 bb.set("last_plan_result", res, writer=self.name)
                 if task is not None:
                     self.goal_mount.mount(task, bb)
                     bb.last_failure_reason = ""
                     return Status.SUCCESS
             elif ready.error is not None:
+                self._error_streak += 1
+                self._next_retry_at = time.monotonic() + min(30.0, float(2 ** min(5, self._error_streak)))
                 bb.set("last_llm_error", str(ready.error), writer=self.name)
             return Status.RUNNING
 
@@ -208,9 +232,15 @@ class AsyncLLMReplanNode(Node):
                 return Status.SUCCESS
             return Status.RUNNING
 
+        if time.monotonic() < self._next_retry_at:
+            bb.last_action_outcome = "llm_error_backoff"
+            return Status.RUNNING
+
+        messages, tools = self.planner.build_request_payload(bb, needs_ai=needs_ai)
+        brain = self.planner.brain
         job_id = uuid.uuid4().hex[:8]
         ctx_ver = self._context_version
-        self.worker.submit(job_id, ctx_ver, lambda: self.planner.plan_once(bb, needs_ai=needs_ai))
+        self.worker.submit(job_id, ctx_ver, lambda m=messages, t=tools, b=brain: b.chat(m, tools=t))
         bb.last_action_outcome = "llm_submitted_async"
         return Status.RUNNING
 
