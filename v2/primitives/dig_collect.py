@@ -41,12 +41,11 @@ class DigCollectPrimitive:
             {"pos": list(target), "collect": collect},
             lambda: self.ctx.client.dig(list(target), collect=collect),
             unknown_center=target,
+            record_unreachable_action="dig",
         )
         if out.status == "OK":
             self.ctx.gateway.write_through_dig(bb.dimension, target)
             return out
-        if out.status == "FAILED_LOCAL":
-            self.ctx.gateway.unreachable.record_failure(bb.dimension, target, "dig", out.reason)
         return out
 
     def dig_nearest_of_types(

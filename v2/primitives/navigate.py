@@ -31,6 +31,8 @@ class NavigatePrimitive:
             avoid_block_breaking=avoid_block_breaking,
             prefer_3d=prefer_3d,
             xz_only=xz_only,
+            threat_positions=bb.get("active_threat_positions"),
+            nearby_entities=bb.entities,
         )
         if out.action_taken != "none":
             bb.writes_this_tick += 1
@@ -41,4 +43,5 @@ class NavigatePrimitive:
             return ActionOutcome("PROGRESSED", "navigate", reason=out.reason, details=out.details)
         if out.status == "UNKNOWN":
             return ActionOutcome("UNKNOWN", "navigate", reason=out.reason, details=out.details)
+        bb.last_failure_reason = f"navigate:{out.reason}"
         return ActionOutcome("FAILED_LOCAL", "navigate", reason=out.reason, details=out.details)

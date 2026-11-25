@@ -22,17 +22,81 @@ class ContainerPrimitive:
         self.ctx = ctx
         self._nav = NavigatePrimitive(ctx)
 
-    def inspect_window(self, bb: Blackboard, pos: Coord3) -> ActionOutcome:
-        """Open and inspect a furnace/chest via `window/view` (<= 1 write-locked action)."""
-        center = (pos[0] + 0.5, pos[1] + 0.5, pos[2] + 0.5)
-        if dist3(bb.pos, center) > 4.5:
-            return self._nav.step_to(bb, center, tolerance=3.2)
+    def inspect_window(
+        self,
+        bb: Blackboard,
+        pos: Optional[Coord3] = None,
+        *,
+        block: Optional[str] = None,
+        entity_id: Optional[int] = None,
+    ) -> ActionOutcome:
+        """Open and inspect a furnace/chest/station/villager via `window/view` (<= 1 write-locked action)."""
+        if pos is not None:
+            if self.ctx.gateway.unreachable.is_blocked(bb.dimension, pos, "window"):
+                bb.last_failure_reason = "window:blacklisted_unreachable"
+                return ActionOutcome("FAILED_LOCAL", "window/view", reason="blacklisted_unreachable")
+            center = (pos[0] + 0.5, pos[1] + 0.5, pos[2] + 0.5)
+            if dist3(bb.pos, center) > 4.5:
+                nav = self._nav.step_to(bb, center, tolerance=3.2)
+                if nav.status == "FAILED_LOCAL":
+                    self.ctx.gateway.unreachable.record_failure(bb.dimension, pos, "window", nav.reason)
+                return nav
+            return self.ctx.execute_write(
+                bb,
+                "window/view",
+                {"pos": list(pos)},
+                lambda: self.ctx.client.window_view(list(pos)),
+                unknown_center=pos,
+                record_unreachable_action="window",
+            )
+        payload: Dict[str, Any] = {}
+        if block is not None:
+            payload["block"] = block
+        elif entity_id is not None:
+            payload["entity_id"] = int(entity_id)
+        else:
+            bb.last_failure_reason = "window/view:missing_target"
+            return ActionOutcome("FAILED_LOCAL", "window/view", reason="missing_target")
         return self.ctx.execute_write(
             bb,
             "window/view",
-            {"pos": list(pos)},
-            lambda: self.ctx.client.window_view(list(pos)),
-            unknown_center=pos,
+            payload,
+            lambda: self.ctx.client.window_view(block=block, entity_id=entity_id),
+        )
+
+    def window_ops(
+        self,
+        bb: Blackboard,
+        ops: List[Dict[str, Any]],
+        *,
+        pos: Optional[Coord3] = None,
+        block: Optional[str] = None,
+        entity_id: Optional[int] = None,
+    ) -> ActionOutcome:
+        """Universal station/entity/container ops accepting {pos} | {block} | {entity_id}."""
+        if pos is not None:
+            if self.ctx.gateway.unreachable.is_blocked(bb.dimension, pos, "window"):
+                bb.last_failure_reason = "window:blacklisted_unreachable"
+                return ActionOutcome("FAILED_LOCAL", "window/act", reason="blacklisted_unreachable")
+            center = (pos[0] + 0.5, pos[1] + 0.5, pos[2] + 0.5)
+            if dist3(bb.pos, center) > 4.5:
+                nav = self._nav.step_to(bb, center, tolerance=3.2)
+                if nav.status == "FAILED_LOCAL":
+                    self.ctx.gateway.unreachable.record_failure(bb.dimension, pos, "window", nav.reason)
+                return nav
+            return self.ctx.execute_write(
+                bb,
+                "window/act",
+                {"pos": list(pos), "ops": ops},
+                lambda: self.ctx.client.window_act(list(pos), ops),
+                unknown_center=pos,
+                record_unreachable_action="window",
+            )
+        return self.ctx.execute_write(
+            bb,
+            "window/act",
+            {"block": block, "entity_id": entity_id, "ops": ops},
+            lambda: self.ctx.client.window_act(None, ops, block=block, entity_id=entity_id),
         )
 
     def load_furnace(

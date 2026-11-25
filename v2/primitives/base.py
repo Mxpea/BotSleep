@@ -46,8 +46,9 @@ class PrimitiveContext:
         call: Callable[[], Dict[str, Any]],
         *,
         unknown_center: Optional[Coord3] = None,
+        record_unreachable_action: Optional[str] = None,
     ) -> ActionOutcome:
-        """Execute ONE write endpoint guarded by PendingTransactionJournal."""
+        """Execute ONE write endpoint guarded by PendingTransactionJournal; every failure mutates BB/unreachable."""
         tx_id = self.journal.begin_write(endpoint, payload, dimension=bb.dimension, pos=bb.pos)
         bb.writes_this_tick += 1
         try:
@@ -57,9 +58,24 @@ class PrimitiveContext:
                 self.journal.resolve_write(tx_id, "unknown", details={"code": err.code, "message": err.message})
                 self.gateway.invalidate_unknown_radius(bb.dimension, unknown_center or block_coord(bb.pos))
                 bb.last_action_outcome = f"{endpoint}:unknown"
+                bb.last_failure_reason = f"{endpoint}:unknown:{err.code}"
                 return ActionOutcome("UNKNOWN", endpoint, reason=err.code, details=err.details)
             self.journal.resolve_write(tx_id, "failed_known", details={"code": err.code, "message": err.message})
             bb.last_action_outcome = f"{endpoint}:failed:{err.code}"
+            bb.last_failure_reason = f"{endpoint}:{err.code}"
+            failures = list(bb.get("recent_primitive_failures") or ())
+            failures.append({
+                "tick": bb.tick_index,
+                "endpoint": endpoint,
+                "code": err.code,
+                "center": list(unknown_center) if unknown_center is not None else None,
+            })
+            bb.set("recent_primitive_failures", failures[-16:], writer="PrimitiveContext")
+            if unknown_center is not None:
+                act = record_unreachable_action or endpoint
+                self.gateway.unreachable.record_failure(bb.dimension, unknown_center, act, err.code)
+                if err.code in {"occupied", "no_support", "not_loaded", "protected_region", "no_such_block"}:
+                    self.gateway.invalidate_unknown_radius(bb.dimension, unknown_center, radius=0)
             return ActionOutcome("FAILED_LOCAL", endpoint, reason=err.code, details=err.details)
 
         self.journal.resolve_write(tx_id, "confirmed")

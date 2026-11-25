@@ -1,13 +1,25 @@
-"""L2 LocalRecoveryBranch: urgent eat, canopy descent, water shore escape, and opportunistic auto-sleep."""
+"""L2 LocalRecoveryBranch: urgent eat, canopy descent, water shore escape, and cached/throttled auto-sleep."""
 
 from __future__ import annotations
 
 import math
-from typing import Any, Dict, Optional
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
 from v2.bt.blackboard import Blackboard
+from v2.bt.branches.unstuck import PhysicalUnstuckBranch
 from v2.bt.kernel import Node, Status
-from v2.domain import AIR_BLOCKS, FOOD_ITEMS, HAZARD_BLOCKS, LEAF_BLOCKS, NON_SOLID_BLOCKS, block_coord
+from v2.domain import (
+    AIR_BLOCKS,
+    BED_BLOCKS,
+    Coord3,
+    FOOD_ITEMS,
+    HAZARD_BLOCKS,
+    LEAF_BLOCKS,
+    NON_SOLID_BLOCKS,
+    block_coord,
+    dist3,
+)
 from v2.gateway.surface_swim import SurfaceSwimExecutor
 from v2.gateway.world_proxy import VirtualWorldGateway
 from v2.kernel.client import APIError
@@ -26,6 +38,8 @@ class LocalRecoveryBranch(Node):
         low_health_threshold: float = 10.0,
         enable_auto_sleep: bool = True,
         sleep_radius: int = 16,
+        bed_scan_interval: float = 8.0,
+        unstuck: Optional[PhysicalUnstuckBranch] = None,
     ) -> None:
         super().__init__("LocalRecoveryBranch")
         self.gateway = gateway
@@ -34,7 +48,43 @@ class LocalRecoveryBranch(Node):
         self.low_health_threshold = float(low_health_threshold)
         self.enable_auto_sleep = bool(enable_auto_sleep)
         self.sleep_radius = int(sleep_radius)
+        self.bed_scan_interval = max(1.0, float(bed_scan_interval))
         self._swimmer = SurfaceSwimExecutor(gateway.client, journal)
+        self._unstuck = unstuck or PhysicalUnstuckBranch(gateway, journal)
+        self._last_bed_scan_at: float = 0.0
+        self._last_bed_scan_pos: Optional[Tuple[float, float, float]] = None
+        self._cached_beds: List[Coord3] = []
+
+    def _find_nearby_beds(self, bb: Blackboard) -> List[Coord3]:
+        """Return cached nearby beds, running typed gateway scan at most once per bed_scan_interval (or 6m move)."""
+        now = time.monotonic()
+        moved_far = (
+            self._last_bed_scan_pos is None
+            or dist3(bb.pos, self._last_bed_scan_pos) >= 6.0
+        )
+        if moved_far or (now - self._last_bed_scan_at) >= self.bed_scan_interval:
+            rows = self.gateway.scan_blocks(
+                bb.dimension,
+                list(BED_BLOCKS),
+                radius=self.sleep_radius,
+                limit=8,
+            )
+            found: List[Coord3] = []
+            for row in rows:
+                bpos = row.get("pos")
+                if isinstance(bpos, list) and len(bpos) == 3:
+                    found.append((int(bpos[0]), int(bpos[1]), int(bpos[2])))
+            self._cached_beds = found
+            self._last_bed_scan_at = now
+            self._last_bed_scan_pos = bb.pos
+
+        valid = [
+            c for c in self._cached_beds
+            if dist3(bb.pos, (c[0] + 0.5, c[1] + 0.5, c[2] + 0.5)) <= self.sleep_radius + 2.0
+            and not self.gateway.unreachable.is_blocked(bb.dimension, c, "sleep")
+        ]
+        valid.sort(key=lambda c: dist3(bb.pos, (c[0] + 0.5, c[1] + 0.5, c[2] + 0.5)))
+        return valid
 
     def _best_food(self, counts: Dict[str, int]) -> Optional[str]:
         avail = [(val, name) for name, val in FOOD_ITEMS.items() if counts.get(name, 0) > 0]
@@ -82,7 +132,7 @@ class LocalRecoveryBranch(Node):
             bb.last_action_outcome = f"recovery_swim:{res.status.lower()}"
             return Status.RUNNING
 
-        # 3) Canopy descent: if standing directly on tree leaves, verify safe drop (<= 4m, no lava) before digging!
+        # 3) Canopy descent: safe drop (<= 4m, no lava) -> dig leaf; unsafe tall canopy -> lateral-to-trunk descent!
         fx, fy, fz = block_coord(bb.pos)
         below = self.gateway.get_block(bb.dimension, (fx, fy - 1, fz), allow_fetch=True)
         if below is not None and below.name in LEAF_BLOCKS:
@@ -108,29 +158,35 @@ class LocalRecoveryBranch(Node):
                 if res_status == Status.RUNNING and not bb.get("pending_frozen"):
                     self.gateway.write_through_dig(bb.dimension, (fx, fy - 1, fz))
                 return res_status
+            # Tall canopy (> 4m lethal drop): step laterally toward trunk or safe-drop neighbor without digging underfoot!
+            lateral_res = self._unstuck.try_canopy_lateral_to_trunk(bb)
+            if lateral_res is not None:
+                return lateral_res
 
-        # 3) Opportunistic auto-sleep at night when a bed is nearby and not already sleeping
+        # 4) Opportunistic auto-sleep at night using cached/throttled typed gateway bed scan
         if self.enable_auto_sleep and not st.get("is_sleeping", False):
             tod = int(st.get("time_of_day", 1000)) % 24000
             if 12541 <= tod <= 23458:
-                beds = [
-                    b for b in self.gateway.client.get_blocks(radius=self.sleep_radius)
-                    if str(b.get("name", "")).endswith("_bed") and isinstance(b.get("pos"), list)
-                ]
+                beds = self._find_nearby_beds(bb)
                 if beds:
-                    beds.sort(key=lambda b: float(b.get("dist", 999.0)))
-                    bpos = beds[0]["pos"]
+                    bpos = list(beds[0])
                     dist = math.dist(bb.pos, (bpos[0] + 0.5, bpos[1] + 0.5, bpos[2] + 0.5))
                     if dist > 2.5:
                         bb.last_action_outcome = "recovery_approach_bed"
-                        return self._write_action(
+                        res = self._write_action(
                             bb, "move_to", {"x": bpos[0], "y": bpos[1], "z": bpos[2], "range": 2.0},
                             lambda: self.gateway.client.move_to(bpos[0], bpos[1], bpos[2], range=2.0, timeout_ms=8000),
                         )
+                        if res == Status.FAILURE:
+                            self.gateway.unreachable.record_failure(bb.dimension, beds[0], "sleep", "approach_failed")
+                        return res
                     bb.last_action_outcome = "recovery_sleep"
-                    return self._write_action(
+                    res = self._write_action(
                         bb, "interact", {"pos": bpos},
                         lambda: self.gateway.client.interact(pos=bpos),
                     )
+                    if res == Status.FAILURE:
+                        self.gateway.unreachable.record_failure(bb.dimension, beds[0], "sleep", "interact_failed")
+                    return res
 
         return Status.FAILURE

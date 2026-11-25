@@ -40,7 +40,7 @@ class PendingUnknownGuard(Node):
 
 
 class HardSafetyBranch(Node):
-    """Reactive survival reflexes: lava/fire escape, low-oxygen surfacing, and reachable threat evasion."""
+    """Reactive survival reflexes: lava/fire escape, low-oxygen surfacing, shield defense, and hysteresis threat evasion."""
 
     def __init__(
         self,
@@ -48,18 +48,29 @@ class HardSafetyBranch(Node):
         journal: PendingTransactionJournal,
         *,
         threat_radius: float = 8.0,
+        threat_exit_radius: Optional[float] = None,
+        threat_dwell_seconds: float = 2.5,
         low_oxygen_threshold: int = 10,
     ) -> None:
         super().__init__("HardSafetyBranch")
         self.gateway = gateway
         self.journal = journal
         self.threat_radius = float(threat_radius)
+        self.threat_exit_radius = (
+            float(threat_exit_radius)
+            if threat_exit_radius is not None
+            else max(self.threat_radius + 4.0, 12.0)
+        )
+        self.threat_dwell_seconds = max(0.0, float(threat_dwell_seconds))
         self.low_oxygen_threshold = int(low_oxygen_threshold)
         self._swimmer = SurfaceSwimExecutor(gateway.client, journal)
         self._douse_cooldown_until: float = 0.0
+        self._evasion_active: bool = False
+        self._evasion_dwell_until: float = 0.0
+        self._shield_raised: bool = False
 
-    def _find_actionable_threat(self, bb: Blackboard) -> Optional[Dict[str, Any]]:
-        """Select closest hostile that is actually reachable or ranged, exempting canopy ground melee mobs."""
+    def _collect_actionable_threats(self, bb: Blackboard, max_radius: float) -> List[Tuple[float, Dict[str, Any]]]:
+        """Collect all actionable hostiles within max_radius, exempting unreachable canopy/burrow ground melee mobs."""
         px, py, pz = bb.pos
         recently_hurt = (time.time() - bb.last_hurt_at) <= 6.0
         in_burrow = bool(bb.get("in_sealed_burrow", False))
@@ -74,7 +85,7 @@ class HardSafetyBranch(Node):
             if not isinstance(epos, list) or len(epos) != 3:
                 continue
             d3 = dist3((px, py, pz), epos)
-            if d3 > self.threat_radius:
+            if d3 > max_radius:
                 continue
             dy = py - float(epos[1])
             is_ranged = name in RANGED_MOBS
@@ -87,10 +98,52 @@ class HardSafetyBranch(Node):
                 continue
             candidates.append((d3, ent))
 
-        if not candidates:
-            return None
         candidates.sort(key=lambda pair: pair[0])
-        return candidates[0][1]
+        return candidates
+
+    def _find_actionable_threat(self, bb: Blackboard) -> Optional[Dict[str, Any]]:
+        """Apply enter/exit radius hysteresis + dwell timer and publish active threat coords for navigation repulsion."""
+        now = time.monotonic()
+        repulsion_scan_r = max(self.threat_exit_radius + 4.0, 16.0)
+        all_near = self._collect_actionable_threats(bb, repulsion_scan_r)
+        bb.set(
+            "active_threat_positions",
+            [tuple(float(v) for v in ent["pos"]) for _, ent in all_near],
+            writer=self.name,
+        )
+
+        if not all_near:
+            self._evasion_active = False
+            bb.set("threat_hysteresis_active", False, writer=self.name)
+            return None
+
+        closest_dist, closest_ent = all_near[0]
+        if not self._evasion_active:
+            if closest_dist <= self.threat_radius:
+                self._evasion_active = True
+                self._evasion_dwell_until = now + self.threat_dwell_seconds
+                bb.set("threat_hysteresis_active", True, writer=self.name)
+                return closest_ent
+            bb.set("threat_hysteresis_active", False, writer=self.name)
+            return None
+
+        # Hysteresis active: keep evading until threat clears threat_exit_radius AND dwell timer elapses
+        if closest_dist <= self.threat_exit_radius or now < self._evasion_dwell_until:
+            if closest_dist <= self.threat_radius:
+                self._evasion_dwell_until = now + self.threat_dwell_seconds
+            bb.set("threat_hysteresis_active", True, writer=self.name)
+            return closest_ent
+
+        self._evasion_active = False
+        bb.set("threat_hysteresis_active", False, writer=self.name)
+        return None
+
+    @staticmethod
+    def _has_shield(bb: Blackboard) -> bool:
+        if bb.inventory_counts.get("shield", 0) > 0:
+            return True
+        off = bb.inventory.get("offhand")
+        return isinstance(off, dict) and off.get("name") == "shield"
 
     def _write_action(self, bb: Blackboard, endpoint: str, payload: Dict[str, Any], fn: Any) -> Tuple[Status, Optional[Dict[str, Any]], bool]:
         tx_id = self.journal.begin_write(endpoint, payload, dimension=bb.dimension, pos=bb.pos)
@@ -150,21 +203,43 @@ class HardSafetyBranch(Node):
             bb.last_action_outcome = f"safety_surface:{res.status.lower()}"
             return Status.RUNNING
 
-        # 3) Actionable nearby hostile threat
+        # 3) Actionable nearby hostile threat (with enter/exit hysteresis + shield posture)
         threat = self._find_actionable_threat(bb)
         if threat is None:
+            if self._shield_raised or bool(st.get("blocking", False)):
+                self._shield_raised = False
+                bb.last_action_outcome = "safety_shield_lower"
+                status_ret, _, _ = self._write_action(
+                    bb, "posture", {"sneak": False, "shield": False, "jump": False},
+                    lambda: self.gateway.client.posture(sneak=False, shield=False, jump=False),
+                )
+                return status_ret
             return Status.FAILURE
 
         epos = threat["pos"]
         px, py, pz = bb.pos
         d = dist3((px, py, pz), epos)
-        # Compute retreat vector away from threat (6 blocks)
+        tname = str(threat.get("name") or "")
+
+        # Raise shield via posture(shield=True) against ranged mobs, creepers, or low-HP melee threats
+        wants_shield = (tname in RANGED_MOBS or tname == "creeper" or bb.health < 12.0) and self._has_shield(bb)
+        if wants_shield and not bool(st.get("blocking", False)) and not self._shield_raised:
+            bb.last_action_outcome = f"safety_shield_raise:{tname}"
+            status_ret, _, ok = self._write_action(
+                bb, "posture", {"sneak": False, "shield": True, "jump": False},
+                lambda: self.gateway.client.posture(sneak=False, shield=True, jump=False),
+            )
+            if ok:
+                self._shield_raised = True
+            return status_ret
+
+        # Compute retreat vector away from threat (aim beyond threat_exit_radius so we don't oscillate!)
         vx, vz = px - float(epos[0]), pz - float(epos[2])
         norm = max(1e-6, math.hypot(vx, vz))
-        rx, rz = round(px + (vx / norm) * 6.0, 1), round(pz + (vz / norm) * 6.0, 1)
+        retreat_step = max(6.0, self.threat_exit_radius - d + 2.5)
+        rx, rz = round(px + (vx / norm) * min(retreat_step, 10.0), 1), round(pz + (vz / norm) * min(retreat_step, 10.0), 1)
 
         # If healthy and melee-range with an actual sword/axe and not a creeper, strike once; otherwise retreat!
-        tname = str(threat.get("name") or "")
         if d <= 3.5 and bb.health >= 12.0 and tname != "creeper" and self._has_melee_weapon(bb.inventory_counts):
             bb.last_action_outcome = f"safety_strike:{tname}"
             status_ret, _, _ = self._write_action(

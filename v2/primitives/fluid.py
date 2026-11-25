@@ -50,6 +50,7 @@ class FluidPrimitive:
             {"pos": list(target), "item": "bucket"},
             lambda: self.ctx.client.interact(pos=list(target), item="bucket"),
             unknown_center=target,
+            record_unreachable_action="fluid_pickup",
         )
         if out.status == "OK":
             # Upstream useBucket returns ok=true even on silent miss (`changed: false`, empty `gained`)!
@@ -57,11 +58,11 @@ class FluidPrimitive:
             filled = any(str(k).endswith("_bucket") and int(v) > 0 for k, v in gained.items()) or bool(out.details.get("filled"))
             if not filled and out.details.get("changed") is False:
                 self.ctx.gateway.unreachable.record_failure(bb.dimension, target, "fluid_pickup", "bucket_no_change")
+                self.ctx.gateway.invalidate_unknown_radius(bb.dimension, target, radius=0)
+                bb.last_failure_reason = "fluid_pickup:bucket_no_change"
                 return ActionOutcome("FAILED_LOCAL", "fluid_pickup", reason="bucket_no_change", details=out.details)
             # Invalidate rather than hard-setting air because 2x2 infinite water sources immediately reform!
             self.ctx.gateway.invalidate_unknown_radius(bb.dimension, target, radius=0)
-        elif out.status == "FAILED_LOCAL":
-            self.ctx.gateway.unreachable.record_failure(bb.dimension, target, "fluid_pickup", out.reason)
         return out
 
     def pour_liquid(self, bb: Blackboard, target_pos: Coord3, *, bucket_item: str) -> ActionOutcome:
@@ -94,12 +95,15 @@ class FluidPrimitive:
             {"pos": list(target), "item": bucket_item},
             lambda: self.ctx.client.interact(pos=list(target), item=bucket_item),
             unknown_center=target,
+            record_unreachable_action="fluid_pour",
         )
         if out.status == "OK":
             used = out.details.get("used") if isinstance(out.details.get("used"), dict) else {}
             consumed = int(used.get(bucket_item, 0)) > 0 or bool(out.details.get("poured"))
             if not consumed and out.details.get("changed") is False:
                 self.ctx.gateway.unreachable.record_failure(bb.dimension, target, "fluid_pour", "pour_no_change")
+                self.ctx.gateway.invalidate_unknown_radius(bb.dimension, target, radius=1)
+                bb.last_failure_reason = "fluid_pour:pour_no_change"
                 return ActionOutcome("FAILED_LOCAL", "fluid_pour", reason="pour_no_change", details=out.details)
             # Invalidate 3x3x3 neighborhood because poured fluid flows and may cast obsidian on neighbors
             self.ctx.gateway.invalidate_unknown_radius(bb.dimension, target, radius=1)

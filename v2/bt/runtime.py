@@ -8,6 +8,7 @@ from typing import List, Optional
 from v2.bt.blackboard import Blackboard
 from v2.bt.branches.hard_safety import HardSafetyBranch, PendingUnknownGuard
 from v2.bt.branches.local_recovery import LocalRecoveryBranch
+from v2.bt.branches.unstuck import PhysicalUnstuckBranch
 from v2.bt.goal_mount import ActiveGoalMount, GoalTaskProtocol
 from v2.bt.kernel import Node, PrioritySelector, Sequence, Status
 from v2.bt.observe_node import SyncBlackboardNode
@@ -40,17 +41,19 @@ class BTRuntime:
         self.watchdog = LoopWatchdogNode()
         self.pending_guard = PendingUnknownGuard(journal)
         self.hard_safety = HardSafetyBranch(gateway, journal, threat_radius=threat_radius)
+        self.unstuck = PhysicalUnstuckBranch(gateway, journal)
         self.local_recovery = LocalRecoveryBranch(
             gateway,
             journal,
             food_threshold=food_threshold,
             enable_auto_sleep=enable_auto_sleep,
             sleep_radius=sleep_radius,
+            unstuck=self.unstuck,
         )
         self.goal_mount = ActiveGoalMount()
         self.replan_node = replan_node
 
-        branches: List[Node] = [self.pending_guard, self.hard_safety, self.local_recovery]
+        branches: List[Node] = [self.pending_guard, self.hard_safety, self.local_recovery, self.unstuck]
         if mode != "sleep":
             branches.append(self.goal_mount)
             if replan_node is not None:

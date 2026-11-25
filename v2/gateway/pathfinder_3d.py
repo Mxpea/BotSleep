@@ -52,11 +52,31 @@ class Pathfinder3D:
         allow_pillar: bool = True,
         allow_bridge: bool = True,
         avoid_block_breaking: Optional[Callable[[Coord3], bool]] = None,
+        threat_positions: Optional[Sequence[Tuple[float, float, float]]] = None,
+        threat_avoid_radius: float = 10.0,
+        threat_repulsion_weight: float = 14.0,
         max_expansions: int = 800,
     ) -> Optional[List[NavStep]]:
         """Find a short 3D step sequence from start to within `tolerance` of goal."""
         gw = self.gateway
         avoid_fn = avoid_block_breaking or (lambda _c: False)
+        threats = [tuple(float(v) for v in tp) for tp in (threat_positions or ()) if len(tp) == 3]
+        avoid_r = max(1.0, float(threat_avoid_radius))
+        repulse_w = max(0.0, float(threat_repulsion_weight))
+
+        def threat_penalty(c: Coord3) -> float:
+            if not threats or repulse_w <= 0.0:
+                return 0.0
+            cx_f, cy_f, cz_f = c[0] + 0.5, float(c[1]), c[2] + 0.5
+            pen = 0.0
+            for tx, ty, tz in threats:
+                d = math.dist((cx_f, cy_f, cz_f), (tx, ty, tz))
+                if d < avoid_r:
+                    ratio = (avoid_r - d) / avoid_r
+                    pen += repulse_w * (ratio * ratio)
+                    if d < 4.5:
+                        pen += 8.0
+            return pen
 
         # Prefetch a compact local 3D corridor (bounded read budget; warm cache hits avoid HTTP reads)
         dx = goal[0] - start[0]
@@ -65,13 +85,14 @@ class Pathfinder3D:
         dist = max(1.0, math.sqrt(dx * dx + dy * dy + dz * dz))
         steps_preview = min(9, int(math.ceil(dist)))
         probe_coords: List[Coord3] = []
+        corridor_xz = 4 if threats else 2
         for s in range(0, steps_preview + 1):
             t = s / max(1, steps_preview)
             cx = int(round(start[0] + dx * min(1.0, t * (steps_preview / dist))))
             cy = int(round(start[1] + dy * min(1.0, t * (steps_preview / dist))))
             cz = int(round(start[2] + dz * min(1.0, t * (steps_preview / dist))))
-            for ox in (-1, 0, 1):
-                for oz in (-2, -1, 0, 1, 2):
+            for ox in range(-corridor_xz, corridor_xz + 1):
+                for oz in range(-corridor_xz, corridor_xz + 1):
                     for oy in (-1, 0, 1, 2):
                         probe_coords.append((cx + ox, cy + oy, cz + oz))
         gw.prefetch_blocks(dimension, probe_coords)
@@ -200,7 +221,7 @@ class Pathfinder3D:
                             neighbors.append((nxt, NavStep("dig", need_cells[0], nxt, extra=extra), cost))
 
             for nxt, step, step_cost in neighbors:
-                tentative_g = cur_g + step_cost
+                tentative_g = cur_g + step_cost + threat_penalty(nxt)
                 if tentative_g < g_score.get(nxt, math.inf):
                     g_score[nxt] = tentative_g
                     came_from[nxt] = (cur, step)

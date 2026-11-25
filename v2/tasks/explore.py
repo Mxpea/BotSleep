@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import math
-from typing import Callable, List, Optional, Tuple
+import time
+from typing import Callable, Dict, List, Optional, Tuple
 
 from v2.bt.blackboard import Blackboard
 from v2.domain import dist2_xz
@@ -50,13 +51,31 @@ class ExploreUntilTask(Task):
             bb.last_failure_reason = f"{self.name}:explore_budget_exhausted"
             return "NEEDS_AI"
 
-        dx, dz = self.DIRECTIONS[self._sector_idx % len(self.DIRECTIONS)]
-        ring = 1 + (self._sector_idx // len(self.DIRECTIONS))
-        wp = (
-            self._origin[0] + dx * self.step_distance * ring,
-            self._origin[1],
-            self._origin[2] + dz * self.step_distance * ring,
-        )
+        excluded: Dict[Tuple[int, int], float] = bb.get("excluded_sectors") or {}
+        now = time.time()
+        wp: Optional[Tuple[float, float, float]] = None
+        for _ in range(len(self.DIRECTIONS)):
+            dx, dz = self.DIRECTIONS[self._sector_idx % len(self.DIRECTIONS)]
+            ring = 1 + (self._sector_idx // len(self.DIRECTIONS))
+            cand = (
+                self._origin[0] + dx * self.step_distance * ring,
+                self._origin[1],
+                self._origin[2] + dz * self.step_distance * ring,
+            )
+            sec = (math.floor(cand[0] / 16.0), math.floor(cand[2] / 16.0))
+            if excluded.get(sec, 0.0) > now:
+                self._sector_idx += 1
+                continue
+            wp = cand
+            break
+        if wp is None:
+            dx, dz = self.DIRECTIONS[self._sector_idx % len(self.DIRECTIONS)]
+            ring = 1 + (self._sector_idx // len(self.DIRECTIONS))
+            wp = (
+                self._origin[0] + dx * self.step_distance * ring,
+                self._origin[1],
+                self._origin[2] + dz * self.step_distance * ring,
+            )
         if dist2_xz(bb.pos, wp) <= 3.0:
             self._sector_idx += 1
             self._steps_taken += 1

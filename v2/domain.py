@@ -98,6 +98,15 @@ RANGED_MOBS: FrozenSet[str] = frozenset({
 PASSIVE_ANIMALS: FrozenSet[str] = frozenset({
     "cow", "pig", "sheep", "chicken", "rabbit", "mooshroom",
 })
+BED_BLOCKS: Tuple[str, ...] = (
+    "white_bed", "red_bed", "blue_bed", "green_bed", "yellow_bed", "black_bed",
+    "brown_bed", "cyan_bed", "gray_bed", "light_blue_bed", "light_gray_bed",
+    "lime_bed", "magenta_bed", "orange_bed", "pink_bed", "purple_bed",
+)
+BOAT_ITEMS: Tuple[str, ...] = (
+    "oak_boat", "spruce_boat", "birch_boat", "jungle_boat", "acacia_boat",
+    "dark_oak_boat", "mangrove_boat", "cherry_boat", "pale_oak_boat", "bamboo_raft",
+)
 
 PICKAXE_TIERS: Tuple[str, ...] = (
     "netherite_pickaxe", "diamond_pickaxe", "iron_pickaxe", "stone_pickaxe", "golden_pickaxe", "wooden_pickaxe",

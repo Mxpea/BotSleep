@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 import math
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
-from v2.domain import Coord3, SCAFFOLD_BLOCKS, block_coord, dist2_xz, dist3, pick_best_item
+from v2.domain import BOAT_ITEMS, Coord3, SCAFFOLD_BLOCKS, block_coord, dist2_xz, dist3, pick_best_item
 from v2.gateway.pathfinder_3d import NavStep, Pathfinder3D
 from v2.gateway.surface_swim import SurfaceSwimExecutor
 from v2.gateway.world_proxy import VirtualWorldGateway
@@ -77,6 +77,43 @@ class MultiHopNavigator:
         self.journal.resolve_write(tx_id, "confirmed")
         return res, None
 
+    @staticmethod
+    def _deflect_waypoint_from_threats(
+        cur_p: Tuple[float, float, float],
+        wp_x: float,
+        wp_z: float,
+        threats: Sequence[Tuple[float, float, float]],
+        *,
+        avoid_radius: float = 9.0,
+    ) -> Tuple[float, float, bool]:
+        """If the segment cur_p -> (wp_x, wp_z) passes within avoid_radius of a threat, deflect laterally."""
+        if not threats:
+            return wp_x, wp_z, False
+        dx = wp_x - cur_p[0]
+        dz = wp_z - cur_p[2]
+        seg_len_sq = dx * dx + dz * dz
+        if seg_len_sq < 1e-4:
+            return wp_x, wp_z, False
+        seg_len = math.sqrt(seg_len_sq)
+        for tx, _ty, tz in threats:
+            # Closest point on segment cur_p -> wp to threat (tx, tz)
+            t = max(0.0, min(1.0, ((tx - cur_p[0]) * dx + (tz - cur_p[2]) * dz) / seg_len_sq))
+            cx = cur_p[0] + t * dx
+            cz = cur_p[2] + t * dz
+            d_perp = math.hypot(cx - tx, cz - tz)
+            if d_perp < avoid_radius:
+                # Choose perpendicular direction pointing away from the threat
+                px1, pz1 = -dz / seg_len, dx / seg_len
+                px2, pz2 = dz / seg_len, -dx / seg_len
+                mid_x = cur_p[0] + 0.5 * dx
+                mid_z = cur_p[2] + 0.5 * dz
+                c1 = (mid_x + px1 * (avoid_radius + 2.0), mid_z + pz1 * (avoid_radius + 2.0))
+                c2 = (mid_x + px2 * (avoid_radius + 2.0), mid_z + pz2 * (avoid_radius + 2.0))
+                if math.hypot(c1[0] - tx, c1[1] - tz) >= math.hypot(c2[0] - tx, c2[1] - tz):
+                    return round(c1[0], 1), round(c1[1], 1), True
+                return round(c2[0], 1), round(c2[1], 1), True
+        return wp_x, wp_z, False
+
     def step_toward(
         self,
         target_pos: Sequence[float],
@@ -87,6 +124,8 @@ class MultiHopNavigator:
         avoid_block_breaking: Optional[Callable[[Coord3], bool]] = None,
         prefer_3d: bool = False,
         xz_only: bool = False,
+        threat_positions: Optional[Sequence[Tuple[float, float, float]]] = None,
+        nearby_entities: Optional[Sequence[Dict[str, Any]]] = None,
     ) -> NavOutcome:
         """Perform AT MOST ONE bounded navigation/clearing/bridging/pillaring write step toward target_pos."""
         pos = status.get("pos") or [0.0, 64.0, 0.0]
@@ -95,11 +134,17 @@ class MultiHopNavigator:
         tgt = (float(target_pos[0]), float(target_pos[1]), float(target_pos[2]))
         tgt_cell = block_coord(tgt)
         inv = inventory_counts or {}
+        threats = [tuple(float(v) for v in tp) for tp in (threat_positions or ()) if len(tp) == 3]
 
         distance = dist2_xz(cur_p, tgt) if xz_only else dist3(cur_p, tgt)
         if distance <= tolerance:
             self._pending_pillar = None
             self.reset_target_state(dim, tgt_cell)
+            if status.get("in_vehicle"):
+                _, err_out = self._run_write("dismount", {}, dim, cur_p, lambda: self.client.dismount())
+                if err_out is not None:
+                    return err_out
+                return NavOutcome("PROGRESSED", action_taken="dismount", reason="dismounted_at_target")
             return NavOutcome("REACHED", action_taken="none", reason="within_tolerance")
 
         # 0) Complete pending pillar-up placement launched on previous tick while airborne!
@@ -126,8 +171,63 @@ class MultiHopNavigator:
             else:
                 self._pending_pillar = None
 
-        # 1) Surface swim if currently in water/submerged
+        # 0.5) Already riding a vehicle (e.g. boat crossing water) -> steer via move_to or dismount at shore
+        if status.get("in_vehicle"):
+            if not status.get("in_water") and dist2_xz(cur_p, tgt) <= max(tolerance + 2.0, 3.5):
+                _, err_out = self._run_write("dismount", {}, dim, cur_p, lambda: self.client.dismount())
+                if err_out is not None:
+                    return err_out
+                return NavOutcome("PROGRESSED", action_taken="dismount", reason="dismounted_on_shore")
+            rx, rz = tgt[0], tgt[2]
+            if dist2_xz(cur_p, tgt) > self.RELAY_THRESHOLD:
+                ratio = self.RELAY_STEP / max(1e-6, dist2_xz(cur_p, tgt))
+                rx = cur_p[0] + (tgt[0] - cur_p[0]) * min(1.0, ratio)
+                rz = cur_p[2] + (tgt[2] - cur_p[2]) * min(1.0, ratio)
+            payload = {"x": round(rx, 1), "z": round(rz, 1), "range": max(tolerance, 2.0), "timeout_ms": 10000}
+            res, err_out = self._run_write(
+                "move_to", payload, dim, cur_p,
+                lambda: self.client.move_to(x=payload["x"], z=payload["z"], range=payload["range"], timeout_ms=10000),
+            )
+            if err_out is not None:
+                if err_out.status == "BLOCKED":
+                    # Hit shore or obstacle while boating -> dismount on next tick
+                    self.gateway.unreachable.record_blocked_edge(dim, block_coord(cur_p), tgt_cell)
+                return err_out
+            return NavOutcome("PROGRESSED", action_taken="move_to", reason="drive_vehicle", details=res.get("result", {}) if res else {})
+
+        # 1) Water crossing: use boat if available for >10m crossing, else SurfaceSwimExecutor
         if status.get("in_water") or status.get("submerged"):
+            if not status.get("submerged") and dist2_xz(cur_p, tgt) > 10.0:
+                # Mount an already-deployed boat right next to us
+                for ent in (nearby_entities or ()):
+                    ename = str(ent.get("name") or "")
+                    epos = ent.get("pos")
+                    if ename.endswith("_boat") or ename == "boat" or ename == "bamboo_raft":
+                        if isinstance(epos, list) and len(epos) == 3 and dist3(cur_p, epos) <= 3.5:
+                            eid = int(ent["id"])
+                            _, err_out = self._run_write(
+                                "interact", {"entity_id": eid}, dim, cur_p,
+                                lambda _eid=eid: self.client.interact(entity_id=_eid),
+                            )
+                            if err_out is None:
+                                return NavOutcome("PROGRESSED", action_taken="interact", reason="boarded_boat")
+                            if err_out.status == "UNKNOWN":
+                                return err_out
+                            break
+                # Or deploy a boat from inventory on water surface
+                boat_item = pick_best_item(inv, BOAT_ITEMS)
+                if boat_item is not None and not self.gateway.unreachable.is_blocked(dim, block_coord(cur_p), "deploy_boat"):
+                    deploy_cell = list(block_coord(cur_p))
+                    _, err_out = self._run_write(
+                        "use_item", {"item": boat_item, "target": {"pos": deploy_cell}}, dim, cur_p,
+                        lambda bi=boat_item, dc=deploy_cell: self.client.use_item(bi, target={"pos": dc}),
+                    )
+                    if err_out is None:
+                        return NavOutcome("PROGRESSED", action_taken="use_item", reason="deployed_boat")
+                    if err_out.status == "UNKNOWN":
+                        return err_out
+                    self.gateway.unreachable.record_failure(dim, block_coord(cur_p), "deploy_boat", err_out.reason)
+
             swim_res = self.swimmer.swim_step(tgt, status)
             if swim_res.status == "UNKNOWN":
                 return NavOutcome("UNKNOWN", action_taken="control", reason=swim_res.reason)
@@ -146,38 +246,39 @@ class MultiHopNavigator:
 
         use_3d = prefer_3d or self._stall_counts.get(key, 0) >= 1
 
-        # 2) Direct or relay move_to (no 32m hard cap!)
+        # 2) Direct or relay move_to (no 32m hard cap!), with threat-repulsion lateral deflection
         if not use_3d:
             if distance > self.RELAY_THRESHOLD:
                 ratio = self.RELAY_STEP / max(1e-6, dist2_xz(cur_p, tgt))
                 rx = cur_p[0] + (tgt[0] - cur_p[0]) * min(1.0, ratio)
                 rz = cur_p[2] + (tgt[2] - cur_p[2]) * min(1.0, ratio)
+                rx, rz, deflected = self._deflect_waypoint_from_threats(cur_p, rx, rz, threats)
                 payload = {"x": round(rx, 1), "z": round(rz, 1), "range": 2.0, "timeout_ms": 8000}
                 res, err_out = self._run_write(
                     "move_to", payload, dim, cur_p,
                     lambda: self.client.move_to(x=payload["x"], z=payload["z"], range=2.0, timeout_ms=8000),
                 )
             else:
-                ry = None if xz_only else tgt[1]
-                payload = {"x": round(tgt[0], 1), "y": ry, "z": round(tgt[2], 1), "range": tolerance, "timeout_ms": 10000}
+                wx, wz, deflected = self._deflect_waypoint_from_threats(cur_p, tgt[0], tgt[2], threats)
+                ry = None if (xz_only or deflected) else tgt[1]
+                w_range = 2.0 if deflected else tolerance
+                payload = {"x": round(wx, 1), "y": ry, "z": round(wz, 1), "range": w_range, "timeout_ms": 10000}
                 res, err_out = self._run_write(
                     "move_to", payload, dim, cur_p,
-                    lambda: self.client.move_to(x=payload["x"], y=ry, z=payload["z"], range=tolerance, timeout_ms=10000),
+                    lambda: self.client.move_to(x=payload["x"], y=ry, z=payload["z"], range=w_range, timeout_ms=10000),
                 )
 
             if err_out is None:
-                return NavOutcome("PROGRESSED", action_taken="move_to", details=res.get("result", {}) if res else {})
+                return NavOutcome("PROGRESSED", action_taken="move_to", reason="threat_detour" if deflected else "", details=res.get("result", {}) if res else {})
             if err_out.status == "UNKNOWN":
                 return err_out
-            # move_to failed (e.g. path_not_found across leaves/wall/pit) -> mark stall and fall through to 3D on NEXT tick or immediately?
-            # Strict Single-Write Macro-Tick: move_to already used 1 write attempt; switch to 3D for next tick!
+            # move_to failed (e.g. path_not_found across leaves/wall/pit) -> escalate to 3D on next tick
             self._stall_counts[key] = self._stall_counts.get(key, 0) + 1
             return NavOutcome("PROGRESSED", action_taken="move_to_fallback_3d", reason=err_out.reason)
 
-        # 3) Local 3D A* step (micro-dig / pillar-up / bridge / detour walk)
+        # 3) Local 3D A* step (micro-dig / pillar-up / bridge / detour walk) with dynamic threat repulsion
         scaffold = pick_best_item(inv, SCAFFOLD_BLOCKS)
         start_cell = block_coord(cur_p)
-        # If target is far, aim Pathfinder3D at an intermediate 8m sub-goal (always within Pathfinder3D prefetch window!)
         sub_goal = tgt_cell
         if dist3(start_cell, tgt_cell) > 9.0:
             ratio = 8.0 / max(1e-6, dist3(start_cell, tgt_cell))
@@ -194,8 +295,10 @@ class MultiHopNavigator:
             tolerance=min(tolerance, 2.0),
             has_scaffold=scaffold is not None,
             avoid_block_breaking=avoid_block_breaking,
+            threat_positions=threats,
         )
         if not steps:
+            self.gateway.unreachable.record_failure(dim, tgt_cell, "navigate", "no_3d_path")
             return NavOutcome("BLOCKED", action_taken="pathfinder_3d", reason="no_3d_path")
 
         step: NavStep = steps[0]
@@ -231,6 +334,9 @@ class MultiHopNavigator:
                 unknown_center=step.target,
             )
             if err_out is not None:
+                if err_out.status == "BLOCKED":
+                    self.gateway.unreachable.record_blocked_edge(dim, start_cell, step.stand_after)
+                    self.gateway.unreachable.record_failure(dim, step.target, "place", err_out.reason)
                 return err_out
             self.gateway.write_through_place(dim, step.target, scaffold)
             self._stall_counts[key] = 0

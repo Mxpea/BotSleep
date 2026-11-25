@@ -24,27 +24,40 @@ class CraftPrimitive:
         if not rows:
             return None
         rows.sort(key=lambda r: float(r.get("dist", 999.0)))
-        pos = rows[0].get("pos")
-        if isinstance(pos, list) and len(pos) == 3:
-            return (int(pos[0]), int(pos[1]), int(pos[2]))
+        for row in rows:
+            pos = row.get("pos")
+            if isinstance(pos, list) and len(pos) == 3:
+                coord = (int(pos[0]), int(pos[1]), int(pos[2]))
+                if not self.ctx.gateway.unreachable.is_blocked(bb.dimension, coord, "craft_table"):
+                    return coord
         return None
 
     def craft(self, bb: Blackboard, item: str, count: int = 1, *, needs_table: bool = False) -> ActionOutcome:
         """Execute ONE crafting step (or approach/place table if 3x3 required). Never duplicates tables within 16m."""
+        table_pos: Optional[Coord3] = None
         if needs_table:
             table_pos = self.find_nearby_table(bb)
             if table_pos is not None:
                 t_center = (table_pos[0] + 0.5, table_pos[1] + 0.5, table_pos[2] + 0.5)
                 if dist3(bb.pos, t_center) > 4.2:
-                    return self._nav.step_to(bb, t_center, tolerance=3.0)
+                    nav = self._nav.step_to(bb, t_center, tolerance=3.0)
+                    if nav.status == "FAILED_LOCAL":
+                        self.ctx.gateway.unreachable.record_failure(bb.dimension, table_pos, "craft_table", nav.reason)
+                        self.ctx.gateway.unreachable.record_failure(bb.dimension, table_pos, "craft_table", nav.reason)
+                    return nav
             else:
                 if bb.inventory_counts.get("crafting_table", 0) > 0:
                     return self._place.place_near_player(bb, "crafting_table")
+                bb.last_failure_reason = "craft:no_crafting_table"
                 return ActionOutcome("FAILED_LOCAL", "craft", reason="no_crafting_table")
 
-        return self.ctx.execute_write(
+        out = self.ctx.execute_write(
             bb,
             "craft",
             {"item": item, "count": int(count)},
             lambda: self.ctx.client.craft(item, int(count)),
         )
+        if out.status == "FAILED_LOCAL" and table_pos is not None and out.reason in {"need_crafting_table", "path_not_found"}:
+            self.ctx.gateway.unreachable.record_failure(bb.dimension, table_pos, "craft_table", out.reason)
+            self.ctx.gateway.invalidate_unknown_radius(bb.dimension, table_pos, radius=0)
+        return out
