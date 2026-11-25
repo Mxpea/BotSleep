@@ -26,7 +26,9 @@ class BucketSkills(DailySurvivalSkills):
         self._ignitions = {}
 
     def execute(self, name, args, cancel_event=None, **kwargs):
+        force_override = bool(kwargs.pop("force_override", False))
         context = {"cancel": cancel_event, "acted": False, "reads": 0,
+                   "force_override": force_override,
                    "deadline": time.monotonic() + 12, "evidence": {"skill": name, "executed": False}}
         data = context["evidence"]
         try:
@@ -86,9 +88,12 @@ class BucketSkills(DailySurvivalSkills):
             counts[row["name"]] = counts.get(row["name"], 0) + row["count"]
         return counts, result
 
-    def _station(self, pos, context, *, item="bucket"):
+    def _station(self, pos, context, *, item="bucket", liquid_name=None):
         status = self._prepare(context)
-        if status["health"] < 12 or status.get("food", 0) < 8:
+        is_water_pickup = item == "bucket" and liquid_name == "water"
+        min_health = 3 if is_water_pickup else 12
+        min_food = 4 if is_water_pickup else 8
+        if status["health"] < min_health or status.get("food", 0) < min_food:
             raise _Failure("unsafe", "Bucket use requires adequate health and food")
         if math.dist(status["pos"], context["origin"]) > .25:
             raise _Failure("unsafe", "Bucket stance changed")
@@ -97,7 +102,16 @@ class BucketSkills(DailySurvivalSkills):
         feet = [math.floor(v) for v in status["pos"]]
         if feet[0] == pos[0] and feet[2] == pos[2]:
             raise _Failure("unsafe", "Never use liquid in the player's own column")
-        if self._block([feet[0], feet[1] - 1, feet[2]], context)["name"] not in self.CONTAINMENT:
+        water_extra_support = frozenset({
+            "clay", "mossy_cobblestone", "dripstone_block", "packed_ice", "blue_ice",
+            "coal_ore", "iron_ore", "copper_ore", "deepslate_coal_ore", "deepslate_iron_ore", "deepslate_copper_ore",
+        })
+        allowed_support = (
+            self.CONTAINMENT | DailySurvivalSkills.SUPPORT | water_extra_support
+            if (item == "bucket" and liquid_name == "water")
+            else self.CONTAINMENT
+        )
+        if self._block([feet[0], feet[1] - 1, feet[2]], context)["name"] not in allowed_support:
             raise _Failure("unsafe", "Bucket stance needs a nonflammable full support block")
         for height in (0, 1):
             if self._block([feet[0], feet[1] + height, feet[2]], context)["name"] not in self.AIR:
@@ -126,8 +140,8 @@ class BucketSkills(DailySurvivalSkills):
                                {"blocker": list(cell), "bucket_item": item, "aim": target})
         return status
 
-    def _write(self, pos, item, context):
-        self._station(pos, context, item=item)
+    def _write(self, pos, item, context, *, liquid_name=None):
+        self._station(pos, context, item=item, liquid_name=liquid_name)
         context["acted"] = context["write_sent"] = True
         context["unverified_write"] = True
         if item == "lava_bucket":
@@ -146,7 +160,7 @@ class BucketSkills(DailySurvivalSkills):
         pos, name = self._pos(args["pos"], block=True), self._item(args["expected_name"])
         if name not in {"water", "lava"}:
             raise _Failure("bad_args", "Only water and lava sources are supported")
-        self._station(pos, context)
+        self._station(pos, context, item="bucket", liquid_name=name)
         before, inv = self._inventory_full(context)
         if before.get("bucket", 0) < 1:
             raise _Failure("missing_item", "An existing empty bucket is required")
@@ -156,9 +170,9 @@ class BucketSkills(DailySurvivalSkills):
         if not self._source(block, name):
             raise _Failure("not_liquid_source", "Only an explicitly observed level-zero source may be collected")
         context["evidence"].update(pos=pos, liquid=name)
-        self._write(pos, "bucket", context)
+        self._write(pos, "bucket", context, liquid_name=name)
         self._check(context)
-        self._station(pos, context)
+        self._station(pos, context, item="bucket", liquid_name=name)
         after, _ = self._inventory_full(context)
         current = self._block(pos, context)
         filled = name + "_bucket"

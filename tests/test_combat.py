@@ -613,3 +613,109 @@ class CombatClientTests(unittest.TestCase):
             for kwargs in ({"ms": 3001}, {"hit": 0}, {"yaw": float("nan")}, {"back": 1}):
                 with self.assertRaises(APIError): client.control(**kwargs)
             request.assert_not_called()
+
+    def test_combat_options_supports_expanded_easy_melee_mobs_at_12_hp(self):
+        obs = {
+            "fresh": True, "inventory_fresh": True,
+            "status": {"ready": True, "alive": True, "busy": None, "health": 13, "food": 16,
+                       "dimension": "overworld", "gamemode": "survival", "on_ground": True,
+                       "pos": [0.5, 64, 0.5], "offhand": None},
+            "inventory": [{"name": "iron_sword", "count": 1}],
+            "entities": [{"id": 9, "name": "husk", "type": "hostile", "pos": [2.4, 64, 0.5]}],
+        }
+        res = combat_options(obs)
+        self.assertTrue(res["allowed"], res)
+        self.assertEqual(res["mode"], "melee")
+
+    def test_combat_options_allows_close_easy_melee_under_1_5_blocks_and_at_9_hp(self):
+        obs = {
+            "fresh": True, "inventory_fresh": True,
+            "status": {"ready": True, "alive": True, "busy": None, "health": 9, "food": 16,
+                       "dimension": "overworld", "gamemode": "survival", "on_ground": True,
+                       "pos": [0.5, 64, 0.5], "offhand": None},
+            "inventory": [{"name": "stone_sword", "count": 1}],
+            "entities": [
+                {"id": 9, "name": "zombie", "type": "hostile", "pos": [1.4, 64, 0.5]},
+                {"id": 10, "name": "zombie", "type": "hostile", "pos": [7.0, 64, 0.5]},
+            ],
+        }
+        res = combat_options(obs)
+        self.assertTrue(res["allowed"], res)
+        self.assertEqual(res["mode"], "melee")
+
+    def test_combat_footing_accepts_ore_floor_and_dirt_path_surface(self):
+        from unittest.mock import Mock
+        client = Mock()
+        blocks = {
+            (0, 63, 0): {"name": "dirt", "properties": {}},
+            (0, 64, 0): {"name": "dirt_path", "properties": {}},
+            (0, 65, 0): {"name": "air", "properties": {}},
+            (1, 63, 0): {"name": "iron_ore", "properties": {}},
+            (1, 64, 0): {"name": "air", "properties": {}},
+            (1, 65, 0): {"name": "air", "properties": {}},
+        }
+        client.get_block.side_effect = lambda pos, **kw: {"ok": True, "result": blocks.get(tuple(pos), {"name": "air", "properties": {}})}
+        skills = CombatSkills(client)
+        skills._footing({"cancel": None, "deadline": time.monotonic() + 5, "block_reads": 0}, [0.5, 64.9375, 0.5])
+        skills._footing({"cancel": None, "deadline": time.monotonic() + 5, "block_reads": 0}, [1.5, 64.0, 0.5])
+
+    def test_shield_auto_equips_to_offhand_and_advances_on_distant_skeleton(self):
+        world = CombatWorld()
+        world.counts = {"iron_sword": 1, "shield": 1}
+        world.status["offhand"] = None
+        world.entities = [{"id": 5, "name": "skeleton", "type": "hostile", "pos": [6.5, 64, .5], "health": 20},
+                          {"id": 6, "name": "arrow", "type": "projectile", "pos": [3.5, 64, .5]}]
+        equip_slots = []
+        orig_equip = world.equip
+
+        def track_equip(item, slot="hand", **kwargs):
+            equip_slots.append((item, slot))
+            if slot == "off-hand":
+                world.status["offhand"] = {"name": item, "count": 1}
+                return world.ok({"offhand": world.status["offhand"]})
+            return orig_equip(item, slot=slot, **kwargs)
+
+        world.equip = track_equip
+
+        def advance(kwargs):
+            if kwargs.get("forward"):
+                world.status["pos"][0] += 1.25
+                return world.ok({"moved": 1.25})
+            return CombatWorld.control(world, **kwargs)
+
+        world.effects["control"] = advance
+        skills = CombatSkills(world, allow_unarmed=True)
+        with patch.object(skills, "_wait"):
+            res = skills.execute("fight_hostile", {"entity_id": 5, "expected_name": "skeleton"})
+        self.assertTrue(res.success, res)
+        self.assertIn(("shield", "off-hand"), equip_slots)
+        self.assertEqual(res.data["mode"], "shield_advance")
+        self.assertTrue(res.data["shield_advanced"])
+        self.assertTrue(any(c[0] == "control" and c[1].get("forward") for c in world.calls))
+
+    def test_creeper_with_shield_and_sword_hits_then_backsteps_to_reset_fuse(self):
+        world = CombatWorld()
+        world.counts = {"iron_sword": 1, "shield": 1}
+        world.status["offhand"] = {"name": "shield", "count": 1}
+        world.entities = [{"id": 8, "name": "creeper", "type": "hostile", "pos": [2.5, 64, .5], "health": 20}]
+        skills = CombatSkills(world, allow_unarmed=True)
+        with patch.object(skills, "_wait"):
+            res = skills.execute("fight_hostile", {"entity_id": 8, "expected_name": "creeper"})
+        self.assertTrue(res.success, res)
+        self.assertTrue(res.data["attack_sent"])
+        self.assertTrue(res.data["creeper_kited"])
+        controls = [c[1] for c in world.calls if c[0] == "control"]
+        self.assertTrue(any(c.get("hit") == 1 for c in controls))
+        self.assertTrue(any(c.get("back") is True for c in controls))
+
+    def test_unarmed_daily_bot_punches_close_zombie_without_equip(self):
+        world = CombatWorld()
+        world.counts = {}
+        world.entities = [{"id": 12, "name": "zombie", "type": "hostile", "pos": [2.2, 64, .5], "health": 20}]
+        skills = CombatSkills(world, allow_unarmed=True)
+        with patch.object(skills, "_wait"):
+            res = skills.execute("fight_hostile", {"entity_id": 12, "expected_name": "zombie"})
+        self.assertTrue(res.success, res)
+        self.assertIsNone(res.data["weapon"])
+        self.assertFalse(any(c[0] == "equip" for c in world.calls))
+        self.assertTrue(any(c[0] == "control" and c[1].get("hit") == 1 for c in world.calls))

@@ -1,0 +1,755 @@
+"""Offline regressions for dual-API overflow routing, SafetyArbiter planning, tight retreat, and dead-loop fixes."""
+
+import copy
+import json
+import tempfile
+import threading
+import time
+import unittest
+from pathlib import Path
+from unittest.mock import Mock
+
+from agent.brain import LLMError, OpenAIBrain
+from agent.llm_planner import LLMSurvivalPlanner
+from agent.survival_planner import Decision, SurvivalPlanner
+from core.autonomous_tasks import AutonomousTaskController
+from core.config import DEFAULTS, load_config
+from core.daily_policy import DailySafetyPolicy
+from core.loop_supervisor import LoopSupervisor
+from core.model_gate import ModelGateError, ModelRequestGate
+from core.retreat_controller import RetreatController
+from core.safety_arbiter import SafetyArbiter
+from skills import SkillResult
+from skills.daily_survival import DailySurvivalSkills
+from test_autonomous_tasks import world as auto_world
+
+
+def _obs(pos=None, *, health=18, food=18, is_day=False, on_ground=True, in_water=False, blocks=None, entities=None, counts=None, nearest_hostile=None):
+    return {
+        "fresh": True,
+        "stale": False,
+        "inventory_fresh": True,
+        "terrain_fresh": True,
+        "observation_scope": "full",
+        "status": {
+            "ready": True,
+            "alive": True,
+            "busy": None,
+            "gamemode": "survival",
+            "dimension": "overworld",
+            "pos": list(pos or [0.5, 64.0, 0.5]),
+            "health": health,
+            "food": food,
+            "oxygen": 20,
+            "on_ground": on_ground,
+            "is_day": is_day,
+            "time_of_day": 15000 if not is_day else 2000,
+            "thundering": False,
+            "is_sleeping": False,
+            "in_vehicle": False,
+            "in_water": in_water,
+            "submerged": False,
+            "in_lava": False,
+            "on_fire": False,
+            "last_death": None,
+            "nearest_hostile": nearest_hostile,
+        },
+        "counts": dict(counts or {}),
+        "inventory": [{"name": k, "count": v} for k, v in (counts or {}).items() if v > 0],
+        "blocks": list(blocks or []),
+        "entities": list(entities or []),
+    }
+
+
+class OverflowAndLoopFixesTests(unittest.TestCase):
+    # ------------------------------------------------------------------
+    # 1. Config & competition isolation + scope_id concurrent ModelGate
+    # ------------------------------------------------------------------
+    def test_overflow_config_defaults_env_overrides_and_competition_isolation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg_path = Path(tmp) / "c.yaml"
+            cfg_path.write_text(
+                "\n".join([
+                    "agent:",
+                    "  mode: survival",
+                    "survival:",
+                    "  objective: daily",
+                    "llm:",
+                    "  enabled: true",
+                    "  base_url: https://primary.example/v1",
+                    "  model: qwen-primary",
+                    "  api_key: secret-primary",
+                ]),
+                encoding="utf-8",
+            )
+            base = load_config(cfg_path, environ={})
+            self.assertFalse(base["llm"]["overflow"]["enabled"])
+            self.assertEqual(base["llm"]["overflow"]["base_url"], "https://doro.lat/v1")
+            self.assertEqual(base["llm"]["overflow"]["model"], "deepseek-v4.1-flash")
+
+            # Enabled by env for daily multi-bot runs.
+            enabled_cfg = load_config(
+                cfg_path,
+                environ={
+                    "BOTSLEEP_LLM_OVERFLOW_ENABLED": "true",
+                    "BOTSLEEP_LLM_OVERFLOW_API_KEY": "secret-overflow",
+                },
+            )
+            self.assertTrue(enabled_cfg["llm"]["overflow"]["enabled"])
+            self.assertEqual(enabled_cfg["llm"]["overflow"]["api_key"], "secret-overflow")
+
+            # Strictly forced off in competition objective unless explicitly permitted.
+            comp_path = Path(tmp) / "comp.yaml"
+            comp_path.write_text(
+                "\n".join([
+                    "agent:",
+                    "  mode: survival",
+                    "survival:",
+                    "  objective: competition",
+                    "llm:",
+                    "  enabled: true",
+                    "  base_url: https://primary.example/v1",
+                    "  model: qwen-primary",
+                    "  api_key: secret-primary",
+                    "  overflow:",
+                    "    enabled: true",
+                    "    api_key: secret-overflow",
+                ]),
+                encoding="utf-8",
+            )
+            comp_cfg = load_config(comp_path, environ={})
+            self.assertFalse(comp_cfg["llm"]["overflow"]["enabled"])
+
+    def test_model_gate_scope_isolation_allows_parallel_overflow_and_busy_timeout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gate_1 = ModelRequestGate("https://doro.lat/v1", "k", directory=tmp, global_concurrency=False, scope_id="bot_1")
+            gate_2 = ModelRequestGate("https://doro.lat/v1", "k", directory=tmp, global_concurrency=False, scope_id="bot_2")
+            entered = threading.Event()
+            release = threading.Event()
+            second_ok = threading.Event()
+
+            def holder():
+                with gate_1.request():
+                    entered.set()
+                    release.wait(2.0)
+
+            t = threading.Thread(target=holder, daemon=True)
+            t.start()
+            self.assertTrue(entered.wait(1.0))
+            with gate_2.request(wait_seconds=0.5):
+                second_ok.set()
+            self.assertTrue(second_ok.is_set(), "Distinct scope_id overflow gates must not block each other")
+
+            # Same-scope request times out quickly with wait_seconds override.
+            gate_1_dup = ModelRequestGate("https://doro.lat/v1", "k", directory=tmp, global_concurrency=False, scope_id="bot_1")
+            with self.assertRaises(ModelGateError) as busy_err:
+                with gate_1_dup.request(wait_seconds=0.1):
+                    pass
+            self.assertEqual(busy_err.exception.code, "llm_busy")
+            release.set()
+            t.join(timeout=2.0)
+
+    def test_openai_brain_overflow_on_busy_error_and_transport_cooldown_and_redaction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            holder_gate = ModelRequestGate("https://primary.example/v1", "sec-p", directory=tmp, wait_seconds=5)
+            overflow = OpenAIBrain(
+                base_url="https://doro.lat/v1",
+                api_key="sec-o-super-secret",
+                model="deepseek-v4.1-flash",
+                request_gate=None,
+            )
+            overflow._chat_completion = Mock(return_value={
+                "model": "deepseek-ai/DeepSeek-V4.1-Flash-1017",
+                "choices": [{"finish_reason": "tool_calls", "message": {"role": "assistant", "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "wait", "arguments": "{\"seconds\": 1}"}}]}}],
+            })
+            primary_gate = ModelRequestGate("https://primary.example/v1", "sec-p", directory=tmp, wait_seconds=5)
+            primary = OpenAIBrain(
+                base_url="https://primary.example/v1",
+                api_key="sec-p",
+                model="default",
+                overflow_brain=overflow,
+                primary_wait_seconds=0.1,
+                primary_cooldown_seconds=30.0,
+                request_gate=primary_gate,
+            )
+
+            # Case 1: Primary slot held -> fast overflow after 0.1s wait (no HTTP sent on primary).
+            held = threading.Event()
+            release = threading.Event()
+            def hold():
+                with holder_gate.request():
+                    held.set()
+                    release.wait(2.0)
+            t = threading.Thread(target=hold, daemon=True)
+            t.start()
+            self.assertTrue(held.wait(1.0))
+            res = primary.chat_completion([{"role": "user", "content": "hi"}])
+            self.assertEqual(res["model"], "deepseek-ai/DeepSeek-V4.1-Flash-1017")
+            self.assertEqual(primary.last_request_meta["route"], "overflow")
+            self.assertEqual(primary.last_request_meta["overflow_reason"], "primary_busy")
+            release.set()
+            t.join(timeout=2.0)
+
+            # Case 2: Primary HTTP 500 error -> marks primary cooldown & immediately serves overflow.
+            primary._chat_completion = Mock(side_effect=LLMError("llm_http_error", "HTTP 500", {"http_status": 500}))
+            res2 = primary.chat_completion([{"role": "user", "content": "hi"}])
+            self.assertEqual(res2["model"], "deepseek-ai/DeepSeek-V4.1-Flash-1017")
+            self.assertEqual(primary.last_request_meta["overflow_reason"], "primary_llm_http_error")
+
+            # Subsequent call during cooldown skips primary completely.
+            res3 = primary.chat_completion([{"role": "user", "content": "hi"}])
+            self.assertEqual(primary.last_request_meta["overflow_reason"], "primary_cooldown")
+            self.assertEqual(primary._chat_completion.call_count, 1)
+
+            # Case 3: Secret redaction covers both primary and overflow keys.
+            planner = LLMSurvivalPlanner(
+                {
+                    "enabled": True,
+                    "base_url": "https://primary.example/v1",
+                    "api_key": "sec-p-secret",
+                    "model": "default",
+                    "overflow": {
+                        "enabled": True,
+                        "base_url": "https://doro.lat/v1",
+                        "api_key": "sec-o-super-secret",
+                        "model": "deepseek-v4.1-flash",
+                    },
+                },
+                {"objective": "daily", "world_id": "test_scope"},
+            )
+            redacted = planner._redact("p=sec-p-secret o=sec-o-super-secret")
+            self.assertNotIn("sec-p-secret", redacted)
+            self.assertNotIn("sec-o-super-secret", redacted)
+            planner.close()
+
+    # ------------------------------------------------------------------
+    # 2. SafetyArbiter tiered planning preemption (no medium-range cancels)
+    # ------------------------------------------------------------------
+    def test_safety_arbiter_planning_ignores_mid_range_hostiles_but_cancels_melee_or_hurt(self):
+        rules = SurvivalPlanner(copy.deepcopy(DEFAULTS["survival"]))
+        arbiter = SafetyArbiter(rules, copy.deepcopy(DEFAULTS["survival"]), daily=True, llm_override_on_block=True)
+        base_status = _obs()["status"]
+
+        # Zombie at 3.5 blocks while planning (no damage, no hazard) -> must NOT preempt planning!
+        mid_zombie = {**base_status, "nearest_hostile": {"id": 1, "name": "zombie", "dist": 3.5}}
+        res_mid = arbiter.evaluate_monitor(mid_zombie, base_status, decision=None, planning=True, context={})
+        self.assertFalse(res_mid.danger, res_mid)
+
+        # Zombie inside immediate 2.0-block melee radius -> DOES preempt planning.
+        close_zombie = {**base_status, "nearest_hostile": {"id": 1, "name": "zombie", "dist": 2.0}}
+        res_close = arbiter.evaluate_monitor(close_zombie, base_status, decision=None, planning=True, context={})
+        self.assertTrue(res_close.danger)
+        self.assertIn("hostile_within_limit", res_close.reasons)
+
+    # ------------------------------------------------------------------
+    # 3. Minimal close-range retreat thresholds (melee <= 2.5, ranged <= 5.0, |dy| <= 2.5)
+    # ------------------------------------------------------------------
+    def test_tight_close_range_retreat_skips_distant_and_offlevel_mobs(self):
+        policy = DailySafetyPolicy({
+            "low_health_threshold": 8,
+            "food_threshold": 16,
+            "threat_radius": 8,
+            "disable_sleep": True,
+            "sleep_policy": "strict",
+            "llm_override_on_block": True,
+        })
+        baseline = Decision("wait", {"seconds": 1}, "idle", "idle")
+        counts = {"stone_pickaxe": 1, "raw_iron": 3}
+
+        # Daytime exploration with stone_pickaxe (no sword/shield) ignores distant/off-level mobs.
+        obs_z = _obs(is_day=True, counts=counts, entities=[{"id": 1, "type": "hostile", "name": "zombie", "pos": [4.0, 64.0, 0.5]}])
+        self.assertIsNone(policy.choose(obs_z, baseline, context={}))
+
+        # Skeleton at 6.0m -> > 5.0m ranged threshold -> does NOT force retreat_from!
+        obs_s = _obs(is_day=True, counts=counts, entities=[{"id": 2, "type": "hostile", "name": "skeleton", "pos": [6.5, 64.0, 0.5]}])
+        self.assertIsNone(policy.choose(obs_s, baseline, context={}))
+
+        # Zombie at 2.0m horizontally but 4.0m higher (different cave layer, |dy| > 2.5) -> ignored!
+        obs_dy = _obs(is_day=True, counts=counts, entities=[{"id": 3, "type": "hostile", "name": "zombie", "pos": [1.5, 68.0, 0.5]}])
+        self.assertIsNone(policy.choose(obs_dy, baseline, context={}))
+
+        # Close same-level ranged skeleton within 5.0m (no shield) triggers close-range retreat_from.
+        obs_close_skel = _obs(is_day=True, counts=counts, entities=[{"id": 4, "type": "hostile", "name": "skeleton", "pos": [4.5, 64.0, 0.5]}])
+        chosen = policy.choose(obs_close_skel, baseline, context={})
+        self.assertIsNotNone(chosen)
+        self.assertEqual(chosen.name, "retreat_from")
+
+    # ------------------------------------------------------------------
+    # 4. Dead-loop fixes: hostile_position_unknown, unstable, repeated failure, retreat, gravel
+    # ------------------------------------------------------------------
+    def test_hostile_position_unknown_and_unstable_wait_streaks_break_after_two_cycles(self):
+        policy = DailySafetyPolicy({
+            "low_health_threshold": 8,
+            "food_threshold": 16,
+            "threat_radius": 8,
+            "disable_sleep": True,
+            "llm_override_on_block": True,
+        })
+        baseline = Decision("wait", {"seconds": 1}, "idle", "idle")
+        ctx = {}
+
+        # Bot3 underground scenario: wall-occluded cave_spider without entity coords.
+        obs_unknown = _obs(pos=[-2117.3, 8.0, 42.5], nearest_hostile={"id": 14856, "name": "cave_spider", "dist": 4.7})
+        d1 = policy.choose(obs_unknown, baseline, context=ctx)
+        self.assertEqual(d1.name, "wait")
+        d2 = policy.choose(obs_unknown, baseline, context=ctx)
+        self.assertIsNone(d2, "Must release hostile_position_unknown wait streak rather than looping 939 times")
+        self.assertTrue(any("Released repeated local wait" in w for w in policy.warnings(obs_unknown, ctx)))
+
+        # Unstable footing loop (`on_ground=False` air-edge snag -> releases after 2 waits).
+        ctx2 = {}
+        obs_unstable = _obs(is_day=True, on_ground=False, in_water=False)
+        self.assertEqual(policy.choose(obs_unstable, baseline, context=ctx2).name, "wait")
+        self.assertEqual(policy.choose(obs_unstable, baseline, context=ctx2).name, "wait")
+        self.assertIsNone(policy.choose(obs_unstable, baseline, context=ctx2))
+
+    def test_loop_supervisor_records_planner_repeated_failure_cooldown(self):
+        events = []
+        sup = LoopSupervisor(record_fn=lambda l, e, d: events.append((e, d)))
+        ctx = {}
+        sig = LoopSupervisor.action_signature_parts("run_survival_task", {"task": "craft", "item": "furnace"})
+        self.assertEqual(sig, "run_survival_task:craft:furnace")
+        sup.record_planner_rejection(sig, "llm_repeated_failure", "Already failed", 1000.0, ctx)
+        self.assertIn(sig, ctx.get("blocked_task_signatures", {}))
+        self.assertTrue(any(e == "LOOP_ACTION_COOLDOWN" for e, _ in events))
+
+    def test_retreat_controller_stops_jitter_reset_after_two_cooldown_cycles(self):
+        ctx = {}
+        ctl = RetreatController(ctx, {"threat_radius": 8, "target_cooldown_seconds": 30})
+        obs = _obs(entities=[{"id": 1, "type": "hostile", "name": "zombie", "pos": [2.5, 64.0, 0.5]}], nearest_hostile={"id": 1, "name": "zombie", "dist": 2.0})
+        d = Decision("retreat_from", {"pos": [2.5, 64.0, 0.5], "distance": 8}, "retreat", "safety")
+        ctl.choose_decision(obs, d)
+        ctl.handle_result(d, SkillResult(False, "No path", {"executed": True}, "no_path"), obs, uncertain_codes=set(), fatal_codes=set())
+        ctx["retreat_recovery"]["cooldown_cycles"] = 2
+        # Enemy wanders 3 blocks away while bot stayed at same block with full health -> must NOT reset cooldown!
+        obs_moved_enemy = _obs(entities=[{"id": 1, "type": "hostile", "name": "zombie", "pos": [5.5, 64.0, 0.5]}], nearest_hostile={"id": 1, "name": "zombie", "dist": 5.0})
+        self.assertFalse(ctl.changed(obs_moved_enemy, [5.5, 64.0, 0.5], ctx["retreat_recovery"]))
+
+    def test_nether_portal_approaches_distant_gravel_and_allows_gravel_placement(self):
+        self.assertIn("gravel", DailySurvivalSkills.PLACEABLE)
+        obs = auto_world({"water_bucket": 1, "iron_ingot": 1, "cobblestone": 12, "iron_pickaxe": 1})
+        obs["blocks"] = [{"name": "gravel", "pos": [12, 64, 0], "can_see": True, "can_dig": True}]
+        ctl = AutonomousTaskController({})
+        ctl.start({"task": "nether_portal"}, obs)
+        step = ctl.next_action(obs)
+        self.assertIsNotNone(step)
+        self.assertEqual(step.name, "move_to")
+        self.assertEqual(step.goal, "nether_portal_approach")
+        self.assertEqual(step.args["range"], 2)
+
+    def test_harness_allows_nether_portal_approach_near_water_and_scout_surface(self):
+        from types import SimpleNamespace
+        from core.survival_harness import SurvivalHarness
+
+        rules = DailySafetyPolicy({"threat_radius": 8, "low_health_threshold": 8}).rules
+        dummy = SimpleNamespace(daily=True, _safety_rules=rules)
+        obs = {
+            "blocks": [{"name": "water", "pos": [5, 62, 0]}],
+            "terrain": [],
+            "entities": [{"id": 7, "type": "hostile", "name": "skeleton", "pos": [25, 62, 0]}],
+        }
+        approach = Decision("move_to", {"pos": [5, 62, 0], "range": 2}, "Approach water", "nether_portal_approach")
+        self.assertIsNone(SurvivalHarness._unsafe_destination(dummy, approach, obs))
+        close_skel_obs = {
+            "blocks": [{"name": "water", "pos": [5, 62, 0]}],
+            "terrain": [],
+            "entities": [{"id": 7, "type": "hostile", "name": "skeleton", "pos": [14, 62, 0]}],
+        }
+        scout = Decision("move_to", {"pos": [0.5, 64, 0.5], "range": 4, "scan_radius": 32, "distance": 64}, "Scout", "scout_surface")
+        self.assertIsNone(SurvivalHarness._unsafe_destination(dummy, scout, close_skel_obs))
+        lava_obs = {"blocks": [{"name": "lava", "pos": [5, 62, 0]}], "terrain": [], "entities": []}
+        self.assertIsNotNone(SurvivalHarness._unsafe_destination(dummy, approach, lava_obs))
+
+    def test_nether_portal_water_approach_reach_flowing_filter_and_wide_fallback(self):
+        obs = auto_world({"bucket": 1, "iron_ingot": 1, "flint": 1, "cobblestone": 16, "iron_pickaxe": 1})
+        obs["blocks"] = [
+            {"name": "water", "pos": [2, 64, 0], "properties": {"level": 3}, "can_see": True},
+            {"name": "water", "pos": [4, 64, 0], "properties": {"level": 0}, "can_see": True},
+        ]
+        ctl = AutonomousTaskController({})
+        ctl.start({"task": "nether_portal"}, obs)
+        step = ctl.next_action(obs)
+        self.assertEqual((step.name, step.goal), ("move_to", "nether_portal_approach"))
+        self.assertEqual(step.args["pos"], [4, 64, 0])
+        # Simulate two failed close-range collect_liquid attempts -> triggers wide search instead of exhausting 8 local steps
+        close_obs = auto_world({"bucket": 1, "iron_ingot": 1, "flint": 1, "cobblestone": 16, "iron_pickaxe": 1})
+        close_obs["blocks"] = [
+            {"name": "water", "pos": [2, 64, 0], "properties": {"level": 0}, "can_see": True},
+            {"name": "water", "pos": [2, 64, 1], "properties": {"level": 0}, "can_see": True},
+            {"name": "water", "pos": [1, 64, 1], "properties": {"level": 0}, "can_see": True},
+        ]
+        ctl2 = AutonomousTaskController({})
+        ctl2.start({"task": "nether_portal"}, close_obs)
+        s1 = ctl2.next_action(close_obs)
+        self.assertEqual(s1.name, "collect_liquid")
+        ctl2.record_result(s1, SkillResult(False, "flow", {}, "not_liquid_source"), close_obs)
+        s2 = ctl2.next_action(close_obs)
+        self.assertEqual(s2.name, "collect_liquid")
+        ctl2.record_result(s2, SkillResult(False, "occluded", {}, "target_occluded"), close_obs)
+        step2 = ctl2.next_action(close_obs)
+        self.assertEqual((step2.name, step2.goal), ("move_to", "nether_portal_water"))
+
+    def test_bucket_collect_water_allows_grass_bank_while_lava_requires_containment(self):
+        from skills.buckets import BucketSkills
+        from test_buckets import LiquidWorld
+
+        w = LiquidWorld()
+        w.counts = {"bucket": 1}
+        w.block([1, 63, 0], "grass_block")
+        w.block(w.source, "water", properties={"level": 0})
+        res_water = BucketSkills(w).execute("collect_liquid", {"pos": w.source, "expected_name": "water"})
+        self.assertTrue(res_water.success, res_water)
+
+        w2 = LiquidWorld()
+        w2.counts = {"bucket": 1}
+        w2.block([1, 63, 0], "grass_block")
+        w2.block(w2.source, "lava", properties={"level": 0})
+        res_lava = BucketSkills(w2).execute("collect_liquid", {"pos": w2.source, "expected_name": "lava"})
+        self.assertEqual(res_lava.error_code, "unsafe")
+
+    def test_daily_policy_low_health_release_does_not_force_wait_only_constraint(self):
+        policy = DailySafetyPolicy(
+            {"low_health_threshold": 8, "threat_radius": 8, "llm_override_on_block": True}
+        )
+        obs = _obs(health=3.0, food=17)
+        obs["counts"] = {"stone_pickaxe": 1, "shield": 1}
+        obs["blocks"] = [{"name": "stone", "pos": [0, 63, 0]}]
+        constraints = policy.constraints(obs, context={})
+        self.assertTrue(constraints["model_allowed"])
+        self.assertIsNone(constraints["allowed_actions"])
+        self.assertNotEqual(constraints["scenario"], "food_recovery_blocked")
+
+    def test_food_options_skips_recently_inspected_containers(self):
+        import time as _time
+        policy = DailySafetyPolicy({"low_health_threshold": 8, "threat_radius": 8, "llm_override_on_block": True})
+        obs = _obs(health=18.0, food=6)
+        obs["blocks"] = [{"name": "furnace", "pos": [1, 64, 0], "can_see": True}]
+        ctx = {}
+        first = policy._food_options(obs, low_health=False, context=ctx)
+        self.assertEqual([d.name for d in first], ["inspect_container"])
+        ctx["food_inspected_containers"] = {"1,64,0": _time.time() + 120.0}
+        second = policy._food_options(obs, low_health=False, context=ctx)
+        self.assertEqual(second, [])
+
+    def test_unstable_footing_streak_survives_interleaved_observe_wait(self):
+        policy = DailySafetyPolicy({"low_health_threshold": 8, "threat_radius": 8, "llm_override_on_block": True})
+        obs_air = _obs(on_ground=False, is_day=True)
+        obs_air["status"]["time_of_day"] = 1000
+        obs_air["blocks"] = [{"name": "dirt", "pos": [0, 62, 0]}]
+        ctx = {}
+        d1 = policy.choose(obs_air, Decision("wait", {"seconds": 1}, "b", "idle"), context=ctx)
+        self.assertEqual(d1.goal, "recover")
+        # Interleave an observe-scenario wait streak (like partial safety scan)
+        policy._record_choice_streak(ctx, "observe", Decision("wait", {"seconds": 1}, "obs", "observe"))
+        d2 = policy.choose(obs_air, Decision("wait", {"seconds": 1}, "b", "idle"), context=ctx)
+        self.assertEqual(d2.goal, "recover")
+        # Streak >= 2 -> releases to normal planning instead of Wait for stable footing forever
+        d3 = policy.choose(obs_air, Decision("wait", {"seconds": 1}, "b", "idle"), context=ctx)
+        self.assertIsNone(d3)
+
+    def test_unsafe_destination_uses_arbiter_limit_and_vertical_tolerance_when_llm_override(self):
+        from types import SimpleNamespace
+        from core.survival_harness import SurvivalHarness
+        from core.safety_arbiter import SafetyArbiter
+
+        policy = DailySafetyPolicy({"low_health_threshold": 8, "threat_radius": 8, "llm_override_on_block": True})
+        arbiter = SafetyArbiter(policy.rules, {"low_health_threshold": 8}, daily=True, llm_override_on_block=True, daily_policy=policy)
+        dummy = SimpleNamespace(daily=True, llm_override_on_block=True, _safety_rules=policy.rules, _safety_arbiter=arbiter)
+        obs = {
+            "status": _obs(health=20.0, food=20, pos=[0.5, 27.0, 0.5])["status"],
+            "blocks": [],
+            "terrain": [],
+            "entities": [{"id": 9, "type": "hostile", "name": "skeleton", "pos": [8.0, 27.0, 0.5]}],
+        }
+        place_furnace = Decision("place_item", {"item": "furnace", "pos": [2, 27, 0]}, "Place furnace", "nether_portal")
+        # Skeleton at [8, 27, 0.5] is 6.0m from [2, 27, 0] > 5.0m SafetyArbiter ranged limit -> allowed
+        self.assertIsNone(SurvivalHarness._unsafe_destination(dummy, place_furnace, obs))
+        # Close skeleton at 3.5m same Y -> still blocked
+        obs["entities"][0]["pos"] = [5.5, 27.0, 0.5]
+        self.assertIsNotNone(SurvivalHarness._unsafe_destination(dummy, place_furnace, obs))
+        # Different floor (|dy| > 2.5) -> ignored
+        obs["entities"][0]["pos"] = [3.0, 31.0, 0.5]
+        self.assertIsNone(SurvivalHarness._unsafe_destination(dummy, place_furnace, obs))
+
+    def test_nether_portal_escalates_when_cave_water_approaches_stay_unreachable(self):
+        obs = auto_world({"bucket": 1, "iron_ingot": 1, "flint": 1, "cobblestone": 16, "iron_pickaxe": 1})
+        obs["blocks"] = [
+            {"name": "water", "pos": [12, 50, 0], "properties": {"level": 0}, "can_see": True},
+            {"name": "water", "pos": [13, 50, 0], "properties": {"level": 0}, "can_see": True},
+            {"name": "water", "pos": [14, 50, 0], "properties": {"level": 0}, "can_see": True},
+            {"name": "water", "pos": [15, 50, 0], "properties": {"level": 0}, "can_see": True},
+        ]
+        ctl = AutonomousTaskController({})
+        ctl.start({"task": "nether_portal"}, obs)
+        for _ in range(2):
+            s = ctl.next_action(obs)
+            self.assertEqual(s.goal, "nether_portal_approach")
+            ctl.record_result(s, SkillResult(False, "stalled", {"executed": True}, "stalled"), obs)
+        s_wide = ctl.next_action(obs)
+        self.assertEqual(s_wide.goal, "nether_portal_water")
+        ctl.record_result(s_wide, SkillResult(False, "move_unverified", {"executed": True}, "move_unverified"), obs)
+        s4 = ctl.next_action(obs)
+        self.assertEqual(s4.goal, "nether_portal_approach")
+        ctl.record_result(s4, SkillResult(False, "stalled", {"executed": True}, "stalled"), obs)
+        self.assertIsNone(ctl.next_action(obs))
+        self.assertEqual(ctl.snapshot()["status"], "needs_ai")
+        self.assertIn(ctl.snapshot()["reason"], ("water_unreachable_nearby", "bounded_local_recovery_exhausted"))
+        self.assertLessEqual(ctl.snapshot()["steps"], 4)
+
+    def test_nether_portal_picks_dry_shore_stand_and_collects_at_2_85m(self):
+        obs = auto_world({"bucket": 1, "iron_ingot": 1, "flint": 1, "cobblestone": 16, "iron_pickaxe": 1})
+        obs["blocks"] = [
+            {"name": "water", "pos": [6, 63, 0], "properties": {"level": 0}, "can_see": True},
+            {"name": "grass_block", "pos": [5, 62, 0], "can_see": True},
+        ]
+        obs["safe_stand_candidates"] = [{"pos": [5.5, 63.0, 0.5], "support": "grass_block"}]
+        ctl = AutonomousTaskController({})
+        ctl.start({"task": "nether_portal"}, obs)
+        step = ctl.next_action(obs)
+        self.assertEqual((step.name, step.goal), ("move_to", "nether_portal_approach"))
+        self.assertEqual(step.args["pos"], [5.5, 63.0, 0.5])
+        self.assertEqual(step.args["range"], 1)
+
+        # Within 2.85m (e.g. 2.80m after water_escape), must scoop instead of walking back into water
+        obs_edge = auto_world({"bucket": 1, "iron_ingot": 1, "flint": 1, "cobblestone": 16, "iron_pickaxe": 1}, pos=[0.5, 64.0, 0.5])
+        obs_edge["blocks"] = [{"name": "water", "pos": [3, 63, 0], "properties": {"level": 0}, "can_see": True}]
+        ctl2 = AutonomousTaskController({})
+        ctl2.start({"task": "nether_portal"}, obs_edge)
+        step_scoop = ctl2.next_action(obs_edge)
+        self.assertEqual(step_scoop.name, "collect_liquid")
+        self.assertEqual(step_scoop.args["expected_name"], "water")
+
+    def test_wide_find_water_clusters_probes_shore_and_handles_gt_32m(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from core.autonomy_runtime import AutonomyRuntime
+
+        moves = []
+
+        class _FakeClient:
+            def get_status(self):
+                return {"ok": True, "result": {"pos": [0.5, 64.0, 0.5], "dimension": "overworld", "alive": True, "ready": True, "on_ground": True}}
+
+            def get_block(self, x, y, z, **kw):
+                # Cave pool near [10, 52, 0] is covered by stone; distant lake at [45, 62, 0] has dry grass_block shore at [44, 63, 0]
+                if (x, y, z) == (44, 62, 0):
+                    return {"ok": True, "result": {"name": "grass_block"}}
+                if (x, y, z) in ((44, 63, 0), (44, 64, 0)):
+                    return {"ok": True, "result": {"name": "air"}}
+                return {"ok": True, "result": {"name": "stone"}}
+
+            def find_blocks(self, types=None, radius=64, limit=256):
+                # Fill first results with blocked cave pool, then distant surface lake at 45m (>32m!)
+                rows = [{"name": "water", "pos": [10, 52, dz], "properties": {"level": 0}} for dz in range(4)]
+                rows.append({"name": "water", "pos": [45, 62, 0], "properties": {"level": 0}})
+                return rows
+
+            def move_to(self, x, y, z, **kw):
+                moves.append(([x, y, z], kw))
+                return {"ok": True, "result": {"pos": [44.5, 63.0, 0.5]}}
+
+        rt = AutonomyRuntime()
+        rt.client = _FakeClient()
+        rt.context = {}
+        rt._cancel = None
+        rt.task_controller = SimpleNamespace(rules=SimpleNamespace(_blocked=lambda ctx: {"10,52,0": 9999999999.0}))
+        obs = {"status": {"pos": [0.5, 64.0, 0.5]}}
+        # Override second get_status inside _move_wide_candidate to return arrived pos
+        calls = {"n": 0}
+        orig_status = rt.client.get_status
+
+        def _seq_status():
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return orig_status()
+            return {"ok": True, "result": {"pos": [44.5, 63.0, 0.5], "dimension": "overworld", "alive": True, "ready": True, "on_ground": True}}
+
+        rt.client.get_status = _seq_status
+        res = rt._run_task_wide_find(Decision("move_to", {"pos": [0.5, 64.0, 0.5], "range": 4}, "find", "nether_portal_water"), obs, "water")
+        self.assertTrue(res.success, res)
+        self.assertTrue(moves)
+        # Verify it jumped past the blocked [10, 52, *] cluster to the [44, 63, 0] shore of [45, 62, 0]
+        self.assertEqual([int(moves[0][0][0]), int(moves[0][0][1]), int(moves[0][0][2])], [44, 63, 0])
+        self.assertTrue(moves[0][1].get("allow_partial"))
+
+    def test_flowing_water_beside_collect_liquid_and_clay_support_and_relocation_reset(self):
+        from types import SimpleNamespace
+        from core.survival_harness import SurvivalHarness
+        from skills.buckets import BucketSkills
+        from test_buckets import LiquidWorld
+
+        policy = DailySafetyPolicy({"low_health_threshold": 8, "threat_radius": 8, "llm_override_on_block": True})
+        dummy = SimpleNamespace(daily=True, llm_override_on_block=True, _safety_rules=policy.rules, _safety_arbiter=None)
+        flow_obs = {
+            "status": _obs()["status"],
+            "blocks": [{"name": "flowing_water", "pos": [2, 63, 0]}],
+            "terrain": [],
+            "entities": [],
+        }
+        collect_d = Decision("collect_liquid", {"pos": [2, 62, 0], "expected_name": "water"}, "Fill", "nether_portal")
+        self.assertIsNone(SurvivalHarness._unsafe_destination(dummy, collect_d, flow_obs))
+
+        w = LiquidWorld()
+        w.counts = {"bucket": 1}
+        w.block([1, 63, 0], "clay")
+        w.block(w.source, "water", properties={"level": 0})
+        res = BucketSkills(w).execute("collect_liquid", {"pos": w.source, "expected_name": "water"})
+        self.assertTrue(res.success, res)
+
+        obs_w = auto_world({"bucket": 1, "iron_ingot": 1, "flint": 1, "cobblestone": 16, "iron_pickaxe": 1})
+        obs_w["blocks"] = [
+            {"name": "water", "pos": [2, 64, 0], "properties": {"level": 0}, "can_see": True},
+            {"name": "water", "pos": [2, 64, 1], "properties": {"level": 0}, "can_see": True},
+            {"name": "water", "pos": [6, 64, 0], "properties": {"level": 0}, "can_see": True},
+        ]
+        ctl = AutonomousTaskController({})
+        ctl.start({"task": "nether_portal"}, obs_w)
+        s1 = ctl.next_action(obs_w)
+        ctl.record_result(s1, SkillResult(False, "occ", {}, "target_occluded"), obs_w)
+        s2 = ctl.next_action(obs_w)
+        ctl.record_result(s2, SkillResult(False, "occ", {}, "target_occluded"), obs_w)
+        s_wide = ctl.next_action(obs_w)
+        self.assertEqual(s_wide.goal, "nether_portal_water")
+        ctl.record_result(s_wide, SkillResult(True, "Moved", {"executed": True}), obs_w)
+        s_after = ctl.next_action(obs_w)
+        self.assertIsNotNone(s_after)
+        self.assertEqual(s_after.goal, "nether_portal_approach")
+
+    def test_gather_block_supports_gravel_flint_drop_and_carried_gravel_placement(self):
+        from skills.survival import SurvivalSkills
+        from test_survival_skills import World as FakeWorld, envelope
+
+        self.assertIn("gravel", SurvivalSkills.GATHERABLE)
+        w = FakeWorld()
+        w.counts = {}
+        w.set_block([2, 64, 0], "gravel", can_dig=True, can_see=True)
+
+        def dig_gravel(pos):
+            w.blocks.pop(tuple(pos), None)
+            w.counts["flint"] = w.counts.get("flint", 0) + 1
+            return envelope({"gained": {"flint": 1}})
+
+        w.dig_effect = dig_gravel
+        res = SurvivalSkills(w).execute("gather_block", {"pos": [2, 64, 0], "expected_name": "gravel"})
+        self.assertTrue(res.success, res)
+        self.assertEqual(res.data["gained"], {"flint": 1})
+
+        obs_g = auto_world({"water_bucket": 1, "iron_ingot": 1, "gravel": 2, "cobblestone": 16, "iron_pickaxe": 1})
+        obs_g["blocks"] = [{"name": "gravel", "pos": [14, 64, 0], "can_see": True, "can_dig": True}]
+        obs_g["placement_candidates"] = [{"pos": [2, 64, 0], "support": "stone"}]
+        ctl = AutonomousTaskController({})
+        ctl.start({"task": "nether_portal"}, obs_g)
+        step = ctl.next_action(obs_g)
+        self.assertEqual((step.name, step.args["item"]), ("place_item", "gravel"))
+
+    def test_collect_liquid_allows_water_pickup_at_moderate_low_health_but_blocks_lava(self):
+        from skills.buckets import BucketSkills
+        from test_buckets import LiquidWorld
+
+        w = LiquidWorld()
+        w.status.update(health=6.5, food=14)
+        w.counts = {"bucket": 1}
+        w.block(w.source, "water", properties={"level": 0})
+        water_res = BucketSkills(w).execute("collect_liquid", {"pos": w.source, "expected_name": "water"})
+        self.assertTrue(water_res.success, water_res)
+        self.assertEqual(w.counts.get("water_bucket"), 1)
+
+        w2 = LiquidWorld()
+        w2.status.update(health=6.5, food=14)
+        w2.counts = {"bucket": 1}
+        w2.block(w2.source, "lava", properties={"level": 0})
+        lava_res = BucketSkills(w2).execute("collect_liquid", {"pos": w2.source, "expected_name": "lava"})
+        self.assertFalse(lava_res.success)
+        self.assertEqual(lava_res.error_code, "unsafe")
+
+    def test_escape_to_surface_climbs_underground_ceiling_and_aborts_before_hazard(self):
+        from skills.survival import SurvivalSkills
+        from test_v22_live_fixes import _BurrowMineWorld
+
+        w = _BurrowMineWorld(bot_pos=(0.5, 58.0, 0.5), surface_y=64)
+        w.blocks.clear()
+        w.items = {"cobblestone": 16, "stone_pickaxe": 1}
+        w.status["held"] = {"name": "cobblestone", "count": 16}
+        w.blocks[(0, 57, 0)] = {"name": "stone", "properties": {}}
+        for yy in range(60, 63):
+            w.blocks[(0, yy, 0)] = {"name": "stone", "properties": {}}
+        # Surrounded below y=63 so only surface exit is at y=63 along +x.
+        for yy in range(58, 63):
+            for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                w.blocks[(dx, yy, dz)] = {"name": "stone", "properties": {}}
+        w.blocks[(1, 62, 0)] = {"name": "grass_block", "properties": {}}
+        res = SurvivalSkills(w).escape_to_surface(max_climb=10, timeout_seconds=15.0)
+        self.assertTrue(res.success, res)
+        self.assertGreaterEqual(res.data["risen"], 4)
+        self.assertGreaterEqual(w.status["pos"][1], 63.0)
+
+        w_haz = _BurrowMineWorld(bot_pos=(0.5, 58.0, 0.5), surface_y=64)
+        w_haz.blocks.clear()
+        w_haz.items = {"cobblestone": 16, "stone_pickaxe": 1}
+        w_haz.blocks[(0, 57, 0)] = {"name": "stone", "properties": {}}
+        w_haz.blocks[(0, 60, 0)] = {"name": "stone", "properties": {}}
+        w_haz.blocks[(0, 61, 0)] = {"name": "water", "properties": {}}
+        res_haz = SurvivalSkills(w_haz).escape_to_surface(max_climb=10, timeout_seconds=15.0)
+        self.assertFalse(res_haz.success)
+        self.assertEqual(res_haz.error_code, "hazard_detected")
+
+    def test_wide_find_water_skips_close_already_in_range_and_climbs_underground_and_canopy_near_hostile_releases(self):
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from core.autonomy_runtime import AutonomyRuntime
+        from core.local_recovery_runtime import LocalRecoveryRuntime
+        from skills import SkillResult
+        from skills.survival import SurvivalSkills
+
+        rt = AutonomyRuntime()
+        rt.client = SimpleNamespace(
+            find_blocks=lambda **kw: [{"name": "water", "pos": [-2, 45, 1], "properties": {"level": 0}}],
+            get_block=lambda *a, **kw: {"ok": True, "result": {"name": "stone"}},
+        )
+        rt.context = {}
+        rt._cancel = None
+        rt.task_controller = SimpleNamespace(rules=SimpleNamespace(_blocked=lambda ctx: {}))
+        obs = {
+            "status": {"pos": [0.5, 46.0, 0.5], "dimension": "overworld", "alive": True, "ready": True, "on_ground": True},
+            "counts": {"bucket": 1, "cobblestone": 32, "stone_pickaxe": 1},
+            "blocks": [],
+        }
+        with patch.object(rt, "_move_wide_candidate", return_value=SkillResult(
+            True, "Already within the requested range; no movement was performed",
+            {"already_in_range": True, "executed": False}, None,
+        )), patch.object(SurvivalSkills, "escape_to_surface", return_value=SkillResult(
+            True, "Ascended", {"exited": True, "risen": 18, "pos": [1.5, 64.0, 0.5], "executed": True}, None,
+        )) as mock_esc, patch("skills.scouting.SurfaceScoutSkill.execute", return_value=SkillResult(
+            True, "Scout", {"found_water": [{"name": "water", "pos": [-2, 45, 1]}], "final_pos": [0.5, 46.0, 0.5], "executed": True}, None,
+        )):
+            res = rt._run_task_wide_find(Decision("move_to", {"pos": [0.5, 46.0, 0.5], "range": 4}, "", "nether_portal_water"), obs, "water")
+        mock_esc.assert_called_once()
+        self.assertFalse(res.data.get("already_in_range") is True and res.success)
+
+        # Near_hostile repeats during canopy_escape should increment stalled_unsafe and release cleanly.
+        class _DummyRecovery(LocalRecoveryRuntime):
+            def __init__(self):
+                self.settings = {"target_cooldown_seconds": 30, "low_health_threshold": 8}
+                self.context = {"life_generation": 1}
+                self.daily = True
+                self.daily_policy = DailySafetyPolicy({"low_health_threshold": 8, "threat_radius": 8})
+                self._safety_rules = self.daily_policy.rules
+                self._records = []
+
+            def _record(self, level, event, data):
+                self._records.append((level, event, data))
+
+        rec = _DummyRecovery()
+        for _ in range(4):
+            rec._local_recovery_result(
+                Decision("canopy_escape", {}, "", "safety"),
+                SkillResult(False, "Hostile nearby", {"executed": False}, "near_hostile"),
+                {"status": {"pos": [0.5, 70.0, 0.5], "dimension": "overworld"}, "fresh": True, "footing": {"name": "oak_leaves"}},
+            )
+        state = rec.context.get("canopy_recovery") or {}
+        self.assertIs(state.get("evacuating"), False)
+        self.assertEqual(state.get("reason"), "canopy_stalled_released")
+
+
+if __name__ == "__main__":
+    unittest.main()

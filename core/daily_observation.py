@@ -522,11 +522,13 @@ class DailyObservationCollector(ObservationCollector):
             raise APIError("observation_changed", "Backend idle state is unknown")
         self._collect_footing(observation, cancel_event)
         resources = [("iron_ore", "deepslate_iron_ore", "diamond_ore", "deepslate_diamond_ore",
-                      "dead_bush", "chest", "barrel", "smoker", "blast_furnace", "gravel", "nether_portal")]
+                      "dead_bush", "chest", "barrel", "smoker", "blast_furnace",
+                      "obsidian", "crying_obsidian", "gravel", "nether_portal")]
         if self.campaign:
             resources.append(("sand",))
         if not self.campaign:
-            resources.append(("wheat", "carrots", "potatoes", "beetroots", "farmland", "grass_block", "dirt"))
+            resources.append(("wheat", "carrots", "potatoes", "beetroots", "farmland",
+                              "hay_block", "sweet_berry_bush", "grass_block", "dirt"))
         for types in resources:
             self._check_cancel(cancel_event)
             rows = self.client.get_blocks(radius=self.radius, types=list(types), limit=48)

@@ -18,6 +18,9 @@ survival:
   continuous: true                         # Daily survival treats global budgets as planning advice.
   risk_policy: "guarded"                    # advisory lets daily goals consider tactical risks and continue.
   sleep_policy: "opportunistic"            # opportunistic (sleep only if nearby bed exists; thunder/night no-bed keeps working) or strict.
+  disable_sleep: false                     # true disables bed crafting/sleeping completely (use for multi-bot servers where night cannot be slept).
+  llm_override_on_block: false             # true converts non-fatal safety/script blocks into warnings and prioritizes LLM rescue/override.
+  action_watchdog_seconds: 30              # 0 disables; >0 cancels stalled non-child actions (or stalled child actions) after N seconds and hands control to the LLM.
   disable_deep_mining: false               # True keeps ore collection local and skips deep expeditions.
   operator_goal: ""                        # Optional current user goal (<=1000 visible characters); safety still wins.
   autonomy:                               # Daily/competition: one model goal, locally verified child steps.
@@ -96,6 +99,18 @@ llm:
   max_history_turns: 10
   max_repair_attempts: 1
   tls_version: "auto"                     # Optional "1.2" for TLS negotiation compatibility; verification stays on.
+  gate_wait_seconds: 600                  # Global FIFO wait limit across bots sharing the concurrency-1 AI API slot.
+  recover_uncertain_transport: true       # Auto-recover after timeout/network drops with bounded backoff retries.
+  retry_backoff_seconds: [4, 16, 32, 64, 128, 256]
+  # Optional concurrent overflow endpoint (off by default and forced off in competition objective).
+  overflow:
+    enabled: false                        # Set true + BOTSLEEP_LLM_OVERFLOW_API_KEY for multi-bot runs.
+    allow_in_competition: false
+    base_url: "https://doro.lat/v1"       # BOTSLEEP_LLM_OVERFLOW_BASE_URL
+    api_key: ""                           # BOTSLEEP_LLM_OVERFLOW_API_KEY
+    model: "deepseek-v4.1-flash"          # BOTSLEEP_LLM_OVERFLOW_MODEL
+    primary_wait_seconds: 1.5             # Try primary slot briefly before overflowing.
+    cooldown_seconds: 45                  # Cooldown primary route after explicit error/timeout.
 
 # RCON is an optional development dependency, never used by the model runner.
 rcon:

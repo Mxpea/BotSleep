@@ -205,6 +205,33 @@ class SurfaceScoutSkillTests(unittest.TestCase):
         self.assertEqual(res.data["early_stop_reason"], "completed_forward_span")
         self.assertEqual(res.data["found_structures"], [])
 
+    def test_lava_focus_ignores_nearby_wood_and_stops_on_lava_pool_cluster(self):
+        world = SimScoutWorld(pos=(0.5, 64.0, 0.5))
+        world.world_blocks = [
+            {"name": "oak_log", "pos": [10, 64, 0]},
+            {"name": "lava", "pos": [120, 63, 0]},
+            {"name": "lava", "pos": [121, 63, 0]},
+            {"name": "lava", "pos": [120, 63, 1]},
+            {"name": "lava", "pos": [121, 63, 1]},
+        ]
+        res = SurfaceScoutSkill(world).execute(scan_radius=48, hop_distance=55.0, max_hops=4, goal_focus="lava")
+        self.assertTrue(res.success, res)
+        self.assertEqual(res.data["early_stop_reason"], "lava_pool_found")
+        self.assertGreaterEqual(len(res.data["found_lava"]), 4)
+        self.assertEqual(res.data["hops_completed"], 2)
+
+    def test_prefer_wood_does_not_abort_early_on_surface_ores(self):
+        world = SimScoutWorld(pos=(0.5, 64.0, 0.5))
+        world.world_blocks = [
+            {"name": "iron_ore", "pos": [2, 60, 0]},
+            {"name": "copper_ore", "pos": [3, 60, 0]},
+            {"name": "oak_log", "pos": [110, 64, 0]},
+        ]
+        res = SurfaceScoutSkill(world).execute(scan_radius=48, hop_distance=55.0, max_hops=4, prefer_wood=True)
+        self.assertTrue(res.success, res)
+        self.assertEqual(res.data["early_stop_reason"], "wood_found")
+        self.assertGreaterEqual(res.data["hops_completed"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

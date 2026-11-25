@@ -33,7 +33,7 @@ Copy-Item config.example.yaml config.yaml
 .\.venv\Scripts\python.exe -B main.py --config config.yaml --check-config
 ```
 
-编辑 `config.yaml` 中的 `mc_api.base_url`、`agent.name` 和认证配置，使其与服务端匹配。默认 API 地址为 `http://127.0.0.1:18900/api/v1`；运行前需启动 Minecraft 服务端和 mc-agent-api。`--check-config` 只校验配置，不连接游戏、API 或模型。
+编辑 `config.yaml` 中的 `mc_api.base_url`、`agent.name` 和认证配置，使其与服务端匹配。默认 API 地址为 `http://127.0.0.1:18900/api/v1`；运行前需启动 Minecraft 服务端和 mc-agent-api。`--check-config` 只校验配置，不连接游戏、API 或模型。详细参数含义、目标服务器对接与推荐比赛配置见 [配置与赛事参数指南](docs/CONFIGURATION.md)。
 
 ```powershell
 # 默认自动睡眠；单次有界尝试可加 --once
@@ -206,6 +206,7 @@ RCON 仅供开发靶场，另需安装可选依赖；安装不会授权实服测
 | `debug/`、`tests/` | 聊天调试、脱敏日志、只读监控与回归测试。 |
 
 - [当前架构](docs/ARCHITECTURE.md)：starter/daily/competition 运行链路与设计边界。
+- [配置与赛事参数指南](docs/CONFIGURATION.md)：目标服接入、推荐配置模板与全量 YAML 参数说明。
 - [生存运行指南](docs/SURVIVAL.md) / [日常任务与记忆](docs/DAILY_SURVIVAL.md)：配置、技能、安全策略与恢复。
 - [技能契约](docs/SKILL_SPEC.md) / [调试指南](docs/DEBUG_GUIDE.md)：技能开发与聊天/RCON 入口。
 - [赛事接口与未来提案](docs/HARNESS_INTERFACES.md)：已实现的任务子集及尚未绑定的接口。

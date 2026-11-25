@@ -115,7 +115,7 @@ class DailyRuntimeTests(unittest.TestCase):
         self.world = RuntimeDailyWorld()
         self.index = 0
 
-    def make_harness(self, replies=None, *, state_dir=None, timeout=1):
+    def make_harness(self, replies=None, *, state_dir=None, timeout=1, recover_uncertain_transport=True):
         self.index += 1
         settings = {**copy.deepcopy(DEFAULTS["survival"]), "objective": "daily",
             "autonomy": {"enabled": False},  # This fixture verifies individual native atomic calls.
@@ -125,10 +125,20 @@ class DailyRuntimeTests(unittest.TestCase):
         if replies is not None:
             endpoint = FakeChatEndpoint(replies)
             self.addCleanup(endpoint.close)
-            gate = ModelRequestGate(endpoint.base_url, "offline-model-key", directory=Path(self.temp.name) / "gates")
-            brain = OpenAIBrain(endpoint.base_url, "offline-model-key", "offline-model", timeout_seconds=timeout, request_gate=gate)
-            planner = LLMSurvivalPlanner({"enabled": True, "model": "offline-model", "api_key": "offline-model-key",
-                "max_repair_attempts": 0}, settings, brain=brain)
+            gate = ModelRequestGate(
+                endpoint.base_url, "offline-model-key", directory=Path(self.temp.name) / "gates",
+                auto_recover_uncertain=recover_uncertain_transport,
+            )
+            brain = OpenAIBrain(
+                endpoint.base_url, "offline-model-key", "offline-model",
+                timeout_seconds=timeout, recover_uncertain_transport=recover_uncertain_transport,
+                request_gate=gate,
+            )
+            planner = LLMSurvivalPlanner(
+                {"enabled": True, "model": "offline-model", "api_key": "offline-model-key",
+                 "max_repair_attempts": 0, "recover_uncertain_transport": recover_uncertain_transport},
+                settings, brain=brain,
+            )
         harness = SurvivalHarness(self.world, settings, DEFAULTS["sleep"], planner=planner)
         self.assertIsInstance(harness.collector, DailyObservationCollector)
         self.assertIsInstance(harness.skills, DailySurvivalSkills)
@@ -167,7 +177,7 @@ class DailyRuntimeTests(unittest.TestCase):
         self.assertEqual(self.world.counts.get("iron_ingot", 0), 0)
         self.assertEqual(harness.context["smelting_jobs"][0]["expected_output"], "iron_ingot")
         tools = {entry["function"]["name"] for entry in endpoint.requests[0]["body"]["tools"]}
-        local_safety = {"canopy_escape", "water_escape", "retreat_from", "fight_hostile"}
+        local_safety = {"canopy_escape", "water_escape", "emergency_burrow", "exit_burrow", "clear_burial", "retreat_from", "fight_hostile"}
         self.assertTrue((set(DailySurvivalSkills.ARGUMENTS) - local_safety).issubset(tools))
         self.assertFalse(local_safety & tools)
         self.assertIn("plan_shelter", tools)
@@ -418,7 +428,9 @@ class DailyRuntimeTests(unittest.TestCase):
         self.assertEqual(len([call for call in self.world.calls if call[0] == "place"]), 1)
 
     def test_uncertain_model_http_blocks_new_requests_but_local_eating_and_retreat_continue(self):
-        harness, endpoint = self.make_harness([tool_response("wait", {"seconds": 1})], timeout=.05)
+        harness, endpoint = self.make_harness(
+            [tool_response("wait", {"seconds": 1})], timeout=.05, recover_uncertain_transport=False,
+        )
         endpoint.release.clear()
         result = self.step(harness)
         self.assertEqual(result.error_code, "llm_request_uncertain")
@@ -497,6 +509,123 @@ class DailyRuntimeTests(unittest.TestCase):
         self.assertEqual(self.world.counts["cobblestone"], 1)
         self.assertFalse([call for call in self.world.calls if call[0] == "place"])
         self.assertIsNone(harness.planner._pending)
+
+    def test_daily_planner_rejection_records_hint_without_escalating_network_backoff(self):
+        self.world.counts = {"furnace": 1}
+        harness, endpoint = self.make_harness([
+            tool_response("craft_item", {"item": "furnace", "count": 1}, "bad_furnace_1"),
+            tool_response("wait", {"seconds": 1}, "ok_2"),
+        ])
+        first = self.step(harness)
+        self.assertEqual(first.error_code, "llm_no_progress")
+        self.assertEqual(harness._model_failures, 0)
+        self.assertEqual(harness._llm_retry_after, 0.0)
+        self.assertFalse(harness.paused)
+        self.assertIn("last_planner_rejection", harness.context)
+        self.assertIn("furnace", harness.context["last_planner_rejection"]["message"])
+        second = self.step(harness)
+        self.assertTrue(second.success, second)
+        self.assertNotIn("last_planner_rejection", harness.context)
+        sent_second = self.prompt(endpoint.requests[1])
+        self.assertIn("last_planner_rejection", sent_second["context"])
+
+    def test_empty_found_wood_keeps_scout_allowed_until_3_calls(self):
+        harness, endpoint = self.make_harness([
+            tool_response("craft_item", {"item": "stick", "count": 4}, "noop_1"),
+        ])
+        harness.planner._scout_calls = 1
+        visible, _, _ = harness.planner._request_catalog(
+            {"last_scout_report": {"found_wood": [], "estimated_reach": 48.0}},
+            harness.collector.collect(),
+        )
+        # craft_item doesn't have task param, test with autonomy enabled:
+        harness.planner.autonomy_enabled = True
+        visible_goal, _, _ = harness.planner._request_catalog(
+            {"last_scout_report": {"found_wood": [], "estimated_reach": 48.0}},
+            harness.collector.collect(),
+        )
+        goal_tool = next(t for t in visible_goal if t["function"]["name"] == "run_survival_task")
+        self.assertIn("scout", goal_tool["function"]["parameters"]["properties"]["task"]["enum"])
+
+    def test_daily_retreat_interruption_action_unconfirmed_recovers_when_status_is_idle(self):
+        harness, _ = self.make_harness([tool_response("wait", {"seconds": 1}, "after_recover")])
+        self.world.entities = [{"id": 9, "name": "skeleton", "type": "hostile", "pos": [-3, 64, .5]}]
+        self.world.status["nearest_hostile"] = {"name": "skeleton", "dist": 3.5}
+        with patch.object(
+            harness.skills,
+            "execute",
+            return_value=SkillResult(
+                False,
+                "Navigation write was interrupted before verification",
+                {
+                    "executed": True,
+                    "action_state": "unknown",
+                    "cleanup_skipped": "navigation_unknown",
+                    "recovery_error": "interrupted",
+                },
+                "action_unconfirmed",
+            ),
+        ):
+            res = self.step(harness)
+        self.assertEqual(res.error_code, "action_unconfirmed")
+        self.assertFalse(harness.paused)
+        self.assertIsNone(harness.journal.state.get("pending"))
+        self.assertNotIn("retreat_recovery", harness.context)
+
+    def test_offhand_shield_blocks_duplicate_shield_craft_and_inspect_container_recovers(self):
+        self.world.status["offhand"] = {"name": "shield", "count": 1}
+        self.world.block([2, 64, 0], "chest")
+        harness, _ = self.make_harness([
+            tool_response("run_survival_task", {"task": "craft", "item": "shield", "count": 1}, "dup_shield"),
+            tool_response("inspect_container", {"pos": [2, 64, 0]}, "peek"),
+        ])
+        harness.planner.autonomy_enabled = True
+        dup = self.step(harness)
+        self.assertEqual(dup.error_code, "llm_no_progress")
+        self.assertFalse(harness.paused)
+        harness.planner.autonomy_enabled = False
+        with patch.object(
+            harness.skills,
+            "execute",
+            return_value=SkillResult(
+                False,
+                "Container peek interrupted before verification",
+                {"executed": True, "action_state": "unknown", "recovery_error": "interrupted"},
+                "action_unconfirmed",
+            ),
+        ):
+            peek = self.step(harness)
+        self.assertEqual(peek.error_code, "action_unconfirmed")
+        self.assertFalse(harness.paused)
+        self.assertIsNone(harness.journal.state.get("pending"))
+
+    def test_daily_retreat_death_action_unconfirmed_recovers_without_task_unknown_pause(self):
+        harness, _ = self.make_harness([tool_response("wait", {"seconds": 1}, "ok")])
+        harness.task_controller = __import__("core.autonomous_tasks", fromlist=["AutonomousTaskController"]).AutonomousTaskController({**harness.settings, "autonomy": {"enabled": True}})
+        obs = harness.collector.collect()
+        harness.task_controller.start({"task": "gather", "resource": "logs", "count": 4}, obs, harness.context)
+        self.world.entities = [{"id": 9, "name": "skeleton", "type": "hostile", "pos": [-3, 64, .5]}]
+        self.world.status["nearest_hostile"] = {"name": "skeleton", "dist": 3.5}
+        with patch.object(
+            harness.skills,
+            "execute",
+            return_value=SkillResult(
+                False,
+                "Navigation write was interrupted before verification",
+                {
+                    "executed": True,
+                    "action_state": "unknown",
+                    "cleanup_skipped": "navigation_unknown",
+                    "recovery_error": "dead",
+                },
+                "action_unconfirmed",
+            ),
+        ):
+            res = self.step(harness)
+        self.assertEqual(res.error_code, "action_unconfirmed")
+        self.assertFalse(harness.paused)
+        self.assertIsNone(harness.journal.state.get("pending"))
+        self.assertNotEqual(harness.task_controller.snapshot()["status"], "unknown")
 
     def test_native_arrow_preempts_production_even_without_a_visible_attacker(self):
         harness, endpoint = self.make_harness([tool_response("wait", {"seconds": 5}, "unused")])

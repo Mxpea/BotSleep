@@ -13,6 +13,7 @@ RECIPES = {
     "crafting_table": ({"planks": 4}, 1), "stick": ({"planks": 2}, 4),
     "furnace": ({"cobblestone": 8}, 1), "chest": ({"planks": 8}, 1),
     "torch": ({"coal": 1, "stick": 1}, 4), "bread": ({"wheat": 3}, 1),
+    "wheat": ({"hay_block": 1}, 9),
     "bone_meal": ({"bone": 1}, 3), "diamond_boots": ({"diamond": 4}, 1),
     "shield": ({"planks": 6, "iron_ingot": 1}, 1), "bucket": ({"iron_ingot": 3}, 1),
     "flint_and_steel": ({"iron_ingot": 1, "flint": 1}, 1),
@@ -29,7 +30,7 @@ RECIPES = {
     **{bed: ({bed[:-4] + "_wool": 3, "planks": 3}, 1) for bed in DailySurvivalSkills.BEDS},
 }
 
-HAND_RECIPES = frozenset({"stick", "torch", "crafting_table", "flint_and_steel", "blaze_powder", "ender_eye", "bone_meal", *PLANK_NAMES})
+HAND_RECIPES = frozenset({"stick", "torch", "crafting_table", "wheat", "flint_and_steel", "blaze_powder", "ender_eye", "bone_meal", *PLANK_NAMES})
 # Keep established acquisition choices (e.g. smelt iron instead of unpacking blocks).
 _catalog = json.loads((Path(__file__).resolve().parents[1] / "data" / "mc_tree_crafting.json").read_text(encoding="utf-8"))
 for _item, (_materials, _yield, _table) in _catalog.items():

@@ -38,6 +38,9 @@ DEFAULTS: Dict[str, Any] = {
         "continuous": False,
         "risk_policy": "guarded",
         "sleep_policy": "opportunistic",
+        "disable_sleep": False,
+        "llm_override_on_block": False,
+        "action_watchdog_seconds": 0,
         "disable_deep_mining": False,
         "operator_goal": "",
         "autonomy": {"enabled": True, "local_opening": False, "mainline": False, "max_steps": 128, "max_seconds": 600,
@@ -84,7 +87,20 @@ DEFAULTS: Dict[str, Any] = {
     "llm": {"enabled": False, "base_url": "http://127.0.0.1:8000/v1", "api_key": "",
             "model": "qwen3.6-35b-a3b", "temperature": 0.3, "max_tokens": 2048,
             "timeout_seconds": 60, "max_history_turns": 10, "max_repair_attempts": 1,
-            "tls_version": "auto"},
+            "tls_version": "auto", "gate_wait_seconds": 600,
+            "recover_uncertain_transport": True,
+            "retry_backoff_seconds": [4, 16, 32, 64, 128, 256],
+            "overflow": {
+                "enabled": False,
+                "allow_in_competition": False,
+                "base_url": "https://doro.lat/v1",
+                "api_key": "",
+                "model": "deepseek-v4.1-flash",
+                "primary_wait_seconds": 1.5,
+                "cooldown_seconds": 45,
+                "timeout_seconds": 45,
+                "tls_version": "auto",
+            }},
     "mining": {
         "targets": {
             "iron": {"count": 24, "min_tool": "stone_pickaxe"},
@@ -252,6 +268,8 @@ def _validate(config: Dict[str, Any], config_dir: Path) -> None:
         raise ConfigError("survival.campaign requires objective=daily and intent=speedrun")
     if not isinstance(survival["sleep_policy"], str) or survival["sleep_policy"] not in ("opportunistic", "strict"):
         raise ConfigError("survival.sleep_policy must be opportunistic or strict")
+    _boolean(survival["disable_sleep"], "survival.disable_sleep")
+    _boolean(survival["llm_override_on_block"], "survival.llm_override_on_block")
     goal = survival["operator_goal"]
     if (not isinstance(goal, str) or len(goal) > 1000 or goal and not goal.strip()
             or isinstance(goal, str) and any(unicodedata.category(char) in {"Cc", "Cf", "Cs"} for char in goal)):
@@ -307,6 +325,9 @@ def _validate(config: Dict[str, Any], config_dir: Path) -> None:
         raise ConfigError("survival.scan_radius must be an integer between 4 and 64")
     for key in ("poll_interval_seconds", "retry_seconds", "max_runtime_seconds", "target_cooldown_seconds"):
         _positive(survival[key], f"survival.{key}")
+    watchdog = survival["action_watchdog_seconds"]
+    if type(watchdog) not in (int, float) or not math.isfinite(watchdog) or watchdog < 0 or watchdog > 3600:
+        raise ConfigError("survival.action_watchdog_seconds must be a finite number between 0 and 3600")
     for key, maximum in (("low_health_threshold", 20), ("food_threshold", 20), ("threat_radius", 24), ("explore_distance", 32)):
         _positive(survival[key], f"survival.{key}")
         if survival[key] > maximum:
@@ -382,6 +403,47 @@ def _validate(config: Dict[str, Any], config_dir: Path) -> None:
             raise ConfigError(f"llm.{key} must be an integer between {low} and {high}")
     if llm["tls_version"] not in ("auto", "1.2"):
         raise ConfigError("llm.tls_version must be auto or the string 1.2")
+    _positive(llm["gate_wait_seconds"], "llm.gate_wait_seconds")
+    if llm["gate_wait_seconds"] > 3600:
+        raise ConfigError("llm.gate_wait_seconds must not exceed 3600")
+    _boolean(llm["recover_uncertain_transport"], "llm.recover_uncertain_transport")
+    backoff = llm["retry_backoff_seconds"]
+    if not isinstance(backoff, list) or not 1 <= len(backoff) <= 12:
+        raise ConfigError("llm.retry_backoff_seconds must be a list of 1 to 12 positive numbers")
+    for entry in backoff:
+        _positive(entry, "llm.retry_backoff_seconds entry")
+        if entry > 600:
+            raise ConfigError("llm.retry_backoff_seconds entries must not exceed 600")
+    overflow = _mapping(llm["overflow"], "llm.overflow")
+    if set(overflow) - set(DEFAULTS["llm"]["overflow"]):
+        raise ConfigError("llm.overflow contains unsupported options")
+    _boolean(overflow["enabled"], "llm.overflow.enabled")
+    _boolean(overflow["allow_in_competition"], "llm.overflow.allow_in_competition")
+    if survival["objective"] == "competition" and not overflow["allow_in_competition"]:
+        overflow["enabled"] = False
+    _string(overflow["api_key"], "llm.overflow.api_key", allow_empty=True)
+    ov_active = bool(llm["enabled"] and overflow["enabled"])
+    _string(overflow["model"], "llm.overflow.model", allow_empty=not ov_active)
+    ov_url = _string(overflow["base_url"], "llm.overflow.base_url", allow_empty=not ov_active).strip().rstrip("/")
+    try:
+        ov_parsed = urlsplit(ov_url)
+        ov_valid = (not ov_url and not ov_active) or (
+            ov_parsed.scheme in ("http", "https") and bool(ov_parsed.hostname)
+            and not any(c.isspace() for c in ov_url) and ov_parsed.username is None
+            and ov_parsed.password is None and not ov_parsed.query and not ov_parsed.fragment
+            and (ov_parsed.port is None or 1 <= ov_parsed.port <= 65535)
+        )
+    except ValueError:
+        ov_valid = False
+    if not ov_valid:
+        raise ConfigError("llm.overflow.base_url must be an HTTP(S) URL without credentials, query or fragment")
+    overflow["base_url"] = ov_url
+    for key, maximum in (("primary_wait_seconds", 60), ("cooldown_seconds", 600), ("timeout_seconds", 120)):
+        _positive(overflow[key], f"llm.overflow.{key}")
+        if overflow[key] > maximum:
+            raise ConfigError(f"llm.overflow.{key} must not exceed {maximum}")
+    if overflow["tls_version"] not in ("auto", "1.2"):
+        raise ConfigError("llm.overflow.tls_version must be auto or the string 1.2")
 
     mining = _mapping(config["mining"], "mining")
     if set(mining) - set(DEFAULTS["mining"]):
@@ -459,6 +521,21 @@ def load_config(
     ):
         if variable in environment:
             config[section][key] = environment[variable]
+    for variable, ov_key in (
+        ("BOTSLEEP_LLM_OVERFLOW_API_KEY", "api_key"),
+        ("BOTSLEEP_LLM_OVERFLOW_BASE_URL", "base_url"),
+        ("BOTSLEEP_LLM_OVERFLOW_MODEL", "model"),
+    ):
+        if variable in environment:
+            config["llm"]["overflow"][ov_key] = environment[variable]
+    if "BOTSLEEP_LLM_OVERFLOW_ENABLED" in environment:
+        raw_ov = str(environment["BOTSLEEP_LLM_OVERFLOW_ENABLED"]).strip().lower()
+        if raw_ov in {"1", "true", "yes", "on"}:
+            config["llm"]["overflow"]["enabled"] = True
+        elif raw_ov in {"0", "false", "no", "off"}:
+            config["llm"]["overflow"]["enabled"] = False
+        else:
+            raise ConfigError("BOTSLEEP_LLM_OVERFLOW_ENABLED must be a boolean")
     if username is not None:
         config["agent"]["name"] = username
 

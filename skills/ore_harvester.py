@@ -124,6 +124,7 @@ class OreHarvester:
         invalidate: Optional[Callable[[Sequence[int]], None]] = None,
         max_dist: float = 4.5,
         max_vein: int = 16,
+        finish_vein: bool = True,
     ) -> int:
         queue: deque = deque([list(seed_pos)])
         seen_vein: Set[Tuple[int, int, int]] = {(int(seed_pos[0]), int(seed_pos[1]), int(seed_pos[2]))}
@@ -155,6 +156,18 @@ class OreHarvester:
             )
             if tk != target_key:
                 continue
+            # Never start a brand-new vein whose target quota is already met, but once
+            # inside an opened connected vein (`dug > 0`), finish exposed vein blocks
+            # cleanly so leftover ore isn't wasted (while still checking tool tier).
+            if action == "skipped_quota" and finish_vein and dug > 0:
+                tool_chk, _, _ = evaluate_ore_block(
+                    bname,
+                    targets,
+                    harvested_counts={},
+                    best_tool_tier=tool_tier,
+                )
+                if tool_chk == "mine":
+                    action = "mine"
             if action != "mine":
                 if not ore_cell_hazard_free(ckey, cached_read):
                     action = "skipped_hazard"

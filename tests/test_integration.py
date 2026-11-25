@@ -79,7 +79,7 @@ class FakeAPI:
                     payload["result"] = {"slept": True}
                 elif path == "events":
                     payload["result"] = {"events": [], "last_seq": 0, "has_more": False}
-                elif path in ("stop", "auth/logout", "chat"):
+                elif path in ("stop", "disconnect", "auth/logout", "chat"):
                     payload["result"] = {"stopped": path == "stop"}
                 else:
                     status = 404

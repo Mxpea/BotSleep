@@ -89,6 +89,8 @@ class MinecraftAgentClient:
         self.token: Optional[str] = None
         self._continuous_session_file = None
         self._session = requests.Session()
+        self.activity_seq = 0
+        self.last_write_at = 0.0
         self.recorder = recorder
 
     @staticmethod
@@ -185,6 +187,9 @@ class MinecraftAgentClient:
             raise APIError(code, message, status_code, details)
         if data.get("ok") is not True:
             raise APIError("invalid_response", f"{endpoint} response has no boolean ok=true", status_code)
+        self.activity_seq += 1
+        if endpoint in self.WRITE_ENDPOINTS:
+            self.last_write_at = time.monotonic()
         return data
 
     @staticmethod
@@ -203,6 +208,12 @@ class MinecraftAgentClient:
 
     def _action_timeout(self, deadline_seconds: float) -> float:
         return max(self.timeout_seconds, deadline_seconds + self.ACTION_MARGIN_SECONDS)
+
+    def close(self) -> None:
+        """Close the underlying HTTP keep-alive session."""
+        session = getattr(self, "_session", None)
+        if session is not None:
+            session.close()
 
     def _open_session(self):
         data = self._request("POST", "auth/login", payload={"username": self.username, "password": self.password},
@@ -243,14 +254,34 @@ class MinecraftAgentClient:
         self.connect()
         raise APIError("not_ready", "Waiting for the current game session to become ready")
 
-    def login(self, max_wait_seconds: float = 15) -> Dict[str, Any]:
+    def login(
+        self,
+        max_wait_seconds: float = 15,
+        *,
+        retry_rate_limit: bool = False,
+        max_login_attempts: int = 3,
+    ) -> Dict[str, Any]:
         """Log in and return a ready status; clean up the session on failure."""
         max_wait_seconds = self._positive(max_wait_seconds, "max_wait_seconds")
+        attempts = max(1, int(max_login_attempts)) if retry_rate_limit else 1
         if self.token:
             self.logout()
         try:
-            self._open_session()
             deadline = time.monotonic() + max_wait_seconds
+            for attempt in range(attempts):
+                try:
+                    self._open_session()
+                    break
+                except APIError as error:
+                    if (not retry_rate_limit or attempt + 1 >= attempts
+                            or error.code not in {"rate_limited", "routing_unavailable"}):
+                        raise
+                    wait_s = error.details.get("retry_after_s") if isinstance(error.details, dict) else None
+                    sleep_s = float(wait_s) if isinstance(wait_s, (int, float)) and wait_s > 0 else 2.0
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise
+                    time.sleep(min(remaining, min(65.0, sleep_s + 0.25)))
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:

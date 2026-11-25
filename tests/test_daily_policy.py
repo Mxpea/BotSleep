@@ -782,10 +782,142 @@ class DailyPolicyTests(unittest.TestCase):
         # Submerged WITH in_water=True also allows water_escape (live bot state).
         submerged_wet = observed(in_water=True, submerged=True, on_ground=False)
         self.assertEqual(self.policy.choose(submerged_wet, self.baseline).name, "water_escape")
-        # Exhausted recovery falls back to environment_hazard wait.
+        # Exhausted recovery falls back to environment_hazard wait unless head is actively submerged.
         exhausted_ctx = {"water_recovery": {"exhausted": True}}
         self.assertEqual(self.policy.choose(obs, self.baseline, context=exhausted_ctx).name, "wait")
         self.assertEqual(self.policy.constraints(obs, context=exhausted_ctx)["scenario"], "environment_hazard")
+        self.assertEqual(self.policy.choose(submerged_wet, self.baseline, context=exhausted_ctx).name, "water_escape")
+
+    def test_opportunistic_releases_after_food_or_boxed_retreat_exhausted(self):
+        opp = DailySafetyPolicy({"low_health_threshold": 8, "food_threshold": 16, "threat_radius": 8, "sleep_policy": "opportunistic"})
+        food_blocked = observed(health=6, food=10)
+        wait_strict = self.policy.choose(food_blocked, self.baseline, context={"food_recovery": {"needs_ai": True}})
+        self.assertEqual((wait_strict.name, wait_strict.args.get("seconds")), ("wait", 1))
+        ctx_food = {"food_recovery": {"needs_ai": True}}
+        self.assertIsNone(opp.choose(food_blocked, self.baseline, context=ctx_food))
+        self.assertTrue(opp.constraints(food_blocked, ctx_food)["model_allowed"])
+        self.assertIsNone(opp.validate(action("move_to", pos=[4, 64, 0]), food_blocked, ctx_food))
+        # Distant hostile (dist 10 > threat_radius 8) must not freeze low-health opportunistic recovery.
+        distant_hostile = observed(health=3, food=10)
+        distant_hostile["entities"] = [{"id": 21, "type": "hostile", "name": "zombie", "pos": [10.5, 64.0, 0.5]}]
+        self.assertIsNone(opp.choose(distant_hostile, self.baseline, context=ctx_food))
+
+        boxed_obs = observed(health=18, food=18)
+        boxed_obs["entities"] = [{"id": 22, "type": "hostile", "name": "spider", "pos": [6.0, 64.0, 0.5]}]
+        self.assertEqual(
+            opp.choose(boxed_obs, self.baseline, context={"retreat_recovery": {"no_route_exhausted": True}}),
+            None,
+        )
+        close_obs = observed(health=18, food=18)
+        close_obs["entities"] = [{"id": 23, "type": "hostile", "name": "spider", "pos": [2.5, 64.0, 0.5]}]
+        self.assertEqual(
+            opp.choose(close_obs, self.baseline, context={"retreat_recovery": {"no_route_exhausted": True}}).name,
+            "retreat_from",
+        )
+
+    def test_llm_override_on_block_downgrades_tactical_locks_to_warnings_while_keeping_lava_hard_stop(self):
+        over = DailySafetyPolicy({"low_health_threshold": 8, "food_threshold": 16, "threat_radius": 8,
+                                  "sleep_policy": "opportunistic", "llm_override_on_block": True})
+        wet = observed(in_water=True, on_ground=False)
+        self.assertIsNone(over.choose(wet, self.baseline, context={"water_recovery": {"steps": 2}}))
+        c_wet = over.constraints(wet, context={"water_recovery": {"steps": 2}})
+        self.assertTrue(c_wet["model_allowed"])
+        self.assertTrue(any("in_water" in w for w in c_wet["warnings"]))
+
+        hungry = observed(health=5, food=4, is_day=False, time_of_day=14000)
+        self.assertIsNone(over.choose(hungry, self.baseline, context={}))
+        self.assertTrue(over.constraints(hungry)["model_allowed"])
+        self.assertIsNone(over.validate(action("move_to", pos=[4, 64, 0]), hungry))
+
+        lava = observed(in_lava=True, on_ground=False)
+        self.assertEqual(over.choose(lava, self.baseline).goal, "recover")
+        self.assertFalse(over.constraints(lava)["model_allowed"])
+
+    def test_disable_sleep_blocks_sleeping_and_spawn_camp_widens_retreat_and_warns(self):
+        no_sleep = DailySafetyPolicy({
+            "low_health_threshold": 8, "food_threshold": 16, "threat_radius": 8,
+            "sleep_policy": "strict", "disable_sleep": True, "llm_override_on_block": True,
+        })
+        night_obs = observed(is_day=False, time_of_day=15000, health=18, food=18)
+        night_obs["blocks"].append({"name": "red_bed", "pos": [2, 64, 0], "properties": {"occupied": False}})
+        self.assertFalse(no_sleep._bed(night_obs))
+        self.assertFalse(no_sleep._strict_night_block(night_obs, night_obs["status"]))
+        self.assertEqual(no_sleep.validate(action("auto_sleep"), night_obs), "sleep_disabled")
+        self.assertTrue(no_sleep.constraints(night_obs)["model_allowed"])
+
+        camp_obs = observed(is_day=False, time_of_day=15000, health=6, food=18)
+        camp_obs["counts"] = {"stone_pickaxe": 1, "raw_iron": 3}
+        camp_obs["inventory"] = [{"name": "stone_pickaxe", "count": 1}, {"name": "raw_iron", "count": 3}]
+        camp_obs["entities"] = [{"id": 31, "type": "hostile", "name": "zombie", "pos": [4.5, 64.0, 0.5]}]
+        camp_ctx = {"spawn_camp_alert": True, "recent_spawn_deaths": 2}
+        retreat = no_sleep.choose(camp_obs, self.baseline, context=camp_ctx)
+        self.assertEqual(retreat.name, "retreat_from")
+        self.assertEqual(retreat.args["distance"], 14)
+        self.assertTrue(any("SPAWN_CAMP_ALERT" in w for w in no_sleep.warnings(camp_obs, camp_ctx)))
+
+        # Unarmed / no-valuable-gear bots punch close zombies or recover drops instead of running blindly.
+        unarmed_punch = observed(is_day=False, time_of_day=15000, health=18, food=18)
+        unarmed_punch["inventory"] = []
+        unarmed_punch["entities"] = [{"id": 41, "type": "hostile", "name": "zombie", "pos": [2.2, 64.0, 0.5]}]
+        self.assertEqual(no_sleep.choose(unarmed_punch, self.baseline, context={}).name, "fight_hostile")
+
+        unarmed_drops = observed(is_day=False, time_of_day=15000, health=18, food=18)
+        unarmed_drops["inventory"] = []
+        unarmed_drops["entities"] = [
+            {"id": 42, "type": "hostile", "name": "zombie", "pos": [5.5, 64.0, 0.5]},
+            {"id": 43, "type": "item", "name": "iron_pickaxe", "pos": [1.5, 64.0, 1.5]},
+        ]
+        self.assertIsNone(no_sleep.choose(unarmed_drops, self.baseline, context={}))
+        self.assertTrue(any("DROPPED_GEAR_NEARBY" in w for w in no_sleep.warnings(unarmed_drops, {})))
+
+        # Shield + sword enables advancing on ranged skeletons up to 10m locally.
+        skel_obs = observed(is_day=False, time_of_day=15000, health=16, food=18)
+        skel_obs["counts"] = {"iron_sword": 1, "shield": 1}
+        skel_obs["inventory"] = [{"name": "iron_sword", "count": 1}, {"name": "shield", "count": 1}]
+        skel_obs["entities"] = [{"id": 32, "type": "hostile", "name": "skeleton", "pos": [7.5, 64.0, 0.5]}]
+        fight = no_sleep.choose(skel_obs, self.baseline, context={})
+        self.assertEqual((fight.name, fight.args["expected_name"]), ("fight_hostile", "skeleton"))
+
+    def test_emergency_burrow_triggers_on_night_unarmed_surface_and_skips_when_burrowed(self):
+        from agent.daily_survival import DailySurvivalGoals
+
+        no_sleep = DailySafetyPolicy({
+            "low_health_threshold": 8, "food_threshold": 16, "threat_radius": 8,
+            "sleep_policy": "strict", "disable_sleep": True, "llm_override_on_block": True,
+        })
+        night_obs = observed(is_day=False, time_of_day=15000, health=18, food=18, pos=[0.5, 64.0, 0.5])
+        night_obs["blocks"] = [
+            {"name": "grass_block", "pos": [0, 63, 0], "properties": {}},
+            {"name": "dirt", "pos": [0, 62, 0], "properties": {}},
+            {"name": "dirt", "pos": [0, 61, 0], "properties": {}},
+            {"name": "stone", "pos": [0, 60, 0], "properties": {}},
+        ]
+        # Empty-handed / starter bot stays free to explore and accumulate memory instead of burrowing.
+        self.assertIsNone(no_sleep.choose(night_obs, self.baseline, context={"life_generation": 1}))
+
+        valued_night_obs = copy.deepcopy(night_obs)
+        valued_night_obs["counts"] = {"stone_pickaxe": 1, "raw_iron": 4}
+        valued_night_obs["inventory"] = [{"name": "stone_pickaxe", "count": 1}, {"name": "raw_iron", "count": 4}]
+        burrow = no_sleep.choose(valued_night_obs, self.baseline, context={"life_generation": 1})
+        self.assertIsNotNone(burrow)
+        self.assertEqual(burrow.name, "emergency_burrow")
+        self.assertIsNone(no_sleep.validate(burrow, valued_night_obs, context={"life_generation": 1}))
+
+        burrowed_ctx = {"life_generation": 1, "night_burrow": {"pos": [0, 61, 0], "generation": 1}}
+        burrowed_obs = observed(is_day=False, time_of_day=15000, health=18, food=18, pos=[0.5, 61.0, 0.5])
+        burrowed_obs["blocks"] = [{"name": "dirt", "pos": [0, 63, 0], "properties": {}}]
+        burrowed_obs["entities"] = [{"id": 91, "type": "hostile", "name": "skeleton", "pos": [0.5, 64.0, 0.5]}]
+        stale_wait = Decision("wait", {"seconds": 1}, "No verified retreat route; observe again before the bounded search", "safety")
+        self.assertIsNone(no_sleep.choose(burrowed_obs, stale_wait, context=burrowed_ctx))
+
+        goals = DailySurvivalGoals({"daily": {"food_reserve": 8, "wood_reserve": 8, "fuel_reserve": 8}})
+        ready_obs = observed(is_day=False, time_of_day=15000, health=18, food=18, pos=[0.5, 64.0, 0.5])
+        ready_obs["counts"] = {"iron_pickaxe": 1, "bucket": 1, "iron_ingot": 1, "shield": 1}
+        ready_obs["inventory"] = [{"name": k, "count": 1} for k in ready_obs["counts"]]
+        board = goals.build(ready_obs, {}, {})
+        iron_row = next(row for row in board["tasks"] if row["id"] == "iron_tools")
+        self.assertEqual(iron_row["priority"], 25)
+        self.assertFalse(iron_row.get("next_action") and iron_row["next_action"].get("args", {}).get("task") == "deep_mine")
 
 
 if __name__ == "__main__":

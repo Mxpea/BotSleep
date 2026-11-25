@@ -1160,6 +1160,76 @@ class AutonomousTaskTests(unittest.TestCase):
         self.assertIsNone(step)
         self.assertEqual(ctrl.snapshot()["status"], "needs_ai")
 
+    def test_food_task_loots_nearby_chest_converts_hay_and_hunts_up_to_24_blocks(self):
+        obs = world({"hay_block": 1}, food=10, health=14)
+        obs["blocks"] = [{"name": "chest", "pos": [2, 64, 0], "can_see": True}]
+        obs["containers"] = [{
+            "pos": [2, 64, 0], "name": "chest", "dimension": "overworld",
+            "fresh": True, "verified": True, "items": [{"name": "bread", "count": 4}],
+        }]
+        ctrl = self.start({"task": "food", "count": 8}, obs=obs)
+        step1 = ctrl.next_action(obs)
+        self.assertEqual((step1.name, step1.args["item"], step1.args["count"]), ("take_items", "bread", 4))
+
+        obs2 = world({"hay_block": 1}, food=10, health=14)
+        ctrl2 = self.start({"task": "food", "count": 8}, obs=obs2)
+        step2 = ctrl2.next_action(obs2)
+        self.assertEqual((step2.name, step2.args["item"], step2.args["count"]), ("craft_item", "wheat", 9))
+
+        obs3 = world({"stone_sword": 1}, food=10, health=14)
+        obs3["entities"] = [{"id": 77, "name": "cow", "type": "passive", "pos": [18.5, 64, 0.5]}]
+        ctrl3 = self.start({"task": "food", "count": 8}, obs=obs3)
+        step3 = ctrl3.next_action(obs3)
+        self.assertEqual((step3.name, step3.args["pos"]), ("move_to", [18.5, 64, 0.5]))
+
+    def test_nether_portal_gravel_rng_does_not_stall_and_completes_in_the_nether(self):
+        obs = world({"water_bucket": 1, "iron_ingot": 1, "gravel": 1, "cobblestone": 12, "iron_pickaxe": 1})
+        obs["placement_candidates"] = [{"pos": [2, 64, 0], "support": "grass_block"}]
+        ctrl = self.start({"task": "nether_portal"}, obs=obs)
+        for _ in range(10):
+            obs["blocks"] = []
+            place_step = ctrl.next_action(obs)
+            self.assertEqual((place_step.name, place_step.args["item"]), ("place_item", "gravel"))
+            obs["counts"]["gravel"] = 0
+            ctrl.record_result(place_step, SkillResult(True, "Placed gravel", {"executed": True}), obs)
+            obs["blocks"] = [{"name": "gravel", "pos": [2, 64, 0], "can_see": True, "can_dig": True}]
+            dig_step = ctrl.next_action(obs)
+            self.assertEqual((dig_step.name, dig_step.args["expected_name"]), ("gather_block", "gravel"))
+            obs["counts"]["gravel"] = 1
+            ctrl.record_result(dig_step, SkillResult(True, "Dug gravel", {"executed": True}), obs)
+        self.assertEqual(ctrl.snapshot()["status"], "running")
+
+        obs["counts"]["flint_and_steel"] = 1
+        portal_step = ctrl.next_action(obs)
+        self.assertEqual((portal_step.name, portal_step.goal), ("move_to", "nether_portal"))
+        nether_obs = world({"cobblestone": 12, "iron_pickaxe": 1}, dimension="the_nether")
+        ctrl.record_result(portal_step, SkillResult(True, "Entered Nether", {"nether_entered": True, "portal_active": True, "portal_skill": True}), nether_obs)
+        self.assertTrue(ctrl.confirm_completion(nether_obs))
+        self.assertEqual(ctrl.snapshot()["status"], "completed")
+
+    def test_interrupted_deep_mine_does_not_blacklist_ore_for_retry(self):
+        obs = world({"stone_pickaxe": 3, "cobblestone": 12, "oak_log": 4})
+        ctrl = self.start({"task": "gather", "resource": "raw_iron", "count": 12}, obs=obs)
+        ctx = {"deep_mining_enabled": True}
+        first = ctrl.next_action(obs, ctx)
+        self.assertEqual((first.name, first.goal), ("gather_resource", "deep_mine"))
+        ctrl.record_result(first, SkillResult(False, "Workflow cancelled", {"stop_reason": "cancelled"}, "cancelled"), obs, ctx)
+        self.assertNotIn("raw_iron", ctrl.state()["deep_mine_ores"])
+        retry = ctrl.next_action(obs, ctx)
+        self.assertEqual((retry.name, retry.goal), ("gather_resource", "deep_mine"))
+
+    def test_night_surface_cobblestone_prefers_deep_mine_instead_of_surface_wandering(self):
+        from core.config import DEFAULTS
+        obs = world({"wooden_pickaxe": 1, "oak_log": 4})
+        obs["status"]["is_day"] = False
+        obs["status"]["time_of_day"] = 14000
+        obs["blocks"] = [{"name": "stone", "pos": [4, 64, 0], "can_see": True, "can_dig": True}]
+        ctrl = AutonomousTaskController({**DEFAULTS["survival"], "objective": "daily", "disable_sleep": True})
+        ctrl.start({"task": "gather", "resource": "cobblestone", "count": 8}, obs, {})
+        ctx = {"deep_mining_enabled": True}
+        step = ctrl.next_action(obs, ctx)
+        self.assertEqual((step.name, step.goal), ("gather_resource", "deep_mine"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -142,6 +142,19 @@ class MultiThreatRetreatTests(unittest.TestCase):
         self.assertEqual(result.data["target"], [1.5, 71, .5])
         self.assertLess(math.hypot(4.5, 3.5) - math.hypot(3.5, 3.5), 1.5)
 
+    def test_distant_secondary_skeleton_beyond_7_5_blocks_does_not_paralyze_escape_from_close_spider(self):
+        world = World()
+        # Close spider to the west, wall to the east/south, distant skeleton 9m NW leaving north corridor >= 8m from skeleton.
+        world.status["pos"] = [0.5, 64, 0.5]
+        world.set_block([1, 64, 0], "stone")
+        world.set_block([1, 65, 0], "stone")
+        world.set_block([0, 64, 1], "stone")
+        world.set_block([0, 65, 1], "stone")
+        world.entities = [hostile("spider", [-1.0, 64, 0.5], 1), hostile("skeleton", [-6.0, 64, -7.0], 2)]
+        result = self.retreat(world, [-1.0, 64, 0.5])
+        self.assert_single_move(world, result)
+        self.assertGreater(math.hypot(result.data["target"][0] + 1.0, result.data["target"][2] - 0.5), 1.5)
+
 
 class CanopyShooterDescentTests(unittest.TestCase):
     """A descent can lose vertical distance while retreating from two shooters."""

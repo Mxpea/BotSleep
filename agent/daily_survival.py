@@ -13,6 +13,7 @@ import re
 
 from agent.survival_planner import Decision, SurvivalPlanner
 from core.domain import LOG_NAMES, PLANK_NAMES, SAFE_FOOD, TOOL_KINDS, parse_pos
+from core.loop_supervisor import LoopSupervisor
 from core.skill_registry import skills_for_objective
 from core.structure_spec import SHELTER_BUILDING_BLOCKS
 from skills.daily_survival import DailySurvivalSkills
@@ -71,7 +72,7 @@ class DailySurvivalGoals:
     def _action(name, args, reason, goal):
         return {"name": name, "args": args, "reason": reason, "goal": goal}
 
-    def _safe_rows(self, observation, names=None, entities=False, context=None):
+    def _safe_rows(self, observation, names=None, entities=False, context=None, *, max_distance=16):
         origin = self._pos(observation["status"].get("pos"))
         if origin is None:
             return []
@@ -80,7 +81,7 @@ class DailySurvivalGoals:
         found = []
         for row in rows:
             pos = self._pos(row.get("pos"))
-            if pos is None or math.dist(origin, pos) > 16 or (names is not None and row.get("name") not in names):
+            if pos is None or math.dist(origin, pos) > max_distance or (names is not None and row.get("name") not in names):
                 continue
             if self.rules._key(pos) in blocked:
                 continue
@@ -303,9 +304,16 @@ class DailySurvivalGoals:
                 return self._action(workspace.name, workspace.args, workspace.reason, "food_reserve") if workspace.name != "wait" else None
             return self._action("craft_item", {"item": "bread", "count": min(64, counts["wheat"] // 3)},
                                 "Turn held wheat into a verified food reserve", "food_reserve")
+        if counts.get("hay_block", 0) >= 1:
+            return self._action("craft_item", {"item": "wheat", "count": 9},
+                                "Convert village hay_block into wheat for bread", "food_reserve")
         cooked = self._smelt(set(SAFE_FOOD), observation, counts, "food_reserve", context)
         if cooked:
             return cooked
+        for row in self._safe_rows(observation, {"hay_block"}, context=context, max_distance=24):
+            if row.get("can_dig") is not False:
+                return self._action("gather_block", {"pos": row["pos"], "expected_name": "hay_block"},
+                                    "Harvest village hay_block for emergency/sustainable bread supply", "food_reserve")
         for row in self._safe_rows(observation, set(CROPS), context=context):
             age = (row.get("properties") or {}).get("age")
             if type(age) is int and age >= CROPS[row["name"]][0]:
@@ -326,11 +334,11 @@ class DailySurvivalGoals:
                                         "Acquire food from one observed passive animal", "food_reserve")
         return None
 
-    def _can_hunt(self, observation, counts, row):
+    def _can_hunt(self, observation, counts, row, *, max_distance=8):
         status = observation["status"]
         return (status.get("health", 0) >= 12 and status.get("food", 0) >= 10
                 and any(counts.get(item) for item in HUNTING_TOOLS)
-                and math.dist(status["pos"], row["pos"]) <= 8)
+                and math.dist(status["pos"], row["pos"]) <= max_distance)
 
     def _hunt_approach(self, observation, row, context, goal):
         origin = observation["status"]["pos"]
@@ -556,7 +564,8 @@ class DailySurvivalGoals:
                     "needs": ["fresh_observation"], "revalidate_candidates": []}
 
         drops = None
-        if context.get("death_count", 0) > 0:
+        drop_hotspot_suspended = LoopSupervisor.should_suspend_drop_recovery(observation, context)
+        if context.get("death_count", 0) > 0 and not drop_hotspot_suspended:
             for row in self._safe_rows(observation, entities=True, context=context):
                 item = self._drop_name(row)
                 entity_id = row.get("id", row.get("entity_id"))
@@ -566,8 +575,16 @@ class DailySurvivalGoals:
                     drops = self._action("collect_drops", {"entity_id": entity_id, "expected_item": item},
                                          "Collect one currently observed safe drop after death", "recover_drops")
                     break
-        task("recover_drops", 100, context.get("death_count", 0) == 0, action=drops,
-             reason="No currently visible safe drop; do not replay a route to the death location", waiting=True)
+        drop_priority = (
+            0 if drop_hotspot_suspended
+            else (100 if (drops is not None and status.get("is_day") is True and context.get("death_count", 0) <= 2)
+                  else (45 if drops is not None else 5))
+        )
+        task("recover_drops", drop_priority, context.get("death_count", 0) == 0, action=drops,
+             reason=("Night death hotspot suspended; recover drops after dawn or re-gear locally"
+                     if drop_hotspot_suspended
+                     else "No currently visible safe drop; do not replay a route to the death location"),
+             waiting=True)
 
         well_fed = (
             fresh
@@ -588,9 +605,21 @@ class DailySurvivalGoals:
              reason="No safe mature crop/passive animal or ready cooking input is currently available")
 
         wood = sum(counts.get(name, 0) for name in LOG_NAMES) + sum(counts.get(name, 0) for name in PLANK_NAMES) // 4
-        task("wood_reserve", 30 if (expedition_focus and wood >= 2) else 65, wood >= self.targets["wood_reserve"],
+        has_any_pick = any(counts.get(t + "_pickaxe", 0) > 0 for t in ("wooden", "stone", "iron", "diamond", "netherite"))
+        opening_need_trees = (
+            wood == 0
+            and sum(counts.get(name, 0) for name in PLANK_NAMES) < 3
+            and not has_any_pick
+            and (not fresh or (status.get("food", 20) > 6 and status.get("health", 20) > 8))
+        )
+        wood_action = self._gather(LOG_NAMES, observation, context, "wood_reserve")
+        if wood_action is None and opening_need_trees and bool(context.get("autonomy_llm_mode") is True):
+            wood_action = self._action("run_survival_task", {"task": "scout", "distance": 96},
+                                       "Explore to locate trees and forest as primary opening goal", "wood_reserve")
+        wood_prio = 92 if opening_need_trees else (30 if (expedition_focus and wood >= 2) else 65)
+        task("wood_reserve", wood_prio, wood >= self.targets["wood_reserve"],
              missing=[{"log_equivalents": max(0, self.targets["wood_reserve"] - wood)}],
-             action=self._gather(LOG_NAMES, observation, context, "wood_reserve"), proof={"log_equivalents": wood})
+             action=wood_action, proof={"log_equivalents": wood})
 
         progress = self.rules.progress(observation)
         starter_missing = ["stone_" + kind for kind in TOOL_KINDS if not progress["stone_" + kind]]
@@ -669,7 +698,19 @@ class DailySurvivalGoals:
                     counts.get("iron_ingot", 0) < ingots
                     or sum(n for name, n in counts.items() if name.endswith("_planks")) < planks)):
                 iron_action = tool_action
-        task("iron_tools", 70 if missing_defense else 55, not missing_iron and not missing_defense,
+        portal_iron_ready = (
+            counts.get("iron_pickaxe", 0) >= 1
+            and (counts.get("bucket", 0) >= 1 or counts.get("water_bucket", 0) >= 1 or counts.get("lava_bucket", 0) >= 1)
+            and (counts.get("iron_ingot", 0) >= 1 or counts.get("flint_and_steel", 0) >= 1)
+        )
+        iron_prio = 25 if portal_iron_ready else (70 if missing_defense else 55)
+        if portal_iron_ready and iron_action and iron_action.get("args", {}).get("task") == "deep_mine":
+            iron_action = None
+        is_night = bool(fresh and (status.get("is_day") is False or (status.get("time_of_day") or 0) >= 12000))
+        on_surface = bool(fresh and isinstance(status.get("pos"), (list, tuple)) and len(status["pos"]) == 3 and status["pos"][1] >= 56)
+        if not portal_iron_ready and is_night and on_surface and any(counts.get(p, 0) for p in ("wooden_pickaxe", "stone_pickaxe", "iron_pickaxe", "diamond_pickaxe")):
+            iron_prio = 96
+        task("iron_tools", iron_prio, not missing_iron and not missing_defense,
              missing=missing_defense + ["iron_" + kind for kind in missing_iron], action=iron_action,
              depends_on=("starter_tools", "furnace", "fuel_reserve"), reason="Need safe observed iron, fuel, smelting output and crafting materials")
 
@@ -678,7 +719,8 @@ class DailySurvivalGoals:
         task("base_site", 75, base_ok, missing=[] if base_ok else ["fresh_base_site_survey"], proof=copy.deepcopy(base) if base_ok else {},
              action=self._base_candidate(observation, counts, context),
              reason="A single safe standing cell or remembered location does not verify a buildable base site")
-        beds = self._safe_rows(observation, {row.get("name") for row in self._rows(observation.get("blocks")) if str(row.get("name", "")).endswith("_bed")})
+        disable_sleep = bool((context or {}).get("disable_sleep"))
+        beds = [] if disable_sleep else self._safe_rows(observation, {row.get("name") for row in self._rows(observation.get("blocks")) if str(row.get("name", "")).endswith("_bed")})
         complete_beds = []
         offsets = {"north": (0, -1), "south": (0, 1), "west": (-1, 0), "east": (1, 0)}
         indexed = {tuple(row["pos"]): row for row in beds}
@@ -694,11 +736,11 @@ class DailySurvivalGoals:
                     and head_props.get("facing") == props["facing"]
                     and (head_props.get("occupied") is False or head_props.get("occupied") == "false")):
                 complete_beds.append(row["pos"])
-        held_bed = next((name for name, count in counts.items() if name.endswith("_bed") and count > 0), None)
+        held_bed = None if disable_sleep else next((name for name, count in counts.items() if name.endswith("_bed") and count > 0), None)
         shelter = evidence.get("shelter")
         shelter_ok = self._verified(shelter, dimension) and shelter.get("shelter_verified") is True
         bed_action = self._place(held_bed, observation, "bed", context) if held_bed and base_ok and shelter_ok else None
-        if not held_bed:
+        if not held_bed and not disable_sleep:
             wool = next((name for name, count in counts.items() if name.endswith("_wool") and count >= 3), None)
             if wool and sum(counts.get(name, 0) for name in PLANK_NAMES) >= 3:
                 workspace = self.rules._workspace(observation, context)
@@ -716,8 +758,12 @@ class DailySurvivalGoals:
                             bed_action = self._action("hunt_animal", {"entity_id": entity_id, "expected_name": "sheep"},
                                                       "Acquire wool from one observed sheep; verify its actual drops", "bed")
                         break
-        task("bed", 74, bool(complete_beds), missing=[] if complete_beds else ["complete_unoccupied_bed"], action=bed_action,
-             depends_on=("base_site", "shelter"), proof={"positions": complete_beds[:4]}, reason="Need wool, planks and a safe two-block placement inside the completed shelter; held beds are not deployed beds")
+        task("bed", 0 if disable_sleep else 74, True if disable_sleep else bool(complete_beds),
+             missing=[] if (disable_sleep or complete_beds) else ["complete_unoccupied_bed"],
+             action=None if disable_sleep else bed_action,
+             depends_on=() if disable_sleep else ("base_site", "shelter"),
+             proof={"disabled": True} if disable_sleep else {"positions": complete_beds[:4]},
+             reason="Sleep is disabled by configuration" if disable_sleep else "Need wool, planks and a safe two-block placement inside the completed shelter; held beds are not deployed beds")
 
         site = observation.get("shelter")
         door_only = (base_ok and isinstance(site, dict) and site.get("fresh") is True and site.get("pos") == base["pos"]

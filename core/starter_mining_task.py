@@ -2,6 +2,7 @@
 
 import copy
 import json
+import math
 
 from agent.survival_planner import Decision
 from core.domain import block_key, cell_coords, parse_pos
@@ -106,6 +107,7 @@ class StarterMiningTask:
         if not isinstance(saved, dict):
             raise ValueError("Invalid starter mine state")
         self.site = copy.deepcopy(saved.get("site"))
+        self.last_site = copy.deepcopy(saved.get("last_site"))
         self.rejected = copy.deepcopy(saved.get("rejected", {}))
         self.target = saved.get("target", 0)
         self.returning = saved.get("returning", False)
@@ -113,6 +115,9 @@ class StarterMiningTask:
                 or self.site is not None and (not isinstance(self.site, dict) or set(self.site) != {"entry", "direction"}
                     or parse_pos(self.site.get("entry"), integer=True) is None
                     or self.site.get("direction") not in DIRECTIONS or self.target < 1)
+                or self.last_site is not None and (not isinstance(self.last_site, dict) or set(self.last_site) != {"entry", "direction"}
+                    or parse_pos(self.last_site.get("entry"), integer=True) is None
+                    or self.last_site.get("direction") not in DIRECTIONS)
                 or not isinstance(self.rejected, dict) or len(self.rejected) > 16
                 or any(not isinstance(key, str) or len(key) > 64 or not isinstance(values, list)
                        or len(values) > 4 or any(v not in DIRECTIONS for v in values)
@@ -120,7 +125,8 @@ class StarterMiningTask:
             raise ValueError("Invalid starter mine evidence")
 
     def state(self):
-        return {"site": copy.deepcopy(self.site), "rejected": copy.deepcopy(self.rejected),
+        return {"site": copy.deepcopy(self.site), "last_site": copy.deepcopy(self.last_site),
+                "rejected": copy.deepcopy(self.rejected),
                 "target": self.target, "returning": self.returning}
 
     @staticmethod
@@ -137,6 +143,18 @@ class StarterMiningTask:
         origin = obs["status"]["pos"]
         if obs.get("local_geometry_origin") != origin:
             return None
+        # Reuse the previously excavated starter staircase at this camp instead of digging a new shaft.
+        if self.site is None and self.last_site is not None:
+            entry = self.last_site["entry"]
+            re_key = block_key(entry)
+            if (self.last_site["direction"] not in self.rejected.get(re_key, [])
+                    and obs["status"].get("dimension") in {"overworld", "minecraft:overworld"}
+                    and sum(abs(entry[i] - math.floor(origin[i])) for i in (0, 2)) <= 24
+                    and abs(entry[1] - origin[1]) <= 6):
+                self.site = copy.deepcopy(self.last_site)
+                self.target = target
+                self.returning = False
+                return self.step(obs, context)
         excluded = self.rejected.get(block_key(cell_coords(origin)), [])
         if len(excluded) == len(DIRECTIONS):
             return None  # Ask the caller to find another freshly observed stance.
@@ -172,9 +190,11 @@ class StarterMiningTask:
                         or tuple(entry) != cell_coords(obs["status"]["pos"])):
                     return "staircase_survey_requires_new_site_evidence"
                 self.site = {"entry": entry, "direction": direction}
+                self.last_site = copy.deepcopy(self.site)
                 self.returning = False
             elif result.error_code in {"no_staircase_site", "staircase_blocked"} and data.get("executed") is False:
                 self._reject(cell_coords(obs["status"]["pos"]), DIRECTIONS)
+                self.last_site = None
             return None
         if decision.name != "step_starter_staircase" or self.site is None:
             return None
@@ -182,11 +202,14 @@ class StarterMiningTask:
         if result.success:
             if data.get("verified") is not True:
                 return "staircase_step_requires_new_evidence"
+            self.last_site = copy.deepcopy(self.site)
             if decision.args.get("returning") and data.get("at_entry") is True and at_entry:
                 self.site = None
                 self.returning = False
         elif result.error_code in {"staircase_blocked", "missing_tool"} and data.get("executed") is False:
             self._reject(self.site["entry"], [self.site["direction"]])
+            if self.last_site == self.site:
+                self.last_site = None
             if at_entry:
                 self.site = None
                 self.returning = False

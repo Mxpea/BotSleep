@@ -17,7 +17,7 @@ from .survival import SurvivalSkills, _Failure
 class DailySurvivalSkills(SurvivalSkills):
     PICKUP_DISTANCE = 8
     PICKUP_SETTLE_SECONDS = 1.4
-    PLACEABLE = SurvivalSkills.PLACEABLE | {"barrel", "smoker", "blast_furnace"}
+    PLACEABLE = SurvivalSkills.PLACEABLE | {"gravel", "barrel", "smoker", "blast_furnace"}
     FOODS = SurvivalSkills.FOODS | {"beef", "porkchop", "rabbit", "mutton", "cod", "salmon", "potato"}
     CROPS = {"wheat": ("wheat", "wheat_seeds"), "carrots": ("carrot", "carrot"),
              "potatoes": ("potato", "potato"), "beetroots": ("beetroot", "beetroot_seeds")}
@@ -46,7 +46,7 @@ class DailySurvivalSkills(SurvivalSkills):
     FUELS = SurvivalSkills.LOGS | SurvivalSkills.PLANKS | {"coal", "charcoal", "stick"}
     FURNACES = frozenset({"furnace", "smoker", "blast_furnace"})
     CONTAINERS = frozenset({"chest", "barrel"})
-    FOLIAGE = SurvivalSkills.RETREAT_LEAVES | {"azalea_leaves", "flowering_azalea_leaves", "vine"}
+    FOLIAGE = SurvivalSkills.RETREAT_LEAVES | {"azalea_leaves", "flowering_azalea_leaves", "vine", "bamboo", "bamboo_sapling"}
     UNKNOWN = frozenset({"request_timeout", "network_error", "invalid_json", "invalid_response",
                          "internal", "internal_error", "dig_unconfirmed", "action_unconfirmed"})
     ARGUMENTS = {**SurvivalSkills.ARGUMENTS,
@@ -67,9 +67,9 @@ class DailySurvivalSkills(SurvivalSkills):
         super().__init__(client)
         self.allow_herd_hunting = allow_herd_hunting
 
-    def execute(self, name, args, cancel_event=None, *, recovery_context=None, cautious=False, relaxed_work=None):
+    def execute(self, name, args, cancel_event=None, *, recovery_context=None, cautious=False, relaxed_work=None, force_override=False):
         result = super().execute(name, args, cancel_event, recovery_context=recovery_context, cautious=cautious,
-                                 relaxed_work=relaxed_work)
+                                 relaxed_work=relaxed_work, force_override=force_override)
         if name not in SurvivalSkills.ARGUMENTS:
             result.data.setdefault("executed", False)
             if (not result.success and result.data["executed"] and result.data.get("action_state") != "verified"
@@ -121,9 +121,20 @@ class DailySurvivalSkills(SurvivalSkills):
                                {"action_state": "unknown" if executed else "not_executed"})
         return status
 
-    def _safe_status(self, status):
+    def _safe_status(self, status, force_override=False):
         self._overworld(status)
-        if status.get("gamemode", "survival") != "survival" or status.get("on_ground") is not True:
+        if status.get("gamemode", "survival") != "survival":
+            raise _Failure("unsafe_state", "Daily actions require survival mode")
+        if force_override:
+            if status.get("in_lava") or status.get("on_fire"):
+                raise _Failure("unsafe", "Daily actions cannot run in lava or fire")
+            if status.get("submerged") and type(status.get("oxygen")) in (int, float) and status["oxygen"] <= 8:
+                raise _Failure("unsafe", "Oxygen is too low; surface before running daily actions")
+            hostile = status.get("nearest_hostile")
+            if isinstance(hostile, dict) and isinstance(hostile.get("dist"), (int, float)) and hostile["dist"] < 2.5:
+                raise _Failure("unsafe", "A hostile entity is dangerously close for a daily task")
+            return
+        if status.get("on_ground") is not True:
             raise _Failure("unsafe_state", "Daily actions require survival mode and stable ground")
         if any(status.get(key) for key in ("in_water", "in_lava", "on_fire", "submerged")):
             raise _Failure("unsafe", "Daily actions cannot run in a hazardous body state")
@@ -133,7 +144,7 @@ class DailySurvivalSkills(SurvivalSkills):
 
     def _daily_action(self, context, operation, *args, readonly=False, validate=None, **kwargs):
         def guard(status):
-            self._safe_status(status)
+            self._safe_status(status, force_override=bool(context.get("force_override")))
             if validate is not None:
                 validate(status)
 
@@ -310,7 +321,7 @@ class DailySurvivalSkills(SurvivalSkills):
         """Clear one adjacent body-height obstacle, without collecting or walking."""
         pos, name = self._pos(args["pos"], block=True), self._item(args["expected_name"])
         if name not in self.FOLIAGE:
-            raise _Failure("unsupported_foliage", "Only known leaves and vine may be cleared")
+            raise _Failure("unsupported_foliage", "Only known leaves, vine, and bamboo may be cleared")
         initial = self._prepare(context)
         initial_feet = [math.floor(value + 1e-4) for value in initial["pos"]]
 
@@ -318,20 +329,20 @@ class DailySurvivalSkills(SurvivalSkills):
             feet = [math.floor(value + 1e-4) for value in status["pos"]]
             if feet != initial_feet or abs(status["pos"][1] - initial["pos"][1]) >= .5:
                 raise _Failure("position_changed", "The stance changed before clearing foliage")
-            if (status.get("is_day") is not True
+            if (not context.get("force_override") and (status.get("is_day") is not True
                     or type(status.get("time_of_day")) not in (int, float)
                     or not 0 <= status["time_of_day"] < 11000
-                    or status.get("thundering")):
+                    or status.get("thundering"))):
                 raise _Failure("unsafe_time", "Foliage clearing requires freshly confirmed daylight")
-            if (self._number(status.get("health"), "health", 0, 1024) < 12
-                    or self._number(status.get("food"), "food", 0, 20) < 8):
+            if (not context.get("force_override") and (self._number(status.get("health"), "health", 0, 1024) < 12
+                    or self._number(status.get("food"), "food", 0, 20) < 8)):
                 raise _Failure("unsafe_state", "Foliage clearing requires health >= 12 and food >= 8")
             if (max(abs(pos[0] - feet[0]), abs(pos[2] - feet[2])) != 1
                     or pos[1] not in (feet[1], feet[1] + 1)
                     or math.dist(status["pos"], pos) > 3):
                 raise _Failure("unsafe_target", "Only a horizontally adjacent eight-neighbor body-height foliage cell may be cleared")
             target = self._gather_guard(pos, name, status, context)
-            if name != "vine" and target.get("properties", {}).get("waterlogged") not in (False, "false"):
+            if name not in {"vine", "bamboo", "bamboo_sapling"} and target.get("properties", {}).get("waterlogged") not in (False, "false"):
                 raise _Failure("unsafe", "Leaves must be explicitly observed as not waterlogged")
             sight = trace_block_visibility(status["pos"], pos, lambda p: self._block(p, context), max_queries=24, max_distance=4)
             if sight["visible"] is not True:

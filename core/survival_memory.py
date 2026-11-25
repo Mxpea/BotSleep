@@ -317,10 +317,15 @@ class SurvivalMemory:
             died = bool(old and ((alive is False and old.get("alive") is True) or death_changed))
             changed_dimension = bool(old.get("dimension") and old["dimension"] != dimension)
             if died or changed_dimension:
-                # Old routes/failed targets must not dictate actions in a new life or dimension.
+                # Old routes/failed targets must not dictate actions in a new life or dimension,
+                # except verified surface lava landmarks (y >= 56) whose confidence decays cleanly.
                 db.execute("DELETE FROM memories WHERE kind='strategies'")
-                db.execute("DELETE FROM memories WHERE kind='places' AND json_extract(payload,'$.category') "
-                           "IN ('resource','hazard','safe_stand','dropped_items')")
+                db.execute(
+                    "DELETE FROM memories WHERE kind='places' AND json_extract(payload,'$.category') "
+                    "IN ('resource','hazard','safe_stand','dropped_items') "
+                    "AND NOT (json_extract(payload,'$.name') IN ('lava','minecraft:lava') "
+                    "AND COALESCE(json_extract(payload,'$.pos[1]'), 0) >= 56)"
+                )
                 for row_id, encoded in db.execute("SELECT id,payload FROM memories WHERE kind='places'").fetchall():
                     payload = json.loads(encoded)
                     payload["confidence"] *= 0.5
@@ -342,13 +347,13 @@ class SurvivalMemory:
                         name, pos = self._identifier(row.get("name")), self._pos(row.get("pos"))
                         if not name or pos is None:
                             continue
-                        category, ttl = self._place_type(name)
+                        category, ttl = self._place_type(name, pos=pos)
                         if category:
                             self._place(db, category, name, pos, dimension, "api_verified", 0.85, ttl, row, now)
             self._prune(db, now)
 
     @staticmethod
-    def _place_type(name):
+    def _place_type(name, pos=None):
         plain = name.removeprefix("minecraft:")
         if plain.endswith("_bed"):
             return "bed", 86400
@@ -356,6 +361,9 @@ class SurvivalMemory:
             return "workstation", 86400
         if plain in {"chest", "trapped_chest", "barrel"}:
             return "storage", 86400
+        if plain == "lava" and pos is not None and len(pos) == 3 and float(pos[1]) >= 56.0:
+            # Surface lava pools remain useful across multiple nights and deaths for portal casting.
+            return "hazard", 3600
         if plain in {"lava", "fire", "soul_fire", "magma_block", "cactus", "powder_snow"}:
             return "hazard", 300
         if plain.endswith(("_log", "_ore")) or plain in {"stone", "cobblestone", "wheat", "carrots", "potatoes", "water"}:
@@ -455,6 +463,38 @@ class SurvivalMemory:
                 elif sum(map(len, result.values())) >= limit:
                     return result
         return result
+
+    def recall_lava_candidates(self, observation, *, limit=4, min_y=56.0):
+        """Return remembered surface lava coordinates in the current dimension.
+
+        Surface lava pools (y >= min_y) survive transient death pruning with decayed
+        confidence so portal casting can revisit known pools after a night death.
+        """
+        observation = observation if isinstance(observation, dict) else {}
+        status = observation.get("status") if isinstance(observation.get("status"), dict) else {}
+        dimension = self._identifier(status.get("dimension"))
+        origin = self._pos(status.get("pos"))
+        if not dimension or observation.get("fresh") is False or limit <= 0:
+            return []
+        now = self._now()
+        candidates = []
+        with self._transaction() as db:
+            self._prune(db, now)
+            rows = db.execute(
+                "SELECT payload FROM memories WHERE kind='places' AND dimension=? AND expires_at>? "
+                "ORDER BY observed_at DESC,id DESC",
+                (dimension, now),
+            ).fetchall()
+        for (encoded,) in rows:
+            payload = self._redact(json.loads(encoded))
+            name = str(payload.get("name") or "").removeprefix("minecraft:")
+            pos = self._pos(payload.get("pos"))
+            if name != "lava" or pos is None or float(pos[1]) < float(min_y):
+                continue
+            dist = math.dist(origin, pos) if origin is not None else 0.0
+            candidates.append((round(-float(payload.get("confidence", 0.0)), 4), dist, -float(payload.get("observed_at", 0.0)), payload))
+        candidates.sort(key=lambda item: item[:3])
+        return [item[3] for item in candidates[:limit]]
 
     def close(self):
         """Connections are transaction-local; close only rejects subsequent calls."""

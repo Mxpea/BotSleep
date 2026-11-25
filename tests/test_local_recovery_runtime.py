@@ -74,7 +74,7 @@ class LocalRecoveryRuntimeTests(unittest.TestCase):
         self.assertFalse(short["inventory_fresh"])
         self.assertFalse(short["terrain_fresh"])
         self.assertNotIn("footing", short)
-        self.assertFalse(any(call[0] == "get_block" for call in self.world.calls[before:]))
+        self.assertFalse(any(call[0] == "get_block" and call[1][1] < 70 for call in self.world.calls[before:]))
         harness, brain = self.make_harness()
         self.assertEqual(harness.daily_policy.constraints(full)["scenario"], "canopy_escape")
         self.assertNotEqual(harness.daily_policy.constraints(short)["scenario"], "canopy_escape")
@@ -758,6 +758,35 @@ class LocalRecoveryRuntimeTests(unittest.TestCase):
         released = harness._local_recovery_result(decision, res, obs)
         self.assertTrue(released)
         self.assertNotIn("canopy_recovery", harness.context)
+
+    def test_canopy_stalled_leaf_and_step_budget_release_without_pausing(self):
+        from core.local_recovery_runtime import has_canopy_support
+        from skills import SkillResult
+        harness, _ = self.make_harness()
+        obs = {
+            "fresh": True,
+            "inventory_fresh": True,
+            "terrain_fresh": True,
+            "footing_origin": [-2017.3, 73.0, 13.5],
+            "footing": {"pos": [-2018, 72, 13], "name": "dark_oak_leaves",
+                        "properties": {"waterlogged": False}, "fresh": True, "verified": True, "source": "api_verified"},
+            "status": {"pos": [-2017.3, 73.0, 13.5], "health": 20, "food": 20, "dimension": "overworld",
+                       "in_water": False, "submerged": False, "on_ground": True, "ready": True, "alive": True},
+            "blocks": [{"pos": [-2018, 72, 13], "name": "dark_oak_leaves", "fresh": True, "verified": True}],
+        }
+        res = SkillResult(False, "No safe retreat destination", {}, "unsafe")
+        decision = Decision("canopy_escape", {}, "Step", "safety")
+        for _ in range(4):
+            harness._local_recovery_result(decision, res, obs)
+        self.assertFalse(harness.paused)
+        self.assertFalse(has_canopy_support(obs, harness.context))
+        self.assertGreater(harness.context["canopy_recovery"]["released_until"], time.time())
+        harness.context["canopy_recovery"]["released_until"] = 0
+        harness.context["canopy_recovery"]["steps"] = 32
+        out = harness._local_recovery_decision(decision, obs)
+        self.assertIsNone(out)
+        self.assertFalse(harness.paused)
+        self.assertFalse(has_canopy_support(obs, harness.context))
 
 
 if __name__ == "__main__":

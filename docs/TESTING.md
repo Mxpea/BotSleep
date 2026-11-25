@@ -1,5 +1,97 @@
 # 配置、客户端、生存、赛事与监控验证
 
+> 架构变更、异机部署运行步骤、Token/耗时账单与逻辑审计汇总另见 [交接文档](HANDOFF.md)。
+
+## 双 API 溢出与 `v24`–`v31` 九 Bot 1.5 小时进地狱实服压测收官（2026-11-24 – 2026-11-25）
+
+在 `develop-tianya/api-model-opt`（截至 `83ca6b0` + 本次文档更新）上使用全新重置 Leaves 1.21.11 世界（`difficulty=easy`、官方未修改 `mc-agent-api` 1.3.19、`--spread --min-dist 1500`、5400s 预算）、双 API 方案（主路 `https://api.nju-aia.com/v1` `model=default` 实返 `qwen3.6-35b-a3b`；溢出 `https://doro.lat/v1` 请求 `deepseek-v4.1-flash` 实返 `deepseek-ai/DeepSeek-V4.1-Flash-1017`）连续进行了多轮 9-Bot 实服定位、修复与复测（`v31` 完成后按约定停止迭代）：
+
+- **离线全量与定向验证（在所有代码修改后运行）**：
+  - 全量离线单元测试：`BOTSLEEP_RUN_LIVE_TESTS=0 .\.venv\Scripts\python.exe -B -m unittest discover -s tests -q` 通过 **`2185`** 项（跳过 **`10`** 项依赖真实游戏世界的用例），含新增的 [tests/test_overflow_and_loop_fixes.py](../tests/test_overflow_and_loop_fixes.py)（`24` 项）。
+  - 语法检查与示例配置校验：`compileall`、`main.py --check-config`、`git diff --check` 均通过（待本轮文档提交前最终复跑并记录于本节）。
+- **历轮实服关键进展（`v24` → `v31`，均为重置存档 9-Bot 零人工干预压测）**：
+  - **`v24`–`v28`**（`5f448d1`、`9f26d63`、`4d8a9d6`、`7c47a46`）：打通 `nether_portal_approach` 安全目的地放行、修正熔炉 `inspect_container`（196 次）与稳定站位计数循环、实现岸边站位优先与 6m 聚类宽域找水、修复阻塞水误解封与重定位重试清零；`v26` 达 `8/9` 烧铁、`v28` 中 `bot_8` 首次在实服完成 `collect_liquid("water")`（`water_ok=1`）并定位到 `gravel` 缺 `GATHERABLE` 支持；`v25`–`v31` 全员保持 **0 例模型门禁永久死锁**。
+  - **`v29`**（~68m 中止）：提交 `792e95d` 打通砂砾采集与携带砂砾放置；`3/9` 达 `smelt_iron`，`bot_9` 拿齐 `flint: 4 + iron_ingot: 2` 后暴露低血 `BucketSkills._station(health < 12)` 拒收安全水桶（11 连败）以及 `bot_1/bot_4/bot_7` 滞留地下洞穴/坑洞（`y=43..59`）无法返回地表问题。
+  - **`v30`**（`670ab3a`，90m 跑完 9/9 `rc=2`）：放松冷水拾取血量至 `3/4`、引入 `SurvivalSkills.escape_to_surface`，`3` 个 Bot 造出 `flint_and_steel`、`bot_2` 取到水桶；定位到 `bot_1/bot_5` 因 `max_reads=320` 仅爬 12 格或停在柱顶、`bot_8` 因 `already_in_range=True` 短回路 247 步跳过爬升、`bot_2` 在树冠因 `near_hostile` 死等，且全员消耗 `24.02M` tokens（主路 `31.8%` / 溢出 `68.2%`，p50 `4.63s`）。
+  - **`v31`**（`83ca6b0`，**90m 跑完 9/9 `rc=2`**）：
+    - 服务端成就：**`8/9` 达成 `story/smelt_iron`、`7/9` 达成 `story/iron_tools`**、`8` 个 Bot 进入 `nether_portal` 任务阶段，**`0/9` 进入 `the_nether`**（仅 `bot_9` 达 64 死触及 `death_limit` 暂停，其余 8/9 完整跑满 5400s）；
+    - **关键里程碑**：**`bot_3`** 于 `step 1413` 一次取水成功，于 `step 1430..1434` 利用背包携带 `gravel` 现场放挖取得 `flint` 并合成 **`flint_and_steel`**，在 `step 1435..1442` 调用 **`build_portal` 路线 8 次**，暴露最后 1 处局部寻路阻断——`_run_task_nether_portal` 在 64 格搜出超过 32 格的岩浆池后仍调 `SurvivalSkills.execute("move_to")` 触发 `out_of_range: Only local movement within 32 blocks is supported`；另外 `bot_1`/`bot_6` 在有落差的水岸遇到 `collect_liquid` `target_occluded` 射线遮挡；
+    - 性能与额度：`2,007` 次请求 / `1,988` 次响应（`0` 取消），主路由 `635` 次（`31.9%` / `6.66M tok` / p50 `7.48s`）、溢出 `deepseek-v4.1-flash` `1,353` 次（`68.1%` / `13.71M tok` / p50 `4.22s`），累计 **`20,372,954` tokens**（Prompt `20.18M` / Completion `0.19M` / Cached `6.59M`）。
+
+## 1.5 小时 9-Bot 分散出生实服测试（`nether_bench_v22`）与六类问题修复（2026-11-24）
+
+基线在 `develop-tianya/api-model-opt`（`a951a3b` 之后）对全新重置的 Leaves 1.21.11 世界（`Seed: [-3196205548112340014]`、`difficulty=easy`、`mc-agent-api` 1.3.19，`intent="speedrun"`、`llm_override_on_block=True`）执行了 **5400s（1.5 小时）零手动介入、9-Bot 分散出生测试（`nether_bench_v22`）**：
+
+- **`nether_bench_v22` 实服结果（`SleepBot1..9`，`min_dist=1609.9`，`y=64..88`）**：
+  - 全员 **9/9** 在 5400s 预算到达后以 `rc=2` 正常退出（`0` 次运行时永久冻结、`ACTION_WATCHDOG_TIMEOUT=0`，`AUTO_PAUSED_GAME_RECOVERED` 在 `bot_3=4`、`bot_6=2`、`bot_8=2`、`bot_4/5/7=1` 自动恢复）。
+  - 服务端累计 **`minecraft:story/*` 成就 35 项**（`SleepBot3`/`6` 均达 5 项含 `iron_tools`；`SleepBot1`/`4`/`7`/`8` 各 4 项含 `smelt_iron`；`SleepBot2`/`5`/`9` 各 3 项）、总死亡 **52 次**（`SleepBot1=0`、`SleepBot8=1`、`SleepBot9=2`、`SleepBot7=3`、`SleepBot4/5=6`、`SleepBot6=9`、`SleepBot3=11`、`SleepBot2=14`）、**进入下界 `0/9`**。
+  - **日志与旁观截屏定位的根因 + 6 类行为问题**（已在当前工作树修复，**尚未在实服复测**）：
+    1. **复用已有矿道与开局阶梯**（[skills/mining.py](../skills/mining.py)、[core/autonomy_runtime.py](../core/autonomy_runtime.py)、[core/starter_mining_task.py](../core/starter_mining_task.py)）：`mine_targets_from_surface` 新增 `_find_reusable_shaft` 并转发 `origin`/`orientation`/`resume_progress`（失败再回退新选址），`_wf_deep_fishbone` 地表续挖先下 5 层楼梯再回放 `deep_trail`；`AutonomyRuntime` 持久化 `deep_mine_site`；`StarterMiningTask.survey` 复用 24×6 格内未废弃 `last_site`（补齐缺失 `import math`）。
+    2. **禁止重复制造工作台**（[agent/llm_planner.py](../agent/llm_planner.py)、[core/intent_compiler.py](../core/intent_compiler.py)）：背包已持工作台或 16 水平格 / 4 垂直格内已可见工作台时拒绝重复 `craft_item` / `run_survival_task(craft crafting_table)`；`should_prefer_local_workstation` 放宽为 `max_horiz=16.0, max_dy=4.0`。
+    3. **放置缺少空间不再死重试**（[core/autonomous_tasks.py](../core/autonomous_tasks.py)、[core/loop_supervisor.py](../core/loop_supervisor.py)、[agent/llm_planner.py](../agent/llm_planner.py)）：工作台/熔炉 `placement_candidates` 为空时先调用 `_clear_adjacent_placement_foliage` 清枝叶或有界 `_explore` 换位；`LoopSupervisor` 纳管 `place_item`/`plan_shelter`/`build_shelter_step` 空间失败签名冷却。
+    4. **无镐禁止手挖岩石与矿石**（[skills/mining.py](../skills/mining.py)、[agent/llm_planner.py](../agent/llm_planner.py)）：将 `stone`/`cobblestone` 等岩石移出 `_dig_cell_safely` 的 `soft_without_pick` 集合（无镐触发 `missing_pickaxe`）；`LLMSurvivalPlanner` 在原子 `gather_block` / `gather_resource` 前校检对应镐阶。
+    5. **已开矿脉挖净余矿**（[skills/ore_harvester.py](../skills/ore_harvester.py)）：`OreHarvester.mine_vein` 开启 `finish_vein=True`，已开挖同种矿脉（`dug > 0`）即使满足配额也挖完相连可见余块，不再新开其他矿脉。
+    6. **夜间 `night_burrow` 地坑卡死与 `nether_portal` `v22` 故障修复**（[core/safety_arbiter.py](../core/safety_arbiter.py)、[core/loop_supervisor.py](../core/loop_supervisor.py)、[core/daily_policy.py](../core/daily_policy.py)、[skills/survival.py](../skills/survival.py)、[core/survival_harness.py](../core/survival_harness.py)、[core/autonomous_tasks.py](../core/autonomous_tasks.py)、[core/autonomy_runtime.py](../core/autonomy_runtime.py)）：
+       - 兼容 `night_burrow.pos` 与 `burrow_feet`；处于密封坑内且未受击/掉血/危险方块时不再因地表头顶僵尸重复 `llm_cancelled`（`SleepBot1` 曾达 1951 次），并在 `SkillResult.data["preempt_code"]` 透传给 `LoopSupervisor` 触发护盾；
+       - 新增白天无危险时自动出坑动作 `exit_burrow`（使用 `MINE_SHAFT_SPEC` 清顶帽并搭柱爬出），禁止在 `night_burrow` 坑内放置工作台/熔炉；
+       - `nether_portal` 取水靠近改用 `goal="nether_portal_approach", range=2` 避免被 `move_to(goal="nether_portal")` 劫持，`AutonomyRuntime` 的 `move_to` 范围从 `5` 修正为 `4`（满足 `SurvivalSkills._move_to` `0.5..4` 上界）。
+- 新增离线回归测试 [tests/test_v22_live_fixes.py](../tests/test_v22_live_fixes.py)（9 项），并在当前基线运行离线全量测试 `BOTSLEEP_RUN_LIVE_TESTS=0 .\.venv\Scripts\python.exe -B -m unittest discover -s tests -q`（**`2161` 项通过、跳过 `10` 项**，详见提交后最终复验结果；实服 `nether_bench_v23` 复测待下一轮启动）。
+
+## 端侧 API 过夜 9-Bot 长跑与「LLM 优先接管 + 警告降级」方案（2026-11-23）
+
+基线为 `develop-tianya/api-model-opt`（提交 `0b02c21` 至 `9824e80` 实测，以及最新未提交/待推的 `llm_override_on_block` 改造）。Windows / Python 3.13，Leaves 1.21.11（`difficulty=easy`）+ 单端口 `mc-agent-api`（`18900`，未改动源码）+ 默认端侧 API（`https://api.nju-aia.com/v1`，`model: default`），跨 9 个 Bot 启用全局并发=1 FIFO 门禁与 `[4, 16, 32, 64, 128, 256]` 秒自动退避重试（`gate_wait_seconds: 600`、`recover_uncertain_transport: true`、`max_runtime_seconds: 4680`）。
+
+- **过夜实服汇总（`nether_bench_v7`–`v14`，截至 `v14` 第 58 分钟仍在运行）**：
+  - **是否已有 Bot 在 `< 1.3h` 内进入 `the_nether`**：**暂未（`0/9`）**。
+  - **稳定到达铁器/进门前夜的代表 Bot**：
+    - `v9`：`bot_1` 拿到 `13 iron_ingot` + `bucket` + `shield`；
+    - `v12`：`bot_3` 达成 `[Acquire Hardware]`（0 死亡，开始烧铁）；
+    - **`v13`**：`8/9` 达成 `[Getting an Upgrade]`（石镐），**`bot_6`（0 死、`iron_pickaxe + bucket + shield + 13 raw_iron + 2 iron_ingot`）与 `bot_9`（0 死、`iron_pickaxe + bucket + shield + 9 raw_iron + 3 iron_ingot`）均达成 `[Isn't It Iron Pick]`**；
+    - **`v14`（T+58m，仍在跑）**：`bot_5` 达成 `[Isn't It Iron Pick]` 并持 `iron_pickaxe + bucket + shield + 6 iron_ingot + 210 cobblestone` 启动 `nether_portal`（后受单会话连续 HTTP 500 退避阻断）；`bot_3`/`bot_8` 也均采出铁矿/黑曜石前驱或燧石（`bot_8` 峰值 `raw_iron=9, flint=2`）。
+- **逐轮定位并修复的全部主要问题**：
+  1. **API 并发超限与断连熔断**（已在 `0b02c21` 修复）：新增跨进程/线程并发=1 FIFO 排队门禁与 `4..256s` 自动退避，清理 `model_gate` 死锁后 `v8` 起不再因单次波动全员永久停摆。
+  2. **撤退/容器/树冠中断 `action_unconfirmed` 冻结**（`51d0f5e`–`fe3e8b1`、`9824e80`）：`retreat_from`、`inspect_container` 与 `canopy_escape`（含死亡触发的 `recovery_error="dead"/"life_changed"`）现优先在任务检查前复检恢复，`v11` 起连续运行时段保持 `pauses=0`。
+  3. **多处本地策略与状态机死循环**（`0e80c27`、`0d46211`、`ab7c6b8`、`9824e80`）：修正 `found_wood` 键名拼写、限制禁用 `scout` 与重复工具打造、打破低血 `food < 18` 永久 `wait(5)` 僵死、洞穴被围 `retreat_from -> wait(2)` 死循环、目标冷却复选同任务循环，并修正 `iron_pickaxe + bucket` 误手动找砂砾而不调 `nether_portal` 的提示。
+  4. **`v14` 新暴露残余阻塞（本轮新方案已全部覆盖）**：
+     - **脚本卡死仍拦截 LLM 指挥**：`bot_9` 落水循环 821 次（`water_ex=327`）却被禁止在水中调用 `move_to`/`scout`；`bot_3` 遭遇 45 次 `target_out_of_range` 被本地直接报错拦截；
+     - **单会话坏历史引发连续 HTTP 500**：`bot_2`（15 次）、`bot_5`（8 次）在同一代理端连续 HTTP 500 上重复发送同一批旧 `_turns` 退避；
+     - **禁用 `scout` 参数循环 & `recover_drops` 送死**：`bot_1` 连续 28 次误传已禁用 `scout`；`bot_6`（`steps=132, deaths=52`）在 `recover_drops` 优先级 100 下反复夜里送死。
+- **新开发「LLM 优先接管 + 非致命保护降级为警告」方案（`survival.llm_override_on_block`）**：
+  - `core/config.py` & `config.example.yaml`：新增 `survival.llm_override_on_block`（默认 `false` 保持原有严格契约测试不变，开启后启用以下机制）；
+  - `core/daily_policy.py` & `core/local_recovery_runtime.py` & `core/autonomous_tasks.py`：仅保留生命周期（`dead/not_ready`）、未知写入 `pending` 复查、`in_lava/on_fire`、低氧溺水（`oxygen <= 8`）等硬不变量；`water_escape` 失败 `>= 2` 次、`retreat` 被围、`low_health` 无食、夜间或 `food <= 6` 均立刻释放 `model_allowed=True`，并生成 `safety_warnings` 传给 LLM；
+  - `skills/daily_survival.py`、`skills/survival.py`、`skills/combat.py`：新增 `force_override` 通道，放行 LLM 在水中/非地面/夜间执行 `move_to`、`gather_block`、`place_item`、`clear_foliage`（仍禁岩浆/着火/低氧），并在 `fight_hostile` 超距（`target_out_of_range` / `no_safe_attack_range`）时先短距逼近再挥击；
+  - `agent/daily_survival.py`、`agent/llm_planner.py`、`core/survival_harness.py`：无可见近处掉落或夜间/多次死亡时降级 `recover_drops` 优先级（5/45）；`llm_override_on_block` 下保留 `scout` 可调并转发 `safety_warnings`；连续 `>= 2` 次 5xx/坏响应自动裁剪 `_turns` 解除坏上下文锁死。
+- **`v15` 实服压测完成与发现（`f92763f`，2026-11-23 `09:13–10:33`）**：
+  - `nether_bench_v15` 全员 9/9 Bot 在 `4680s` 预算内 `rc=2` 完整运行退出（0 熔断暂停，0 HTTP 500 锁死，0 `water_ex` 落水死循环，`scout` 禁用参数误选清零，`target_out_of_range` 降至 0–3 次）；服务端总进度 `16` 项、死亡 `388` 次、进地狱 `0/9`。
+  - **`bot_3` 进门阻断精确原因**：`bot_3` 于 `09:56:17` 达成 `[Isn't It Iron Pick]` 并集齐 `iron_pickaxe + bucket + shield + 9 iron_ingot + 356 cobblestone` 后两次启动 `nether_portal`（`02:03:28Z` 与 `02:04:04Z`），但均因 `BucketSkills.execute(..., force_override=True)` 触发 `or kwargs` 校验返回 `bad_args` 失败 5 次并在约 2 分钟后夜间遭围杀掉光装备；`bot_9` `0` 死获 `[Acquire Hardware]`（峰值 `6 raw_iron + 1 iron_ingot + 245 cobblestone`）。
+  - 本次已修复 `skills/buckets.py` 对 `force_override` 的兼容，并将 `core/survival_harness.py` 的 `force_override` 传递限定到 `self.skills`、`self.combat_skills`、`self.bucket_skills`。
+  - 后续实服 `nether_bench_v16`–`v20` 迭代并合并提交 `06926da`、`1576edd`、`c804104`、`766736d`、`07daa6e`（消除 `water_escape`/`retreat_from`/游戏侧 `action_unconfirmed` 永久 `paused` 锁死，引入 `action_watchdog_seconds: 30` 动作超时看门狗，收敛二轮多余 `deep_mine(raw_iron)` 并调整预算，仅高价值装备启用夜间 `emergency_burrow` 挖三填一与退避、空手近战与掉落物找回、红树林浅水与竹林阻挡清理、`--spread` 分散安全林地出生及开局优先找树）。
+  - `nether_bench_v20`（基线 `07daa6e`，9 Bot `4680s` 预算，`min_dist=1667.2`，`y=66..91`，`0` 树顶/水中出生）：9/9 全员按 `budget_exhausted`（`rc=2`）完整退出，实现全航程 `0` 永久暂停锁死（`ACTION_WATCHDOG_TIMEOUT=0`、`AUTO_PAUSED_GAME_RECOVERED=4`、`RECOVERY_REQUIRED=0`、`RETREAT_INTERRUPTION_RECOVERED=78`）；MC 服务端累计进度 `17` 项、总死亡 `55` 次（`bot_2/8/9` 全程 `0` 死，`bot_6` 夜间 `recover_drops` 重复死亡 `28` 次）、进地狱 `0/9`。
+  - `nether_bench_v20` 剩余推进瓶颈：模型参数误用 `craft(item="sticks")` 与无效 `smelt` 参数导致 `bad_args`（如 `bot_8` 已至 `y=16`）、`bot_9` 携 `raw_iron=1` 停留在 `smelt:needs_ai`、`bot_2` 耗尽石镐后持 `cobblestone=149` 停滞及夜间地面 `recover_drops` 连续死亡。
+  - **四阶段架构重构与离线验证（2026-11-24，并入 `origin/main` 与 `6d99700`..Phase 4）**：
+    1. **`SafetyArbiter` 统一安全仲裁**（[core/safety_arbiter.py](../core/safety_arbiter.py)、[core/survival_harness.py](../core/survival_harness.py)）：抽出 `_monitor` / `_cycle` / `_observe` 重复监控逻辑，在 `llm_override_on_block=True` 下保证 `planning=True` 不自取消，并把连续 `>=2` 次被动 `observation_scope="safety"` `wait(1)` 滞留强制升级为完整观测；新增 [test_safety_arbiter.py](../tests/test_safety_arbiter.py)。
+    2. **`LoopSupervisor` 双级看门狗**（[core/loop_supervisor.py](../core/loop_supervisor.py)、[agent/daily_survival.py](../agent/daily_survival.py)）：统一 L1 30s 动作超时看门狗与 L2 跨步活锁抑制（`llm_cancelled` 高频打断护盾、静止 wait 警告、重复 `bad_args`/失败签名冷却、夜间多死点暂停 `recover_drops`）；新增 [test_loop_supervisor.py](../tests/test_loop_supervisor.py)。
+    3. **`IntentCompiler` 意图编译层**（[core/intent_compiler.py](../core/intent_compiler.py)、[agent/llm_planner.py](../agent/llm_planner.py)、[core/autonomous_tasks.py](../core/autonomous_tasks.py)）：确定性归一化复数别名与 `smelt` 输入（仅缺 `item` 时由 `resource` 补全，保留冲突参数校检）、拦截速通无效烧炼、`playbook` 对齐可见工具并支持远距工作台本地合成放置；新增 [test_intent_compiler.py](../tests/test_intent_compiler.py)。
+    4. **分层深矿续挖与 4 铁速通门户链路**（[skills/mining.py](../skills/mining.py)、[core/autonomy_runtime.py](../core/autonomy_runtime.py)、[core/survival_memory.py](../core/survival_memory.py)）：支持 `y <= 52` 地下重入直接开挖鱼骨分支并真实回传失败码、`raw_iron` 深挖总预算调高至 720s（探索上限 60s）、`SurvivalMemory` 保留地表 `y >= 56` 岩浆地标（`ttl=3600` 跨死亡衰减保留）并供 `scout`/`nether_portal` 优先寻路、以及持 4 铁即触发 `PORTAL_IRON_READY` 与 `goal_focus="lava"`；新增 [test_phase4_mining_and_portal.py](../tests/test_phase4_mining_and_portal.py)。
+    - 定向及全量离线单元测试通过 `BOTSLEEP_RUN_LIVE_TESTS=0 .\.venv\Scripts\python.exe -B -m unittest discover -s tests -q` 验证（不连接真实游戏或上游模型）。
+
+## 端侧 API 9-Bot 并行进地狱调试与阻断说明（2026-11-23）
+
+基线为 `develop-tianya/api-model-opt`（提交 `4e7b9a7`、`c432674`、`3a483bf`、`3de226f`、`e900c65`、`3354b71`、`0779f21` 与 `scripts/multi_bot_runner.py` 散布点隔离改动）。Windows / Python 3.12，使用 Leaves 1.21.11（`difficulty=easy`）与 `mc-agent-api`（未改动其源码），通过 `scripts/multi_bot_runner.py` 启动 9 个 Bot 并行连接默认端侧 API（`https://api.nju-aia.com/v1`，`model: default`，实际返回模型为 `qwen3.6-35b-a3b`）进行实服压测。
+
+- **已落地功能与实服问题修复**：
+  - 探索、砂砾采燧石、宝箱拾取、干草块做面包与地狱门搭建/进门链路（`skills/survival.py`、`core/autonomous_tasks.py`、`core/autonomy_runtime.py`、`core/survival_harness.py`、`agent/llm_planner.py`）。
+  - 夜间战斗与保活优化：扩大 `Easy` 敌对怪识别与低血近战阈值、`water_escape` 水中窒息绕过冷却与落地确认、多重威胁 `BFS` 回退放宽、深矿中断不误拉黑矿脉且 `raw_iron` 双熔炉并发、`PermissionError` (`WinError 5`) 状态写入重试、`deep_mine("cobblestone")` 地表遮挡回退、prompt 精简与连接空闲回收。
+  - 多 Bot 启动散布防撞与逐个 `/spawnpoint` 隔离（`scripts/multi_bot_runner.py`）。
+- **离线验证（截至最后一次代码提交 `0779f21`，含文档更新后复跑验证）**：
+  - `BOTSLEEP_RUN_LIVE_TESTS=0 .\.venv\Scripts\python.exe -B -m unittest discover -s tests -q` 通过 `1583` 项（跳过 `10` 项，未运行实服套件）。
+- **实服 6 轮 9-Bot 压测进展（`nether_bench_v1`–`v6`）**：
+  - 从早期落水卡死、夜战暴毙与状态写盘冲突逐步收敛到 `v5` 阶段 **0/9 死亡**、以及 `v6` **8/9 存活**（仅 `bot_1` 被骷髅击杀 1 次）；`v2` 中 `bot_3` 已完成 `deep_mine` 并启动 2 炉烧 `raw_iron`。
+  - **已观察残余问题**：`v6` 中 `bot_3` 在高树冠（约 `[-2017.3, 73.0, 13.5]`）发生 `canopy_escape` 退避失败循环（连续 `198` 步冷却等待）。
+- **当前硬阻断（尚未达成 `< 1.3h` 且 `> 50%` 进地狱目标）**：
+  - `v2`、`v4`、`v5`、`v6` 均被上游端侧 LLM 链路稳定性打断：`v2` 出现 `llm_network_error`（耗时 `39975.1ms`）；`v4` 出现 `llm_network_error`（`17:15:25.122Z -> 17:15:56.458Z` / `31.34s`，总耗时 `40600.5ms`）；`v5` 出现 `SSLError`（`32.29s`，`elapsed_ms: 40250.6`）；`v6` 出现 `ConnectionError`（`17:47:31.239Z -> 17:48:35.483Z` / `64.24s`，`elapsed_ms: 67821.0`）。
+  - 按 `AGENTS.md` 与 `core/model_gate.py` 强制约束，传输超时或连接中断会触发跨进程共享凭据的持久化 `"uncertain"` 状态锁，严禁自动重试或程序侧擅自清锁，因此每次触发后全部 9 个 Bot 均立即停机等待人工核查。
+
 ## 远程赛事修复复验（2026-11-23）
 
 赛事本地调度复测：模型门禁仍为 `llm_request_uncertain`。第一次三步测试发现空背包且已有采石成就时无可选开局。修正阶段判断后，两步实服测试依次返回 `Task selected` 和 `Goal accepted`，随后按测试预算退出。仅验证了自主选项和派发，未验证新成就得分。赛事运行、规则任务和批量任务的 101 项定向离线测试通过。

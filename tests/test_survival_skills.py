@@ -1432,6 +1432,185 @@ class WaterEscapeTests(unittest.TestCase):
         self.assertEqual(res.data.get("action_state"), "unknown")
         self.assertNotIn("stop", [c[0] for c in world.calls])
 
+    def test_water_escape_airborne_jump_over_water_does_not_claim_dry_escape(self):
+        world = World()
+        world.ground = "water"
+        world.status.update({"pos": [0.5, 61.0, 0.5], "in_water": True, "submerged": False, "on_ground": False})
+        world.set_block([1, 62, 0], "grass_block")
+        world.set_block([1, 63, 0], "air")
+        world.set_block([1, 64, 0], "air")
+
+        def fake_control(**kwargs):
+            world.calls.append(("control", kwargs))
+            # Jump puts bot briefly airborne above water, then gravity drops it back into water.
+            world.status.update({"pos": [0.5, 63.4, 0.5], "in_water": False, "submerged": False, "on_ground": False})
+            return envelope({"ok": True})
+
+        statuses = []
+        orig_get_status = world.get_status
+
+        def sequenced_status(**kwargs):
+            res = orig_get_status(**kwargs)
+            statuses.append(len(statuses))
+            if not world.status["in_water"] and world.status["on_ground"] is False and len(statuses) >= 3:
+                world.status.update({"pos": [0.5, 61.5, 0.5], "in_water": True, "submerged": False, "on_ground": False})
+            return orig_get_status(**kwargs)
+
+        world.control = fake_control
+        world.move_effect = Mock(side_effect=APIError("stalled", "stuck"))
+        with patch("skills.survival.time.sleep"):
+            with patch.object(world, "get_status", side_effect=sequenced_status):
+                res = SurvivalSkills(world).execute("water_escape", {})
+        self.assertFalse(res.success)
+        self.assertEqual(res.error_code, "still_in_water")
+        self.assertFalse(res.data.get("progress_made"))
+
+    def test_retreat_from_partial_progress_avoids_spurious_failure_when_short_of_8_blocks(self):
+        world = World()
+        world.status.update({"pos": [0.5, 64.0, 0.5], "on_ground": True})
+        # Wall off at x=2 so only x=1 (+1.0m, horizontal=3.5 < anchor_horizontal+2=4.5) is reachable.
+        for z in (-2, -1, 0, 1, 2):
+            for dy in (0, 1):
+                world.set_block([2, 64 + dy, z], "stone")
+        world.set_block([-1, 64, 0], "stone")
+        world.set_block([-1, 65, 0], "stone")
+        world.set_block([0, 64, -1], "stone")
+        world.set_block([0, 65, -1], "stone")
+        world.set_block([0, 64, 1], "stone")
+        world.set_block([0, 65, 1], "stone")
+        world.set_block([1, 64, -1], "stone")
+        world.set_block([1, 65, -1], "stone")
+        world.set_block([1, 64, 1], "stone")
+        world.set_block([1, 65, 1], "stone")
+        with patch.object(world, "get_entities", return_value=[{"id": 11, "name": "zombie", "type": "hostile", "pos": [-2.0, 64.0, 0.5]}]):
+            res = SurvivalSkills(world).execute("retreat_from", {"pos": [-2.0, 64.0, 0.5], "distance": 8})
+        self.assertTrue(res.success, res)
+        self.assertEqual(res.data["terrain_search"]["termination"], "partial_progress")
+
+    def test_water_escape_accepts_steps_recovery_context_for_heading_rotation(self):
+        world = World()
+        world.ground = "water"
+        world.status.update({"pos": [0.5, 62.0, 0.5], "in_water": True, "submerged": False, "on_ground": False})
+        yaws = []
+
+        def fake_control(**kwargs):
+            yaws.append(kwargs.get("yaw"))
+            return envelope({"ok": True})
+
+        world.control = fake_control
+        world.move_effect = Mock(side_effect=APIError("stalled", "open water"))
+        with patch("skills.survival.time.sleep"):
+            r0 = SurvivalSkills(world).execute("water_escape", {}, recovery_context={"purpose": "water_escape", "steps": 0})
+            r4 = SurvivalSkills(world).execute("water_escape", {}, recovery_context={"purpose": "water_escape", "steps": 4})
+        self.assertEqual(r0.error_code, "still_in_water")
+        self.assertEqual(r4.error_code, "still_in_water")
+        self.assertGreaterEqual(len(yaws), 2)
+        self.assertNotEqual(yaws[0], yaws[-1])
+
+    def test_daily_skills_force_override_allows_water_move_and_combat_approach(self):
+        from skills.daily_survival import DailySurvivalSkills
+        from skills.combat import CombatSkills
+
+        world = World()
+        world.status.update({"pos": [0.5, 62.0, 0.5], "in_water": True, "on_ground": False, "health": 18, "food": 18})
+        res = DailySurvivalSkills(world).execute("move_to", {"pos": [4.5, 64.0, 0.5]}, force_override=True)
+        self.assertTrue(res.success, res)
+
+        cworld = World()
+        cworld.status.update({"pos": [0.5, 64.0, 0.5], "gamemode": "survival", "on_ground": True,
+                              "in_water": False, "in_lava": False, "on_fire": False, "in_vehicle": False,
+                              "health": 18, "food": 18, "held": {"name": "stone_sword", "count": 1}})
+        cworld.counts["stone_sword"] = 1
+        cworld.equip = lambda item, **kw: envelope({"held": {"name": item, "count": 1}})
+        cworld.look_at = lambda *a, **kw: envelope({"ok": True})
+        zombie = {"id": 99, "name": "zombie", "type": "hostile", "pos": [4.5, 64.0, 0.5], "health": 20.0}
+        moves = []
+
+        def fake_move(pos, kw):
+            moves.append(pos)
+            cworld.status["pos"] = [3.0, 64.0, 0.5]
+            return envelope({"pos": [3.0, 64.0, 0.5]})
+
+        cworld.move_effect = fake_move
+        cworld.control = lambda **kw: envelope({"ok": True, "hits": [{"entity": {"id": 99, "name": "zombie"}}]})
+        with patch.object(cworld, "get_entities", return_value=[zombie]), patch("skills.combat.clear_entity_ray", return_value={"visible": True, "queries": 1}), patch("skills.combat.time.sleep"):
+            cres = CombatSkills(cworld, starter_defense=False).execute("fight_hostile", {"entity_id": 99, "expected_name": "zombie"}, force_override=True)
+        self.assertTrue(cres.success, cres)
+        self.assertTrue(cres.data.get("approached"))
+        self.assertEqual(len(moves), 1)
+
+    def test_emergency_burrow_digs_three_down_and_places_one_cap_overhead(self):
+        world = World()
+        world.status.update({"pos": [0.5, 64.0, 0.5], "dimension": "overworld", "on_ground": True,
+                            "in_water": False, "in_lava": False, "health": 18, "food": 18})
+        world.set_block((0, 63, 0), "grass_block")
+        world.set_block((0, 62, 0), "dirt")
+        world.set_block((0, 61, 0), "dirt")
+        world.set_block((0, 60, 0), "stone")
+        world.set_block((0, 65, 0), "air")
+        for y in (63, 62, 61):
+            for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                world.set_block((dx, y, dz), "dirt")
+
+        def dig_and_fall(pos):
+            key = tuple(pos)
+            name = world.blocks[key]["name"]
+            drop = "dirt" if name == "grass_block" else name
+            world.set_block(key, "air")
+            world.counts[drop] = world.counts.get(drop, 0) + 1
+            if key == (0, 61, 0):
+                world.status["pos"] = [0.5, 61.0, 0.5]
+            elif key == (0, 62, 0):
+                world.status["pos"] = [0.5, 62.0, 0.5]
+            elif key == (0, 63, 0):
+                world.status["pos"] = [0.5, 63.0, 0.5]
+            return envelope({"dug": name, "gained": {drop: 1}})
+
+        world.dig_effect = dig_and_fall
+        res = SurvivalSkills(world).execute("emergency_burrow", {})
+        self.assertTrue(res.success, res)
+        self.assertEqual(res.data["burrow_feet"], [0, 61, 0])
+        self.assertEqual(res.data["cap_pos"], [0, 63, 0])
+        self.assertLessEqual(res.data["estimated_seconds"], 22.0)
+        self.assertEqual(world.blocks[(0, 63, 0)]["name"], res.data["cap_item"])
+
+        mud_world = World()
+        mud_world.status.update({"pos": [0.5, 62.9, 0.5], "dimension": "overworld", "on_ground": True,
+                                 "in_water": False, "in_lava": False, "health": 18, "food": 18})
+        for y, name in ((62, "mud"), (61, "dirt"), (60, "dirt"), (59, "stone")):
+            mud_world.set_block((0, y, 0), name)
+        mud_world.set_block((0, 64, 0), "air")
+        for y in (62, 61, 60):
+            for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                mud_world.set_block((dx, y, dz), "dirt")
+
+        def mud_dig(pos):
+            key = tuple(pos)
+            name = mud_world.blocks[key]["name"]
+            mud_world.set_block(key, "air")
+            drop = "dirt" if name == "dirt" else "mud"
+            mud_world.counts[drop] = mud_world.counts.get(drop, 0) + 1
+            if key[1] == 60:
+                mud_world.status["pos"] = [0.5, 60.0, 0.5]
+            return envelope({"dug": name, "gained": {drop: 1}})
+
+        mud_world.dig_effect = mud_dig
+        mud_res = SurvivalSkills(mud_world).execute("emergency_burrow", {})
+        self.assertTrue(mud_res.success, mud_res)
+        self.assertEqual(mud_res.data["burrow_feet"], [0, 60, 0])
+        self.assertEqual(mud_res.data["cap_pos"], [0, 62, 0])
+
+        unsafe_world = World()
+        unsafe_world.status.update({"pos": [0.5, 64.0, 0.5], "dimension": "overworld", "on_ground": True,
+                                   "in_water": False, "in_lava": False, "health": 18, "food": 18})
+        unsafe_world.set_block((0, 63, 0), "grass_block")
+        unsafe_world.set_block((0, 62, 0), "dirt")
+        unsafe_world.set_block((0, 61, 0), "dirt")
+        unsafe_world.set_block((0, 60, 0), "lava")
+        bad = SurvivalSkills(unsafe_world).execute("emergency_burrow", {})
+        self.assertFalse(bad.success)
+        self.assertFalse(any(c[0] == "dig" for c in unsafe_world.calls))
+
 
 if __name__ == "__main__":
     unittest.main()

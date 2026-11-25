@@ -658,7 +658,14 @@ class SurvivalJournal:
                 json.dump(payload, stream, ensure_ascii=False, indent=2, allow_nan=False)
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.replace(temporary, target_path)
+            for attempt in range(5):
+                try:
+                    os.replace(temporary, target_path)
+                    break
+                except PermissionError:
+                    if attempt >= 4:
+                        raise
+                    time.sleep(0.025)
         finally:
             if temporary.exists():
                 try:

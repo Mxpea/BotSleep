@@ -391,6 +391,28 @@ class ObservedClearingTests(unittest.TestCase):
         self.assertTrue(result.data["retreat_complete"])
         self.assertEqual(result.data["evacuation_stage"], "ground")
 
+    def test_hurt_interruption_briefly_airborne_lands_and_returns_retreat_interrupted(self):
+        self.world = World()
+        calls = {"n": 0}
+        orig_get_status = self.world.get_status
+
+        def move(pos, kwargs):
+            self.world.status.update(health=18, pos=[pos[0], 64.4, pos[2]], on_ground=False)
+            raise APIError("interrupted", "Move stopped by knockback", 200, {"cause": "hurt"})
+
+        def polling_status(**kwargs):
+            calls["n"] += 1
+            if calls["n"] >= 2:
+                self.world.status.update(on_ground=True, pos=[self.world.status["pos"][0], 64.0, self.world.status["pos"][2]])
+            return orig_get_status(**kwargs)
+
+        self.world.move_effect = move
+        self.world.get_status = polling_status
+        result = SurvivalSkills(self.world).execute("retreat_from", {"pos": [-3, 64, .5]})
+        self.assertFalse(result.success)
+        self.assertEqual(result.error_code, "retreat_interrupted")
+        self.assertTrue(result.data["landing_settled"])
+
 
 if __name__ == "__main__":
     unittest.main()

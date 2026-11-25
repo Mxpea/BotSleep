@@ -30,14 +30,19 @@ class SurvivalSkills:
     WOODS = ("oak", "spruce", "birch", "jungle", "acacia", "dark_oak", "mangrove", "cherry", "pale_oak")
     LOGS = frozenset(wood + "_log" for wood in WOODS)
     PLANKS = frozenset(wood + "_planks" for wood in WOODS)
-    GATHERABLE = LOGS | {"stone", "cobblestone", "coal_ore", "deepslate_coal_ore", "dead_bush", "sand"}
+    GATHERABLE = LOGS | {"stone", "cobblestone", "coal_ore", "deepslate_coal_ore", "dead_bush", "sand", "gravel"}
     PICKAXES = frozenset(tier + "_pickaxe" for tier in ("wooden", "copper", "stone", "iron", "golden", "diamond", "netherite"))
     AIR = frozenset({"air", "cave_air", "void_air"})
     # Verified zero-collision, replaceable targets in Minecraft 1.21.11.
     # This is deliberately separate from both traversability and solid support.
     PLACEMENT_SPACE = AIR | {"leaf_litter", "short_grass"}
     RETREAT_PASSABLE = AIR | {
-        "short_grass", "tall_grass", "fern", "large_fern", "leaf_litter",
+        "short_grass", "tall_grass", "short_dry_grass", "tall_dry_grass",
+        "fern", "large_fern", "leaf_litter", "wildflowers", "bush", "firefly_bush", "cactus_flower",
+        "pink_petals", "dead_bush", "dandelion", "poppy", "blue_orchid", "allium", "azure_bluet",
+        "red_tulip", "orange_tulip", "white_tulip", "pink_tulip", "oxeye_daisy", "cornflower",
+        "lily_of_the_valley", "sunflower", "lilac", "rose_bush", "peony",
+        "brown_mushroom", "red_mushroom", "torch", "wall_torch", "sugar_cane",
         "vine", "glow_lichen", "hanging_roots", "moss_carpet", "pale_moss_carpet",
         "pale_hanging_moss", "eyeblossom", "open_eyeblossom", "closed_eyeblossom", "snow",
     }
@@ -57,6 +62,7 @@ class SurvivalSkills:
         )),
         "andesite", "granite", "diorite", "deepslate", "cobbled_deepslate",
         "tuff", "calcite", "dripstone_block", "snow_block", "moss_block", "pale_moss_block",
+        "mangrove_roots", "muddy_mangrove_roots", "lily_pad", "dirt_path", "farmland",
         "crafting_table", "furnace",
     }
     PLACEABLE = LOGS | PLANKS | {
@@ -77,6 +83,8 @@ class SurvivalSkills:
         # Internal safety actions; deliberately absent from the model catalog.
         "canopy_escape": (set(), set()),
         "water_escape": (set(), set()),
+        "emergency_burrow": (set(), set()),
+        "exit_burrow": (set(), set()),
         "clear_burial": ({"pos"}, {"pos"}),
     }
 
@@ -269,7 +277,7 @@ class SurvivalSkills:
 
     def _gather_guard(self, pos, name, status, context):
         self._overworld(status)
-        if status.get("in_water") or status.get("in_lava") or status.get("on_fire"):
+        if status.get("in_lava") or status.get("on_fire") or (not context.get("force_override") and status.get("in_water")):
             raise _Failure("unsafe", "Do not gather while in water, lava or fire")
         feet = [math.floor(v) for v in status["pos"]]
         if pos[0] == feet[0] and pos[2] == feet[2]:
@@ -295,7 +303,7 @@ class SurvivalSkills:
         status = self._status(context)
         target = self._gather_guard(pos, name, status, context)
         before, items = self._inventory(context)
-        if name not in self.LOGS | {"dead_bush"}:
+        if name not in self.LOGS | {"dead_bush", "sand", "gravel"}:
             usable = [item for item in items if item["name"] in self.PICKAXES and item["count"] > 0
                       and (not item.get("durability") or item["durability"][0] > 0)]
             if not usable:
@@ -332,6 +340,8 @@ class SurvivalSkills:
             expected_drops.add("coal")
         if name == "dead_bush":
             expected_drops = {"stick", "dead_bush"}
+        elif name == "gravel":
+            expected_drops.add("flint")
         try:
             dig_result = self._action(context, self.client.dig, pos,
                                       collect=not (context.get("cautious") or context.get("relaxed_work")))
@@ -595,6 +605,389 @@ class SurvivalSkills:
         recovery["purpose"] = "canopy_escape"
         return self._retreat_from({"pos": [0, 0, 0], "distance": 8}, context)
 
+    def _emergency_burrow(self, args, context):
+        """Dig 3 blocks straight down and place 1 solid cap block overhead to survive night."""
+        initial = self._status(context)
+        self._overworld(initial)
+        if not initial.get("on_ground") or initial.get("in_water") or initial.get("in_lava"):
+            raise _Failure("unsafe", "Emergency burrow requires dry ground footing")
+        fx = math.floor(initial["pos"][0])
+        top_y = math.floor(initial["pos"][1] - 0.15)
+        fz = math.floor(initial["pos"][2])
+        if top_y < 53:
+            raise _Failure("unsafe", "Already deep underground; emergency burrow not needed")
+        counts, _ = self._inventory(context)
+        burrow_support = self.SUPPORT | {"muddy_mangrove_roots", "dirt_path", "farmland", "soul_sand", "crimson_nylium", "warped_nylium"}
+        floor_pos = [fx, top_y - 3, fz]
+        floor_block = self._block(floor_pos, context)
+        if floor_block["name"] not in burrow_support or not self._safe_block(floor_block):
+            raise _Failure("unsafe", "Unsafe floor beneath burrow depth", {"pos": floor_pos, "block": floor_block["name"]})
+        col_positions = ([fx, top_y, fz], [fx, top_y - 1, fz], [fx, top_y - 2, fz])
+        col_blocks = [self._block(pos, context) for pos in col_positions]
+        for pos, block in zip(col_positions, col_blocks):
+            if block["name"] not in burrow_support or not self._safe_block(block):
+                raise _Failure("unsafe", "Burrow column contains unsupported or hazardous block",
+                               {"pos": pos, "block": block["name"]})
+        soft_burrow = {
+            "dirt", "grass_block", "coarse_dirt", "rooted_dirt", "podzol", "mycelium",
+            "mud", "packed_mud", "muddy_mangrove_roots", "dirt_path", "farmland",
+            "sand", "red_sand", "gravel", "snow_block", "moss_block", "pale_moss_block",
+        }
+        hard_stone = {
+            "stone", "cobblestone", "cobbled_deepslate", "deepslate",
+            "andesite", "granite", "diorite", "tuff", "sandstone", "red_sandstone", "calcite",
+        }
+        has_pickaxe = any(counts.get(p, 0) > 0 for p in self.PICKAXES)
+        if not has_pickaxe and sum(1 for blk in col_blocks if blk["name"] in soft_burrow) < 2:
+            raise _Failure("unsafe", "Too much hard stone to burrow quickly without a pickaxe")
+        pick_tier = next(
+            (tier for tier in ("netherite", "diamond", "iron", "stone", "wooden", "copper", "golden")
+             if counts.get(tier + "_pickaxe", 0) > 0),
+            None,
+        )
+        stone_sec = {"netherite": 0.4, "diamond": 0.45, "iron": 0.55, "stone": 0.8, "golden": 0.6, "wooden": 1.4, "copper": 1.0, None: 7.5}[pick_tier]
+        estimated_sec = 2.0 + sum(
+            0.9 if blk["name"] in soft_burrow else (stone_sec if blk["name"] in hard_stone else 1.8)
+            for blk in col_blocks
+        )
+        if estimated_sec > 22.0:
+            raise _Failure("unsafe", f"Estimated burrow duration ({estimated_sec:.1f}s) too close to watchdog limit",
+                           {"estimated_seconds": round(estimated_sec, 1)})
+        cap_candidates = (
+            "dirt", "cobblestone", "cobbled_deepslate", "stone", "sandstone", "red_sandstone",
+            "andesite", "granite", "diorite", "mud",
+            "oak_planks", "spruce_planks", "birch_planks", "dark_oak_planks",
+            "acacia_planks", "jungle_planks", "mangrove_planks", "cherry_planks", "pale_oak_planks",
+            "oak_log", "spruce_log", "birch_log", "sand", "gravel",
+        )
+        has_existing_cap = any(counts.get(item, 0) >= 1 for item in cap_candidates)
+        can_harvest_cap = any(
+            blk["name"] in (soft_burrow - {"gravel", "sand", "muddy_mangrove_roots", "dirt_path", "farmland"})
+            or blk["name"] in {"grass_block", "dirt_path", "farmland"}
+            or (has_pickaxe and blk["name"] in {"stone", "cobblestone", "cobbled_deepslate", "deepslate"})
+            for blk in col_blocks
+        )
+        if not (has_existing_cap or can_harvest_cap):
+            raise _Failure("missing_item", "No solid cap block available for emergency burrow")
+        above = self._block([fx, top_y + 2, fz], context)
+        if not self._safe_block(above):
+            raise _Failure("unsafe", "Hazard directly above head prevents burrowing", {"block": above["name"]})
+        for pos in col_positions:
+            for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                nbr = self._block([pos[0] + dx, pos[1], pos[2] + dz], context)
+                if not self._safe_block(nbr):
+                    raise _Failure("unsafe", "Adjacent liquid/fire hazard near burrow",
+                                   {"pos": [pos[0] + dx, pos[1], pos[2] + dz], "block": nbr["name"]})
+        if abs(initial["pos"][0] - (fx + 0.5)) > 0.16 or abs(initial["pos"][2] - (fz + 0.5)) > 0.16:
+            try:
+                self._action(context, self.client.move_to, fx + 0.5, float(initial["pos"][1]), fz + 0.5, range=0.15, timeout_ms=3500)
+            except (_Failure, APIError):
+                pass
+        for pos in col_positions:
+            self._check(context)
+            cur = self._block(pos, context)
+            if cur["name"] not in self.AIR:
+                self._action(context, self.client.dig, pos, collect=True)
+                rem = self._block(pos, context)
+                if rem["name"] not in self.AIR:
+                    raise _Failure("dig_unverified", "Burrow block was not cleared", {"pos": pos, "block": rem["name"]})
+        expected_feet_y = top_y - 2
+        settled = self._status(context)
+        deadline = time.monotonic() + 1.2
+        while (settled["pos"][1] > expected_feet_y + 0.25 or settled.get("on_ground") is not True) and time.monotonic() < deadline:
+            if context["cancel"] is not None:
+                context["cancel"].wait(0.2)
+            else:
+                time.sleep(0.2)
+            self._check(context)
+            settled = self._status(context)
+        if settled["pos"][1] > expected_feet_y + 0.25:
+            try:
+                self._action(context, self.client.move_to, fx + 0.5, float(settled["pos"][1]), fz + 0.5, range=0.15, timeout_ms=3000)
+                time.sleep(0.4)
+                settled = self._status(context)
+            except (_Failure, APIError):
+                pass
+        if settled["pos"][1] > expected_feet_y + 0.25:
+            raise _Failure("move_unverified", "Bot did not drop 3 blocks into burrow",
+                           {"pos": settled["pos"], "expected_y": expected_feet_y})
+        after_counts, _ = self._inventory(context)
+        cap_item = next((item for item in cap_candidates if after_counts.get(item, 0) >= 1), None)
+        if cap_item is None:
+            raise _Failure("missing_item", "No cap block in inventory after digging burrow")
+        cap_pos = col_positions[0]
+        def _place_cap():
+            context["placement_write"] = True
+            return self.client.place_block(*cap_pos, item=cap_item)
+        self._action(context, _place_cap)
+        placed = self._block(cap_pos, context)
+        if placed["name"] in self.PLACEMENT_SPACE:
+            raise _Failure("place_unverified", "Cap block did not place overhead", {"pos": cap_pos, "block": placed["name"]})
+        context["placement_verified"] = True
+        return {"burrow_feet": [fx, expected_feet_y, fz], "cap_pos": cap_pos, "cap_item": cap_item,
+                "estimated_seconds": round(estimated_sec, 1), "night_burrow": True}
+
+    def _exit_burrow(self, args, context):
+        """Uncap an emergency burrow or shallow 1x1 pit and climb cleanly back to open ground."""
+        from skills.action_workflow import WorkflowContext, WorkflowGuard, WorkflowStepError, pillar_up
+        from core.structure_spec import CAVE_DIGGABLE_BLOCKS, MINE_DIGGABLE_BLOCKS, MINE_SHAFT_SPEC, SCAFFOLD_BLOCKS
+
+        initial = self._status(context)
+        self._overworld(initial)
+        if initial.get("in_water") or initial.get("in_lava"):
+            raise _Failure("unsafe", "Cannot pillar out of burrow while in liquid")
+        fx = math.floor(initial["pos"][0] + 0.0001)
+        fy = math.floor(initial["pos"][1] + 0.0001)
+        fz = math.floor(initial["pos"][2] + 0.0001)
+
+        head_allowed = (
+            set(CAVE_DIGGABLE_BLOCKS)
+            | set(MINE_DIGGABLE_BLOCKS)
+            | {
+                "oak_leaves", "birch_leaves", "spruce_leaves", "dark_oak_leaves",
+                "acacia_leaves", "jungle_leaves", "mangrove_leaves", "cherry_leaves",
+                "pale_oak_leaves", "azalea_leaves", "flowering_azalea_leaves",
+                "moss_block", "pale_moss_block", "moss_carpet", "leaf_litter",
+            }
+        )
+        # Clear overhead burrow cap at fy+2 first (also freeing cramped leaf/dirt traps).
+        cap_pos = [fx, fy + 2, fz]
+        cap_blk = self._block(cap_pos, context)
+        if cap_blk["name"] not in self.AIR:
+            if not self._safe_block(cap_blk):
+                raise _Failure("unsafe", "Hazard overhead prevents exiting burrow", {"pos": cap_pos, "block": cap_blk["name"]})
+            self._action(context, self.client.dig, cap_pos, collect=True)
+
+        guard = WorkflowGuard(
+            self.client,
+            cancel_event=context.get("cancel"),
+            timeout_seconds=18.0,
+            allow_damage=True,
+        )
+        wf_ctx = WorkflowContext(
+            guard=guard,
+            spec=MINE_SHAFT_SPEC,
+            origin=[fx, fy, fz],
+            orientation="south",
+        )
+        preferred = (
+            "cobblestone", "cobbled_deepslate", "stone_bricks", "stone",
+            "andesite", "granite", "diorite", "deepslate",
+            "oak_planks", "birch_planks", "spruce_planks", "dirt",
+        )
+        blocks_prio = preferred + tuple(b for b in sorted(SCAFFOLD_BLOCKS) if b not in preferred)
+        risen = 0
+        for _ in range(4):
+            self._check(context)
+            cur = self._status(context)
+            cx = math.floor(cur["pos"][0] + 0.0001)
+            cy = math.floor(cur["pos"][1] + 0.0001)
+            cz = math.floor(cur["pos"][2] + 0.0001)
+            open_side = None
+            for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                feet_n = self._block([cx + dx, cy, cz + dz], context)
+                head_n = self._block([cx + dx, cy + 1, cz + dz], context)
+                floor_n = self._block([cx + dx, cy - 1, cz + dz], context)
+                if (feet_n["name"] in self.AIR and head_n["name"] in self.AIR
+                        and floor_n["name"] not in self.AIR and self._safe_block(floor_n)):
+                    open_side = [cx + dx + 0.5, float(cy), cz + dz + 0.5]
+                    break
+            if open_side is not None and (risen > 0 or cy >= fy + 1):
+                try:
+                    self._action(context, self.client.move_to, open_side[0], open_side[1], open_side[2], range=0.8, timeout_ms=4000)
+                except (_Failure, APIError):
+                    pass
+                break
+            try:
+                pillar_up(
+                    wf_ctx,
+                    steps=1,
+                    blocks=blocks_prio,
+                    allow_dig_headroom=True,
+                    allowed_headroom_blocks=head_allowed,
+                )
+                context["write_sent"] = True
+                risen += 1
+            except WorkflowStepError as exc:
+                if risen > 0:
+                    break
+                raise _Failure(exc.code or "unsafe", str(exc))
+        after = self._status(context)
+        return {"exited": True, "risen": risen, "pos": after["pos"], "executed": context.get("write_sent") is True}
+
+    def escape_to_surface(self, *, max_climb=28, timeout_seconds=55.0, cancel_event=None):
+        """Safely pillar up out of a pit or underground cave until reaching open-sky surface ground."""
+        from skills.action_workflow import (
+            WorkflowContext,
+            WorkflowGuard,
+            WorkflowStepError,
+            WorkflowUncertainError,
+            pillar_up,
+        )
+        from core.structure_spec import CAVE_DIGGABLE_BLOCKS, DEFAULT_REPLACEABLE, MINE_DIGGABLE_BLOCKS, MINE_SHAFT_SPEC, SCAFFOLD_BLOCKS
+
+        soft_blocks = frozenset({
+            "dirt", "grass_block", "coarse_dirt", "rooted_dirt", "podzol", "mycelium", "mud",
+            "packed_mud", "sand", "red_sand", "gravel", "clay", "moss_block", "pale_moss_block",
+            "moss_carpet", "leaf_litter", "snow", "snow_block",
+        })
+        leaves_set = self.RETREAT_LEAVES | {"azalea_leaves", "flowering_azalea_leaves"}
+        head_allowed = set(CAVE_DIGGABLE_BLOCKS) | set(MINE_DIGGABLE_BLOCKS) | set(leaves_set) | set(soft_blocks)
+        preferred = (
+            "cobblestone", "cobbled_deepslate", "stone_bricks", "stone",
+            "andesite", "granite", "diorite", "deepslate",
+            "oak_planks", "birch_planks", "spruce_planks", "dirt",
+        )
+        blocks_prio = preferred + tuple(b for b in sorted(SCAFFOLD_BLOCKS) if b not in preferred)
+        liquid_hazards = {"water", "flowing_water", "lava", "flowing_lava", "fire", "soul_fire"}
+        overhead_unsafe = liquid_hazards | {"sand", "red_sand", "gravel", "suspicious_sand", "suspicious_gravel"}
+
+        guard = WorkflowGuard(
+            self.client,
+            cancel_event=cancel_event,
+            timeout_seconds=max(6.0, float(timeout_seconds)),
+            max_reads=900,
+            allow_damage=True,
+        )
+        context = {"cancel": cancel_event, "deadline": time.monotonic() + max(6.0, float(timeout_seconds)),
+                   "reads": 0, "acted": False, "write_sent": False}
+
+        def _blk_name(x, y, z):
+            try:
+                raw = guard.read(self.client.get_block, int(x), int(y), int(z), timeout_seconds=guard.remaining_timeout(2.0))
+                blk = raw.get("result") if isinstance(raw, dict) and "result" in raw else raw
+                return str((blk or {}).get("name") or "air")
+            except WorkflowStepError:
+                return "air"
+
+        def _has_open_sky(x, y, z, span=14):
+            top_y = min(256, int(y) + int(span) + 2)
+            for yy in range(int(y) + 2, top_y):
+                nm = _blk_name(x, yy, z)
+                if nm in liquid_hazards:
+                    return False
+                if nm not in DEFAULT_REPLACEABLE and nm not in leaves_set:
+                    return False
+            return True
+
+        def _find_open_surface_side(cx, cy, cz):
+            for dy in (0, -1, -2, -3):
+                ly = cy + dy
+                for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    nx, nz = cx + dx, cz + dz
+                    feet_n = _blk_name(nx, ly, nz)
+                    head_n = _blk_name(nx, ly + 1, nz)
+                    floor_n = _blk_name(nx, ly - 1, nz)
+                    if (feet_n in DEFAULT_REPLACEABLE and head_n in DEFAULT_REPLACEABLE
+                            and floor_n not in DEFAULT_REPLACEABLE and floor_n not in liquid_hazards
+                            and floor_n not in self.HAZARDS and _has_open_sky(nx, ly, nz)):
+                        return [nx + 0.5, float(ly), nz + 0.5]
+            return None
+
+        risen = 0
+        try:
+            initial = guard.check_status(require_safe=True)
+            dim = str(initial.get("dimension") or "").lower()
+            if dim not in {"overworld", "minecraft:overworld"}:
+                return SkillResult(False, "Surface ascent requires the overworld", {"executed": False}, "unsafe_dimension")
+            if initial.get("in_water") or initial.get("in_lava"):
+                return SkillResult(False, "Cannot pillar to surface while in liquid", {"executed": False}, "unsafe")
+            pos0 = initial.get("pos") or [0, 64, 0]
+            fx = math.floor(float(pos0[0]) + 0.0001)
+            fy = math.floor(float(pos0[1]) + 0.0001)
+            fz = math.floor(float(pos0[2]) + 0.0001)
+            if fy >= 60 and _has_open_sky(fx, fy, fz) and _find_open_surface_side(fx, fy, fz) is not None:
+                return SkillResult(True, "Already on open surface ground", {"exited": True, "risen": 0, "pos": list(pos0), "executed": False})
+
+            wf_ctx = WorkflowContext(guard=guard, spec=MINE_SHAFT_SPEC, origin=[fx, fy, fz], orientation="south")
+            shifted = False
+            for _ in range(max(1, int(max_climb))):
+                if cancel_event is not None and cancel_event.is_set():
+                    break
+                if guard.remaining_timeout(float(timeout_seconds)) < 3.5:
+                    break
+                cur = guard.check_status(require_safe=True)
+                if cur.get("in_water") or cur.get("in_lava"):
+                    break
+                cpos = cur["pos"]
+                cx = math.floor(float(cpos[0]) + 0.0001)
+                cy = math.floor(float(cpos[1]) + 0.0001)
+                cz = math.floor(float(cpos[2]) + 0.0001)
+                if (cy >= 60 or (risen >= 3 and cy >= 58)) and _has_open_sky(cx, cy, cz):
+                    open_side = _find_open_surface_side(cx, cy, cz)
+                    if open_side is not None:
+                        try:
+                            guard.write(self.client.move_to, open_side[0], open_side[1], open_side[2], range=0.8, timeout_ms=4000)
+                        except WorkflowStepError:
+                            pass
+                        break
+                head2_name = _blk_name(cx, cy + 2, cz)
+                above3_name = _blk_name(cx, cy + 3, cz)
+                side_hazard = any(_blk_name(cx + dx, cy + 2, cz + dz) in liquid_hazards for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)))
+                if (head2_name in liquid_hazards | {"bedrock", "chest", "trapped_chest", "spawner"}
+                        or above3_name in overhead_unsafe or side_hazard):
+                    if risen == 0 and not shifted:
+                        moved_aside = False
+                        for dx, dz in ((2, 0), (-2, 0), (0, 2), (0, -2), (1, 1), (-1, -1)):
+                            tx, tz = cx + dx, cz + dz
+                            if (_blk_name(tx, cy, tz) in DEFAULT_REPLACEABLE
+                                    and _blk_name(tx, cy + 1, tz) in DEFAULT_REPLACEABLE
+                                    and _blk_name(tx, cy - 1, tz) not in DEFAULT_REPLACEABLE | liquid_hazards):
+                                try:
+                                    guard.write(self.client.move_to, tx + 0.5, float(cy), tz + 0.5, range=0.8, timeout_ms=4000)
+                                    moved_aside = True
+                                    shifted = True
+                                    break
+                                except WorkflowStepError:
+                                    continue
+                        if moved_aside:
+                            continue
+                    return SkillResult(risen > 0, f"Stopped surface ascent safely before overhead hazard ({head2_name}/{above3_name})",
+                                       {"exited": risen > 0, "risen": risen, "pos": list(cpos), "executed": guard.writes > 0},
+                                       None if risen > 0 else "hazard_detected")
+                if head2_name not in DEFAULT_REPLACEABLE and head2_name not in soft_blocks and head2_name not in leaves_set:
+                    inv_raw = guard.read(self.client.inventory, timeout_seconds=guard.remaining_timeout(2.0))
+                    rows = (inv_raw.get("result") or {}).get("items") if isinstance(inv_raw, dict) else []
+                    has_pick = any(isinstance(r, dict) and r.get("name") in self.PICKAXES and r.get("count", 0) > 0 for r in (rows or []))
+                    if not has_pick:
+                        return SkillResult(risen > 0, "Missing pickaxe for surface ascent",
+                                           {"exited": risen > 0, "risen": risen, "pos": list(cpos), "executed": guard.writes > 0},
+                                           None if risen > 0 else "missing_pickaxe")
+                if wf_ctx.select_item(blocks_prio) is None:
+                    return SkillResult(risen > 0, "Inventory lacks scaffold blocks for surface ascent",
+                                       {"exited": risen > 0, "risen": risen, "pos": list(cpos), "executed": guard.writes > 0},
+                                       None if risen > 0 else "missing_building_block")
+                pillar_up(
+                    wf_ctx,
+                    steps=1,
+                    blocks=blocks_prio,
+                    allow_dig_headroom=True,
+                    allowed_headroom_blocks=head_allowed,
+                )
+                risen += 1
+            after = guard.check_status(require_safe=False)
+            apos = list(after.get("pos") or pos0)
+            ax = math.floor(float(apos[0]) + 0.0001)
+            ay = math.floor(float(apos[1]) + 0.0001)
+            az = math.floor(float(apos[2]) + 0.0001)
+            if risen > 0 and ay >= 58 and _has_open_sky(ax, ay, az):
+                open_side = _find_open_surface_side(ax, ay, az)
+                if open_side is not None:
+                    try:
+                        guard.write(self.client.move_to, open_side[0], open_side[1], open_side[2], range=0.8, timeout_ms=4000)
+                        after = guard.check_status(require_safe=False)
+                        apos = list(after.get("pos") or open_side)
+                    except WorkflowStepError:
+                        pass
+            return SkillResult(risen > 0, f"Ascended {risen} blocks toward open surface",
+                               {"exited": risen > 0, "risen": risen, "pos": apos, "executed": guard.writes > 0},
+                               None if risen > 0 else "surface_ascent_no_progress")
+        except WorkflowUncertainError as exc:
+            return SkillResult(False, str(exc), {"exited": False, "risen": risen, "executed": guard.writes > 0, **exc.data}, exc.code)
+        except WorkflowStepError as exc:
+            return SkillResult(risen > 0, str(exc), {"exited": risen > 0, "risen": risen, "executed": guard.writes > 0},
+                               None if risen > 0 else (exc.code or "surface_ascent_failed"))
+
     @staticmethod
     def _hurt_interruption(error):
         """Only a complete official response proves this move's backend termination."""
@@ -628,8 +1021,8 @@ class SurvivalSkills:
                     raise _Failure("action_unconfirmed", "Interrupted retreat lost its idle same-life observation")
                 if previous is not None and status["health"] < previous["health"]:
                     raise _Failure("action_unconfirmed", "Health changed during interrupted retreat verification")
-                speed = self._number(status.get("speed"), "speed", 0, 1024)
-                velocity = self._pos(status.get("velocity"))
+                speed = self._number(status["speed"], "speed", 0, 1024) if "speed" in status else 0.0
+                velocity = self._pos(status["velocity"]) if "velocity" in status else [0.0, 0.0, 0.0]
                 stable = (status.get("on_ground") is True and status.get("jumping") is not True
                           and type(speed) in (int, float) and math.isfinite(speed) and 0 <= speed <= .1
                           and math.dist(velocity, [0, 0, 0]) <= .1
@@ -698,8 +1091,27 @@ class SurvivalSkills:
         self._overworld(before)
         if before.get("in_lava") or before.get("on_fire"):
             raise _Failure("unsafe", "Cannot run water escape while in lava or fire")
-        is_dry = lambda st: not st.get("in_water") and not st.get("submerged")
-        if is_dry(before):
+        def is_settled_dry(st):
+            if st.get("in_water") or st.get("submerged"):
+                return False
+            # Jumping upward over water temporarily clears in_water while
+            # airborne (on_ground=False); require landed ground contact when exposed.
+            if "on_ground" in st and st.get("on_ground") is not None:
+                return st.get("on_ground") is True
+            return True
+
+        def _confirm_dry_landing():
+            nonlocal cur
+            if is_settled_dry(cur):
+                return True
+            if not cur.get("in_water") and not cur.get("submerged") and cur.get("on_ground") is False:
+                time.sleep(0.25)
+                cur = self._status(context)
+                return is_settled_dry(cur)
+            return False
+
+        cur = before
+        if _confirm_dry_landing():
             return {"pos": before["pos"], "escaped_water": True, "stage": "already_dry", "progress_made": True}
 
         fatal_or_unknown = {
@@ -708,7 +1120,6 @@ class SurvivalSkills:
             "cancelled", "dead", "not_ready", "dimension_changed", "interrupted",
             "busy", "life_changed", "lifecycle_changed", "unsafe_state",
         }
-        cur = before
 
         def swim_step(**kw):
             nonlocal cur
@@ -727,7 +1138,7 @@ class SurvivalSkills:
 
         # Phase 1: swim straight up if submerged or losing air, as long as overhead is safe.
         up_pulses = 0
-        while (cur.get("submerged") or cur.get("oxygen", 20) < 16) and up_pulses < 3:
+        while (cur.get("submerged") or cur.get("oxygen", 20) < 16) and up_pulses < (8 if cur.get("submerged") else 3):
             fx = math.floor(cur["pos"][0] + 1e-4)
             fy = math.floor(cur["pos"][1] + 1e-4)
             fz = math.floor(cur["pos"][2] + 1e-4)
@@ -737,7 +1148,7 @@ class SurvivalSkills:
             if not swim_step(jump=True, ms=700, wait=True):
                 break
             up_pulses += 1
-            if is_dry(cur):
+            if _confirm_dry_landing():
                 context["navigation_verified"] = True
                 return {"pos": cur["pos"], "escaped_water": True, "stage": "surfaced_dry", "progress_made": True}
 
@@ -780,7 +1191,8 @@ class SurvivalSkills:
             try:
                 rows = self.client.get_blocks(
                     radius=20,
-                    types=["grass_block", "dirt", "sand", "stone", "gravel", "mud", "sandstone", "cobblestone"],
+                    types=["grass_block", "dirt", "sand", "stone", "gravel", "mud", "sandstone", "cobblestone",
+                           "mangrove_roots", "muddy_mangrove_roots", "lily_pad"],
                     limit=48,
                 )
             except (APIError, _Failure) as exc:
@@ -803,7 +1215,7 @@ class SurvivalSkills:
         shore_supports.sort(key=lambda p: (0 if p[1] <= cy + 1 else 1, math.hypot(p[0] + 0.5 - cur["pos"][0], p[2] + 0.5 - cur["pos"][2])))
         for tx, ty, tz in shore_supports[:3]:
             dist = math.hypot(tx + 0.5 - cur["pos"][0], tz + 0.5 - cur["pos"][2])
-            if dist <= 16.0:
+            if dist <= 16.0 and not cur.get("submerged"):
                 context["navigation_write"] = True
                 context["navigation_verified"] = False
                 try:
@@ -812,20 +1224,23 @@ class SurvivalSkills:
                     if getattr(exc, "code", None) in fatal_or_unknown:
                         raise
                 cur = self._status(context)
-                if is_dry(cur):
+                if _confirm_dry_landing():
                     context["navigation_verified"] = True
                     return {"pos": cur["pos"], "target": [tx, ty, tz], "escaped_water": True, "stage": "shore_move", "progress_made": True}
             # Direct bank lip swim-hop when Mineflayer move_to stalls at shoreline edge
             if math.hypot(tx + 0.5 - cur["pos"][0], tz + 0.5 - cur["pos"][2]) <= 6.5:
+                step_before_h = list(cur["pos"])
                 yaw = math.atan2(-(tx + 0.5 - cur["pos"][0]), -(tz + 0.5 - cur["pos"][2]))
                 swim_step(forward=True, jump=True, yaw=yaw, pitch=0.0, ms=850, wait=True)
-                if is_dry(cur):
+                if _confirm_dry_landing():
                     context["navigation_verified"] = True
                     return {"pos": cur["pos"], "target": [tx, ty, tz], "escaped_water": True, "stage": "shore_swim", "progress_made": True}
-                break
+                if math.hypot(cur["pos"][0] - step_before_h[0], cur["pos"][2] - step_before_h[2]) >= 0.5:
+                    break
 
         # Phase 3: fallback directional swim toward wider shore or cardinal headings
-        if is_dry(cur) is False and (cur["pos"] == before["pos"] or math.dist(cur["pos"], before["pos"]) < 0.8):
+        moved_since_start = math.hypot(cur["pos"][0] - before["pos"][0], cur["pos"][2] - before["pos"][2])
+        if not is_settled_dry(cur) and moved_since_start < 0.6:
             yaw = float(cur.get("yaw", 0.0) or 0.0)
             if callable(getattr(self.client, "get_blocks", None)):
                 try:
@@ -838,15 +1253,23 @@ class SurvivalSkills:
                     if getattr(exc, "code", None) in fatal_or_unknown:
                         raise
             swim_step(forward=True, jump=True, yaw=yaw, pitch=0.0, ms=900, wait=True)
-            if is_dry(cur):
+            if _confirm_dry_landing():
                 context["navigation_verified"] = True
                 return {"pos": cur["pos"], "escaped_water": True, "stage": "swim_dry", "progress_made": True}
+            # If pressing straight toward bank moved <0.35m horizontally (steep cliff/overhang), swim laterally to skirt it.
+            if math.hypot(cur["pos"][0] - before["pos"][0], cur["pos"][2] - before["pos"][2]) < 0.35:
+                step_idx = (int((context.get("recovery_context") or {}).get("steps", 0) or 0) // 4) % 4
+                lateral_yaw = yaw + (math.pi / 2 if step_idx % 2 == 0 else -math.pi / 2)
+                swim_step(forward=True, jump=True, yaw=lateral_yaw, pitch=0.0, ms=900, wait=True)
+                if _confirm_dry_landing():
+                    context["navigation_verified"] = True
+                    return {"pos": cur["pos"], "escaped_water": True, "stage": "swim_dry", "progress_made": True}
 
         context["navigation_verified"] = True
         moved_h = math.hypot(cur["pos"][0] - before["pos"][0], cur["pos"][2] - before["pos"][2])
-        rose = cur["pos"][1] - before["pos"][1]
+        surfaced = bool(before.get("submerged") and not cur.get("submerged"))
         gained_air = cur.get("oxygen", 20) > before.get("oxygen", 20)
-        progress_made = moved_h >= 1.2 or rose >= 0.8 or gained_air
+        progress_made = moved_h >= 0.8 or surfaced or gained_air
         raise _Failure(
             "still_in_water",
             "Moved toward shoreline or air; still in water",
@@ -1081,7 +1504,7 @@ class SurvivalSkills:
                   "solid_nodes": 0, "distance_rejections": 0, "height_guard_rejections": 0}
         # Up to five fresh swept-body/support reads before a two-block drop,
         # plus three actual landing reads afterwards.
-        read_limit = 208 if escaping else 248  # Reserve a bounded fresh clearing proof when needed.
+        read_limit = 208 if escaping else 160  # Bound combat retreat reads while preserving canopy/multi-hop fixture coverage.
         planned_path = None
         target = None
         final_target = None
@@ -1091,6 +1514,7 @@ class SurvivalSkills:
         ground_run = []
         ground_sweep = set()
         relay_candidates = []
+        best_partial = None
         outcome = {"origin": origin, "threat_pos": None if escaping else threat, "target": None,
                    "executed": False, "moved": 0, "planned_path": None,
                    "terrain_search": search, "blocked_cells": [], "retreat_complete": False,
@@ -1145,7 +1569,7 @@ class SurvivalSkills:
                              "radius": row["radius"], "origin_margin": round(math.dist(origin, row["pos"]) - row["radius"], 3)}
                             for row in threats[:8]], "all_threats_evaluated": True}
 
-        def threat_safe(point, previous=None, baseline=None):
+        def threat_safe(point, previous=None, baseline=None, *, allow_distant_secondary=False):
             if escaping:
                 return True
             baseline = origin if baseline is None else baseline
@@ -1172,6 +1596,8 @@ class SurvivalSkills:
                     and all(p[1] - row["pos"][1] > 2.5 for p in (baseline, previous, point)))
                 gap = (lambda p: math.hypot(p[0] - row["pos"][0], p[2] - row["pos"][2])) if row["primary"] or lower_shooter_descent else (lambda p: math.dist(p, row["pos"]))
                 initial, prior, current = gap(baseline), gap(previous), gap(point)
+                if allow_distant_secondary and not row["primary"] and initial >= 7.5 and current >= 7.5:
+                    continue
                 # The API rounds coordinates. Allow at most 0.1 of uncertainty,
                 # never cumulative deterioration along a route.
                 if ((initial > row["radius"] and current <= row["radius"])
@@ -1477,7 +1903,8 @@ class SurvivalSkills:
             source["state"] = "edge_entry_verified" if entries else "no_verified_edge_entry"
             return entries
 
-        def terrain_fallback(allow_deep_drop=False):
+        def terrain_fallback(allow_deep_drop=False, allow_distant_secondary=False):
+            nonlocal best_partial
             search.update(used=True, termination="no_safe_destination")
             entries = starting_entries()
             if not entries:
@@ -1492,6 +1919,8 @@ class SurvivalSkills:
             visited = {cell for cell, _ in entries}
             search["nodes"] = len(visited)
             queue = deque(entries)
+            best_partial = None
+            node_cap = 96 if escaping else 64
             directions = sorted(((1, 0), (-1, 0), (0, 1), (0, -1)),
                                 key=lambda delta: delta[0] * dx + delta[1] * dz, reverse=True)
             while queue:
@@ -1520,9 +1949,10 @@ class SurvivalSkills:
                 ordered = directions if escaping else sorted(directions, key=lambda delta: threat_score(
                     [current[0] + delta[0] + .5, current[1], current[2] + delta[1] + .5]), reverse=True)
                 step_ys = (
-                    (0, -1, -2, -3, -4, -5, 1)
+                    ((0, -1, -2, -3, -4, -5, 1) if before["health"] >= 16 else (0, -1, -2, -3, -4, 1))
                     if allow_deep_drop
-                    else ((0, -1, -2, -3, 1) if (escaping and before["health"] > 10) else (0, -1, -2, 1))
+                    else ((0, -1, -2, -3, 1) if (escaping and before["health"] > 10)
+                          else ((0, -1, 1, -2) if (not escaping and not leaf_start) else (0, -1, -2, 1)))
                 )
                 min_dy = -12 if escaping else -6
                 for sx, sz in ordered:
@@ -1540,11 +1970,15 @@ class SurvivalSkills:
                         if not safe_height_band(point):
                             search["height_guard_rejections"] += 1
                             continue
-                        if not threat_safe(point, current_point):
+                        if not threat_safe(point, current_point, allow_distant_secondary=allow_distant_secondary):
                             search["multi_threat_rejections"] = search.get("multi_threat_rejections", 0) + 1
                             continue
-                        if len(visited) >= 64:
+                        if len(visited) >= node_cap:
                             search["termination"] = "node_budget"
+                            if best_partial is not None:
+                                _, b_point, b_route = best_partial
+                                search["termination"] = "partial_progress"
+                                return b_point, b_route
                             return None, None
                         support = safe_cell(cell, temporary_leaves=True)
                         if not support or (allow_deep_drop and step_y < -3 and support not in self.SUPPORT - self.RETREAT_TRUNKS):
@@ -1581,18 +2015,30 @@ class SurvivalSkills:
                                 if outcome["edge_start"]:
                                     route[0] = list(origin)
                                 return point, route
+                            if (not escaping and horizontal >= norm + 0.5
+                                    and math.hypot(point[0] - origin[0], point[2] - origin[2]) >= 0.9):
+                                p_route = [[c[0] + 0.5, c[1], c[2] + 0.5] for c in next_path]
+                                if outcome["edge_start"]:
+                                    p_route[0] = list(origin)
+                                score = (horizontal - norm, len(p_route))
+                                if best_partial is None or score > best_partial[0]:
+                                    best_partial = (score, point, p_route)
                             search["distance_rejections"] += 1
                         queue.append((cell, next_path))
                         # A two-block lower floor can coexist with a floor one
                         # block above the source; inspect that upper alternative.
                         if step_y != -2:
                             break
+            if best_partial is not None:
+                _, b_point, b_route = best_partial
+                search["termination"] = "partial_progress"
+                return b_point, b_route
             return None, None
 
         if before.get("on_ground") is not True:
             search["termination"] = "not_grounded"
             raise _Failure("unsafe", "Wait for stable footing before planning a retreat step", evidence())
-        if before.get("gamemode", "survival") != "survival" or any(before.get(key) for key in ("in_water", "in_lava", "on_fire", "submerged")):
+        if before.get("gamemode", "survival") != "survival" or any(before.get(key) for key in (("in_lava", "on_fire") if context.get("force_override") else ("in_water", "in_lava", "on_fire", "submerged"))):
             raise _Failure("unsafe", "Retreat requires dry survival footing", evidence())
         check_escape_threats(before)
         if not escaping:
@@ -1604,7 +2050,29 @@ class SurvivalSkills:
         except _Failure as error:
             if error.code != "retreat_budget_exhausted":
                 raise
-            search["termination"] = "read_budget"
+            if best_partial is not None:
+                _, final_target, planned_path = best_partial
+                target = planned_path[1]
+                search["termination"] = "partial_progress"
+            else:
+                search["termination"] = "read_budget"
+        relaxed_secondary = False
+        if not escaping and target is None and search.get("multi_threat_rejections", 0) > 0 and origin_distance <= 5.0:
+            relaxed_secondary = True
+            read_limit = min(240, max(read_limit, search["block_reads"] + 64))
+            try:
+                final_target, planned_path = terrain_fallback(allow_distant_secondary=True)
+                if planned_path:
+                    target = planned_path[1]
+            except _Failure as error:
+                if error.code != "retreat_budget_exhausted":
+                    raise
+                if best_partial is not None:
+                    _, final_target, planned_path = best_partial
+                    target = planned_path[1]
+                    search["termination"] = "partial_progress"
+                else:
+                    search["termination"] = "read_budget"
         if (escaping and final_target is None and not outcome["edge_start"]
                 and not any(row[0] > .5 for row in relay_candidates)):
             read_limit = 253  # Leave three reads for confirming the one clearing write.
@@ -1637,7 +2105,7 @@ class SurvivalSkills:
             search["search_boundary"] = search["termination"]
             search["termination"] = "verified_edge_drop"
         if (escaping and target is None and planned_path is None and not relay_candidates
-                and self._number(before.get("health", 0), "health", 0, 1024) >= 16):
+                and self._number(before.get("health", 0), "health", 0, 1024) >= 12):
             try:
                 final_target, planned_path = terrain_fallback(allow_deep_drop=True)
                 if planned_path:
@@ -1681,7 +2149,7 @@ class SurvivalSkills:
                 if type(distance_now) in (int, float) and math.isfinite(distance_now) and distance_now <= limit:
                     raise _Failure("near_hostile", "A hostile appeared at the final canopy movement check", evidence())
             if not escaping:
-                if not threat_safe(target, baseline=status["pos"]):
+                if not threat_safe(target, baseline=status["pos"], allow_distant_secondary=relaxed_secondary):
                     raise _Failure("unsafe", "Latest position makes the retreat step approach another threat", evidence())
                 if isinstance(nearest, dict) and nearest:
                     gap = nearest.get("dist")
@@ -1689,7 +2157,7 @@ class SurvivalSkills:
                     if type(gap) in (int, float) and math.isfinite(gap) and gap <= limit:
                         matches = [row for row in threats if (nearest.get("id") is not None and row["id"] == nearest["id"])
                                    or (nearest.get("id") is None and row["name"] == nearest.get("name"))]
-                        if not any(abs(math.dist(status["pos"], row["pos"]) - gap) <= .75 for row in matches):
+                        if not any(abs(math.dist(status["pos"], row["pos"]) - gap) <= 1.8 for row in matches):
                             raise _Failure("unsafe", "Latest hostile summary changed after the retreat threat scan", evidence())
             if status.get("last_death") != before.get("last_death") or status["health"] < before["health"]:
                 raise _Failure("safety_changed", "Life or health changed while inspecting the retreat corridor", evidence())
@@ -1698,7 +2166,7 @@ class SurvivalSkills:
                 raise _Failure("unsafe", "Bot position changed while inspecting the retreat corridor", evidence(pos=status["pos"]))
             if status.get("on_ground") is not True:
                 raise _Failure("unsafe", "Bot left stable footing before the retreat step", evidence())
-            if any(status.get(key) for key in ("in_water", "in_lava", "on_fire", "submerged")):
+            if any(status.get(key) for key in (("in_lava", "on_fire") if context.get("force_override") else ("in_water", "in_lava", "on_fire", "submerged"))):
                 raise _Failure("unsafe", "Body state became hazardous before movement", evidence())
             if ground_run and (abs(status["pos"][1] - y) > .05 or status.get("jumping") is True
                     or not swept_entry_cells(status["pos"], feet(target)).issubset(ground_sweep)
@@ -1733,7 +2201,8 @@ class SurvivalSkills:
             refresh_retreat_threats()
             if ((feet(target) in edge_drops and not drop_threat_safe(origin, feet(target)))
                     or (ground_run and not ground_segment_safe(origin, ground_run))
-                    or not all(threat_safe(point, prior) for prior, point in zip(planned_path, planned_path[1:]))):
+                    or not all(threat_safe(point, prior, allow_distant_secondary=relaxed_secondary)
+                               for prior, point in zip(planned_path, planned_path[1:]))):
                 raise _Failure("unsafe", "A hostile changed the checked retreat corridor before movement", evidence())
             outcome["threat_assessment"]["target_score"] = list(threat_score(target))
         if feet(target) in edge_drops:
@@ -1876,6 +2345,47 @@ class SurvivalSkills:
                         planned_path=planned_path, path_following_verified=False,
                         path_caveat="Candidate terrain was checked; the backend may choose a different route.")
 
+    def _verify_interrupted_retreat(self, context, before, feet, safe_cell):
+        """Confirm a stopped movement's endpoint without repeating or stopping it again."""
+        deadline = time.monotonic() + 1.5
+        context.update(navigation_settle_deadline=deadline, navigation_observe_only=True)
+
+        def stable(status):
+            return (status.get("last_death") == before.get("last_death")
+                    and status.get("on_ground") is True and status.get("jumping") is not True
+                    and "busy" in status and status["busy"] in (None, False)
+                    and not any(status.get(key) for key in ("in_water", "in_lava", "on_fire", "submerged")))
+
+        try:
+            while True:
+                observed = self._status(context)
+                if (observed.get("last_death") != before.get("last_death")
+                        or observed["health"] >= before["health"]
+                        or any(observed.get(key) for key in ("in_water", "in_lava", "on_fire", "submerged"))):
+                    return None
+                if stable(observed):
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                delay = min(0.12, remaining)
+                if context.get("cancel") is not None:
+                    context["cancel"].wait(delay)
+                else:
+                    time.sleep(delay)
+            if not safe_cell(feet(observed["pos"]), temporary_leaves=True):
+                return None
+            final = self._status(context)
+            if (stable(final) and time.monotonic() <= deadline
+                    and final["health"] == observed["health"]
+                    and feet(final["pos"]) == feet(observed["pos"])
+                    and math.dist(final["pos"], observed["pos"]) <= .2):
+                return final
+        except (APIError, _Failure):
+            return None
+        finally:
+            context.pop("navigation_settle_deadline", None)
+        return None
     def _cautious_guard(self, context, status):
         """Trusted local emergency bootstrap: no backend pickup/table travel."""
         self._overworld(status)
@@ -1972,9 +2482,9 @@ class SurvivalSkills:
             raise _Failure("safety_changed", "Relaxed work state changed during its final checks")
 
     def execute(self, name: str, args: Dict[str, Any], cancel_event=None, *, recovery_context=None,
-                cautious=False, relaxed_work=None) -> SkillResult:
+                cautious=False, relaxed_work=None, force_override=False) -> SkillResult:
         """Execute one registered action; partial and unverified results fail explicitly."""
-        context = {"cancel": cancel_event, "acted": False}
+        context = {"cancel": cancel_event, "acted": False, "force_override": bool(force_override)}
         data = {"skill": name}
         try:
             if not isinstance(name, str) or name not in self.ARGUMENTS:
@@ -1983,21 +2493,24 @@ class SurvivalSkills:
             if not isinstance(args, dict) or set(args) - allowed or required - set(args):
                 raise _Failure("bad_args", "Missing or unsupported survival skill arguments")
             if recovery_context is not None:
-                if (name not in {"retreat_from", "canopy_escape"} or not isinstance(recovery_context, dict)
+                if (name not in {"retreat_from", "canopy_escape", "water_escape"} or not isinstance(recovery_context, dict)
                         or set(recovery_context) - {"excluded_targets", "evacuating", "evacuation_origin", "purpose",
-                                                       "recent_targets", "threat_radius", "campaign_ground_escape"}):
+                                                       "recent_targets", "threat_radius", "steps", "campaign_ground_escape"}):
                     raise _Failure("bad_args", "Unsupported retreat recovery context")
                 excluded = recovery_context.get("excluded_targets", [])
                 recent = recovery_context.get("recent_targets", [])
+                steps_val = recovery_context.get("steps", 0)
                 if (not isinstance(excluded, list) or len(excluded) > 8 or not isinstance(recent, list) or len(recent) > 8
                         or type(recovery_context.get("evacuating", False)) is not bool
                         or type(recovery_context.get("campaign_ground_escape", False)) is not bool
-                        or recovery_context.get("purpose", "retreat") not in {"retreat", "canopy_escape"}):
+                        or type(steps_val) is not int or steps_val < 0
+                        or recovery_context.get("purpose", "retreat") not in {"retreat", "canopy_escape", "water_escape"}):
                     raise _Failure("bad_args", "Invalid retreat recovery context")
                 context["recovery_context"] = {"excluded_targets": [self._pos(pos, block=True) for pos in excluded],
                                                "evacuating": recovery_context.get("evacuating", False),
                                                "recent_targets": [self._pos(pos, block=True) for pos in recent],
                                                "purpose": recovery_context.get("purpose", "retreat"),
+                                               "steps": steps_val,
                                                "campaign_ground_escape": recovery_context.get("campaign_ground_escape", False),
                                                "threat_radius": self._number(recovery_context.get("threat_radius", 8), "threat_radius", 1, 64)}
                 if "evacuation_origin" in recovery_context:

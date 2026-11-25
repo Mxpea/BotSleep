@@ -16,7 +16,7 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.request import urlopen
 
 import main as entrypoint
@@ -385,7 +385,7 @@ class LLMRuntimeTests(unittest.TestCase):
             self.assertEqual(self.game.writes(), [])
 
         retries = [record["data"] for record in records if record["event"] == "MODEL_RETRY_SCHEDULED"]
-        self.assertEqual([event["retry_seconds"] for event in retries], [5, 10, 20, 40, 60, 60, 60])
+        self.assertEqual([event["retry_seconds"] for event in retries], [4, 16, 32, 64, 128, 256, 256])
         self.assertEqual([event["consecutive_failures"] for event in retries], list(range(1, 8)))
         self.assertTrue(all(event["http_status"] == 502 for event in retries))
         harness._next_attempt = 0
@@ -423,10 +423,22 @@ class LLMRuntimeTests(unittest.TestCase):
         finally:
             endpoint.release.set()
         self.assertNotEqual(result, 0, output)
-        self.assertIn("llm_request_uncertain", output)
+        self.assertIn("llm_timeout", output)
         self.assertEqual(len(endpoint.requests), 1)
         self.assertEqual(self.game.writes(), [])
         self.assertEqual(self.game.calls[-1], ("logout",))
+
+        strict_endpoint = self.endpoint([tool_response("gather_block", {"pos": [2, 64, 0], "expected_name": "oak_log"})])
+        strict_endpoint.release.clear()
+        try:
+            strict_result, strict_output = self.run_main(
+                strict_endpoint, max_steps=1, once=True, timeout_seconds=0.05,
+                max_repair_attempts=0, recover_uncertain_transport=False,
+            )
+        finally:
+            strict_endpoint.release.set()
+        self.assertNotEqual(strict_result, 0, strict_output)
+        self.assertIn("llm_request_uncertain", strict_output)
 
     def test_model_events_reach_http_monitor_and_disk_with_secrets_redacted(self):
         from debug.logger import FlightRecorder
@@ -452,6 +464,70 @@ class LLMRuntimeTests(unittest.TestCase):
         for value in (secret, "fake-model-key-sentinel", self.game.token):
             self.assertNotIn(value, raw)
         self.assertNotIn("Bearer fake-", raw)
+
+    def test_llm_busy_gate_contention_uses_short_jittered_backoff_without_counting_failure(self):
+        from agent.brain import LLMError
+        from debug.logger import FlightRecorder
+        records = []
+        recorder = FlightRecorder(self.temp.name, enabled=False, sink=records.append)
+        endpoint = self.endpoint([tool_response("wait", {"seconds": 1}, "ok")])
+        harness = self.harness(endpoint, recorder=recorder, max_steps=8, retry_seconds=5)
+        with patch.object(harness.planner.brain.request_gate, "request",
+                          side_effect=LLMError("llm_busy", "Another local request still owns the model slot")):
+            result = self.finish(harness, automatic=True)
+        self.assertEqual(result.error_code, "llm_busy")
+        self.assertEqual(harness.failures, 0)
+        self.assertFalse(harness.paused)
+        retries = [r["data"] for r in records if r["event"] == "MODEL_RETRY_SCHEDULED"]
+        self.assertEqual(len(retries), 1)
+        self.assertGreaterEqual(retries[0]["retry_seconds"], 1.0)
+        self.assertLessEqual(retries[0]["retry_seconds"], 2.75)
+
+    def test_transport_errors_auto_recover_with_4_to_256s_backoff_and_safety_stays_active(self):
+        import requests
+        from debug.logger import FlightRecorder
+        records = []
+        recorder = FlightRecorder(self.temp.name, enabled=False, sink=records.append)
+        endpoint = self.endpoint([tool_response("wait", {"seconds": 1}, "ok")])
+        harness = self.harness(endpoint, recorder=recorder, max_steps=16)
+        side_effects = [
+            requests.ConnectionError("ssl drop"),
+            requests.Timeout("read timeout"),
+            requests.ConnectionError("reset 3"),
+            requests.ConnectionError("reset 4"),
+            requests.Timeout("timeout 5"),
+            requests.ConnectionError("reset 6"),
+            Mock(status_code=200, json=Mock(return_value={
+                "model": "returned-model",
+                "choices": [{"message": {"role": "assistant", "content": None, "tool_calls": [
+                    {"id": "ok_7", "type": "function", "function": {"name": "wait", "arguments": '{"seconds": 1}'}}
+                ]}}],
+            })),
+        ]
+        with patch("agent.brain.requests.Session.post", side_effect=side_effects):
+            for idx in range(1, 7):
+                harness._next_attempt = 0
+                result = self.finish(harness, automatic=True)
+                self.assertIn(result.error_code, {"llm_network_error", "llm_timeout"})
+                self.assertEqual(harness.planner.brain.request_gate.snapshot()["state"], "idle")
+                self.assertFalse(harness.paused)
+                self.assertIsNone(harness._model_blocked)
+            retries = [r["data"] for r in records if r["event"] == "MODEL_RETRY_SCHEDULED"]
+            self.assertEqual([r["retry_seconds"] for r in retries], [4, 16, 32, 64, 128, 256])
+            self.assertGreater(harness._llm_retry_after, time.monotonic() + 200)
+            # Even if idle danger monitor wakes _next_attempt early, _llm_retry_after stops immediate model calls.
+            harness._next_attempt = time.monotonic()
+            waiting = self.finish(harness, automatic=True)
+            self.assertTrue(waiting.success)
+            self.assertTrue(waiting.data.get("waiting"))
+            self.assertGreater(waiting.data.get("llm_backoff_seconds", 0), 0)
+            # Once backoff expires, the 7th attempt succeeds cleanly and resets model failure count.
+            harness._next_attempt = 0
+            harness._llm_retry_after = 0
+            recovered = self.finish(harness, automatic=True)
+            self.assertTrue(recovered.success, recovered)
+            self.assertEqual(harness._model_failures, 0)
+            self.assertEqual(harness.failures, 0)
 
 
 if __name__ == "__main__":

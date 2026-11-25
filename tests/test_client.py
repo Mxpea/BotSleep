@@ -392,6 +392,17 @@ class ClientTests(unittest.TestCase):
             self.assertEqual(self.request.call_count, 1)
             self.assertTrue(self.request.call_args.args[1].endswith("/status"))
 
+    def test_login_retries_429_rate_limited_when_enabled(self):
+        self.request.side_effect = [
+            response({"ok": False, "error": {"code": "rate_limited", "message": "Slow down", "retry_after_s": 0.01}}, 429),
+            response({"ok": True, "token": "tok-multi"}),
+            response({"ok": True, "result": {"ready": True, "pos": [0, 64, 0]}}),
+        ]
+        status = self.client.login(max_wait_seconds=5, retry_rate_limit=True, max_login_attempts=3)
+        self.assertTrue(status["ready"])
+        self.assertEqual(self.client.token, "tok-multi")
+        self.assertEqual(self.request.call_count, 3)
+
 
 class OptionalDependencyTests(unittest.TestCase):
     def test_core_and_debug_exports_do_not_import_optional_rcon(self):

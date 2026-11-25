@@ -17,6 +17,7 @@ from core.domain import finite_number, parse_pos
 
 RETREAT_REPLAN = {"unsafe", "path_not_found", "no_path", "move_unverified", "retreat_unverified", "retreat_interrupted"}
 RETREAT_WAIT_SECONDS = 5
+RETREAT_COOLDOWN_WAIT_SECONDS = 2
 RETREAT_SEARCH_COOLDOWN = 30
 
 
@@ -94,6 +95,13 @@ class RetreatController:
         health, old_health = observation["status"].get("health"), basis.get("health")
         if finite_number(health) and finite_number(old_health) and health < old_health:
             return True
+        origin = parse_pos(observation["status"].get("pos"))
+        old_origin = parse_pos(basis.get("pos"))
+        moved_dist = math.dist(origin, old_origin) if (origin and old_origin) else 0.0
+        # Once 2+ consecutive retreat cooldowns have fired in place without damage or movement,
+        # ignore minor enemy coordinate wander so boxed-in bots do not thrash endlessly.
+        if int(recovery.get("cooldown_cycles") or 0) >= 2 and moved_dist < 2.0:
+            return False
         old_rows = basis.get("nearby_threats")
         if isinstance(old_rows, list):
             previous = {(row.get("id"), row.get("name")): row.get("distance")
@@ -104,11 +112,9 @@ class RetreatController:
                 # failed search; sub-block coordinate noise does not.
                 if old_gap is None or finite_number(old_gap) and row["distance"] <= old_gap - 2:
                     return True
-        origin = parse_pos(observation["status"].get("pos"))
-        old_origin = parse_pos(basis.get("pos"))
         old_threat = parse_pos(basis.get("threat_pos"))
         if origin and old_origin and (
-            math.dist(origin, old_origin) >= 1
+            moved_dist >= 1
             or any(math.floor(a) != math.floor(b) for a, b in zip(origin, old_origin))
         ):
             return True
@@ -150,13 +156,23 @@ class RetreatController:
         if threat is None:
             return decision  # Skill parameter validation still owns malformed input.
         recovery = self.state(observation, threat)
-        if recovery.get("retry_after", 0) > time.time() and not self.changed(observation, threat, recovery):
+        if self.changed(observation, threat, recovery):
+            recovery.pop("retry_after", None)
+            recovery.pop("cooldown_cycles", None)
+            recovery.pop("no_route_exhausted", None)
+            return decision
+        retry_after = recovery.get("retry_after", 0)
+        if retry_after > time.time():
             return Decision(
                 "wait",
                 {"seconds": self.wait_seconds(observation)},
                 "No verified retreat route; observe again before the bounded search cooldown expires",
                 "safety",
             )
+        if retry_after > 0:
+            recovery["cooldown_cycles"] = int(recovery.get("cooldown_cycles", 0)) + 1
+            if recovery["cooldown_cycles"] >= 2 and recovery.get("evacuating") is not True:
+                recovery["no_route_exhausted"] = True
         recovery.pop("retry_after", None)
         return decision
 

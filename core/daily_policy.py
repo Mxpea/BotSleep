@@ -40,6 +40,14 @@ class DailySafetyPolicy:
         self.food_threshold = self.rules.food_threshold
         raw_policy = settings.get("sleep_policy", "strict") if isinstance(settings, Mapping) else "strict"
         self.sleep_policy = raw_policy if raw_policy in {"opportunistic", "strict"} else "strict"
+        self.disable_sleep = (
+            bool(settings.get("disable_sleep", False))
+            if isinstance(settings, Mapping) else False
+        )
+        self.llm_override_on_block = (
+            bool(settings.get("llm_override_on_block", False))
+            if isinstance(settings, Mapping) else False
+        )
         self.advisory = (settings.get("risk_policy") == "advisory" and settings.get("objective", "daily") == "daily"
                          and settings.get("intent", "survival") == "survival" and settings.get("campaign") is not True)
 
@@ -81,6 +89,8 @@ class DailySafetyPolicy:
             return "not_ready", self._wait("The bot is not ready and alive", "observe")
         if status.get("busy"):
             return "busy", self._wait("The backend action is still active", "observe", 1)
+        if status.get("dimension") in {"the_nether", "minecraft:the_nether"}:
+            return "unsafe_dimension", self._wait("Bot is safely in the Nether; hold position without wandering into hazards", "observe", 10)
         if status.get("dimension") not in {"overworld", "minecraft:overworld"}:
             return "unsafe_dimension", self._wait("Daily survival is limited to the overworld")
         if status.get("gamemode") != "survival":
@@ -97,30 +107,113 @@ class DailySafetyPolicy:
             cooled = bool(water_state.get("exhausted")) or (
                 type(water_state.get("retry_after")) in (int, float) and water_state["retry_after"] > time.time()
             )
-            if status.get("in_water") and not cooled:
+            water_override = (
+                self.llm_override_on_block
+                and (cooled or int(water_state.get("steps") or 0) >= 2)
+                and (not status.get("submerged") or (type(status.get("oxygen")) in (int, float) and status["oxygen"] > 8))
+            )
+            if water_override:
+                pass
+            elif status.get("in_water") and (status.get("submerged") or not cooled):
                 return "water_escape", Decision(
                     "water_escape",
                     {},
                     "Exit water onto freshly checked dry ground or swim upward for air",
                     "safety",
                 )
-            return "environment_hazard", self._wait("No environmental rescue route is verified", "recover", 1)
+            elif not water_override:
+                streaks = (context or {}).get("_policy_wait_streaks") or {}
+                if not (self.llm_override_on_block and int(streaks.get("environment_hazard", 0)) >= 2):
+                    return "environment_hazard", self._wait("No environmental rescue route is verified", "recover", 1)
         if status.get("in_vehicle"):
             return "vehicle", self._wait("Leave the vehicle before daily tasks", "recover")
+        streaks = (context or {}).get("_policy_wait_streaks") or {}
         if status.get("on_ground") is not True and not status.get("is_sleeping"):
-            return "unstable", self._wait("Wait for stable footing", "recover", 1)
-        hostiles = self.rules._dangerous_hostiles(observation, status["pos"])
+            if not (self.llm_override_on_block and status.get("in_water") and int(((context or {}).get("water_recovery") or {}).get("steps") or 0) >= 2):
+                if int(streaks.get("unstable", 0)) >= 2:
+                    if status.get("in_water"):
+                        return "water_escape", Decision("water_escape", {}, "Exit water onto checked dry ground after repeated footing stall", "safety")
+                    if self._canopy(observation, context):
+                        return "canopy_escape", self._canopy_decision()
+                    if self.llm_override_on_block:
+                        pass
+                    else:
+                        return "unstable", self._wait("Wait for stable footing", "recover", 1)
+                else:
+                    footing_wait = 0.3 if self._visible_dangerous_hostiles(observation, status["pos"], context) else 1
+                    return "unstable", self._wait("Wait for stable footing", "recover", footing_wait)
+        sealed_underground = self._is_sealed_underground(observation, context)
+        hostiles = self._visible_dangerous_hostiles(observation, status["pos"], context)
         if hostiles:
-            combat = combat_options(observation)
+            combat = combat_options(observation, allow_unarmed=self.llm_override_on_block)
+            ranged_close = any(row.get("name") in RANGED_HOSTILES and dist <= 6.5 for dist, _, row in hostiles)
             ranged = any(row.get("name") in RANGED_HOSTILES for _, _, row in hostiles)
-            if combat.get("allowed") is True and (not ranged or combat.get("shield") is True):
+            close_melee = combat.get("allowed") is True and combat.get("mode") == "melee" and combat.get("distance", 9) <= 2.8 and not ranged_close
+            unarmed_close = combat.get("allowed") is True and combat.get("weapon") is None and combat.get("distance", 9) <= 2.8
+            if combat.get("allowed") is True and (
+                not ranged
+                or combat.get("shield") is True
+                or combat.get("mode") == "shield_advance"
+                or close_melee
+                or unarmed_close
+            ):
                 target = combat["target"]
                 return "combat", Decision("fight_hostile", {"entity_id": target["id"], "expected_name": target["name"]},
                     "Take one locally verified defensive step, then observe again", "safety")
-            return "near_hostile", Decision("retreat_from", {"pos": hostiles[0][1], "distance": 8},
-                "A hostile is within its danger radius; withdraw through freshly checked terrain instead of waiting exposed", "safety")
+            retreat_rec = (context or {}).get("retreat_recovery") or {}
+            spawn_camp = bool((context or {}).get("spawn_camp_alert")) or int((context or {}).get("recent_spawn_deaths") or 0) >= 2
+            retreat_dist = 14 if spawn_camp else 8
+            retreat_failed = retreat_rec.get("no_route_exhausted") is True or (
+                self.llm_override_on_block and int(retreat_rec.get("cooldown_cycles") or 0) >= 1
+            )
+            # In LLM-override healthy exploration/mining, only force retreat_from for
+            # immediate close-range threats (melee <= 2.5m, ranged <= 5.0m, |dy| <= 2.5m).
+            close_retreat_hostiles = hostiles
+            if self.llm_override_on_block and not spawn_camp and status["health"] > self.low_health:
+                close_retreat_hostiles = [
+                    (dist, hpos, entity)
+                    for dist, hpos, entity in hostiles
+                    if abs(float(hpos[1]) - float(status["pos"][1])) <= 2.5
+                    and dist <= (5.0 if entity.get("name") in RANGED_HOSTILES else 2.5)
+                ]
+            if not close_retreat_hostiles:
+                return "normal", None
+            if self.llm_override_on_block and not self._has_valuable_gear(observation):
+                if self._has_nearby_item_drop(observation) and not any(dist <= 2.8 for dist, _, _ in close_retreat_hostiles):
+                    return "normal", None
+                if not any(dist <= 2.8 for dist, _, _ in close_retreat_hostiles) and self._should_emergency_burrow(observation, context):
+                    return "emergency_burrow", Decision("emergency_burrow", {},
+                        "Dig 3 blocks down and cap 1 overhead instead of empty-handed night retreating", "safety")
+                if not any(dist <= 2.5 and row.get("name") == "creeper" for dist, _, row in close_retreat_hostiles) and status["health"] >= 8 and not any(dist <= 2.5 for dist, _, _ in close_retreat_hostiles):
+                    return "normal", None
+            if ((self.sleep_policy == "opportunistic" or self.llm_override_on_block) and retreat_failed
+                    and status["health"] > 4):
+                if combat.get("allowed") is True:
+                    target = combat["target"]
+                    return "combat", Decision("fight_hostile", {"entity_id": target["id"], "expected_name": target["name"]},
+                        "Take one locally verified defensive step when retreat is boxed in", "safety")
+                if not any(dist <= 3.0 for dist, _, _ in close_retreat_hostiles) and self._should_emergency_burrow(observation, context):
+                    return "emergency_burrow", Decision("emergency_burrow", {},
+                        "Dig 3 blocks down and cap 1 overhead instead of repeated hopeless retreat at night", "safety")
+                threshold = 4.0 if (self.llm_override_on_block and spawn_camp) else (2.5 if self.llm_override_on_block else 3.5)
+                if close_retreat_hostiles[0][0] <= threshold:
+                    return "near_hostile", Decision("retreat_from", {"pos": close_retreat_hostiles[0][1], "distance": retreat_dist},
+                        "A hostile is within its danger radius; withdraw through freshly checked terrain instead of waiting exposed", "safety")
+            else:
+                return "near_hostile", Decision("retreat_from", {"pos": close_retreat_hostiles[0][1], "distance": retreat_dist},
+                    "A hostile is within its danger radius; withdraw through freshly checked terrain instead of waiting exposed", "safety")
         nearby = status.get("nearest_hostile")
-        if isinstance(nearby, dict) and self.rules._number(nearby.get("dist")) and nearby["dist"] <= self.rules._threat_distance(nearby.get("name")):
+        if (not sealed_underground and isinstance(nearby, dict)
+                and self.rules._number(nearby.get("dist")) and nearby["dist"] <= self.rules._threat_distance(nearby.get("name"))):
+            unknown_streak = int(streaks.get("hostile_position_unknown", 0))
+            underground_safe_release = bool(
+                self.llm_override_on_block and status["pos"][1] < 56 and status["health"] >= 10
+            )
+            if unknown_streak >= 2 or (underground_safe_release and unknown_streak >= 1):
+                if self._should_emergency_burrow(observation, context):
+                    return "emergency_burrow", Decision("emergency_burrow", {},
+                        "Dig 3 blocks down and cap 1 overhead instead of stalling on an unlocated hostile", "safety")
+                return "normal", None
             return "hostile_position_unknown", self._wait("Nearby hostile has no fresh position for a safe retreat")
         if status.get("is_sleeping"):
             return "sleeping", Decision("auto_sleep", {}, "Observe the existing sleep through the verified sleep skill", "sleep")
@@ -143,6 +236,8 @@ class DailySafetyPolicy:
 
     def _strict_night_block(self, observation, status):
         """Check whether to rest after the verified home-route decision."""
+        if self.disable_sleep:
+            return False
         if not self._night(status):
             return False
         if self.sleep_policy != "opportunistic":
@@ -387,8 +482,10 @@ class DailySafetyPolicy:
             return output.get("name") == item and type(output.get("count")) is int and output["count"] >= count
         return False
 
-    def _food_options(self, observation, *, low_health=False, task_board=None):
+    def _food_options(self, observation, *, low_health=False, task_board=None, context=None):
         candidates = []
+        inspected_food = (context or {}).get("food_inspected_containers") or {}
+        now_ts = time.time()
         if isinstance(task_board, dict):
             for row in self._rows(task_board.get("tasks")):
                 action = row.get("next_action")
@@ -398,6 +495,10 @@ class DailySafetyPolicy:
             if row["name"] in CROP_OUTPUT:
                 candidates.append(Decision("harvest_crop", {"pos": row["pos"], "expected_name": row["name"]}, "Current crop", "food"))
             if row["name"] in {"chest", "barrel", "furnace", "smoker", "blast_furnace"}:
+                rpos = self.rules._pos(row.get("pos"))
+                until = inspected_food.get(self.rules._key(rpos)) if rpos is not None else None
+                if isinstance(until, (int, float)) and until > now_ts:
+                    continue
                 candidates.append(Decision("inspect_container", {"pos": row["pos"]}, "Current nearby container", "food"))
         if self.rules._counts(observation).get("wheat", 0) >= 3:
             candidates.append(Decision("craft_item", {"item": "bread", "count": 1}, "Held wheat", "food"))
@@ -519,6 +620,8 @@ class DailySafetyPolicy:
                         "Return along fresh short terrain evidence; actual path and arrival require re-observation", "safety")
 
     def _bed(self, observation):
+        if self.disable_sleep:
+            return False
         return any(row["name"].endswith("_bed") and self._near_safe(row["pos"], observation, 16)
                    and (row.get("properties") or {}).get("occupied") not in (True, "true") for row in self._blocks(observation))
 
@@ -544,7 +647,7 @@ class DailySafetyPolicy:
         night = self._night(status)
         if not (low or hungry or night):
             return []
-        if low and status["food"] < 18 and ((not night and self._food_options(observation, low_health=True))
+        if low and status["food"] < 18 and ((not night and self._food_options(observation, low_health=True, context=context))
                                                   or self._food_search(observation, context)):
             return []
         if night and (self.sleep_policy == "strict" or self._bed(observation)):
@@ -570,8 +673,9 @@ class DailySafetyPolicy:
             if self._meal(observation):
                 scenario, allowed, radius, model = "food_available", ["eat_food", "wait"], 0, False
                 reason = "Existing safe food has priority"
-            elif (status["health"] <= self.low_health and status["food"] < 18 and not self._night(status)
-                  and self._food_options(observation, low_health=True)):
+            elif (status["health"] <= self.low_health and status["food"] < 18
+                  and (not self._night(status) or self.sleep_policy == "opportunistic")
+                  and self._food_options(observation, low_health=True, context=context)):
                 scenario, allowed, radius, model = "low_health", sorted(FOOD_ACTIONS - {"inspect_container"}), 2, False
                 reason = "Perform one directly verified nearby food action locally, then observe inventory"
             elif self._canopy(observation, context):
@@ -581,13 +685,16 @@ class DailySafetyPolicy:
                 scenario, allowed, radius, model = "shelter_time", ["wait", home.name], 4, False
                 reason = home.reason
             elif status["health"] <= self.low_health:
-                scenario, allowed, radius, model = "low_health", ["wait"], 0, False
+                if self._opportunistic_low_health_release(observation, context):
+                    scenario, allowed, radius, model = "low_health", None, None, True
+                else:
+                    scenario, allowed, radius, model = "low_health", ["wait"], 0, False
                 reason = ("Food is below 18: natural regeneration cannot restore health; seek only verified nearby food"
                           if status["food"] < 18 else "Food permits natural regeneration; observe recovery before production")
                 if self._bootstrap_ready(observation, context):
                     scenario, allowed, radius, model = "cautious_bootstrap", ["run_survival_task", "wait"], 3, True
                     reason = "Food search is exhausted; only a bounded nearby log or wooden-tool goal may be proposed"
-                elif status["food"] < 18:
+                elif status["food"] < 18 and not (self.llm_override_on_block and allowed is None):
                     search = self._food_search(observation, context)
                     scenario = "food_recovery" if search else "food_recovery_blocked"
                     allowed, radius = ([search.name, "wait"], 3) if search else (["wait"], 0)
@@ -598,16 +705,215 @@ class DailySafetyPolicy:
                 scenario, allowed, radius, model = "shelter_time", ["wait", "auto_sleep", "move_to", "set_door"], 4, False
                 reason = "Dusk/night permits verified sleep or separately verified door and short shelter-route steps"
             elif status["food"] <= 6:
-                scenario, allowed, radius, model = "critical_hunger", sorted(FOOD_ACTIONS), 4, True
-                reason = "Only nearby observed food acquisition is allowed; no hunting, mining, building or exploration"
+                if self.llm_override_on_block:
+                    scenario, allowed, radius, model = "critical_hunger", None, None, True
+                    reason = "Warning: food <= 6; prioritize obtaining or cooking food immediately"
+                else:
+                    scenario, allowed, radius, model = "critical_hunger", sorted(FOOD_ACTIONS), 4, True
+                    reason = "Only nearby observed food acquisition is allowed; no hunting, mining, building or exploration"
         result = {"scenario": scenario, "model_allowed": model, "allowed_actions": allowed,
                 "max_action_distance": radius, "reason": reason,
                 "route_evidence_is_actual_trajectory": False, "shelter_spawn_safety": "unknown"}
+        if self.llm_override_on_block:
+            result["warnings"] = self.warnings(observation, context)
         if risks:
             result["risks"] = risks
         if scenario == "cautious_bootstrap":
             result.update(allowed_task_resources=["logs"], allowed_craft_items=sorted(BOOTSTRAP_ITEMS), max_task_count=8)
         return result
+
+    def warnings(self, observation, context=None):
+        """Non-blocking tactical warnings surfaced to the LLM when override mode is active."""
+        context = context or {}
+        if not isinstance(observation, dict) or not isinstance(observation.get("status"), dict):
+            return []
+        status = observation["status"]
+        notes = []
+        if status.get("in_water"):
+            notes.append("in_water: water_escape struggled; use move_to, place_item, or gather_block/clear_foliage to exit water")
+        if self.rules._number(status.get("health")) and status["health"] <= self.low_health:
+            notes.append(f"low_health ({status['health']:.1f}): gather/eat food, craft defense, or dig shelter (food={status.get('food')})")
+        elif self.rules._number(status.get("food")) and status["food"] <= 6:
+            notes.append(f"critical_hunger (food={status['food']}): prioritize eating or obtaining food")
+        if self._night(status):
+            if self.disable_sleep:
+                notes.append("night_or_thunder (sleep disabled): go underground to mine iron/coal/cobble or equip shield+sword instead of surface roaming")
+            else:
+                notes.append("night_or_thunder: surface hostiles active; fight_hostile, dig underground, or shelter")
+        if context.get("spawn_camp_alert") or int(context.get("recent_spawn_deaths") or 0) >= 2:
+            notes.append("SPAWN_CAMP_ALERT: repeated recent deaths near spawn; flee spawn pit, dig 2-3 blocks underground or craft shield+sword")
+        pos = self._point(status.get("pos"))
+        if pos is not None:
+            hostiles = self._visible_dangerous_hostiles(observation, pos, context)
+            if hostiles:
+                retreat_rec = context.get("retreat_recovery") or {}
+                suffix = " (retreat boxed in/failed)" if (retreat_rec.get("no_route_exhausted") or retreat_rec.get("cooldown_cycles")) else ""
+                notes.append(f"hostile_nearby ({len(hostiles)} within danger radius{suffix}): fight_hostile or move_to/dig escape")
+        if not self._has_valuable_gear(observation) and self._has_nearby_item_drop(observation):
+            notes.append("DROPPED_GEAR_NEARBY: Item drops are visible nearby; call run_survival_task(task='recover_drops') to reclaim gear.")
+        if isinstance(context.get("_policy_wait_warning"), str) and context["_policy_wait_warning"]:
+            notes.append(context["_policy_wait_warning"])
+        return notes
+
+    def _opportunistic_low_health_release(self, observation, context=None):
+        status = observation["status"]
+        food_rec = (context or {}).get("food_recovery") or {}
+        if self.llm_override_on_block:
+            return (0 < status["health"] <= self.low_health and status["food"] < 18
+                    and not status.get("in_lava") and not status.get("on_fire")
+                    and not any(distance <= 2.5 for distance, _ in self.rules._hostiles(observation, status["pos"])))
+        if (self.sleep_policy != "opportunistic" or food_rec.get("needs_ai") is not True
+                or not 0 < status["health"] <= self.low_health or status["food"] >= 18
+                or status.get("on_ground") is not True):
+            return False
+        footing = self._footing(observation)
+        if footing is not None and footing.get("name") in TREE_SUPPORTS:
+            return False
+        return not any(distance <= self.threat_radius for distance, _ in self.rules._hostiles(observation, status["pos"]))
+
+    _VALUABLE_GEAR = frozenset({
+        "shield", "bucket", "water_bucket", "lava_bucket", "flint_and_steel",
+        "obsidian", "raw_iron", "iron_ingot", "diamond", "blaze_rod", "ender_pearl",
+        "stone_pickaxe", "stone_sword", "stone_axe", "furnace",
+        "bread", "cooked_beef", "cooked_porkchop", "cooked_mutton", "cooked_chicken",
+    })
+    _VALUABLE_PREFIXES = ("iron_", "diamond_", "netherite_", "golden_")
+
+    def _has_valuable_gear(self, observation):
+        counts = self.rules._counts(observation)
+        return any(
+            count > 0 and (name in self._VALUABLE_GEAR or name.startswith(self._VALUABLE_PREFIXES))
+            for name, count in counts.items()
+        )
+
+    @staticmethod
+    def _has_nearby_item_drop(observation):
+        return any(
+            isinstance(row, dict) and (row.get("type") == "item" or row.get("name") == "item")
+            for row in (observation.get("entities") or [])
+        )
+
+    def _in_active_night_burrow(self, observation, context=None):
+        """Return True when the bot is currently standing inside its tracked night_burrow pit."""
+        ctx = context or {}
+        burrow = ctx.get("night_burrow")
+        status = (observation or {}).get("status") or {}
+        pos = self._point(status.get("pos"))
+        if not isinstance(burrow, dict) or pos is None:
+            return False
+        if burrow.get("generation") != ctx.get("life_generation"):
+            return False
+        b_pos = burrow.get("pos") or burrow.get("burrow_feet")
+        return bool(
+            isinstance(b_pos, (list, tuple))
+            and len(b_pos) == 3
+            and abs(pos[0] - b_pos[0]) <= 2.5
+            and abs(pos[2] - b_pos[2]) <= 2.5
+            and pos[1] <= b_pos[1] + 1.5
+        )
+
+    def _is_sealed_underground(self, observation, context=None):
+        status = observation.get("status") or {}
+        pos = self._point(status.get("pos"))
+        if pos is None:
+            return False
+        if self._in_active_night_burrow(observation, context):
+            return True
+        fx, fy, fz = (math.floor(pos[0]), math.floor(pos[1]), math.floor(pos[2]))
+        blocks = {
+            cell: row
+            for row in extract_blocks(observation)
+            if (cell := cell_coords(row.get("pos"))) is not None
+        }
+        if not blocks:
+            return False
+        overhead = blocks.get((fx, fy + 2, fz))
+        if not overhead or overhead.get("name") not in DailySurvivalSkills.SUPPORT or overhead["name"].endswith("_log"):
+            return False
+        walled = sum(
+            1 for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1))
+            if (blocks.get((fx + dx, fy + 1, fz + dz)) or {}).get("name") in DailySurvivalSkills.SUPPORT
+        )
+        return walled >= 3
+
+    def _visible_dangerous_hostiles(self, observation, origin, context=None):
+        raw = self.rules._dangerous_hostiles(observation, origin)
+        if not raw or not self._is_sealed_underground(observation, context):
+            return raw
+        return [
+            (distance, pos, entity)
+            for distance, pos, entity in raw
+            if abs(float(pos[1]) - float(origin[1])) < 1.5 and distance <= 2.2
+        ]
+
+    def _should_emergency_burrow(self, observation, context=None):
+        status = observation.get("status") or {}
+        if not self.disable_sleep or not self._night(status):
+            return False
+        if status.get("dimension") not in {"overworld", "minecraft:overworld"}:
+            return False
+        pos = self._point(status.get("pos"))
+        if pos is None or pos[1] < 56:
+            return False
+        if status.get("on_ground") is not True or status.get("in_water") or status.get("in_lava") or status.get("in_cobweb"):
+            return False
+        ctx = context or {}
+        if not self._has_valuable_gear(observation):
+            return False
+        if time.time() < float(ctx.get("emergency_burrow_cooldown") or 0):
+            return False
+        burrow = ctx.get("night_burrow")
+        if isinstance(burrow, dict) and burrow.get("generation") == ctx.get("life_generation"):
+            b_pos = burrow.get("pos")
+            if (isinstance(b_pos, (list, tuple)) and len(b_pos) == 3
+                    and abs(pos[0] - b_pos[0]) <= 2 and abs(pos[2] - b_pos[2]) <= 2 and pos[1] <= b_pos[1] + 1):
+                return False
+        shelter = self._shelter(observation)
+        if shelter and shelter.get("inside") is True:
+            return False
+        fx, fy, fz = (math.floor(pos[0]), math.floor(pos[1]), math.floor(pos[2]))
+        blocks = {
+            cell: row
+            for row in extract_blocks(observation)
+            if (cell := cell_coords(row.get("pos"))) is not None
+        }
+        if blocks:
+            overhead = blocks.get((fx, fy + 2, fz))
+            if overhead and overhead.get("name") in DailySurvivalSkills.SUPPORT and not overhead["name"].endswith("_log"):
+                return False
+            for dy in (1, 2, 3, 4):
+                cell = blocks.get((fx, fy - dy, fz))
+                if cell and cell.get("name") not in DailySurvivalSkills.SUPPORT:
+                    return False
+        counts = self.rules._counts(observation)
+        has_shield = counts.get("shield", 0) > 0
+        has_melee = any(counts.get(w, 0) > 0 for w in (
+            "wooden_sword", "stone_sword", "iron_sword", "diamond_sword", "netherite_sword",
+            "stone_axe", "iron_axe", "diamond_axe", "netherite_axe",
+        ))
+        spawn_camp = bool(ctx.get("spawn_camp_alert")) or int(ctx.get("recent_spawn_deaths") or 0) >= 2
+        if has_shield and has_melee and not spawn_camp:
+            return False
+        return True
+
+    @staticmethod
+    def _record_choice_streak(context, scenario, chosen):
+        if not isinstance(context, dict):
+            return chosen
+        prev = context.get("_policy_wait_streaks") or {}
+        if chosen is not None and chosen.name == "wait" and scenario != "normal":
+            streaks = {**prev, scenario: int(prev.get(scenario, 0)) + 1}
+            context["_policy_wait_streaks"] = streaks
+            context.pop("_policy_wait_warning", None)
+        else:
+            if prev and scenario == "normal":
+                context["_policy_wait_warning"] = (
+                    f"Released repeated local wait ({', '.join(sorted(prev))}); move, dig, or engage directly instead of idling."
+                )
+            else:
+                context.pop("_policy_wait_warning", None)
+            context.pop("_policy_wait_streaks", None)
+        return chosen
 
     def choose(self, observation, baseline_decision, task_board=None, context=None):
         scenario, forced = self._basics(observation, context)
@@ -615,48 +921,69 @@ class DailySafetyPolicy:
             # Preserve the harness's bounded retreat search cooldown instead of
             # recreating the same unsafe route every observation.
             if scenario == "near_hostile" and isinstance(baseline_decision, Decision) and baseline_decision.goal == "safety" and baseline_decision.name in {"wait", "retreat_from"}:
-                return baseline_decision
-            return forced
-        if isinstance(baseline_decision, Decision) and baseline_decision.name in {"retreat_from", "canopy_escape"}:
-            return baseline_decision  # Continue an already verified canopy relay.
-        if isinstance(baseline_decision, Decision) and baseline_decision.name == "wait" and baseline_decision.goal == "safety":
-            return baseline_decision
+                return self._record_choice_streak(context, scenario, baseline_decision)
+            return self._record_choice_streak(context, scenario, forced)
+        if isinstance(baseline_decision, Decision) and baseline_decision.name == "canopy_escape":
+            return self._record_choice_streak(context, "canopy_escape", baseline_decision)  # Continue an already verified canopy relay.
+        if isinstance(baseline_decision, Decision) and baseline_decision.name == "retreat_from":
+            evacuating = bool(((context or {}).get("retreat_recovery") or {}).get("evacuating"))
+            keep_retreat = (
+                evacuating
+                and not (self._is_sealed_underground(observation, context)
+                         and not self._visible_dangerous_hostiles(observation, observation["status"]["pos"], context))
+                and not (self.llm_override_on_block and not self._has_valuable_gear(observation))
+            )
+            if keep_retreat or not self.llm_override_on_block:
+                return self._record_choice_streak(context, "near_hostile", baseline_decision)
+        if (isinstance(baseline_decision, Decision) and baseline_decision.name == "wait" and baseline_decision.goal == "safety"
+                and not (self._is_sealed_underground(observation, context)
+                         and not self._visible_dangerous_hostiles(observation, observation["status"]["pos"], context))):
+            return self._record_choice_streak(context, scenario, baseline_decision)
         meal = self._meal(observation)
         if meal:
-            return meal
+            return self._record_choice_streak(context, "food", meal)
         status = observation["status"]
-        if status["health"] <= self.low_health and status["food"] < 18 and not self._night(status):
-            foods = self._food_options(observation, low_health=True, task_board=task_board)
+        if status["health"] <= self.low_health and status["food"] < 18 and (not self._night(status) or self.sleep_policy == "opportunistic"):
+            foods = self._food_options(observation, low_health=True, task_board=task_board, context=context)
             if foods:
-                return foods[0]
+                return self._record_choice_streak(context, "food_recovery", foods[0])
         if self._canopy(observation, context):
-            return self._canopy_decision()
+            return self._record_choice_streak(context, "canopy_escape", self._canopy_decision())
         if self.risk_advice(observation, context):
-            return None
+            return self._record_choice_streak(context, "normal", None)
         if self._night(status) and (home := self._return_home(observation)):
-            return home
+            return self._record_choice_streak(context, "shelter_time", home)
+        if (self._in_active_night_burrow(observation, context)
+                and status.get("is_day") is True and status.get("time_of_day", 0) < 12000
+                and not self._visible_dangerous_hostiles(observation, status["pos"], context)):
+            return self._record_choice_streak(context, "exit_burrow", Decision("exit_burrow", {},
+                "Daytime returned; uncap and exit night_burrow pit cleanly before surface work", "safety"))
+        if self._should_emergency_burrow(observation, context):
+            return self._record_choice_streak(context, "emergency_burrow", Decision("emergency_burrow", {},
+                "Dig 3 blocks down and cap 1 overhead to survive night without combat gear", "safety"))
         if status["health"] <= self.low_health:
             if self._partial(observation) and status["food"] < 18:
-                return self._wait("Collect a complete fresh food and ground observation before resuming bounded recovery", "observe")
+                return self._record_choice_streak(context, "observe", self._wait("Collect a complete fresh food and ground observation before resuming bounded recovery", "observe"))
             if self._bootstrap_ready(observation, context):
-                return None
+                return self._record_choice_streak(context, "normal", None)
             if status["food"] < 18:
                 search = self._food_search(observation, context)
                 if search:
-                    return search
-            if status["food"] < 18:
-                return self._wait("Food recovery is blocked: food is below 18 and no currently verified safe food is available; waiting cannot regenerate health",
-                                  "food_recovery")
-            return self._wait("Observe natural regeneration without hunting or gathering", "recover")
+                    return self._record_choice_streak(context, "food_recovery", search)
+                if self._opportunistic_low_health_release(observation, context):
+                    return self._record_choice_streak(context, "normal", None)
+                return self._record_choice_streak(context, "food_recovery_blocked", self._wait("Food recovery is blocked: food is below 18 and no currently verified safe food is available; waiting cannot regenerate health",
+                                  "food_recovery", 1))
+            return self._record_choice_streak(context, "low_health", self._wait("Observe natural regeneration without hunting or gathering", "recover"))
         if self._strict_night_block(observation, status):
             if (not status["is_day"] or status["thundering"]) and self._bed(observation):
-                return Decision("auto_sleep", {}, "Use a currently observed free bed through the verified sleep skill", "sleep")
+                return self._record_choice_streak(context, "shelter_time", Decision("auto_sleep", {}, "Use a currently observed free bed through the verified sleep skill", "sleep"))
             shelter = self._shelter(observation)
-            return self._wait("Remain in the freshly verified shelter geometry; spawn protection is not proven" if shelter and shelter.get("inside") is True
-                              else "Dusk/night has no fresh verified short shelter route or usable bed", "sleep")
+            return self._record_choice_streak(context, "shelter_time", self._wait("Remain in the freshly verified shelter geometry; spawn protection is not proven" if shelter and shelter.get("inside") is True
+                              else "Dusk/night has no fresh verified short shelter route or usable bed", "sleep"))
         # Critical hunger intentionally releases only the constrained food turn.
         # A baseline resource action is never executed here as model fallback.
-        return None
+        return self._record_choice_streak(context, scenario, None)
 
     def validate(self, decision, observation, context=None):
         if not isinstance(decision, Decision) or not isinstance(decision.args, dict):
@@ -669,15 +996,18 @@ class DailySafetyPolicy:
                 return None
             if forced.name == "retreat_from" and decision.name == forced.name and self._point(decision.args.get("pos")) == forced.args["pos"]:
                 return None
-            if forced.name in {"auto_sleep", "water_escape"} and decision.name == forced.name and (forced.name != "water_escape" or not decision.args):
+            if forced.name in {"auto_sleep", "water_escape", "emergency_burrow", "exit_burrow"} and decision.name == forced.name and (forced.name not in {"water_escape", "emergency_burrow", "exit_burrow"} or not decision.args):
                 return None
             return scenario
         status = observation["status"]
+        if self.disable_sleep and decision.name == "auto_sleep" and not status.get("is_sleeping"):
+            return "sleep_disabled"
         if decision.name == "eat_food":
             return None if self._food_valid(decision, observation) else "food_not_available_or_unsafe"
         if self._meal(observation):
             return "existing_food_has_priority"
-        if (status["health"] <= self.low_health and status["food"] < 18 and not self._night(status)
+        if (status["health"] <= self.low_health and status["food"] < 18
+                and (not self._night(status) or self.sleep_policy == "opportunistic")
                 and self._food_valid(decision, observation, low_health=True)):
             return None
         if self._canopy(observation, context):
@@ -689,23 +1019,40 @@ class DailySafetyPolicy:
         if self._night(status) and (home := self._return_home(observation)):
             return None if decision.name == home.name and decision.args == home.args else "night_requires_verified_sleep_or_shelter_route"
         if status["health"] <= self.low_health:
-            if status["food"] < 18 and not self._night(status) and self._food_valid(decision, observation, low_health=True):
+            if (status["food"] < 18 and (not self._night(status) or self.sleep_policy == "opportunistic")
+                    and self._food_valid(decision, observation, low_health=True)):
                 return None
             search = self._food_search(observation, context) if status["food"] < 18 else None
             if search and decision.name == search.name and decision.args == search.args:
                 return None
             if self._bootstrap_valid(decision, observation, context):
                 return None
+            if self._opportunistic_low_health_release(observation, context) or self.llm_override_on_block:
+                return None
             return "low_health_food_only"
         if self._strict_night_block(observation, status):
+            if self.llm_override_on_block:
+                return None
+            home = self._return_home(observation)
+            if home is not None:
+                return None if decision.name == home.name and decision.args == home.args else "night_requires_verified_sleep_or_shelter_route"
             if decision.name == "auto_sleep" and (not status["is_day"] or status["thundering"]) and self._bed(observation):
                 return None
             return "night_requires_verified_sleep_or_shelter_route"
         if status["food"] <= 6 and not self._food_valid(decision, observation):
+            if self.llm_override_on_block:
+                return None
             return "critical_hunger_nearby_food_only"
         if decision.name == "fight_hostile":
             combat = combat_options(observation, decision.args.get("entity_id"), decision.args.get("expected_name"))
-            return None if combat.get("allowed") is True else combat.get("reason", "combat_not_verified")
+            if combat.get("allowed") is True:
+                return None
+            if self.llm_override_on_block and any(
+                row.get("id") == decision.args.get("entity_id") and row.get("name") == decision.args.get("expected_name")
+                for row in self._rows(observation.get("entities"))
+            ):
+                return None
+            return combat.get("reason", "combat_not_verified")
         return None
 
     def soft_hold(self, safety_decision, observation, context=None):
@@ -718,8 +1065,8 @@ class DailySafetyPolicy:
         if safety_decision.goal == "sleep" and self._strict_night_block(observation, status):
             return NIGHT if status["health"] > self.low_health else None
         if (safety_decision.goal in {"recover", "food_recovery"} and status["health"] <= self.low_health
-                and status["food"] < 18 and not self._night(status)
-                and not self._food_options(observation, low_health=True)
+                and status["food"] < 18 and (not self._night(status) or self.sleep_policy == "opportunistic")
+                and not self._food_options(observation, low_health=True, context=context)
                 and self._food_search(observation, context) is None):
             return LOW_HEALTH
         return None
