@@ -1,5 +1,23 @@
 # 配置、客户端、生存、赛事与监控验证
 
+> 架构变更、异机部署运行步骤、Token/耗时账单与逻辑审计汇总另见 [交接文档](HANDOFF.md)。
+
+## 双 API 溢出与 `v24`–`v31` 九 Bot 1.5 小时进地狱实服压测收官（2026-11-24 – 2026-11-25）
+
+在 `develop-tianya/api-model-opt`（截至 `83ca6b0` + 本次文档更新）上使用全新重置 Leaves 1.21.11 世界（`difficulty=easy`、官方未修改 `mc-agent-api` 1.3.19、`--spread --min-dist 1500`、5400s 预算）、双 API 方案（主路 `https://api.nju-aia.com/v1` `model=default` 实返 `qwen3.6-35b-a3b`；溢出 `https://doro.lat/v1` 请求 `deepseek-v4.1-flash` 实返 `deepseek-ai/DeepSeek-V4.1-Flash-1017`）连续进行了多轮 9-Bot 实服定位、修复与复测（`v31` 完成后按约定停止迭代）：
+
+- **离线全量与定向验证（在所有代码修改后运行）**：
+  - 全量离线单元测试：`BOTSLEEP_RUN_LIVE_TESTS=0 .\.venv\Scripts\python.exe -B -m unittest discover -s tests -q` 通过 **`2185`** 项（跳过 **`10`** 项依赖真实游戏世界的用例），含新增的 [tests/test_overflow_and_loop_fixes.py](../tests/test_overflow_and_loop_fixes.py)（`24` 项）。
+  - 语法检查与示例配置校验：`compileall`、`main.py --check-config`、`git diff --check` 均通过（待本轮文档提交前最终复跑并记录于本节）。
+- **历轮实服关键进展（`v24` → `v31`，均为重置存档 9-Bot 零人工干预压测）**：
+  - **`v24`–`v28`**（`5f448d1`、`9f26d63`、`4d8a9d6`、`7c47a46`）：打通 `nether_portal_approach` 安全目的地放行、修正熔炉 `inspect_container`（196 次）与稳定站位计数循环、实现岸边站位优先与 6m 聚类宽域找水、修复阻塞水误解封与重定位重试清零；`v26` 达 `8/9` 烧铁、`v28` 中 `bot_8` 首次在实服完成 `collect_liquid("water")`（`water_ok=1`）并定位到 `gravel` 缺 `GATHERABLE` 支持；`v25`–`v31` 全员保持 **0 例模型门禁永久死锁**。
+  - **`v29`**（~68m 中止）：提交 `792e95d` 打通砂砾采集与携带砂砾放置；`3/9` 达 `smelt_iron`，`bot_9` 拿齐 `flint: 4 + iron_ingot: 2` 后暴露低血 `BucketSkills._station(health < 12)` 拒收安全水桶（11 连败）以及 `bot_1/bot_4/bot_7` 滞留地下洞穴/坑洞（`y=43..59`）无法返回地表问题。
+  - **`v30`**（`670ab3a`，90m 跑完 9/9 `rc=2`）：放松冷水拾取血量至 `3/4`、引入 `SurvivalSkills.escape_to_surface`，`3` 个 Bot 造出 `flint_and_steel`、`bot_2` 取到水桶；定位到 `bot_1/bot_5` 因 `max_reads=320` 仅爬 12 格或停在柱顶、`bot_8` 因 `already_in_range=True` 短回路 247 步跳过爬升、`bot_2` 在树冠因 `near_hostile` 死等，且全员消耗 `24.02M` tokens（主路 `31.8%` / 溢出 `68.2%`，p50 `4.63s`）。
+  - **`v31`**（`83ca6b0`，**90m 跑完 9/9 `rc=2`**）：
+    - 服务端成就：**`8/9` 达成 `story/smelt_iron`、`7/9` 达成 `story/iron_tools`**、`8` 个 Bot 进入 `nether_portal` 任务阶段，**`0/9` 进入 `the_nether`**（仅 `bot_9` 达 64 死触及 `death_limit` 暂停，其余 8/9 完整跑满 5400s）；
+    - **关键里程碑**：**`bot_3`** 于 `step 1413` 一次取水成功，于 `step 1430..1434` 利用背包携带 `gravel` 现场放挖取得 `flint` 并合成 **`flint_and_steel`**，在 `step 1435..1442` 调用 **`build_portal` 路线 8 次**，暴露最后 1 处局部寻路阻断——`_run_task_nether_portal` 在 64 格搜出超过 32 格的岩浆池后仍调 `SurvivalSkills.execute("move_to")` 触发 `out_of_range: Only local movement within 32 blocks is supported`；另外 `bot_1`/`bot_6` 在有落差的水岸遇到 `collect_liquid` `target_occluded` 射线遮挡；
+    - 性能与额度：`2,007` 次请求 / `1,988` 次响应（`0` 取消），主路由 `635` 次（`31.9%` / `6.66M tok` / p50 `7.48s`）、溢出 `deepseek-v4.1-flash` `1,353` 次（`68.1%` / `13.71M tok` / p50 `4.22s`），累计 **`20,372,954` tokens**（Prompt `20.18M` / Completion `0.19M` / Cached `6.59M`）。
+
 ## 1.5 小时 9-Bot 分散出生实服测试（`nether_bench_v22`）与六类问题修复（2026-11-24）
 
 基线在 `develop-tianya/api-model-opt`（`a951a3b` 之后）对全新重置的 Leaves 1.21.11 世界（`Seed: [-3196205548112340014]`、`difficulty=easy`、`mc-agent-api` 1.3.19，`intent="speedrun"`、`llm_override_on_block=True`）执行了 **5400s（1.5 小时）零手动介入、9-Bot 分散出生测试（`nether_bench_v22`）**：
