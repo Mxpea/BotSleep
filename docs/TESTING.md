@@ -2,6 +2,23 @@
 
 > 架构变更、异机部署运行步骤、Token/耗时账单与逻辑审计汇总另见 [交接文档](HANDOFF.md)。
 
+## BotSleep v2（`develop-tianya/rewrite-v2`）L0–L4 分层重写离线验证（2026-11-25）
+
+- **源码基线与环境**：`develop-tianya/rewrite-v2`（P0–P6 逐阶段提交），Windows / `.venv` Python 3.13；上游 `mc-agent-api` 保持零源码改动。
+- **离线验证结果（不连接真实 Minecraft 服务器，不能替代实服验收）**：
+  - `.\.venv\Scripts\python.exe -B -m unittest discover -s tests_v2 -v`：**43 项全部通过**（`0` 跳过、`0` 失败），涵盖：
+    - `test_00_layer_boundaries.py`：AST 单向层间依赖门禁（L0–L4 零逆向导入、零 legacy `core/agent/skills/debug` 耦合）；
+    - `test_01_simulator.py`：`VirtualMcApiServer` 忠实复现上游 `find_blocks` 跳过空气与非暴露块、`interact(bucket)` `y+0.85` 射线遮挡、`move_to` 无 32 格人为上限且 `canDig=false`；
+    - `tests_v2/kernel/`：WAL `UnifiedWorldDB` 并发写入、`PendingTransactionJournal` 未知写跨重启硬冻结、`instance_lock` 防重入、`AsyncReadPool` 线程本地 Session 隔离与 `ModelRequestGate` 串行并发=1；
+    - `tests_v2/gateway/`：54 格跨树叶墙多跳导航到岩浆池、落差水岸 `y+0.85` 单遮挡识别清除、`Pathfinder3D` 保护谓词 `avoid_block_breaking`、浮水氧气门控；
+    - `tests_v2/bt/`：骷髅抢占触发纯内存 `stop()`（0 网络写）并在威胁清除后无损续播、`PendingUnknownGuard` 冻结后连续 5 帧 0 写入、高树冠地面僵尸豁免下树、`--mode sleep` 夜间自动入睡；
+    - `tests_v2/tasks/`：886 配方 `TaskCatalogue` 递归求解、纯内存空手出生 → 木/石/熔炉/铁镐/水桶/打火石 → 54 格岩浆池 → 10 格黑曜石门框浇筑清内模点火 → 进入 `the_nether` 端到端仿真（严格单写宏帧 `<= 1` 写/帧、0 重复工作台）、45 无条件 + 54 条件 override 赛事门禁与服务端 `/advancements` 计分真值校验；
+    - `tests_v2/planner/`：15 张 `skills_kb/*.md` 零依赖 BM25 召回、60 轮历史 `SemanticCompactor` 严格 `<= 6,600` 字节且 0 孤立 `tool_call/tool_result`、`PORTAL_GATE_READY` 置顶门控、`AsyncLLMReplanNode` 非阻塞思考与抢占丢弃过期提案；
+    - `test_06_observability_and_cutover.py`：`main.py` 切流 v2、`bot_sleep.py`/`client.py` 兼容薄转发、`FlightRecorder` 密钥脱敏、`MonitorServer` 只读快照。
+  - `.\.venv\Scripts\python.exe main.py --config config.example.yaml --check-config`：通过（`Configuration valid.`）。
+- **尚未验证（需下一阶段启动真实服务器）**：
+  - 尚未连接 `E:\Program Save\VisualCode\minecraft-server`（重置存档）执行真实 Leaves 1.21.11 + `mc-agent-api` 单 Bot 或 9-Bot 实服冒烟测试；离线仿真通过不等于实服通过。
+
 ## 双 API 溢出与 `v24`–`v31` 九 Bot 1.5 小时进地狱实服压测收官（2026-11-24 – 2026-11-25）
 
 在 `develop-tianya/api-model-opt`（截至 `83ca6b0` + 本次文档更新）上使用全新重置 Leaves 1.21.11 世界（`difficulty=easy`、官方未修改 `mc-agent-api` 1.3.19、`--spread --min-dist 1500`、5400s 预算）、双 API 方案（主路 `https://api.nju-aia.com/v1` `model=default` 实返 `qwen3.6-35b-a3b`；溢出 `https://doro.lat/v1` 请求 `deepseek-v4.1-flash` 实返 `deepseek-ai/DeepSeek-V4.1-Flash-1017`）连续进行了多轮 9-Bot 实服定位、修复与复测（`v31` 完成后按约定停止迭代）：

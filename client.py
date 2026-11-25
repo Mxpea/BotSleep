@@ -1,8 +1,8 @@
-"""Compatibility import for the standalone sleep script.
+"""Compatibility import shim for standalone scripts.
 
-Both entrypoints use the same protocol implementation and error handling.
+Forwards directly to v2 L0 MinecraftAgentClient without duplicating protocol code.
 """
 
-from core.client import APIError, MinecraftAgentClient
+from v2.kernel.client import APIError, MinecraftAgentClient
 
 __all__ = ["APIError", "MinecraftAgentClient"]
