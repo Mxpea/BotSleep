@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from v2.bt.blackboard import Blackboard
 from v2.bt.kernel import Node, Status
-from v2.domain import HOSTILE_MOBS, RANGED_MOBS, block_coord, dist2_xz, dist3
+from v2.domain import HAZARD_BLOCKS, HOSTILE_MOBS, NON_SOLID_BLOCKS, RANGED_MOBS, block_coord, dist2_xz, dist3
 from v2.gateway.surface_swim import SurfaceSwimExecutor
 from v2.gateway.world_proxy import VirtualWorldGateway
 from v2.kernel.client import APIError
@@ -68,6 +68,8 @@ class HardSafetyBranch(Node):
         self._evasion_active: bool = False
         self._evasion_dwell_until: float = 0.0
         self._shield_raised: bool = False
+        self._drown_last_pos: Optional[Tuple[float, float, float]] = None
+        self._drown_stalls: int = 0
 
     def _collect_actionable_threats(self, bb: Blackboard, max_radius: float) -> List[Tuple[float, Dict[str, Any]]]:
         """Collect all actionable hostiles within max_radius, exempting unreachable canopy/burrow ground melee mobs."""
@@ -194,14 +196,36 @@ class HardSafetyBranch(Node):
             )
             return status_ret
 
-        # 2) Low oxygen / drowning -> pure surface buoyancy pulse
+        # 2) Low oxygen / drowning -> dig ceiling if trapped beneath stone, else pure surface buoyancy pulse
         if st.get("submerged") and bb.oxygen <= self.low_oxygen_threshold:
+            if self._drown_last_pos is not None and (bb.pos[1] - self._drown_last_pos[1]) < 0.35:
+                self._drown_stalls += 1
+            else:
+                self._drown_stalls = 0
+            self._drown_last_pos = bb.pos
+            if self._drown_stalls >= 1:
+                fx, fy, fz = block_coord(bb.pos)
+                for dy in (2, 1):
+                    c = (fx, fy + dy, fz)
+                    ent = self.gateway.get_block(bb.dimension, c, allow_fetch=True)
+                    if ent is not None and ent.name not in NON_SOLID_BLOCKS and ent.name not in HAZARD_BLOCKS and ent.name != "bedrock":
+                        bb.last_action_outcome = "safety_surface_dig_ceiling"
+                        status_ret, _, ok = self._write_action(
+                            bb, "dig", {"pos": list(c), "collect": False},
+                            lambda _c=c: self.gateway.client.dig(list(_c), collect=False),
+                        )
+                        if ok:
+                            self.gateway.write_through_dig(bb.dimension, c)
+                            self._drown_stalls = 0
+                        return status_ret
             res = self._swimmer.swim_step((bb.pos[0], bb.pos[1] + 2.0, bb.pos[2]), st)
             bb.writes_this_tick += 1
             if res.status == "UNKNOWN":
                 bb.set("pending_frozen", True, writer=self.name)
             bb.last_action_outcome = f"safety_surface:{res.status.lower()}"
             return Status.RUNNING
+        self._drown_stalls = 0
+        self._drown_last_pos = None
 
         # 3) Actionable nearby hostile threat (with enter/exit hysteresis + shield posture)
         threat = self._find_actionable_threat(bb)

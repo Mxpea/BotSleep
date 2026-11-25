@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 from v2.bt.blackboard import Blackboard
@@ -80,6 +81,25 @@ class IntentCompiler:
             )
         return tools
 
+    def _normalize_item_and_count(self, raw_item: str, raw_count: int) -> Tuple[str, int]:
+        """Normalize accidental 'acquire:furnacex1' or 'furnacex1' item strings from LLM tool calls."""
+        item = str(raw_item or "").strip()
+        count = max(1, int(raw_count or 1))
+        if item.startswith(("acquire:", "mine:")):
+            item = item.split(":", 1)[1].strip()
+        m = re.fullmatch(r"(.+?)x(\d+)", item)
+        if m:
+            is_known = (
+                self.catalogue.get_best_recipe(item, {}) is not None
+                or item in self.catalogue.gathering
+                or item in self.catalogue.smelting
+            )
+            if not is_known:
+                item = m.group(1)
+                if raw_count <= 1:
+                    count = max(1, int(m.group(2)))
+        return item, count
+
     def compile_tool_call(
         self,
         name: str,
@@ -120,8 +140,9 @@ class IntentCompiler:
 
         if name == "run_goal":
             goal = str(args.get("goal", ""))
-            item = str(args.get("item", ""))
-            count = max(1, int(args.get("count", 1) or 1))
+            raw_item = str(args.get("item", "")).strip()
+            raw_count = int(args.get("count", 1) or 1)
+            item, count = self._normalize_item_and_count(raw_item, raw_count)
             if goal == "acquire":
                 if not item:
                     return None, {"ok": False, "error": "missing_item"}

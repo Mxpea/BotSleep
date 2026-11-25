@@ -55,6 +55,43 @@ class LocalRecoveryBranch(Node):
         self._last_bed_scan_at: float = 0.0
         self._last_bed_scan_pos: Optional[Tuple[float, float, float]] = None
         self._cached_beds: List[Coord3] = []
+        self._swim_consec: int = 0
+        self._swim_anchor: Optional[Tuple[float, float, float]] = None
+        self._swim_cooldown_until: float = 0.0
+
+    def _pick_swim_target(self, bb: Blackboard) -> Tuple[float, float, float]:
+        """Prefer nearby dry/air shore block over blind yaw=0 when escaping water."""
+        fx, fy, fz = block_coord(bb.pos)
+        for dy in (1, 0):
+            for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                cand = (fx + dx, fy + dy, fz + dz)
+                below = self.gateway.get_block(bb.dimension, (cand[0], cand[1] - 1, cand[2]), allow_fetch=False)
+                feet = self.gateway.get_block(bb.dimension, cand, allow_fetch=False)
+                head = self.gateway.get_block(bb.dimension, (cand[0], cand[1] + 1, cand[2]), allow_fetch=False)
+                if (
+                    feet is not None and feet.name in NON_SOLID_BLOCKS and feet.name != "water"
+                    and (head is None or (head.name in NON_SOLID_BLOCKS and head.name != "water"))
+                    and (below is None or below.name not in NON_SOLID_BLOCKS)
+                ):
+                    return (cand[0] + 0.5, float(cand[1]) + 0.5, cand[2] + 0.5)
+        return (bb.pos[0], bb.pos[1] + 2.0, bb.pos[2])
+
+    def _try_dig_swim_ceiling(self, bb: Blackboard) -> Optional[Status]:
+        """If trapped in water beneath a breakable solid ceiling, dig an overhead air opening."""
+        fx, fy, fz = block_coord(bb.pos)
+        for dy in (2, 1):
+            c = (fx, fy + dy, fz)
+            ent = self.gateway.get_block(bb.dimension, c, allow_fetch=True)
+            if ent is not None and ent.name not in NON_SOLID_BLOCKS and ent.name not in HAZARD_BLOCKS and ent.name != "bedrock":
+                bb.last_action_outcome = "recovery_swim_dig_ceiling"
+                res_status = self._write_action(
+                    bb, "dig", {"pos": list(c), "collect": False},
+                    lambda _c=c: self.gateway.client.dig(list(_c), collect=False),
+                )
+                if res_status == Status.RUNNING and not bb.get("pending_frozen"):
+                    self.gateway.write_through_dig(bb.dimension, c)
+                return res_status
+        return None
 
     def _find_nearby_beds(self, bb: Blackboard) -> List[Coord3]:
         """Return cached nearby beds, running typed gateway scan at most once per bed_scan_interval (or 6m move)."""
@@ -124,14 +161,39 @@ class LocalRecoveryBranch(Node):
                     lambda: self.gateway.client.use_item(food),
                 )
 
-        # 2) Water shore buoyancy when idle in water or losing air
-        if (st.get("in_water") or st.get("submerged")) and (not bb.active_goal_name or bb.oxygen < 18):
-            res = self._swimmer.swim_step((bb.pos[0], bb.pos[1] + 2.0, bb.pos[2]), st)
-            bb.writes_this_tick += 1
-            if res.status == "UNKNOWN":
-                bb.set("pending_frozen", True, writer=self.name)
-            bb.last_action_outcome = f"recovery_swim:{res.status.lower()}"
-            return Status.RUNNING
+        # 2) Water shore buoyancy: escape drowning or do a bounded shore-hop without starving AI replan
+        in_water = bool(st.get("in_water") or st.get("submerged"))
+        if not in_water:
+            self._swim_consec = 0
+            self._swim_anchor = None
+        else:
+            needs_air = bool(st.get("submerged")) or bb.oxygen < 16
+            now = time.monotonic()
+            if needs_air or (not bb.active_goal_name and now >= self._swim_cooldown_until):
+                if self._swim_anchor is None:
+                    self._swim_anchor = bb.pos
+                stalled_in_water = self._swim_consec >= 2 and dist3(bb.pos, self._swim_anchor) < 0.5
+                if stalled_in_water:
+                    dig_res = self._try_dig_swim_ceiling(bb)
+                    if dig_res is not None:
+                        self._swim_consec = 0
+                        self._swim_anchor = bb.pos
+                        return dig_res
+                if self._swim_consec >= 3 and (not needs_air or stalled_in_water):
+                    # Yield to PhysicalUnstuckBranch / AsyncLLMReplanNode instead of spinning forever
+                    self._swim_cooldown_until = now + 8.0
+                    self._swim_consec = 0
+                    self._swim_anchor = None
+                    bb.last_action_outcome = "recovery_swim_yield"
+                    return Status.FAILURE
+                target_pos = self._pick_swim_target(bb)
+                res = self._swimmer.swim_step(target_pos, st)
+                bb.writes_this_tick += 1
+                self._swim_consec += 1
+                if res.status == "UNKNOWN":
+                    bb.set("pending_frozen", True, writer=self.name)
+                bb.last_action_outcome = f"recovery_swim:{res.status.lower()}"
+                return Status.RUNNING
 
         # 3) Canopy descent: safe drop (<= 4m, no lava) -> dig leaf; unsafe tall canopy -> lateral-to-trunk descent!
         fx, fy, fz = block_coord(bb.pos)

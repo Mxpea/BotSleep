@@ -257,3 +257,64 @@ class TestOpsAndCliCutover(unittest.TestCase):
             finally:
                 client.close()
                 db.close()
+
+    def test_local_recovery_water_trap_yields_and_digs_ceiling_and_run_goal_normalizes_suffix(self) -> None:
+        from tests_v2.sim.virtual_mc_api import VirtualMcApiServer, VirtualMcHttpServer
+        from v2.bt.blackboard import Blackboard
+        from v2.bt.branches.local_recovery import LocalRecoveryBranch
+        from v2.bt.kernel import Status
+        from v2.gateway import VirtualWorldGateway
+        from v2.kernel import MinecraftAgentClient, PendingTransactionJournal, UnifiedWorldDB
+        from v2.planner import HorizonSelector, IntentCompiler
+        from v2.tasks import TaskCatalogue
+
+        sim = VirtualMcApiServer(spawn_pos=(0.5, 44.0, 0.5))
+        sim.fill(-1, 43, -1, 1, 46, 1, "stone")
+        sim.set_block(0, 44, 0, "water")
+        sim.set_block(0, 45, 0, "water")
+        with tempfile.TemporaryDirectory() as td, VirtualMcHttpServer(sim) as srv:
+            db = UnifiedWorldDB.for_scope(td, srv.base_url, "SwimTrapBot", "w1")
+            client = MinecraftAgentClient(srv.base_url, "SwimTrapBot", "pw")
+            try:
+                client.login()
+                journal = PendingTransactionJournal(db)
+                gw = VirtualWorldGateway(client, db=db)
+                rec = LocalRecoveryBranch(gw, journal, enable_auto_sleep=False)
+                bb = Blackboard()
+                bb.tick = 1
+                bb.status = {
+                    "pos": [0.5, 44.8, 0.5],
+                    "dimension": "overworld",
+                    "health": 18.0,
+                    "food": 20,
+                    "oxygen": 20,
+                    "in_water": True,
+                    "submerged": False,
+                    "alive": True,
+                }
+                outcomes = []
+                statuses = []
+                for tick in range(1, 9):
+                    bb.tick = tick
+                    st = rec.update(bb)
+                    statuses.append(st)
+                    outcomes.append(bb.last_action_outcome)
+                self.assertIn("recovery_swim_dig_ceiling", outcomes)
+                self.assertIn(Status.FAILURE, statuses)
+
+                cat = TaskCatalogue()
+                ctx = None  # type: ignore[assignment]
+                from v2.primitives import PrimitiveContext
+                ctx = PrimitiveContext(gw, journal)
+                compiler = IntentCompiler(ctx, cat, objective="daily")
+                task1, res1 = compiler.compile_tool_call("run_goal", {"goal": "acquire", "item": "furnacex1", "count": 1}, bb)
+                self.assertTrue(res1["ok"])
+                self.assertEqual(res1["mounted"], "acquire:furnacex1")
+                self.assertIsNotNone(task1)
+                task2, res2 = compiler.compile_tool_call("run_goal", {"goal": "mine", "item": "acquire:raw_ironx8", "count": 1}, bb)
+                self.assertTrue(res2["ok"])
+                self.assertEqual(res2["mounted"], "mine:raw_ironx8")
+                self.assertIsNotNone(task2)
+            finally:
+                client.close()
+                db.close()
