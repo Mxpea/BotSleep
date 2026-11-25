@@ -246,11 +246,14 @@ def _known_conditional_advancements() -> Optional[set[str]]:
         return None
     try:
         raw = json.loads(rules_path.read_text(encoding="utf-8"))
-        entries = raw.get("advancements") or raw.get("scoring") or []
-        if isinstance(entries, dict):
-            return {k for k, v in entries.items() if isinstance(v, dict) and v.get("conditional")}
+        entries = raw.get("entries") or []
         if isinstance(entries, list):
-            return {e["id"] for e in entries if isinstance(e, dict) and isinstance(e.get("id"), str)}
+            return {
+                e["id"] for e in entries
+                if isinstance(e, dict)
+                and isinstance(e.get("id"), str)
+                and e.get("classification") == "conditional"
+            }
     except Exception:
         return None
     return None

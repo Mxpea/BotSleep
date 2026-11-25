@@ -324,19 +324,25 @@ class VirtualWorldGateway:
         if mode == "pour":
             verify_coords.append((tx, ty - 1, tz))
 
-        # Enumerate candidate solid stand positions in ring r in [1.0, 2.9], dy in [-1, 0, 1, 2]
+        # Enumerate candidate solid stand positions around target.
+        # Pouring onto high blocks (e.g. top of a portal frame at y+4) is reachable from below because eye_y = sy + 1.62.
+        dy_options = (0, 1, 2, -1) if mode == "pickup" else (0, -1, -2, -3, -4, 1)
         candidates: List[Coord3] = []
         for dx in range(-3, 4):
             for dz in range(-3, 4):
                 horiz = math.hypot(dx, dz)
                 if horiz < 0.9 or horiz > 2.9:
                     continue
-                for dy in (0, 1, 2, -1):
+                for dy in dy_options:
                     sx, sy, sz = tx + dx, ty + dy, tz + dz
                     feet = (sx + 0.5, float(sy), sz + 0.5)
                     eye = (sx + 0.5, sy + 1.62, sz + 0.5)
-                    if dist3(feet, (tx + 0.5, ty + 0.5, tz + 0.5)) <= 3.15 and dist3(eye, aim) <= 4.45:
-                        candidates.append((sx, sy, sz))
+                    if mode == "pickup":
+                        if dist3(feet, (tx + 0.5, ty + 0.5, tz + 0.5)) <= 3.15 and dist3(eye, aim) <= 4.45:
+                            candidates.append((sx, sy, sz))
+                    else:
+                        if dist3(eye, aim) <= 4.45:
+                            candidates.append((sx, sy, sz))
 
         candidates.sort(key=lambda c: dist3((c[0] + 0.5, float(c[1]), c[2] + 0.5), player_pos))
         # Prefetch stance cells + ray cells for top 12 candidates in ONE batch call!

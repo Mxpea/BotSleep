@@ -386,9 +386,10 @@ class VirtualMcApiServer:
         gx, gy, gz = goal
 
         def reached(cell: Tuple[int, int, int]) -> bool:
+            eff_range = max(goal_range, 0.25)
             if gy is None:
-                return math.hypot(cell[0] - gx, cell[2] - gz) <= max(goal_range, 1.0)
-            return math.dist(cell, (gx, gy, gz)) <= max(goal_range, 1.0)
+                return math.hypot(cell[0] - gx, cell[2] - gz) <= eff_range
+            return math.dist(cell, (gx, gy, gz)) <= eff_range
 
         if reached(start):
             return [start]
@@ -700,7 +701,17 @@ class VirtualMcApiServer:
                         raise SimAPIError("target_occluded", f"ray to {aim} blocked by {cname} at {cell}", {"blocker": list(cell), "blocker_name": cname})
                 self.consume("bucket", 1)
                 self.give(f"{blk}_bucket", 1)
-                self.set_block(tx, ty, tz, "air")
+                # Real Minecraft 2x2 infinite water source rule: reforms if >= 2 horizontal water sources neighbor it
+                if blk == "water":
+                    water_adj = sum(
+                        1 for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1))
+                        if self.block_name(tx + dx, ty, tz + dz) == "water"
+                        and str(self.block_props(tx + dx, ty, tz + dz).get("level", "0")) == "0"
+                    )
+                    if water_adj < 2:
+                        self.set_block(tx, ty, tz, "air")
+                else:
+                    self.set_block(tx, ty, tz, "air")
                 return {"filled": f"{blk}_bucket", "pos": [tx, ty, tz]}
 
             if item in {"water_bucket", "lava_bucket"}:
