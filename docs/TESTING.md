@@ -1,6 +1,16 @@
 # 配置、客户端、生存、赛事与监控验证
 
-> 架构变更、异机部署运行步骤、Token/耗时账单与逻辑审计汇总另见 [交接文档](HANDOFF.md)。
+> 架构变更、异机部署运行步骤、Token/耗时账单与逻辑审计汇总另见 [交接文档](HANDOFF.md)。过夜全量测试与 API/Token 专题报告见 [OVERNIGHT_TEST_REPORT_20261126.md](OVERNIGHT_TEST_REPORT_20261126.md) 与 [API_AND_TOKEN_REPORT_20261126.md](API_AND_TOKEN_REPORT_20261126.md)。
+
+## BotSleep v2 过夜单 Bot 迭代 + 9-Bot 30 分钟实服压测 + 代码覆盖（2026-11-26）
+
+- **源码基线与环境**：`develop-tianya/rewrite-v2`（提交 `5e176a8` / `e528d86` / `cf39ed1` → `5bd6766` → `c53d3ad` → `c696764` → 终态修复 **`7b14b12`** + 本次文档同步），Windows 11 / `.venv` Python 3.13，Leaves `1.21.11`（`difficulty=easy`、每次实验前删档重置），官方未修改 `mc-agent-api` `1.3.19`（`http://127.0.0.1:18900/api/v1`，`git diff --stat` 为空）。
+- **离线验证与代码覆盖（`7b14b12` 终态，不连接真实服务器）**：
+  - `.\.venv\Scripts\python.exe -B -m unittest discover -s tests_v2 -v`：**77 项全部通过**（`33.727s`，`0` 跳过、`0` 失败）。
+  - 标准库 `trace.Trace` + `dis.findlinestarts`（`scratch/measure_v2_coverage.py`，`77/77` OK，`105.651s`）：`v2/` 全部 62 个文件累计 **`6,529 / 8,089` 可执行行 = `80.71%`**（`domain.py` 95.08%、`observability` 85.52%、`planner` 84.15%、`bt` 83.54%、`gateway` 82.90%、`tasks` 81.69%、`kernel` 78.71%、`primitives` 76.40%、`app.py` 57.84%）。
+- **实服结果汇总（共 5 场 / 13 个 Bot 实例 / ~4.96 Bot·小时，详情见两份专题报告）**：
+  - **单 Bot（仅主路 `qwen3.6-35b-a3b`）**：R1（competition，`290.55s`）修复 `HorizonSelector` `x1` 误拼（`5bd6766`）；R1b（competition，`274.41s`）获 `2` 成就 **`comp_score=10`** 并修复垫脚轮询休眠与空闲 `update_progress` 连发（`c53d3ad`）；R2（daily+speedrun，`561.73s`）修复 `LocalRecoveryBranch` 暗水无限游泳锁死与 `furnacex1x1` 拼接（`c696764`）；R3（daily+speedrun，`491.09s`）跑满 480s `rc=0`，零卡死达成木镐→石镐→熔炉→煤矿→铁镐分支并获 2 成就。
+  - **9-Bot 分散出生 30 分钟双 API 压测（`v2_live9`，`--min-dist 1500` 实测 `1731.1`）**：**9/9 全员 `rc=0` 正常退出**（`1800.24s–1808.78s`），`0` Python 未捕获异常；Leaves 服务端累计 **21 项成就**（`9/9` 石镐、`2/9` 铁锭、`1/9` 铁镐），共 **6 次死亡**（4 名 Bot 全场 0 死）；全夜累计真实调用 `338` 次主路（`0` 溢出、`0` `unknown` 写入、`486,306` total tokens）；赛后对 `bot_6` 500 拍零位移空转与丢弃异步请求遥测缺失已在 **`7b14b12`** 根因修复（待下一轮实服长跑复测，`30 min` 内尚无 Bot 进入 `the_nether`）。
 
 ## BotSleep v2（`develop-tianya/rewrite-v2`）L0–L4 分层重写离线与实服验证（2026-11-26）
 
