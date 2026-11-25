@@ -215,4 +215,7 @@ class TestOpsAndCliCutover(unittest.TestCase):
         comp_horizon = HorizonSelector(cat, objective="competition", competition=comp)
         dp = DepsPlanner(None, comp_compiler, comp_horizon)
         msgs, _tools = dp.build_request_payload(bb)
-        self.assertIn("comp_score=0", msgs[-1]["content"])
+        content = msgs[-1]["content"]
+        self.assertIn("comp_score=0", content)
+        self.assertIn('select_task(task_id="minecraft:story/mine_stone")', content)
+        self.assertNotIn("x1)", content.split("CANDIDATES:")[1].split("PROGRESS_CARD")[0])

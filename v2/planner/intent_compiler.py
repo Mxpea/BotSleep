@@ -98,6 +98,7 @@ class IntentCompiler:
                 tid = str(args.get("task_id", ""))
                 res = self.competition.select_task(tid)
                 if not res.get("ok"):
+                    res = {**res, "selectable_sample": [e.id for e in self.competition.selectable_tasks()[:5]]}
                     return None, res
                 task = self.competition.build_task(self.ctx, tid)
                 return task, res

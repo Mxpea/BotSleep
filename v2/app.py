@@ -231,6 +231,9 @@ def run_v2_session(
                         comp_mgr.sync_server_advancements(client)
                     except APIError:
                         pass
+                    if rt.bb.goal_status == "COMPLETED" and comp_mgr.active_task_id is not None:
+                        # Subgoal completed on client without earning its server advancement (e.g. shield craft before block): defer cleanly so bot advances!
+                        comp_mgr.force_exit_task("subgoal_completed_without_server_advancement")
                     comp_key = (comp_mgr.total_score, len(comp_mgr.completed_ids))
                     if comp_key != last_comp_key:
                         last_comp_key = comp_key
