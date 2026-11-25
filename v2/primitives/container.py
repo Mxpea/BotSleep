@@ -1,8 +1,15 @@
-"""L3a Primitive 5: ContainerPrimitive (multi-furnace parallel batch smelt + chest deposit/withdraw)."""
+"""L3a Primitive 5: ContainerPrimitive (upstream mc-agent-api window/view & window/act for furnaces and chests).
+
+Exact upstream `mc-agent-api/src/session.js` schema:
+- Furnace sections: `input`, `fuel`, `output`; info: `{burning, progress, fuel_left}`.
+- Chest/barrel/shulker sections: `container`.
+- Ops: `{"op": "put", "to": <section>, "item": ..., "count": ...}` and
+       `{"op": "take", "from": <section>, "item": ..., "count": ...}`.
+"""
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from v2.bt.blackboard import Blackboard
 from v2.domain import Coord3, dist3
@@ -15,31 +22,51 @@ class ContainerPrimitive:
         self.ctx = ctx
         self._nav = NavigatePrimitive(ctx)
 
-    def smelt_batch_step(
+    def inspect_window(self, bb: Blackboard, pos: Coord3) -> ActionOutcome:
+        """Open and inspect a furnace/chest via `window/view` (<= 1 write-locked action)."""
+        center = (pos[0] + 0.5, pos[1] + 0.5, pos[2] + 0.5)
+        if dist3(bb.pos, center) > 4.5:
+            return self._nav.step_to(bb, center, tolerance=3.2)
+        return self.ctx.execute_write(
+            bb,
+            "window/view",
+            {"pos": list(pos)},
+            lambda: self.ctx.client.window_view(list(pos)),
+            unknown_center=pos,
+        )
+
+    def load_furnace(
         self,
         bb: Blackboard,
         furnace_pos: Coord3,
         *,
-        input_item: str,
-        input_count: int,
+        input_item: Optional[str] = None,
+        input_count: int = 0,
         fuel_item: Optional[str] = None,
-        fuel_count: int = 1,
-        harvest_output: bool = True,
+        fuel_count: int = 0,
     ) -> ActionOutcome:
-        """Load input + fuel and/or harvest smelted output in ONE bounded window_act call."""
+        """Put raw input and/or fuel into furnace using exact upstream `{op: put, to: input|fuel}` schema."""
         center = (furnace_pos[0] + 0.5, furnace_pos[1] + 0.5, furnace_pos[2] + 0.5)
         if dist3(bb.pos, center) > 4.5:
             return self._nav.step_to(bb, center, tolerance=3.2)
 
-        ops: List[Dict[str, object]] = []
-        if input_count > 0 and bb.inventory_counts.get(input_item, 0) > 0:
-            ops.append({"op": "put", "slot": "input", "item": input_item, "count": min(input_count, bb.inventory_counts[input_item])})
+        ops: List[Dict[str, Any]] = []
+        if input_item and input_count > 0 and bb.inventory_counts.get(input_item, 0) > 0:
+            ops.append({
+                "op": "put",
+                "to": "input",
+                "item": input_item,
+                "count": min(int(input_count), bb.inventory_counts[input_item]),
+            })
         if fuel_item and fuel_count > 0 and bb.inventory_counts.get(fuel_item, 0) > 0:
-            ops.append({"op": "put", "slot": "fuel", "item": fuel_item, "count": min(fuel_count, bb.inventory_counts[fuel_item])})
-        if harvest_output:
-            ops.append({"op": "take", "slot": "output", "count": 64})
+            ops.append({
+                "op": "put",
+                "to": "fuel",
+                "item": fuel_item,
+                "count": min(int(fuel_count), bb.inventory_counts[fuel_item]),
+            })
         if not ops:
-            return ActionOutcome("FAILED_LOCAL", "window_act", reason="nothing_to_smelt_or_harvest")
+            return ActionOutcome("FAILED_LOCAL", "window/act", reason="nothing_to_load")
 
         return self.ctx.execute_write(
             bb,
@@ -49,19 +76,63 @@ class ContainerPrimitive:
             unknown_center=furnace_pos,
         )
 
+    def harvest_furnace(self, bb: Blackboard, furnace_pos: Coord3, *, count: int = 64) -> ActionOutcome:
+        """Take smelted output from furnace using exact upstream `{op: take, from: output}` schema."""
+        center = (furnace_pos[0] + 0.5, furnace_pos[1] + 0.5, furnace_pos[2] + 0.5)
+        if dist3(bb.pos, center) > 4.5:
+            return self._nav.step_to(bb, center, tolerance=3.2)
+
+        ops: List[Dict[str, Any]] = [{"op": "take", "from": "output", "count": int(count)}]
+        return self.ctx.execute_write(
+            bb,
+            "window/act",
+            {"pos": list(furnace_pos), "ops": ops},
+            lambda: self.ctx.client.window_act(list(furnace_pos), ops),
+            unknown_center=furnace_pos,
+        )
+
+    def smelt_batch_step(
+        self,
+        bb: Blackboard,
+        furnace_pos: Coord3,
+        *,
+        input_item: str,
+        input_count: int,
+        fuel_item: Optional[str] = None,
+        fuel_count: int = 1,
+        harvest_output: bool = False,
+    ) -> ActionOutcome:
+        """Load input + fuel (or harvest output when requested) using exact upstream schema."""
+        if harvest_output and input_count <= 0 and not fuel_item:
+            return self.harvest_furnace(bb, furnace_pos)
+        return self.load_furnace(
+            bb,
+            furnace_pos,
+            input_item=input_item,
+            input_count=input_count,
+            fuel_item=fuel_item,
+            fuel_count=fuel_count,
+        )
+
     def chest_transfer(
         self,
         bb: Blackboard,
         chest_pos: Coord3,
         *,
-        op: str,  # "deposit" | "withdraw"
+        op: str,  # "deposit" | "withdraw" | "put" | "take"
         item: str,
         count: int,
     ) -> ActionOutcome:
+        """Deposit or withdraw items from a chest using exact upstream `container` section ops."""
         center = (chest_pos[0] + 0.5, chest_pos[1] + 0.5, chest_pos[2] + 0.5)
         if dist3(bb.pos, center) > 4.5:
             return self._nav.step_to(bb, center, tolerance=3.2)
-        ops = [{"op": op, "item": item, "count": int(count)}]
+        if op in {"deposit", "put"}:
+            ops: List[Dict[str, Any]] = [{"op": "put", "to": "container", "item": item, "count": int(count)}]
+        elif op in {"withdraw", "take"}:
+            ops = [{"op": "take", "from": "container", "item": item, "count": int(count)}]
+        else:
+            return ActionOutcome("FAILED_LOCAL", "window/act", reason=f"unsupported_chest_op:{op}")
         return self.ctx.execute_write(
             bb,
             "window/act",

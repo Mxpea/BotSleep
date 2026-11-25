@@ -38,21 +38,24 @@ class PlaceBuildPrimitive:
         return out
 
     def place_near_player(self, bb: Blackboard, item: str) -> ActionOutcome:
-        """Find a safe adjacent empty cell over solid ground within 2-3 blocks and place item."""
+        """Find a safe adjacent empty cell over solid ground within 2-3 blocks (at fy, fy+1, or fy-1) and place item."""
         if bb.inventory_counts.get(item, 0) < 1:
             return ActionOutcome("FAILED_LOCAL", "place", reason=f"missing_{item}")
         fx, fy, fz = block_coord(bb.pos)
         offsets = [(2, 0), (-2, 0), (0, 2), (0, -2), (1, 1), (-1, 1), (1, -1), (-1, -1), (1, 0), (-1, 0), (0, 1), (0, -1)]
+        dy_order = (0, 1, -1)
         coords = []
-        for ox, oz in offsets:
-            coords.append((fx + ox, fy, fz + oz))
-            coords.append((fx + ox, fy - 1, fz + oz))
+        for oy in dy_order:
+            for ox, oz in offsets:
+                coords.append((fx + ox, fy + oy, fz + oz))
+                coords.append((fx + ox, fy + oy - 1, fz + oz))
         fetched = self.ctx.gateway.prefetch_blocks(bb.dimension, coords)
-        for ox, oz in offsets:
-            cell = (fx + ox, fy, fz + oz)
-            below = (fx + ox, fy - 1, fz + oz)
-            c_ent = fetched.get(cell)
-            b_ent = fetched.get(below)
-            if c_ent is not None and c_ent.name in AIR_BLOCKS and b_ent is not None and b_ent.name not in NON_SOLID_BLOCKS:
-                return self.place_at(bb, item, cell)
+        for oy in dy_order:
+            for ox, oz in offsets:
+                cell = (fx + ox, fy + oy, fz + oz)
+                below = (fx + ox, fy + oy - 1, fz + oz)
+                c_ent = fetched.get(cell)
+                b_ent = fetched.get(below)
+                if c_ent is not None and c_ent.name in AIR_BLOCKS and b_ent is not None and b_ent.name not in NON_SOLID_BLOCKS:
+                    return self.place_at(bb, item, cell)
         return ActionOutcome("FAILED_LOCAL", "place", reason="no_adjacent_clear_spot")

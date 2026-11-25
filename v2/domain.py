@@ -44,10 +44,10 @@ HAZARD_BLOCKS: FrozenSet[str] = LAVA_BLOCKS | frozenset({
     "fire", "soul_fire", "campfire", "soul_campfire", "magma_block", "cactus", "sweet_berry_bush", "wither_rose",
 })
 SOFT_OCCLUDERS: FrozenSet[str] = frozenset({
-    "short_grass", "tall_grass", "fern", "large_fern", "dead_bush", "snow",
+    "short_grass", "tall_grass", "fern", "large_fern", "bush", "dead_bush", "snow",
     "dandelion", "poppy", "sugar_cane", "vine", "leaf_litter", "dirt", "grass_block",
     "oak_leaves", "birch_leaves", "spruce_leaves", "jungle_leaves", "acacia_leaves",
-    "dark_oak_leaves", "mangrove_leaves", "cherry_leaves", "azalea_leaves", "bamboo",
+    "dark_oak_leaves", "mangrove_leaves", "cherry_leaves", "pale_oak_leaves", "azalea_leaves", "bamboo",
 })
 
 LOG_BLOCKS: FrozenSet[str] = frozenset({
@@ -70,7 +70,8 @@ SCAFFOLD_BLOCKS: Tuple[str, ...] = (
 )
 FUEL_ITEMS: Tuple[str, ...] = (
     "coal", "charcoal", "coal_block", "blaze_rod",
-    "oak_planks", "birch_planks", "spruce_planks", "oak_log", "birch_log", "spruce_log", "stick",
+    "oak_planks", "birch_planks", "spruce_planks", "jungle_planks", "acacia_planks", "dark_oak_planks",
+    "oak_log", "birch_log", "spruce_log", "jungle_log", "stick",
 )
 FOOD_ITEMS: Dict[str, int] = {
     "cooked_beef": 8, "cooked_porkchop": 8, "golden_carrot": 6, "cooked_mutton": 6,

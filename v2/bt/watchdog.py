@@ -17,16 +17,17 @@ class LoopWatchdogNode(Node):
         super().__init__("LoopWatchdog")
         self.window = max(4, int(window))
         self.max_repeats = max(3, int(max_repeats))
-        self._signatures: Deque[Tuple[int, int, int, str, str]] = deque(maxlen=self.window)
+        self._signatures: Deque[Tuple[int, int, int, str, str, Tuple[Tuple[str, int], ...]]] = deque(maxlen=self.window)
         self.stalled: bool = False
         self.stall_signature: Optional[str] = None
 
     def update(self, bb: Blackboard) -> Status:
         px, py, pz = bb.pos
-        sig = (math.floor(px), math.floor(py), math.floor(pz), bb.active_goal_name, bb.last_action_outcome)
+        inv_sig = tuple(sorted((k, int(v)) for k, v in bb.inventory_counts.items() if v > 0))
+        sig = (math.floor(px), math.floor(py), math.floor(pz), bb.active_goal_name, bb.last_action_outcome, inv_sig)
         self._signatures.append(sig)
-        # Count occurrences of current signature in recent window (ignore idle)
-        if bb.active_goal_name:
+        # Count occurrences of current signature in recent window (ignore idle and active furnace wait)
+        if bb.active_goal_name and bb.last_action_outcome != "smelt_waiting_furnace":
             repeats = sum(1 for s in self._signatures if s == sig)
             if repeats >= self.max_repeats:
                 self.stalled = True

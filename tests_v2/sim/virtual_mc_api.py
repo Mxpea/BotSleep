@@ -169,6 +169,7 @@ class VirtualMcApiServer:
         self.blocking: bool = False
         self.in_vehicle: Optional[Dict[str, Any]] = None
         self.time_of_day: int = 1000
+        self.smelt_ticks_required: int = 0  # configurable smelting latency for real-time furnace tests
         self.inventory_counts: Dict[str, int] = {}
         self.held_item: Optional[str] = None
         self.offhand_item: Optional[str] = None
@@ -666,10 +667,13 @@ class VirtualMcApiServer:
                 raise SimAPIError("out_of_range", "place target too far")
             if self.block_name(bx, by, bz) not in NON_SOLID_BLOCKS:
                 raise SimAPIError("occupied", "target cell already occupied")
+            fx, fy, fz = self._feet_cell()
+            if (bx, by, bz) in {(fx, fy, fz), (fx, fy + 1, fz)}:
+                raise SimAPIError("blocked_by_self", "bot is standing in target cell")
             self.consume(item, 1)
             self.set_block(bx, by, bz, item)
             if item == "furnace":
-                self.containers[(bx, by, bz)] = {"type": "furnace", "input": None, "fuel": None, "output": None}
+                self.containers[(bx, by, bz)] = {"type": "furnace", "input": None, "fuel": None, "output": None, "remaining_ticks": 0}
             elif item == "chest":
                 self.containers[(bx, by, bz)] = {"type": "chest", "items": {}}
             return {"placed": item, "pos": [bx, by, bz]}
@@ -689,9 +693,9 @@ class VirtualMcApiServer:
                 props = self.block_props(tx, ty, tz)
                 if blk not in LIQUID_BLOCKS or str(props.get("level", "0")) != "0":
                     raise SimAPIError("not_liquid_source", f"block {blk} is not a liquid source")
-                # Exact upstream useBucket constraints: feet dist <= 3.1, eye-to-(y+0.85) <= 4.5, clear ray!
+                # Exact upstream useBucket constraints: feet dist <= 3.6, eye-to-(y+0.85) <= 4.5, clear ray!
                 aim = (tx + 0.5, ty + 0.85, tz + 0.5)
-                if math.dist(self.pos, (tx + 0.5, ty + 0.5, tz + 0.5)) > 3.2 or math.dist(eye, aim) > 4.5:
+                if math.dist(self.pos, (tx + 0.5, ty + 0.5, tz + 0.5)) > 3.65 or math.dist(eye, aim) > 4.5:
                     raise SimAPIError("out_of_range", "liquid source out of bucket reach")
                 for cell in sim_ray_cells(eye, aim):
                     if cell == (tx, ty, tz):
@@ -712,7 +716,13 @@ class VirtualMcApiServer:
                         self.set_block(tx, ty, tz, "air")
                 else:
                     self.set_block(tx, ty, tz, "air")
-                return {"filled": f"{blk}_bucket", "pos": [tx, ty, tz]}
+                return {
+                    "filled": f"{blk}_bucket",
+                    "pos": [tx, ty, tz],
+                    "changed": True,
+                    "used": {"bucket": 1},
+                    "gained": {f"{blk}_bucket": 1},
+                }
 
             if item in {"water_bucket", "lava_bucket"}:
                 if self.inventory_counts.get(item, 0) < 1:
@@ -731,23 +741,26 @@ class VirtualMcApiServer:
                 liquid = "water" if item == "water_bucket" else "lava"
                 self.consume(item, 1)
                 self.give("bucket", 1)
-                existing = self.block_name(tx, ty, tz)
-                if liquid == "water" and existing == "lava":
-                    self.set_block(tx, ty, tz, "obsidian")
-                else:
-                    self.set_block(tx, ty, tz, liquid, {"level": "0"})
-                    # Water next to stationary lava casts obsidian!
-                    if liquid == "water":
-                        for dx, dy, dz in ((1, 0, 0), (-1, 0, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)):
-                            nx, ny, nz = tx + dx, ty + dy, tz + dz
-                            if self.block_name(nx, ny, nz) == "lava" and str(self.block_props(nx, ny, nz).get("level", "0")) == "0":
-                                self.set_block(nx, ny, nz, "obsidian")
-                    elif liquid == "lava":
-                        for dx, dy, dz in ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, 0, 1), (0, 0, -1)):
-                            if self.block_name(tx + dx, ty + dy, tz + dz) == "water":
-                                self.set_block(tx, ty, tz, "obsidian")
-                                break
-                return {"poured": liquid, "pos": [tx, ty, tz]}
+                # Real Minecraft Java physics: pouring water DIRECTLY onto lava replaces it with water (NO obsidian!).
+                # Obsidian forms when water flows from an ADJACENT cell onto stationary lava (or lava next to water).
+                self.set_block(tx, ty, tz, liquid, {"level": "0"})
+                if liquid == "water":
+                    for dx, dy, dz in ((1, 0, 0), (-1, 0, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1)):
+                        nx, ny, nz = tx + dx, ty + dy, tz + dz
+                        if self.block_name(nx, ny, nz) == "lava" and str(self.block_props(nx, ny, nz).get("level", "0")) == "0":
+                            self.set_block(nx, ny, nz, "obsidian")
+                elif liquid == "lava":
+                    for dx, dy, dz in ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, 0, 1), (0, 0, -1)):
+                        if self.block_name(tx + dx, ty + dy, tz + dz) == "water":
+                            self.set_block(tx, ty, tz, "obsidian")
+                            break
+                return {
+                    "poured": liquid,
+                    "pos": [tx, ty, tz],
+                    "changed": True,
+                    "used": {item: 1},
+                    "gained": {"bucket": 1},
+                }
 
             if item == "flint_and_steel":
                 if self.inventory_counts.get("flint_and_steel", 0) < 1:
@@ -791,14 +804,59 @@ class VirtualMcApiServer:
                     raise SimAPIError("no_crafting_table", "requires nearby crafting_table")
             batches = math.ceil(count / out_per)
             # Planks wildcard: accept any *_planks for oak_planks in craft
+            chosen: Dict[str, Tuple[str, int]] = {}
             for ing, req_per in ingredients.items():
                 req = req_per * batches
-                if self.inventory_counts.get(ing, 0) < req:
+                if self.inventory_counts.get(ing, 0) >= req:
+                    chosen[ing] = (ing, req)
+                elif ing == "oak_planks":
+                    alt = next((k for k, v in self.inventory_counts.items() if k.endswith("_planks") and v >= req), None)
+                    if alt is None:
+                        raise SimAPIError("missing_ingredients", f"need {req} {ing}")
+                    chosen[ing] = (alt, req)
+                else:
                     raise SimAPIError("missing_ingredients", f"need {req} {ing}")
-            for ing, req_per in ingredients.items():
-                self.consume(ing, req_per * batches)
+            for actual_ing, req in chosen.values():
+                self.consume(actual_ing, req)
             self.give(item, out_per * batches)
-            return {"crafted": item, "count": out_per * batches}
+            return {"crafted": item, "gained": out_per * batches, "count": out_per * batches}
+
+        def _describe_container(c: Dict[str, Any], pos: Tuple[int, int, int]) -> Dict[str, Any]:
+            if c.get("type") == "furnace":
+                # Advance delayed smelting on view/act ticks
+                if c.get("input") and c.get("fuel"):
+                    rem = int(c.get("remaining_ticks", 0))
+                    if rem <= 0:
+                        in_name = c["input"]["name"]
+                        in_cnt = c["input"]["count"]
+                        smelt_out = {
+                            "raw_iron": "iron_ingot", "raw_gold": "gold_ingot",
+                            "cobblestone": "stone", "sand": "glass", "oak_log": "charcoal",
+                        }.get(in_name, in_name)
+                        out = c.get("output") or {"name": smelt_out, "count": 0}
+                        out["count"] += in_cnt
+                        c["output"] = out
+                        c["input"] = None
+                        c["remaining_ticks"] = 0
+                    else:
+                        c["remaining_ticks"] = rem - 1
+                burning = bool(c.get("input") and c.get("fuel"))
+                return {
+                    "window": "furnace",
+                    "target": {"pos": list(pos)},
+                    "sections": {
+                        "input": [dict(c["input"])] if c.get("input") else [],
+                        "fuel": [dict(c["fuel"])] if c.get("fuel") else [],
+                        "output": [dict(c["output"])] if c.get("output") else [],
+                    },
+                    "info": {"burning": burning},
+                }
+            items_list = [{"name": k, "count": v} for k, v in sorted(c.get("items", {}).items()) if v > 0]
+            return {
+                "window": "generic_9x3",
+                "target": {"pos": list(pos)},
+                "sections": {"container": items_list},
+            }
 
         if ep == "window/view":
             pos = tuple(int(v) for v in payload["target"]["pos"])
@@ -806,61 +864,69 @@ class VirtualMcApiServer:
             if c is None:
                 blk = self.block_name(*pos)
                 if blk == "furnace":
-                    c = {"type": "furnace", "input": None, "fuel": None, "output": None}
+                    c = {"type": "furnace", "input": None, "fuel": None, "output": None, "remaining_ticks": 0}
                     self.containers[pos] = c
                 elif blk == "chest":
                     c = {"type": "chest", "items": {}}
                     self.containers[pos] = c
                 else:
                     raise SimAPIError("not_container", f"{blk} is not a container")
-            return {"container": dict(c), "pos": list(pos)}
+            return _describe_container(c, pos)
 
         if ep == "window/act":
             pos = tuple(int(v) for v in payload["target"]["pos"])
             ops = payload.get("ops", [])
-            c = self.containers.setdefault(pos, {"type": self.block_name(*pos), "input": None, "fuel": None, "output": None, "items": {}})
+            c = self.containers.setdefault(pos, {"type": self.block_name(*pos), "input": None, "fuel": None, "output": None, "items": {}, "remaining_ticks": 0})
+            done: List[Dict[str, Any]] = []
             for op in ops:
-                action = op.get("op") or op.get("action")
+                action = op.get("op")
+                if action not in {"put", "take", "select", "text"}:
+                    raise SimAPIError("bad_args", f"unsupported op {action}; expected put|take|select|text")
                 item = op.get("item")
                 cnt = int(op.get("count", 1))
-                slot = op.get("slot", "")
                 if c.get("type") == "furnace":
-                    if action == "put" and slot == "input":
+                    if action == "put":
+                        sec = op.get("to")
+                        if sec not in {"input", "fuel"}:
+                            raise SimAPIError("bad_section", f'section "{sec}" not in furnace; have: input, fuel, output')
                         if not self.consume(item, cnt):
                             raise SimAPIError("missing_item", f"missing {item}")
-                        cur = c.get("input") or {"name": item, "count": 0}
+                        cur = c.get(sec) or {"name": item, "count": 0}
                         cur["count"] += cnt
-                        c["input"] = cur
-                    elif action == "put" and slot == "fuel":
-                        if not self.consume(item, cnt):
-                            raise SimAPIError("missing_item", f"missing {item}")
-                        cur = c.get("fuel") or {"name": item, "count": 0}
-                        cur["count"] += cnt
-                        c["fuel"] = cur
-                    # Auto-complete smelting immediately when input + fuel present
-                    if c.get("input") and c.get("fuel"):
-                        in_name = c["input"]["name"]
-                        in_cnt = c["input"]["count"]
-                        smelt_out = {"raw_iron": "iron_ingot", "raw_gold": "gold_ingot", "cobblestone": "stone", "sand": "glass", "oak_log": "charcoal"}.get(in_name, in_name)
-                        out = c.get("output") or {"name": smelt_out, "count": 0}
-                        out["count"] += in_cnt
-                        c["output"] = out
-                        c["input"] = None
-                    if action == "take" and slot == "output":
-                        out = c.get("output")
-                        if out and out["count"] > 0:
-                            take_n = min(cnt, out["count"])
-                            self.give(out["name"], take_n)
-                            out["count"] -= take_n
-                            if out["count"] <= 0:
-                                c["output"] = None
+                        c[sec] = cur
+                        if c.get("input") and c.get("fuel"):
+                            c["remaining_ticks"] = self.smelt_ticks_required
+                        done.append({"op": "put", "put": item, "count": cnt, "to": sec})
+                    elif action == "take":
+                        sec = op.get("from")
+                        if sec not in {"input", "fuel", "output"}:
+                            raise SimAPIError("bad_section", f'section "{sec}" not in furnace; have: input, fuel, output')
+                        # Advance smelting if ready before checking output
+                        if sec == "output" and c.get("input") and c.get("fuel") and int(c.get("remaining_ticks", 0)) <= 0:
+                            _describe_container(c, pos)
+                        slot_item = c.get(sec)
+                        if not slot_item or slot_item["count"] <= 0:
+                            raise SimAPIError("no_output" if sec == "output" else "missing_item", f"nothing to take from {sec}")
+                        take_n = min(cnt, slot_item["count"])
+                        self.give(slot_item["name"], take_n)
+                        slot_item["count"] -= take_n
+                        if slot_item["count"] <= 0:
+                            c[sec] = None
+                        done.append({"op": "take", "took": {slot_item["name"]: take_n}, "from": sec})
                 else:
                     store = c.setdefault("items", {})
-                    if action == "deposit":
+                    if action == "put":
+                        sec = op.get("to")
+                        if sec != "container":
+                            raise SimAPIError("bad_section", f'section "{sec}" not in generic_9x3; have: container')
                         if not self.consume(item, cnt):
                             raise SimAPIError("missing_item", f"missing {item}")
                         store[item] = store.get(item, 0) + cnt
-                    elif action == "withdraw":
+                        done.append({"op": "put", "put": item, "count": cnt, "to": "container"})
+                    elif action == "take":
+                        sec = op.get("from")
+                        if sec != "container":
+                            raise SimAPIError("bad_section", f'section "{sec}" not in generic_9x3; have: container')
                         avail = store.get(item, 0)
                         if avail < cnt:
                             raise SimAPIError("missing_item", f"chest missing {item}")
@@ -868,7 +934,8 @@ class VirtualMcApiServer:
                         if store[item] <= 0:
                             store.pop(item, None)
                         self.give(item, cnt)
-            return {"ok": True, "container": dict(c)}
+                        done.append({"op": "take", "took": {item: cnt}, "from": "container"})
+            return {"done": done, "window": _describe_container(c, pos)}
 
         if ep == "equip":
             item = str(payload["item"])
@@ -909,7 +976,8 @@ class VirtualMcApiServer:
         if ep == "look":
             tx, ty, tz = float(payload["x"]), float(payload["y"]), float(payload["z"])
             dx, dz = tx - self.pos[0], tz - self.pos[2]
-            self.yaw = math.atan2(-dx, dz)
+            # Exact mineflayer yaw (session.js:2992): 0 faces -Z, pi/2 faces -X
+            self.yaw = math.atan2(-dx, -dz)
             return {"yaw": round(self.yaw, 3)}
 
         if ep == "control":
@@ -918,8 +986,9 @@ class VirtualMcApiServer:
             self.yaw = yaw
             step_dist = min(1.5, (ms / 1000.0) * 4.3)
             if payload.get("forward"):
+                # Exact mineflayer forward vector (session.js:896): (-sin(yaw), -cos(yaw))
                 dx = -math.sin(yaw) * step_dist
-                dz = math.cos(yaw) * step_dist
+                dz = -math.cos(yaw) * step_dist
                 nx, nz = self.pos[0] + dx, self.pos[2] + dz
                 ny = self.pos[1]
                 # Buoyancy if swimming with jump

@@ -34,6 +34,7 @@ class CompetitionManager:
         eligibility_overrides: Optional[Mapping[str, bool]] = None,
         db: Optional[UnifiedWorldDB] = None,
         defer_seconds: float = 300.0,
+        reset: bool = False,
     ) -> None:
         self.catalogue = catalogue
         self.catalog: Dict[str, CompetitionEntry] = scoring_catalog(eligibility_overrides)
@@ -45,6 +46,29 @@ class CompetitionManager:
         self.deferred_until: Dict[str, float] = {}
         self.ended: bool = False
         self.end_reason: str = ""
+        if reset:
+            self._persist()
+        else:
+            self._load_persisted()
+
+    def _load_persisted(self) -> None:
+        if self.db is None:
+            return
+        saved = self.db.load_checkpoint("competition")
+        if not isinstance(saved, dict):
+            return
+        for aid in saved.get("completed_ids") or []:
+            if isinstance(aid, str) and aid in self.catalog:
+                self.completed_ids.add(aid)
+        active = saved.get("active_task_id")
+        if isinstance(active, str) and active in self.catalog and active not in self.completed_ids:
+            self.active_task_id = active
+        self.progress_note = str(saved.get("progress_note") or "")
+        raw_def = saved.get("deferred_until")
+        if isinstance(raw_def, dict):
+            self.deferred_until = {str(k): float(v) for k, v in raw_def.items() if isinstance(v, (int, float))}
+        self.ended = bool(saved.get("ended", False))
+        self.end_reason = str(saved.get("end_reason") or "")
 
     def sync_server_advancements(self, client: MinecraftAgentClient) -> Dict[str, Any]:
         """Server `/advancements` (`status == 'completed'`) is the ONLY scoring truth."""

@@ -7,7 +7,7 @@ from typing import Any, Dict, Optional
 
 from v2.bt.blackboard import Blackboard
 from v2.bt.kernel import Node, Status
-from v2.domain import FOOD_ITEMS, LEAF_BLOCKS, block_coord
+from v2.domain import AIR_BLOCKS, FOOD_ITEMS, HAZARD_BLOCKS, LEAF_BLOCKS, NON_SOLID_BLOCKS, block_coord
 from v2.gateway.surface_swim import SurfaceSwimExecutor
 from v2.gateway.world_proxy import VirtualWorldGateway
 from v2.kernel.client import APIError
@@ -52,6 +52,7 @@ class LocalRecoveryBranch(Node):
             if err.details.get("action_state") == "unknown":
                 self.journal.resolve_write(tx_id, "unknown", details={"code": err.code, "message": err.message})
                 self.gateway.invalidate_unknown_radius(bb.dimension, block_coord(bb.pos))
+                bb.set("pending_frozen", True, writer=self.name)
                 bb.last_action_outcome = "recovery_unknown"
                 return Status.RUNNING
             self.journal.resolve_write(tx_id, "failed_known", details={"code": err.code})
@@ -72,15 +73,41 @@ class LocalRecoveryBranch(Node):
                     lambda: self.gateway.client.use_item(food),
                 )
 
-        # 2) Canopy descent: if standing directly on tree leaves high off ground, step/drop down safely
+        # 2) Water shore buoyancy when idle in water or losing air
+        if (st.get("in_water") or st.get("submerged")) and (not bb.active_goal_name or bb.oxygen < 18):
+            res = self._swimmer.swim_step((bb.pos[0], bb.pos[1] + 2.0, bb.pos[2]), st)
+            bb.writes_this_tick += 1
+            if res.status == "UNKNOWN":
+                bb.set("pending_frozen", True, writer=self.name)
+            bb.last_action_outcome = f"recovery_swim:{res.status.lower()}"
+            return Status.RUNNING
+
+        # 3) Canopy descent: if standing directly on tree leaves, verify safe drop (<= 4m, no lava) before digging!
         fx, fy, fz = block_coord(bb.pos)
         below = self.gateway.get_block(bb.dimension, (fx, fy - 1, fz), allow_fetch=True)
         if below is not None and below.name in LEAF_BLOCKS:
-            bb.last_action_outcome = "recovery_canopy_descend"
-            return self._write_action(
-                bb, "dig", {"pos": [fx, fy - 1, fz]},
-                lambda: self.gateway.client.dig([fx, fy - 1, fz], collect=False),
-            )
+            column = [(fx, fy - d, fz) for d in range(2, 7)]
+            fetched = self.gateway.prefetch_blocks(bb.dimension, column)
+            safe_drop = False
+            for d in range(2, 7):
+                ent = fetched.get((fx, fy - d, fz))
+                if ent is None:
+                    break
+                if ent.name in HAZARD_BLOCKS:
+                    safe_drop = False
+                    break
+                if ent.name == "water" or ent.name not in NON_SOLID_BLOCKS:
+                    safe_drop = (d - 1) <= 4 or ent.name == "water"
+                    break
+            if safe_drop:
+                bb.last_action_outcome = "recovery_canopy_descend"
+                res_status = self._write_action(
+                    bb, "dig", {"pos": [fx, fy - 1, fz]},
+                    lambda: self.gateway.client.dig([fx, fy - 1, fz], collect=False),
+                )
+                if res_status == Status.RUNNING and not bb.get("pending_frozen"):
+                    self.gateway.write_through_dig(bb.dimension, (fx, fy - 1, fz))
+                return res_status
 
         # 3) Opportunistic auto-sleep at night when a bed is nearby and not already sleeping
         if self.enable_auto_sleep and not st.get("is_sleeping", False):

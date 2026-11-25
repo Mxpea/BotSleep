@@ -74,6 +74,7 @@ def main(argv=None) -> int:
         once=args.once,
         keep_connected=args.keep_connected,
         resume=args.resume,
+        new_competition=args.new_competition,
         acknowledge_model_idle=args.acknowledge_model_idle,
         debug_commands=args.debug,
         max_ticks_override=args.max_steps,

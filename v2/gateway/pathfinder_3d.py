@@ -58,20 +58,20 @@ class Pathfinder3D:
         gw = self.gateway
         avoid_fn = avoid_block_breaking or (lambda _c: False)
 
-        # Prefetch a local 3D corridor wide enough for lateral detours around obstacles/walls
+        # Prefetch a compact local 3D corridor (bounded read budget; warm cache hits avoid HTTP reads)
         dx = goal[0] - start[0]
         dy = goal[1] - start[1]
         dz = goal[2] - start[2]
         dist = max(1.0, math.sqrt(dx * dx + dy * dy + dz * dz))
-        steps_preview = min(14, int(math.ceil(dist)))
+        steps_preview = min(9, int(math.ceil(dist)))
         probe_coords: List[Coord3] = []
         for s in range(0, steps_preview + 1):
             t = s / max(1, steps_preview)
             cx = int(round(start[0] + dx * min(1.0, t * (steps_preview / dist))))
             cy = int(round(start[1] + dy * min(1.0, t * (steps_preview / dist))))
             cz = int(round(start[2] + dz * min(1.0, t * (steps_preview / dist))))
-            for ox in range(-2, 3):
-                for oz in range(-3, 4):
+            for ox in (-1, 0, 1):
+                for oz in (-2, -1, 0, 1, 2):
                     for oy in (-1, 0, 1, 2):
                         probe_coords.append((cx + ox, cy + oy, cz + oz))
         gw.prefetch_blocks(dimension, probe_coords)
@@ -129,11 +129,11 @@ class Pathfinder3D:
             cx, cy, cz = cur
             neighbors: List[Tuple[Coord3, NavStep, float]] = []
 
-            # 1) Pillar up when stuck in pit or goal is higher
+            # 1) Pillar up when stuck in pit or goal is higher (higher cost than step-up dig so staircase ramps are preferred)
             if allow_pillar and has_scaffold and is_safe_air((cx, cy + 2, cz)) and is_safe_solid((cx, cy - 1, cz)):
                 nxt = (cx, cy + 1, cz)
                 if not gw.unreachable.is_edge_blocked(dimension, cur, nxt):
-                    neighbors.append((nxt, NavStep("pillar_up", cur, nxt), 3.2))
+                    neighbors.append((nxt, NavStep("pillar_up", cur, nxt), 5.5))
 
             # 2) Cardinal moves: walk / step-up / drop / micro-dig / bridge
             for ox, oz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
@@ -185,6 +185,19 @@ class Pathfinder3D:
                         if not gw.unreachable.is_edge_blocked(dimension, cur, nxt):
                             cost = 2.6 + (1.0 if extra is not None else 0.0)
                             neighbors.append((nxt, NavStep("dig", dig_target, nxt, extra=extra), cost))
+
+                # Step-up +1 micro-dig (climb out of pits/caves via staircase without pillar blocked_by_self!)
+                if allow_dig and is_safe_solid((nx, cy, nz)):
+                    c_head = (cx, cy + 2, cz)
+                    n_low = (nx, cy + 1, nz)
+                    n_high = (nx, cy + 2, nz)
+                    need_cells = [c for c in (c_head, n_high, n_low) if not is_safe_air(c)]
+                    if need_cells and all(can_dig_cell(c) for c in need_cells):
+                        nxt = (nx, cy + 1, nz)
+                        if not gw.unreachable.is_edge_blocked(dimension, cur, nxt):
+                            extra = need_cells[1] if len(need_cells) > 1 else None
+                            cost = 2.8 + 0.9 * len(need_cells)
+                            neighbors.append((nxt, NavStep("dig", need_cells[0], nxt, extra=extra), cost))
 
             for nxt, step, step_cost in neighbors:
                 tentative_g = cur_g + step_cost

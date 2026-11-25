@@ -50,6 +50,18 @@ SMELT_TABLE: Dict[str, SmeltEntry] = {
     "nether_brick": SmeltEntry("nether_brick", "netherrack"),
 }
 
+OVERWORLD_LOG_TYPES: Tuple[str, ...] = (
+    "oak_log",
+    "birch_log",
+    "spruce_log",
+    "jungle_log",
+    "acacia_log",
+    "dark_oak_log",
+    "mangrove_log",
+    "cherry_log",
+    "pale_oak_log",
+)
+
 GATHER_TABLE: Dict[str, GatherEntry] = {
     "oak_log": GatherEntry("oak_log", ("oak_log",)),
     "birch_log": GatherEntry("birch_log", ("birch_log",)),
@@ -57,7 +69,10 @@ GATHER_TABLE: Dict[str, GatherEntry] = {
     "jungle_log": GatherEntry("jungle_log", ("jungle_log",)),
     "acacia_log": GatherEntry("acacia_log", ("acacia_log",)),
     "dark_oak_log": GatherEntry("dark_oak_log", ("dark_oak_log",)),
-    "cobblestone": GatherEntry("cobblestone", ("stone", "cobblestone"), min_pickaxe="wooden_pickaxe"),
+    "mangrove_log": GatherEntry("mangrove_log", ("mangrove_log",)),
+    "cherry_log": GatherEntry("cherry_log", ("cherry_log",)),
+    "pale_oak_log": GatherEntry("pale_oak_log", ("pale_oak_log",)),
+    "cobblestone": GatherEntry("cobblestone", ("stone", "cobblestone"), min_pickaxe="wooden_pickaxe", preferred_y=56),
     "coal": GatherEntry("coal", ("coal_ore", "deepslate_coal_ore"), min_pickaxe="wooden_pickaxe", preferred_y=48),
     "raw_iron": GatherEntry("raw_iron", ("iron_ore", "deepslate_iron_ore"), min_pickaxe="stone_pickaxe", preferred_y=16),
     "raw_gold": GatherEntry("raw_gold", ("gold_ore", "deepslate_gold_ore"), min_pickaxe="iron_pickaxe", preferred_y=-16),

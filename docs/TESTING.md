@@ -2,22 +2,31 @@
 
 > 架构变更、异机部署运行步骤、Token/耗时账单与逻辑审计汇总另见 [交接文档](HANDOFF.md)。
 
-## BotSleep v2（`develop-tianya/rewrite-v2`）L0–L4 分层重写离线验证（2026-11-25）
+## BotSleep v2（`develop-tianya/rewrite-v2`）L0–L4 分层重写离线与实服验证（2026-11-25）
 
-- **源码基线与环境**：`develop-tianya/rewrite-v2`（P0–P6 逐阶段提交），Windows / `.venv` Python 3.13；上游 `mc-agent-api` 保持零源码改动。
+- **源码基线与环境**：`develop-tianya/rewrite-v2`（P0–P6 + 审阅与实服联调修复提交），Windows / `.venv` Python 3.13；上游 `mc-agent-api` 1.3.19 保持零源码改动。
 - **离线验证结果（不连接真实 Minecraft 服务器，不能替代实服验收）**：
-  - `.\.venv\Scripts\python.exe -B -m unittest discover -s tests_v2 -v`：**43 项全部通过**（`0` 跳过、`0` 失败），涵盖：
+  - `.\.venv\Scripts\python.exe -B -m unittest discover -s tests_v2 -v`：**55 项全部通过**（`0` 跳过、`0` 失败），包含新增 `test_07_review_regressions.py`（12 项协议/物理/安全/运维回归）：
     - `test_00_layer_boundaries.py`：AST 单向层间依赖门禁（L0–L4 零逆向导入、零 legacy `core/agent/skills/debug` 耦合）；
-    - `test_01_simulator.py`：`VirtualMcApiServer` 忠实复现上游 `find_blocks` 跳过空气与非暴露块、`interact(bucket)` `y+0.85` 射线遮挡、`move_to` 无 32 格人为上限且 `canDig=false`；
+    - `test_01_simulator.py`：`VirtualMcApiServer` 忠实复现上游 `find_blocks` 跳过空气与非暴露块、`interact(bucket)` `y+0.85` 射线遮挡、`window/act` 精确 `{op: put/take, to/from}` 协议与延迟烧炼、Mineflayer `yaw=0` 朝 `-Z` 约定、Java 版岩浆遇邻格流水成黑曜石、`place` `blocked_by_self` 及 `move_to` 无 32 格人为上限；
     - `tests_v2/kernel/`：WAL `UnifiedWorldDB` 并发写入、`PendingTransactionJournal` 未知写跨重启硬冻结、`instance_lock` 防重入、`AsyncReadPool` 线程本地 Session 隔离与 `ModelRequestGate` 串行并发=1；
-    - `tests_v2/gateway/`：54 格跨树叶墙多跳导航到岩浆池、落差水岸 `y+0.85` 单遮挡识别清除、`Pathfinder3D` 保护谓词 `avoid_block_breaking`、浮水氧气门控；
-    - `tests_v2/bt/`：骷髅抢占触发纯内存 `stop()`（0 网络写）并在威胁清除后无损续播、`PendingUnknownGuard` 冻结后连续 5 帧 0 写入、高树冠地面僵尸豁免下树、`--mode sleep` 夜间自动入睡；
-    - `tests_v2/tasks/`：886 配方 `TaskCatalogue` 递归求解、纯内存空手出生 → 木/石/熔炉/铁镐/水桶/打火石 → 54 格岩浆池 → 10 格黑曜石门框浇筑清内模点火 → 进入 `the_nether` 端到端仿真（严格单写宏帧 `<= 1` 写/帧、0 重复工作台）、45 无条件 + 54 条件 override 赛事门禁与服务端 `/advancements` 计分真值校验；
+    - `tests_v2/gateway/`：54 格跨树叶墙多跳导航到岩浆池、落差水岸 `y+0.85` 单遮挡识别清除、`Pathfinder3D` 保护谓词 `avoid_block_breaking` 与阶梯微掘爬坑、浮水氧气门控；
+    - `tests_v2/bt/`：骷髅抢占触发纯内存 `stop()`（0 网络写）并在威胁清除后无损续播、`PendingUnknownGuard` 冻结后连续 5 帧 0 写入（且同帧不穿透到 `AsyncLLMReplanNode`）、高树冠地面僵尸豁免下树与高坠落保护、`LoopWatchdog` 结合库存/目标签名防误报并中止真卡死目标、`--mode sleep` 夜间自动入睡；
+    - `tests_v2/tasks/`：886 配方 `TaskCatalogue` 递归求解、非橡木群系（桦木/丛林木）自适应开局、纯内存空手出生 → 真实协议多帧熔炉烧铁 → 铁镐/水桶/打火石 → 54 格岩浆池 → 邻格流水浇筑 10 格黑曜石门框清内模点火 → 进入 `the_nether` 端到端仿真（严格单写宏帧 `<= 1` 写/帧、0 重复工作台）、45 无条件 + 54 条件 override 赛事门禁与持久化/`--new-competition` 重置；
     - `tests_v2/planner/`：15 张 `skills_kb/*.md` 零依赖 BM25 召回、60 轮历史 `SemanticCompactor` 严格 `<= 6,600` 字节且 0 孤立 `tool_call/tool_result`、`PORTAL_GATE_READY` 置顶门控、`AsyncLLMReplanNode` 非阻塞思考与抢占丢弃过期提案；
-    - `test_06_observability_and_cutover.py`：`main.py` 切流 v2、`bot_sleep.py`/`client.py` 兼容薄转发、`FlightRecorder` 密钥脱敏、`MonitorServer` 只读快照。
+    - `test_06_observability_and_cutover.py` & `tests/test_botctl.py`：`main.py` 切流 v2、`bot_sleep.py`/`client.py` 兼容薄转发、`scripts/botctl.py` 同时纳管 v2 SQLite `pending_tx` / `.instance.lock` 与 v1 检查点、`FlightRecorder` 密钥脱敏、`MonitorServer` 只读快照。
   - `.\.venv\Scripts\python.exe main.py --config config.example.yaml --check-config`：通过（`Configuration valid.`）。
-- **尚未验证（需下一阶段启动真实服务器）**：
-  - 尚未连接 `E:\Program Save\VisualCode\minecraft-server`（重置存档）执行真实 Leaves 1.21.11 + `mc-agent-api` 单 Bot 或 9-Bot 实服冒烟测试；离线仿真通过不等于实服通过。
+- **真实服务器冒烟与子系统联调结果（重置存档 `E:\Program Save\VisualCode\minecraft-server`，备份至 `_world_backups\pre_v2_live_20261125`，Leaves 1.21.11 + 官方未修改 `mc-agent-api` 1.3.19，`difficulty=easy`）**：
+  - **零作弊开局实服生存（`V2LiveDay3`）**：空手丛林出生 → 树冠安全降落 → 砍伐 `jungle_log` 自适应丛林木配方 → 制作 `wooden_pickaxe` → 3 格高安全阶梯下矿 `y=64→60`（禁止脚下直挖）→ 采集 3 `cobblestone` → 返程工作台合成 **`stone_pickaxe`**（**28 ticks 成功，缓存命中率 0.52，0 报错**）。
+  - **真实 10s/锭熔炉实服烧铁（`V2LivePhys`，RCON 配给熔炉/生铁/煤）**：`SmeltItemTask("iron_ingot", 2)` 经真实 `window/view` + `window/act {op: put, to: input/fuel}` + 烧炼期原地轮询（0 重复挖矿）+ `{op: take, from: output}` **30.7s（22 ticks）完整收回 2 个真实 `iron_ingot`**。
+  - **真实流体与浮水实服验证（`V2LivePhys`、`V2LiveNether`，RCON 构台）**：
+    - `FluidPrimitive.pickup_liquid` 精确 `y+0.85` 射线 2 步装满 `water_bucket`；
+    - `SurfaceSwimExecutor` 朝正北（`-Z`）实测位移 `dz = -0.70`（确认 Mineflayer `yaw=0 -> -Z` 符号正确）；
+    - `FluidPrimitive.pour_liquid` 倒岩浆 + 邻格倒水实测生成真实服务端 `obsidian`；
+    - `EnterNetherTask` 点燃 4×5 黑曜石门框、步入传送门并在维度切换后经 `SyncBlackboardNode` 稳定抵达 **`the_nether`**（10 ticks，无 `not_ready` 崩溃）。
+- **尚未实服验证（不得宣称已通过）**：
+  - 尚未在真实服务器运行「零作弊空手出生 → 全程自寻岩浆池浇筑 10 格下界门进下界」端到端单 Bot 长跑；
+  - 尚未在真实服务器挂载实网大模型（`llm.enabled: true`）跑 9-Bot 90 分钟压测与赛事（`--objective competition`）实服验收。
 
 ## 双 API 溢出与 `v24`–`v31` 九 Bot 1.5 小时进地狱实服压测收官（2026-11-24 – 2026-11-25）
 

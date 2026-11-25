@@ -29,10 +29,15 @@ class Task(ABC):
         return self.on_tick(bb)
 
     def run_child(self, bb: Blackboard, child: "Task") -> str:
-        if self._active_child is not None and self._active_child.name != child.name:
-            self._active_child.stop(bb)
-        self._active_child = child
-        res = child.tick(bb)
+        """Run a child task, reusing the existing stateful child instance when its name matches."""
+        if self._active_child is not None and self._active_child.name == child.name:
+            active = self._active_child
+        else:
+            if self._active_child is not None:
+                self._active_child.stop(bb)
+            self._active_child = child
+            active = child
+        res = active.tick(bb)
         if res == "COMPLETED":
             self._active_child = None
             return "RUNNING"  # Parent will advance on next macro-tick

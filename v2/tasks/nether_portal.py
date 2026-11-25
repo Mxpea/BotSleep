@@ -1,16 +1,10 @@
 """L3b EnterNetherTask: stateless recursive speedrun portal pipeline (<= 1 write/tick).
 
-Pipeline evaluated from scratch on every macro-tick:
-1. If dimension == 'the_nether' -> COMPLETED.
-2. If a lit `nether_portal` exists nearby -> navigate into it!
-3. Ensure prerequisites: `iron_pickaxe`, `water_bucket` (or `bucket` near water), `flint_and_steel`, >= 10 `cobblestone`.
-4. Locate surface/exposed `lava` pool (scan radius 64, or `ExploreUntilTask`).
-5. Multi-hop navigate to lava pool edge (NO 32m cap!).
-6. Idempotently check 4x5 portal obsidian frame cells next to the lava pool:
-   - For each missing frame obsidian cell: if holding `lava_bucket`, pour lava & cast obsidian with `water_bucket`;
-     if holding `bucket`, scoop lava from pool; otherwise place mold/water or cast!
-7. Once all 10 frame obsidian blocks exist -> ignite interior with `flint_and_steel`!
-8. Step into `nether_portal` -> cross into `the_nether`!
+Real Minecraft Java obsidian casting physics:
+- Pouring `water_bucket` directly ONTO a `lava` source block replaces lava with water (NO obsidian!).
+- Instead, pour `water_bucket` into an adjacent air cell `(tx, ty, tz±1)` or `(tx, ty+1, tz)` over
+  solid support so flowing water touches the lava source -> Minecraft casts `obsidian`, then scoop
+  the temporary water source back up into `water_bucket` and verify `get_block(target) == obsidian`.
 """
 
 from __future__ import annotations
@@ -42,6 +36,7 @@ class EnterNetherTask(Task):
         self._fluid = FluidPrimitive(ctx)
         self._place = PlaceBuildPrimitive(ctx)
         self._portal_anchor: Optional[Coord3] = None
+        self._parked_water_pos: Optional[Coord3] = None
 
     def is_finished(self, bb: Blackboard) -> bool:
         return bb.dimension == "the_nether"
@@ -88,6 +83,43 @@ class EnterNetherTask(Task):
                 return c
         return None
 
+    def _pick_quench_cell(self, bb: Blackboard, target: Coord3) -> Tuple[Optional[Coord3], Optional[Coord3]]:
+        """Choose an adjacent air cell (plus optional support below) with clear pour LOS so flowing water quenches lava."""
+        tx, ty, tz = target
+        reserved = set(self._frame_cells(self._portal_anchor)) if self._portal_anchor else set()
+        candidates: List[Coord3] = [
+            c for c in (
+                (tx, ty, tz + 1),
+                (tx, ty, tz - 1),
+                (tx - 1, ty, tz),
+                (tx + 1, ty, tz),
+            )
+            if c not in reserved
+        ]
+        # Prefer the side closest to player first so the portal wall doesn't occlude the ray
+        candidates.sort(key=lambda c: dist3(bb.pos, (c[0] + 0.5, c[1] + 0.5, c[2] + 0.5)))
+        probe: List[Coord3] = []
+        for c in candidates:
+            probe.append(c)
+            probe.append((c[0], c[1] - 1, c[2]))
+        fetched = self.ctx.gateway.prefetch_blocks(bb.dimension, probe, max_age=3.0)
+
+        # First pass: adjacent air cell that ALREADY has solid support below AND clear pour LOS
+        for c in candidates:
+            ent = fetched.get(c)
+            below = fetched.get((c[0], c[1] - 1, c[2]))
+            if ent is not None and ent.name in AIR_BLOCKS and below is not None and below.name not in NON_SOLID_BLOCKS:
+                plan = self.ctx.gateway.plan_liquid_interaction(bb.dimension, c, bb.pos, mode="pour")
+                if plan.status in {"READY", "CLEAR_OCCLUDER"}:
+                    return c, None
+        # Second pass: adjacent air cell where we can place 1 cobblestone support block below it
+        for c in candidates:
+            ent = fetched.get(c)
+            below = fetched.get((c[0], c[1] - 1, c[2]))
+            if ent is not None and ent.name in AIR_BLOCKS and below is not None and below.name in AIR_BLOCKS:
+                return c, (c[0], c[1] - 1, c[2])
+        return None, None
+
     def _find_nearest_lava_sources(self, bb: Blackboard, radius: int = 64) -> List[Coord3]:
         rows = self.ctx.gateway.scan_blocks(bb.dimension, ["lava"], radius=radius, limit=32)
         out: List[Coord3] = []
@@ -110,7 +142,7 @@ class EnterNetherTask(Task):
             out = self._nav.step_to(bb, (ppos[0] + 0.5, float(ppos[1]), ppos[2] + 0.5), tolerance=0.5)
             return "RUNNING" if out.status in {"OK", "PROGRESSED"} else out.status
 
-        # 2) Ensure speedrun portal kit: iron_pickaxe, flint_and_steel, water/empty bucket, cobblestone
+        # 2) Ensure speedrun portal kit: iron_pickaxe, flint_and_steel, water/empty bucket
         inv = bb.inventory_counts
         if inv.get("iron_pickaxe", 0) < 1:
             return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, "iron_pickaxe", 1))
@@ -148,10 +180,10 @@ class EnterNetherTask(Task):
             out = self._nav.step_to(bb, site_stand, tolerance=3.0)
             return "RUNNING" if out.status in {"OK", "PROGRESSED"} else out.status
 
-        # 5) Inspect all 10 portal obsidian cells + 6 interior cells in one batch
+        # 5) Inspect all 10 portal obsidian cells + 6 interior cells in one batch (freshness <= 3s!)
         frame = self._frame_cells(anchor)
         interior = self._interior_cells(anchor)
-        fetched = self.ctx.gateway.prefetch_blocks(bb.dimension, frame + interior)
+        fetched = self.ctx.gateway.prefetch_blocks(bb.dimension, frame + interior, max_age=3.0)
         missing_frame = [c for c in frame if (fetched.get(c) is None or fetched[c].name != "obsidian")]
 
         if not missing_frame:
@@ -173,12 +205,40 @@ class EnterNetherTask(Task):
 
         cur_ent = fetched.get(target_cell)
         if cur_ent is not None and cur_ent.name == "lava":
-            # Quench lava cell directly into obsidian with water_bucket!
+            # Quench lava cell into obsidian by pouring water into an ADJACENT cell (never directly on lava!)
             if inv.get("water_bucket", 0) < 1:
+                if self._parked_water_pos is not None and inv.get("bucket", 0) > 0:
+                    pw = self.ctx.gateway.get_block(bb.dimension, self._parked_water_pos, max_age=3.0)
+                    if pw is not None and pw.name == "water" and str(pw.properties.get("level", "0")) == "0":
+                        out = self._fluid.pickup_liquid(bb, self._parked_water_pos)
+                        if out.status == "OK":
+                            self._parked_water_pos = None
+                            return "RUNNING"
+                        if out.status == "PROGRESSED":
+                            return "RUNNING"
+                        if out.status == "UNKNOWN":
+                            return "UNKNOWN"
+                        # Parked water unreachable (e.g. high mold shelf) -> clear and fall back on NEXT tick (<= 1 write/tick!)
+                        self._parked_water_pos = None
+                        return "RUNNING"
+                    else:
+                        self._parked_water_pos = None
                 return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, "water_bucket", 1))
-            out = self._fluid.pour_liquid(bb, target_cell, bucket_item="water_bucket")
+
+            quench_cell, need_support = self._pick_quench_cell(bb, target_cell)
+            if quench_cell is None:
+                bb.last_failure_reason = "no_adjacent_quench_cell"
+                return "NEEDS_AI"
+            if need_support is not None:
+                if inv.get("cobblestone", 0) < 1:
+                    return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, "cobblestone", 8))
+                out = self._place.place_at(bb, "cobblestone", need_support)
+                return "RUNNING" if out.status in {"OK", "PROGRESSED"} else out.status
+
+            out = self._fluid.pour_liquid(bb, quench_cell, bucket_item="water_bucket")
             if out.status == "OK":
-                self.ctx.gateway.write_through_place(bb.dimension, target_cell, "obsidian")
+                self._parked_water_pos = quench_cell
+                # Re-verify target_cell from server on next tick (FluidPrimitive already invalidated radius=1)
             return "RUNNING" if out.status in {"OK", "PROGRESSED"} else out.status
 
         # Ensure solid support directly below target_cell (for bottom frame or temporary top-bar scaffold)
@@ -199,6 +259,8 @@ class EnterNetherTask(Task):
                         bb.last_failure_reason = "no_solid_spot_to_park_water"
                         return "NEEDS_AI"
                     out = self._fluid.pour_liquid(bb, water_spot, bucket_item="water_bucket")
+                    if out.status == "OK":
+                        self._parked_water_pos = water_spot
                     return "RUNNING" if out.status in {"OK", "PROGRESSED"} else out.status
                 return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, "bucket", 1))
             if not lava_sources:

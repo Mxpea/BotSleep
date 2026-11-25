@@ -44,7 +44,8 @@ class SurfaceSwimExecutor:
 
         dx = float(target_pos[0]) - float(pos[0])
         dz = float(target_pos[2]) - float(pos[2])
-        yaw = math.atan2(-dx, dz)
+        # Mineflayer yaw convention (session.js:896,2992): 0 faces -Z, pi/2 faces -X
+        yaw = math.atan2(-dx, -dz)
 
         # Low oxygen or deeply submerged -> pure vertical buoyancy first
         forward = not (submerged and oxygen <= 10)

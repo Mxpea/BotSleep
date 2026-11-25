@@ -56,6 +56,7 @@ class HardSafetyBranch(Node):
         self.threat_radius = float(threat_radius)
         self.low_oxygen_threshold = int(low_oxygen_threshold)
         self._swimmer = SurfaceSwimExecutor(gateway.client, journal)
+        self._douse_cooldown_until: float = 0.0
 
     def _find_actionable_threat(self, bb: Blackboard) -> Optional[Dict[str, Any]]:
         """Select closest hostile that is actually reachable or ranged, exempting canopy ground melee mobs."""
@@ -91,48 +92,61 @@ class HardSafetyBranch(Node):
         candidates.sort(key=lambda pair: pair[0])
         return candidates[0][1]
 
-    def _write_action(self, bb: Blackboard, endpoint: str, payload: Dict[str, Any], fn: Any) -> Status:
+    def _write_action(self, bb: Blackboard, endpoint: str, payload: Dict[str, Any], fn: Any) -> Tuple[Status, Optional[Dict[str, Any]], bool]:
         tx_id = self.journal.begin_write(endpoint, payload, dimension=bb.dimension, pos=bb.pos)
         bb.writes_this_tick += 1
         try:
-            fn()
+            env = fn()
         except APIError as err:
             if err.details.get("action_state") == "unknown":
                 self.journal.resolve_write(tx_id, "unknown", details={"code": err.code, "message": err.message})
                 self.gateway.invalidate_unknown_radius(bb.dimension, block_coord(bb.pos))
+                bb.set("pending_frozen", True, writer=self.name)
                 bb.last_action_outcome = "safety_unknown"
-                return Status.RUNNING
+                return Status.RUNNING, None, False
             self.journal.resolve_write(tx_id, "failed_known", details={"code": err.code})
             bb.last_action_outcome = f"safety_failed:{err.code}"
-            return Status.RUNNING
+            return Status.RUNNING, None, False
         self.journal.resolve_write(tx_id, "confirmed")
-        return Status.RUNNING
+        res = env.get("result") if isinstance(env, dict) else None
+        return Status.RUNNING, (res if isinstance(res, dict) else {}), True
+
+    @staticmethod
+    def _has_melee_weapon(counts: Dict[str, int]) -> bool:
+        return any(k.endswith(("_sword", "_axe")) and v > 0 for k, v in counts.items())
 
     def update(self, bb: Blackboard) -> Status:
         st = bb.status
         if not st.get("alive", True):
             return Status.RUNNING
 
-        # 1) In lava or on fire -> immediate water bucket douse or jump-escape
+        # 1) In lava or on fire -> immediate water bucket douse (with cooldown on failure) or jump-escape
         if st.get("in_lava") or st.get("on_fire"):
             px, py, pz = bb.pos
-            if bb.inventory_counts.get("water_bucket", 0) > 0:
+            now = time.monotonic()
+            if bb.inventory_counts.get("water_bucket", 0) > 0 and now >= self._douse_cooldown_until:
                 feet = block_coord((px, py, pz))
                 bb.last_action_outcome = "safety_douse_water"
-                return self._write_action(
+                status_ret, res, ok = self._write_action(
                     bb, "interact", {"pos": list(feet), "item": "water_bucket"},
                     lambda: self.gateway.client.interact(pos=list(feet), item="water_bucket"),
                 )
+                if not ok or (res is not None and res.get("changed") is False and not res.get("used")):
+                    self._douse_cooldown_until = now + 4.0
+                return status_ret
             bb.last_action_outcome = "safety_escape_lava"
-            return self._write_action(
+            status_ret, _, _ = self._write_action(
                 bb, "control", {"forward": True, "jump": True, "ms": 400},
                 lambda: self.gateway.client.control(forward=True, jump=True, ms=400),
             )
+            return status_ret
 
         # 2) Low oxygen / drowning -> pure surface buoyancy pulse
         if st.get("submerged") and bb.oxygen <= self.low_oxygen_threshold:
             res = self._swimmer.swim_step((bb.pos[0], bb.pos[1] + 2.0, bb.pos[2]), st)
             bb.writes_this_tick += 1
+            if res.status == "UNKNOWN":
+                bb.set("pending_frozen", True, writer=self.name)
             bb.last_action_outcome = f"safety_surface:{res.status.lower()}"
             return Status.RUNNING
 
@@ -149,17 +163,19 @@ class HardSafetyBranch(Node):
         norm = max(1e-6, math.hypot(vx, vz))
         rx, rz = round(px + (vx / norm) * 6.0, 1), round(pz + (vz / norm) * 6.0, 1)
 
-        # If healthy and melee-range with sword/axe and not a creeper, strike once; otherwise retreat!
+        # If healthy and melee-range with an actual sword/axe and not a creeper, strike once; otherwise retreat!
         tname = str(threat.get("name") or "")
-        if d <= 3.5 and bb.health >= 12.0 and tname != "creeper":
+        if d <= 3.5 and bb.health >= 12.0 and tname != "creeper" and self._has_melee_weapon(bb.inventory_counts):
             bb.last_action_outcome = f"safety_strike:{tname}"
-            return self._write_action(
+            status_ret, _, _ = self._write_action(
                 bb, "attack", {"entity_id": threat["id"]},
                 lambda: self.gateway.client.attack(int(threat["id"]), timeout_ms=2500, max_hits=2),
             )
+            return status_ret
 
         bb.last_action_outcome = f"safety_retreat:{tname}"
-        return self._write_action(
+        status_ret, _, _ = self._write_action(
             bb, "move_to", {"x": rx, "z": rz, "range": 1.5, "timeout_ms": 4000},
             lambda: self.gateway.client.move_to(x=rx, z=rz, range=1.5, timeout_ms=4000),
         )
+        return status_ret

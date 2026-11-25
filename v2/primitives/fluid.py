@@ -52,6 +52,12 @@ class FluidPrimitive:
             unknown_center=target,
         )
         if out.status == "OK":
+            # Upstream useBucket returns ok=true even on silent miss (`changed: false`, empty `gained`)!
+            gained = out.details.get("gained") if isinstance(out.details.get("gained"), dict) else {}
+            filled = any(str(k).endswith("_bucket") and int(v) > 0 for k, v in gained.items()) or bool(out.details.get("filled"))
+            if not filled and out.details.get("changed") is False:
+                self.ctx.gateway.unreachable.record_failure(bb.dimension, target, "fluid_pickup", "bucket_no_change")
+                return ActionOutcome("FAILED_LOCAL", "fluid_pickup", reason="bucket_no_change", details=out.details)
             # Invalidate rather than hard-setting air because 2x2 infinite water sources immediately reform!
             self.ctx.gateway.invalidate_unknown_radius(bb.dimension, target, radius=0)
         elif out.status == "FAILED_LOCAL":
@@ -72,7 +78,10 @@ class FluidPrimitive:
         if plan.status == "CLEAR_OCCLUDER" and plan.occluder_pos is not None:
             out = self._dig.dig_block(bb, plan.occluder_pos, collect=False)
             return ActionOutcome("PROGRESSED" if out.status == "OK" else out.status, "fluid_clear_occluder", reason=plan.reason)
-        if plan.status == "READY" and plan.stand_pos is not None and block_coord(bb.pos) != plan.stand_pos:
+        if plan.status != "READY" or plan.stand_pos is None:
+            self.ctx.gateway.unreachable.record_failure(bb.dimension, target, "fluid_pour", plan.reason)
+            return ActionOutcome("FAILED_LOCAL", "fluid_pour", reason=plan.reason)
+        if block_coord(bb.pos) != plan.stand_pos:
             return self._nav.step_to(
                 bb,
                 (plan.stand_pos[0] + 0.5, float(plan.stand_pos[1]), plan.stand_pos[2] + 0.5),
@@ -87,8 +96,13 @@ class FluidPrimitive:
             unknown_center=target,
         )
         if out.status == "OK":
-            liquid_nm = "water" if bucket_item == "water_bucket" else "lava"
-            self.ctx.gateway.write_through_place(bb.dimension, target, liquid_nm)
+            used = out.details.get("used") if isinstance(out.details.get("used"), dict) else {}
+            consumed = int(used.get(bucket_item, 0)) > 0 or bool(out.details.get("poured"))
+            if not consumed and out.details.get("changed") is False:
+                self.ctx.gateway.unreachable.record_failure(bb.dimension, target, "fluid_pour", "pour_no_change")
+                return ActionOutcome("FAILED_LOCAL", "fluid_pour", reason="pour_no_change", details=out.details)
+            # Invalidate 3x3x3 neighborhood because poured fluid flows and may cast obsidian on neighbors
+            self.ctx.gateway.invalidate_unknown_radius(bb.dimension, target, radius=1)
         return out
 
     def ignite(self, bb: Blackboard, target_pos: Coord3) -> ActionOutcome:

@@ -8,21 +8,41 @@ from typing import Any, Dict
 from v2.bt.blackboard import Blackboard
 from v2.bt.kernel import Node, Status
 from v2.gateway.world_proxy import VirtualWorldGateway
+from v2.kernel.client import APIError
 
 
 class SyncBlackboardNode(Node):
     """Fetches status, inventory, entities, and incremental events in 1 RTT via AsyncReadPool."""
 
-    def __init__(self, gateway: VirtualWorldGateway, *, entity_radius: int = 32) -> None:
+    TRANSIENT_READ_CODES = frozenset({"not_ready", "wrong_server", "request_timeout", "backend_unavailable"})
+
+    def __init__(
+        self,
+        gateway: VirtualWorldGateway,
+        *,
+        entity_radius: int = 32,
+        max_transient_errors: int = 10,
+    ) -> None:
         super().__init__("SyncBlackboard")
         self.gateway = gateway
         self.entity_radius = int(entity_radius)
+        self.max_transient_errors = max(1, int(max_transient_errors))
+        self.consecutive_read_errors: int = 0
 
     def update(self, bb: Blackboard) -> Status:
-        bundle = self.gateway.client.observe_tick_bundle(
-            last_event_seq=bb.last_event_seq,
-            entity_radius=self.entity_radius,
-        )
+        try:
+            bundle = self.gateway.client.observe_tick_bundle(
+                last_event_seq=bb.last_event_seq,
+                entity_radius=self.entity_radius,
+            )
+        except APIError as err:
+            if err.code in self.TRANSIENT_READ_CODES and self.consecutive_read_errors + 1 < self.max_transient_errors:
+                self.consecutive_read_errors += 1
+                bb.last_action_outcome = f"observe_transient:{err.code}"
+                bb.log_event(self.name, "transient_read_error", f"{err.code} ({self.consecutive_read_errors})")
+                return Status.RUNNING
+            raise
+        self.consecutive_read_errors = 0
         bb.status = bundle["status"]
         bb.inventory = bundle["inventory"]
         counts: Dict[str, int] = {}

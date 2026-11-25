@@ -115,6 +115,17 @@ class UnifiedWorldDB:
             self._conn.commit()
 
     @classmethod
+    def scope_db_path(
+        cls,
+        state_dir: Path | str,
+        api_base_url: str,
+        username: str,
+        world_id: str = "default",
+    ) -> Path:
+        sid = scope_digest(api_base_url, username, world_id)
+        return Path(state_dir) / f"world_{username}_{world_id}_{sid}.sqlite3"
+
+    @classmethod
     def for_scope(
         cls,
         state_dir: Path | str,
@@ -122,8 +133,7 @@ class UnifiedWorldDB:
         username: str,
         world_id: str = "default",
     ) -> "UnifiedWorldDB":
-        sid = scope_digest(api_base_url, username, world_id)
-        path = Path(state_dir) / f"world_{username}_{world_id}_{sid}.sqlite3"
+        path = cls.scope_db_path(state_dir, api_base_url, username, world_id)
         return cls(path, api_base_url=api_base_url, username=username, world_id=world_id)
 
     def close(self) -> None:

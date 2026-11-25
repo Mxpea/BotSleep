@@ -43,10 +43,24 @@ class ActiveGoalMount(Node):
             bb.goal_status = "IDLE"
             return Status.FAILURE
 
+        if bb.get("watchdog_stalled"):
+            reason = str(bb.get("watchdog_reason") or "watchdog_stalled")
+            self._goal.stop(bb)
+            self._goal = None
+            bb.active_goal_name = ""
+            bb.goal_status = "NEEDS_AI"
+            bb.last_failure_reason = reason
+            bb.log_event(self.name, "watchdog_abort", reason)
+            return Status.FAILURE
+
         bb.active_goal_name = self._goal.name
         outcome = self._goal.tick(bb)
         bb.goal_status = outcome
         if outcome == "RUNNING":
+            return Status.RUNNING
+        if outcome == "UNKNOWN":
+            # Immediately freeze this tick so AsyncLLMReplanNode is NEVER invoked after an unknown write!
+            bb.set("pending_frozen", True, writer=self.name)
             return Status.RUNNING
         if outcome == "COMPLETED":
             self._goal = None

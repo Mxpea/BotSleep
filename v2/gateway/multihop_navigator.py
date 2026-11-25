@@ -48,6 +48,7 @@ class MultiHopNavigator:
         self.swimmer = swimmer or SurfaceSwimExecutor(self.client, journal)
         self._stall_counts: Dict[Tuple[str, Coord3], int] = {}
         self._last_pos_for_target: Dict[Tuple[str, Coord3], Tuple[float, float, float]] = {}
+        self._pending_pillar: Optional[Tuple[str, Coord3, str]] = None
 
     def reset_target_state(self, dimension: str, target: Coord3) -> None:
         self._stall_counts.pop((dimension, target), None)
@@ -97,8 +98,33 @@ class MultiHopNavigator:
 
         distance = dist2_xz(cur_p, tgt) if xz_only else dist3(cur_p, tgt)
         if distance <= tolerance:
+            self._pending_pillar = None
             self.reset_target_state(dim, tgt_cell)
             return NavOutcome("REACHED", action_taken="none", reason="within_tolerance")
+
+        # 0) Complete pending pillar-up placement launched on previous tick while airborne!
+        if self._pending_pillar is not None:
+            p_dim, p_target, p_item = self._pending_pillar
+            if p_dim == dim and inv.get(p_item, 0) > 0:
+                if block_coord(cur_p) == p_target and not status.get("on_ground", True):
+                    # Still rising toward jump apex (y < p_target.y + 1.0) -> keep armed for next tick!
+                    return NavOutcome("PROGRESSED", action_taken="none", reason="pillar_rising")
+                self._pending_pillar = None
+                if block_coord(cur_p) != p_target:
+                    res, err_out = self._run_write(
+                        "place", {"item": p_item, "pos": list(p_target)}, dim, cur_p,
+                        lambda: self.client.place_block(p_item, p_target[0], p_target[1], p_target[2]),
+                        unknown_center=p_target,
+                    )
+                    if err_out is not None:
+                        if err_out.status == "BLOCKED" and err_out.reason == "blocked_by_self":
+                            self.gateway.unreachable.record_blocked_edge(dim, p_target, (p_target[0], p_target[1] + 1, p_target[2]))
+                        return err_out
+                    self.gateway.write_through_place(dim, p_target, p_item)
+                    self._stall_counts[(dim, tgt_cell)] = 0
+                    return NavOutcome("PROGRESSED", action_taken="place", reason="pillared_up", details={"pos": list(p_target)})
+            else:
+                self._pending_pillar = None
 
         # 1) Surface swim if currently in water/submerged
         if status.get("in_water") or status.get("submerged"):
@@ -151,10 +177,10 @@ class MultiHopNavigator:
         # 3) Local 3D A* step (micro-dig / pillar-up / bridge / detour walk)
         scaffold = pick_best_item(inv, SCAFFOLD_BLOCKS)
         start_cell = block_coord(cur_p)
-        # If target is far, aim Pathfinder3D at an intermediate 12m sub-goal
+        # If target is far, aim Pathfinder3D at an intermediate 8m sub-goal (always within Pathfinder3D prefetch window!)
         sub_goal = tgt_cell
-        if dist3(start_cell, tgt_cell) > 14.0:
-            ratio = 12.0 / max(1e-6, dist3(start_cell, tgt_cell))
+        if dist3(start_cell, tgt_cell) > 9.0:
+            ratio = 8.0 / max(1e-6, dist3(start_cell, tgt_cell))
             sub_goal = (
                 int(round(start_cell[0] + (tgt_cell[0] - start_cell[0]) * ratio)),
                 int(round(start_cell[1] + (tgt_cell[1] - start_cell[1]) * ratio)),
@@ -211,12 +237,25 @@ class MultiHopNavigator:
             return NavOutcome("PROGRESSED", action_taken="place", reason="bridged_gap", details={"pos": list(step.target)})
 
         if step.action == "pillar_up" and scaffold is not None:
+            # On real mineflayer (session.js:2255), placing inside own feet cell fails with `blocked_by_self`
+            # unless the bot is already airborne (jumping). Emit a bounded jump pulse first (<= 1 write/tick).
+            if status.get("on_ground", True) and block_coord(cur_p) == step.target:
+                res, err_out = self._run_write(
+                    "control", {"jump": True, "ms": 500, "wait": False}, dim, cur_p,
+                    lambda: self.client.control(jump=True, ms=500, wait=False),
+                )
+                if err_out is not None:
+                    return err_out
+                self._pending_pillar = (dim, step.target, scaffold)
+                return NavOutcome("PROGRESSED", action_taken="control", reason="pillar_jump_launch")
             res, err_out = self._run_write(
                 "place", {"item": scaffold, "pos": list(step.target)}, dim, cur_p,
                 lambda: self.client.place_block(scaffold, step.target[0], step.target[1], step.target[2]),
                 unknown_center=step.target,
             )
             if err_out is not None:
+                if err_out.status == "BLOCKED" and err_out.reason == "blocked_by_self":
+                    self.gateway.unreachable.record_blocked_edge(dim, start_cell, step.stand_after)
                 return err_out
             self.gateway.write_through_place(dim, step.target, scaffold)
             self._stall_counts[key] = 0

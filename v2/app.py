@@ -83,6 +83,7 @@ def run_v2_session(
     once: bool = False,
     keep_connected: bool = False,
     resume: bool = False,
+    new_competition: bool = False,
     acknowledge_model_idle: bool = False,
     debug_commands: bool = False,
     max_ticks_override: Optional[int] = None,
@@ -172,6 +173,7 @@ def run_v2_session(
                     eligibility_overrides=surv_cfg["competition"]["eligibility_overrides"],
                     db=db,
                     defer_seconds=surv_cfg["competition"]["defer_seconds"],
+                    reset=new_competition,
                 )
                 comp_mgr.sync_server_advancements(client)
 

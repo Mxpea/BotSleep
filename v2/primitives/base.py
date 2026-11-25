@@ -63,5 +63,8 @@ class PrimitiveContext:
             return ActionOutcome("FAILED_LOCAL", endpoint, reason=err.code, details=err.details)
 
         self.journal.resolve_write(tx_id, "confirmed")
-        bb.last_action_outcome = f"{endpoint}:ok"
+        tag = f"@{unknown_center}" if unknown_center is not None else (
+            f":{payload.get('item')}" if isinstance(payload, dict) and payload.get("item") else ""
+        )
+        bb.last_action_outcome = f"{endpoint}:ok{tag}"
         return ActionOutcome("OK", endpoint, details=env.get("result", {}) if isinstance(env, dict) else {}, verified=True)

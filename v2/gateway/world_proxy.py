@@ -325,8 +325,8 @@ class VirtualWorldGateway:
             verify_coords.append((tx, ty - 1, tz))
 
         # Enumerate candidate solid stand positions around target.
-        # Pouring onto high blocks (e.g. top of a portal frame at y+4) is reachable from below because eye_y = sy + 1.62.
-        dy_options = (0, 1, 2, -1) if mode == "pickup" else (0, -1, -2, -3, -4, 1)
+        # Pouring/picking up on upper portal blocks is reachable from below because eye_y = sy + 1.62.
+        dy_options = (0, 1, 2, -1, -2, -3) if mode == "pickup" else (0, -1, -2, -3, -4, 1)
         candidates: List[Coord3] = []
         for dx in range(-3, 4):
             for dz in range(-3, 4):
@@ -338,15 +338,21 @@ class VirtualWorldGateway:
                     feet = (sx + 0.5, float(sy), sz + 0.5)
                     eye = (sx + 0.5, sy + 1.62, sz + 0.5)
                     if mode == "pickup":
-                        if dist3(feet, (tx + 0.5, ty + 0.5, tz + 0.5)) <= 3.15 and dist3(eye, aim) <= 4.45:
+                        if dist3(feet, (tx + 0.5, ty + 0.5, tz + 0.5)) <= 3.6 and dist3(eye, aim) <= 4.45:
                             candidates.append((sx, sy, sz))
                     else:
                         if dist3(eye, aim) <= 4.45:
                             candidates.append((sx, sy, sz))
 
-        candidates.sort(key=lambda c: dist3((c[0] + 0.5, float(c[1]), c[2] + 0.5), player_pos))
-        # Prefetch stance cells + ray cells for top 12 candidates in ONE batch call!
-        top_candidates = candidates[:12]
+        py_floor = math.floor(float(player_pos[1]))
+        candidates.sort(
+            key=lambda c: (
+                abs(c[1] - py_floor),
+                dist3((c[0] + 0.5, float(c[1]), c[2] + 0.5), player_pos),
+            )
+        )
+        # Prefetch stance cells + ray cells for top 36 candidates in ONE batch call!
+        top_candidates = candidates[:36]
         needed: List[Coord3] = list(verify_coords)
         ray_map: Dict[Coord3, List[Coord3]] = {}
         for c in top_candidates:

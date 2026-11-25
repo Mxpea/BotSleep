@@ -1,12 +1,13 @@
-"""L3b Stateless recursive AcquireItemTask and SmeltItemTask ('20 Questions' DAG solver)."""
+"""L3b Stateless recursive AcquireItemTask and real-time SmeltItemTask ('20 Questions' DAG solver)."""
 
 from __future__ import annotations
 
 import math
-from typing import Dict, List, Optional, Tuple
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
 from v2.bt.blackboard import Blackboard
-from v2.domain import Coord3, FUEL_ITEMS, PICKAXE_TIERS, PLANK_ITEMS, dist3
+from v2.domain import Coord3, FUEL_ITEMS, PICKAXE_TIERS, dist3
 from v2.primitives.base import PrimitiveContext
 from v2.primitives.container import ContainerPrimitive
 from v2.primitives.craft import CraftPrimitive
@@ -14,7 +15,7 @@ from v2.primitives.dig_collect import DigCollectPrimitive
 from v2.primitives.fluid import FluidPrimitive
 from v2.primitives.place_build import PlaceBuildPrimitive
 from v2.tasks.base import Task
-from v2.tasks.catalogue import TaskCatalogue
+from v2.tasks.catalogue import OVERWORLD_LOG_TYPES, TaskCatalogue
 from v2.tasks.explore import ExploreUntilTask
 
 
@@ -25,8 +26,29 @@ def _has_pickaxe_tier(counts: Dict[str, int], required: str) -> bool:
     return any(counts.get(tier, 0) > 0 for tier in PICKAXE_TIERS[: req_idx + 1])
 
 
+def _section_count(window: Dict[str, Any], section: str, item_name: Optional[str] = None) -> int:
+    sections = window.get("sections") if isinstance(window.get("sections"), dict) else {}
+    rows = sections.get(section)
+    if not isinstance(rows, list):
+        return 0
+    total = 0
+    for row in rows:
+        if isinstance(row, dict):
+            if item_name is None or row.get("name") == item_name:
+                total += int(row.get("count", 0) or 0)
+    return total
+
+
 class SmeltItemTask(Task):
-    """Stateless multi-furnace batch smelting task (supports 1..max_furnaces parallel furnaces)."""
+    """Stateless real-time smelting task compatible with 10s/item live Minecraft furnaces.
+
+    Lifecycle per tick (<= 1 write):
+    1. Ensure a placed furnace exists within 16m (or place/craft one).
+    2. Inspect furnace window via `window/view` (or reuse fresh window snapshot from last `window/act`).
+    3. If `output` has smelted items -> harvest with `{op: take, from: output}`.
+    4. If `input` already holds enough raw ore and furnace is burning/fueled -> wait cleanly without re-mining.
+    5. Otherwise gather any remaining missing raw ore / fuel, then load with `{op: put, to: input|fuel}`.
+    """
 
     def __init__(
         self,
@@ -36,6 +58,7 @@ class SmeltItemTask(Task):
         count: int,
         *,
         max_furnaces: int = 2,
+        poll_interval_seconds: float = 0.0,
     ) -> None:
         super().__init__(f"smelt:{output_item}x{count}")
         self.ctx = ctx
@@ -43,8 +66,13 @@ class SmeltItemTask(Task):
         self.output_item = output_item
         self.count = max(1, int(count))
         self.max_furnaces = max(1, int(max_furnaces))
+        self.poll_interval_seconds = max(0.0, float(poll_interval_seconds))
         self._container = ContainerPrimitive(ctx)
         self._place = PlaceBuildPrimitive(ctx)
+        self._last_window: Optional[Dict[str, Any]] = None
+        self._last_window_pos: Optional[Coord3] = None
+        self._last_window_at: float = 0.0
+        self._next_inspect_at: float = 0.0
 
     def is_finished(self, bb: Blackboard) -> bool:
         return bb.inventory_counts.get(self.output_item, 0) >= self.count
@@ -53,6 +81,13 @@ class SmeltItemTask(Task):
         for fuel in FUEL_ITEMS:
             if counts.get(fuel, 0) > 0:
                 return fuel
+        return None
+
+    def _extract_window(self, details: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        if isinstance(details.get("window"), dict):
+            return details["window"]
+        if isinstance(details.get("sections"), dict):
+            return details
         return None
 
     def on_tick(self, bb: Blackboard) -> str:
@@ -74,31 +109,91 @@ class SmeltItemTask(Task):
                 return "RUNNING" if out.status in {"OK", "PROGRESSED"} else out.status
             return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, "furnace", 1))
 
-        # 2) Ensure enough raw input item
-        raw_have = bb.inventory_counts.get(smelt.input_item, 0)
-        if raw_have < missing:
-            return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, smelt.input_item, missing))
+        furnaces.sort(key=lambda r: float(r.get("dist", 999.0)))
+        fpos: Coord3 = tuple(int(v) for v in furnaces[0]["pos"])  # type: ignore[assignment]
+        now = time.monotonic()
 
-        # 3) Ensure fuel
-        fuel = self._pick_fuel(bb.inventory_counts)
-        if fuel is None:
+        # 2) Check cached furnace snapshot; if stale or unknown, inspect via window/view (1 action)
+        win = self._last_window if self._last_window_pos == fpos else None
+        if win is not None:
+            out_cnt = _section_count(win, "output")
+            in_cnt = _section_count(win, "input", smelt.input_item)
+            fuel_cnt = _section_count(win, "fuel")
+            info = win.get("info") if isinstance(win.get("info"), dict) else {}
+            burning = bool(info.get("burning", False))
+
+            # 2a) Output ready -> harvest immediately!
+            if out_cnt > 0:
+                res = self._container.harvest_furnace(bb, fpos)
+                if res.status == "OK":
+                    self._last_window = self._extract_window(res.details)
+                    self._last_window_pos = fpos
+                    self._last_window_at = time.monotonic()
+                    return "RUNNING"
+                if res.status == "PROGRESSED":
+                    return "RUNNING"
+                # If harvest reported no_output, force re-inspect next tick
+                self._last_window = None
+                return "RUNNING" if res.reason == "no_output" else res.status
+
+            # 2b) Furnace is actively smelting our raw input -> wait until next poll, then re-inspect!
+            if in_cnt > 0 and (burning or fuel_cnt > 0):
+                if now < self._next_inspect_at:
+                    bb.last_action_outcome = "smelt_waiting_furnace"
+                    return "RUNNING"
+                view = self._container.inspect_window(bb, fpos)
+                if view.status == "OK":
+                    self._last_window = self._extract_window(view.details)
+                    self._last_window_pos = fpos
+                    self._last_window_at = time.monotonic()
+                    self._next_inspect_at = self._last_window_at + self.poll_interval_seconds
+                    return "RUNNING"
+                return "RUNNING" if view.status == "PROGRESSED" else view.status
+        else:
+            # First time seeing this furnace -> inspect before assuming it's empty!
+            view = self._container.inspect_window(bb, fpos)
+            if view.status == "OK":
+                self._last_window = self._extract_window(view.details)
+                self._last_window_pos = fpos
+                self._last_window_at = time.monotonic()
+                return "RUNNING"
+            return "RUNNING" if view.status == "PROGRESSED" else view.status
+
+        # 3) Furnace needs input and/or fuel
+        in_cnt = _section_count(win, "input", smelt.input_item) if win else 0
+        fuel_cnt = _section_count(win, "fuel") if win else 0
+        info = (win.get("info") if isinstance(win.get("info"), dict) else {}) if win else {}
+        burning = bool(info.get("burning", False))
+
+        need_raw_more = max(0, missing - in_cnt)
+        raw_have = bb.inventory_counts.get(smelt.input_item, 0)
+        if need_raw_more > 0 and raw_have < need_raw_more:
+            return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, smelt.input_item, need_raw_more))
+
+        need_fuel = not burning and fuel_cnt <= 0
+        fuel = self._pick_fuel(bb.inventory_counts) if need_fuel else None
+        if need_fuel and fuel is None:
             return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, "coal", max(1, math.ceil(missing / 8))))
 
-        # 4) Smelt batch in nearest furnace (1 write)
-        furnaces.sort(key=lambda r: float(r.get("dist", 999.0)))
-        fpos = tuple(int(v) for v in furnaces[0]["pos"])
-        out = self._container.smelt_batch_step(
+        load_out = self._container.load_furnace(
             bb,
             fpos,
-            input_item=smelt.input_item,
-            input_count=missing,
+            input_item=smelt.input_item if need_raw_more > 0 else None,
+            input_count=need_raw_more,
             fuel_item=fuel,
-            fuel_count=max(1, math.ceil(missing / 8)),
-            harvest_output=True,
+            fuel_count=max(1, math.ceil(missing / 8)) if fuel else 0,
         )
-        if out.status in {"OK", "PROGRESSED"}:
+        if load_out.status == "OK":
+            self._last_window = self._extract_window(load_out.details)
+            self._last_window_pos = fpos
+            self._last_window_at = time.monotonic()
+            self._next_inspect_at = self._last_window_at + self.poll_interval_seconds
             return "RUNNING"
-        return out.status
+        return "RUNNING" if load_out.status == "PROGRESSED" else load_out.status
+
+    def stop(self, bb: Blackboard) -> None:
+        self._last_window = None
+        super().stop(bb)
 
 
 class AcquireItemTask(Task):
@@ -150,7 +245,12 @@ class AcquireItemTask(Task):
             )
         sources.sort(key=lambda c: dist3(bb.pos, (c[0] + 0.5, c[1] + 0.5, c[2] + 0.5)))
         out = self._fluid.pickup_liquid(bb, sources[0])
-        return "RUNNING" if out.status in {"OK", "PROGRESSED"} else out.status
+        if out.status in {"OK", "PROGRESSED"}:
+            return "RUNNING"
+        # sources[0] was blacklisted on FAILED_LOCAL -> try next candidate source on next tick if any remain!
+        if out.status == "FAILED_LOCAL" and len(sources) > 1:
+            return "RUNNING"
+        return out.status
 
     def on_tick(self, bb: Blackboard) -> str:
         if self._depth > 10:
@@ -177,15 +277,41 @@ class AcquireItemTask(Task):
         if gather is not None:
             if gather.min_pickaxe and not _has_pickaxe_tier(bb.inventory_counts, gather.min_pickaxe):
                 return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, gather.min_pickaxe, 1, _depth=self._depth + 1))
-            out = self._dig.dig_nearest_of_types(bb, gather.block_types, radius=32, collect=True)
+            max_dy = 4.0 if gather.preferred_y is not None else None
+            out = self._dig.dig_nearest_of_types(bb, gather.block_types, radius=32, collect=True, max_dy=max_dy)
             if out.status in {"OK", "PROGRESSED"}:
+                self.local_failures = 0
                 return "RUNNING"
+            # If the nearest exposed block was an unreachable pocket, it has now been blacklisted -> retry up to 2x,
+            # then fall through to MineResourceTask for underground-minable items!
+            if out.status == "FAILED_LOCAL" and out.reason in {"no_3d_path", "path_not_found", "out_of_reach", "blacklisted_unreachable"}:
+                self.local_failures += 1
+                if self.local_failures < 2:
+                    return "RUNNING"
+                if gather.preferred_y is not None:
+                    from v2.tasks.mining import MineResourceTask
+                    return self.run_child(bb, MineResourceTask(self.ctx, self.catalogue, self.item, self.count))
+                return "RUNNING"
+            # Non-oak biome rescue: if looking for oak_log (or any *_log) and none exposed nearby,
+            # harvest ANY nearby overworld log species so parent recipe re-scores to that wood species on next tick!
+            if out.reason == "no_exposed_block_found" and self.item in OVERWORLD_LOG_TYPES:
+                any_wood = self._dig.dig_nearest_of_types(bb, OVERWORLD_LOG_TYPES, radius=32, collect=True)
+                if any_wood.status in {"OK", "PROGRESSED"}:
+                    return "RUNNING"
+                explore_types = list(OVERWORLD_LOG_TYPES)
+            else:
+                explore_types = list(gather.block_types)
+
             if out.reason == "no_exposed_block_found":
+                # For underground stone/ores, dig a safe staircase down instead of wandering grassy plains!
+                if gather.preferred_y is not None:
+                    from v2.tasks.mining import MineResourceTask
+                    return self.run_child(bb, MineResourceTask(self.ctx, self.catalogue, self.item, self.count))
                 return self.run_child(
                     bb,
                     ExploreUntilTask(
                         self.ctx,
-                        lambda _bb, gw: bool(gw.scan_blocks(_bb.dimension, list(gather.block_types), radius=24, limit=4)),
+                        lambda _bb, gw, _types=explore_types: bool(gw.scan_blocks(_bb.dimension, _types, radius=24, limit=4)),
                         name=f"find_{self.item}",
                     ),
                 )
