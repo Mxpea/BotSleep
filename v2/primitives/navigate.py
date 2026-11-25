@@ -47,6 +47,7 @@ class NavigatePrimitive:
         )
         if out.action_taken != "none":
             bb.writes_this_tick += 1
+        bb.set("fast_tick_once", out.reason == "pillar_jump_launch", writer="navigate")
         bb.last_action_outcome = f"nav:{out.status.lower()}:{out.action_taken}"
         if out.status == "REACHED":
             return ActionOutcome("OK", "navigate", reason="reached", details=out.details, verified=True)

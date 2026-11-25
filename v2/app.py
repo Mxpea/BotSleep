@@ -330,7 +330,10 @@ def run_v2_session(
                 if comp_mgr is not None and comp_mgr.ended:
                     break
                 if poll_s > 0 and tick_status == Status.RUNNING:
-                    time.sleep(min(poll_s, 1.0))
+                    if rt.bb.get("fast_tick_once"):
+                        time.sleep(0.18)
+                    else:
+                        time.sleep(min(poll_s, 1.0))
 
         return 0
     except APIError as err:

@@ -49,8 +49,8 @@ class IntentCompiler:
         """Dynamic tool exposure staying strictly compact (<= 1,200 bytes)."""
         if self.objective == "competition":
             return [
-                _fn_tool("select_task", "Select eligible scoring advancement", {"task_id": {"type": "string"}}, ["task_id"]),
-                _fn_tool("update_progress", "Record progress note", {"note": {"type": "string"}}, ["note"]),
+                _fn_tool("select_task", "Select & execute eligible scoring advancement", {"task_id": {"type": "string"}}, ["task_id"]),
+                _fn_tool("update_progress", "Record text note ONLY (does not move or act; call select_task to run task)", {"note": {"type": "string"}}, ["note"]),
                 _fn_tool("finish_task", "Verify active task via /advancements", {}, []),
                 _fn_tool("force_exit_task", "Defer blocked task", {"reason": {"type": "string"}}, ["reason"]),
                 _fn_tool("end_competition", "End competition run", {"reason": {"type": "string"}}, ["reason"]),
@@ -103,6 +103,13 @@ class IntentCompiler:
                 task = self.competition.build_task(self.ctx, tid)
                 return task, res
             if name == "update_progress":
+                last_res = bb.get("last_plan_result")
+                if not bb.active_goal_name and isinstance(last_res, dict) and "note" in last_res:
+                    return None, {
+                        "ok": False,
+                        "error": "update_progress_is_note_only_call_select_task_or_force_exit",
+                        "active_task_id": self.competition.active_task_id,
+                    }
                 return None, self.competition.update_progress(str(args.get("note", "")))
             if name == "finish_task":
                 return None, self.competition.finish_task(self.ctx.client)

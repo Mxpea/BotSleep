@@ -219,3 +219,41 @@ class TestOpsAndCliCutover(unittest.TestCase):
         self.assertIn("comp_score=0", content)
         self.assertIn('select_task(task_id="minecraft:story/mine_stone")', content)
         self.assertNotIn("x1)", content.split("CANDIDATES:")[1].split("PROGRESS_CARD")[0])
+
+        # Repeated update_progress while idle must prompt caller to invoke select_task/force_exit
+        comp.select_task("minecraft:story/mine_stone")
+        bb.active_goal_name = ""
+        _, r1 = comp_compiler.compile_tool_call("update_progress", {"note": "first note"}, bb)
+        self.assertTrue(r1["ok"])
+        bb.set("last_plan_result", r1, writer="test")
+        _, r2 = comp_compiler.compile_tool_call("update_progress", {"note": "second note"}, bb)
+        self.assertFalse(r2["ok"])
+        self.assertEqual(r2["error"], "update_progress_is_note_only_call_select_task_or_force_exit")
+
+    def test_failed_pillar_jump_blacklists_edge_instead_of_looping(self) -> None:
+        from tests_v2.sim.virtual_mc_api import VirtualMcApiServer, VirtualMcHttpServer
+        from v2.bt.blackboard import Blackboard
+        from v2.gateway import VirtualWorldGateway
+        from v2.gateway.multihop_navigator import MultiHopNavigator
+        from v2.kernel import MinecraftAgentClient, PendingTransactionJournal, UnifiedWorldDB
+
+        sim = VirtualMcApiServer(spawn_pos=(0.5, 64.0, 0.5))
+        sim.fill(-2, 63, -2, 2, 63, 2, "stone")
+        sim.give("cobblestone", 8)
+        with tempfile.TemporaryDirectory() as td, VirtualMcHttpServer(sim) as srv:
+            db = UnifiedWorldDB.for_scope(td, srv.base_url, "PillarBot", "w1")
+            client = MinecraftAgentClient(srv.base_url, "PillarBot", "pw")
+            try:
+                client.login()
+                journal = PendingTransactionJournal(db)
+                gw = VirtualWorldGateway(client, db=db)
+                nav = MultiHopNavigator(gw, journal)
+                nav._pending_pillar = ("overworld", (0, 64, 0), "cobblestone")
+                # Player landed back on ground at y=64 without rising above p_target
+                out = nav.step_toward((5.5, 64.0, 0.5), {"pos": [0.5, 64.0, 0.5], "dimension": "overworld", "on_ground": True}, inventory_counts={"cobblestone": 8})
+                self.assertIsNone(nav._pending_pillar)
+                self.assertTrue(gw.unreachable.is_edge_blocked("overworld", (0, 64, 0), (0, 65, 0)))
+                self.assertIn(out.status, {"PROGRESSED", "BLOCKED"})
+            finally:
+                client.close()
+                db.close()

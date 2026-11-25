@@ -186,7 +186,7 @@ class MultiHopNavigator:
                     # Still rising toward jump apex (y < p_target.y + 1.0) -> keep armed for next tick!
                     return NavOutcome("PROGRESSED", action_taken="none", reason="pillar_rising")
                 self._pending_pillar = None
-                if block_coord(cur_p) != p_target:
+                if block_coord(cur_p) != p_target and cur_p[1] >= p_target[1] + 0.8:
                     res, err_out = self._run_write(
                         "place", {"item": p_item, "pos": list(p_target)}, dim, cur_p,
                         lambda: self.client.place_block(p_item, p_target[0], p_target[1], p_target[2]),
@@ -199,6 +199,8 @@ class MultiHopNavigator:
                     self.gateway.write_through_place(dim, p_target, p_item)
                     self._stall_counts[(dim, tgt_cell)] = 0
                     return NavOutcome("PROGRESSED", action_taken="place", reason="pillared_up", details={"pos": list(p_target)})
+                # Jump landed back on same cell without rising (e.g. ceiling/lag) -> blacklist this pillar edge immediately!
+                self.gateway.unreachable.record_blocked_edge(dim, p_target, (p_target[0], p_target[1] + 1, p_target[2]))
             else:
                 self._pending_pillar = None
 
