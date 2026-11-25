@@ -23,7 +23,7 @@ from v2.kernel.model_gate import ModelGateError, ModelRequestGate
 from v2.kernel.storage import UnifiedWorldDB
 
 try:
-    from core.survival_state import SurvivalJournal as _LegacySurvivalJournal
+    from legacy.core.survival_state import SurvivalJournal as _LegacySurvivalJournal
 except ImportError:
     _LegacySurvivalJournal = None  # type: ignore[assignment]
 

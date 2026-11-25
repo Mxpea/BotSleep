@@ -24,7 +24,7 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from core.config import load_config
+from v2.kernel.config import load_config
 
 
 class Rcon:

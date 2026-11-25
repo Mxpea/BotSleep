@@ -26,8 +26,8 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from core.client import MinecraftAgentClient
-from core.config import load_config
+from v2.kernel.client import MinecraftAgentClient
+from v2.kernel.config import load_config
 
 BOT = "SurvivalTestBot"
 WORLD = "survival-smoke-world"
