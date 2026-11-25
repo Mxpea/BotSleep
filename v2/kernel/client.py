@@ -284,15 +284,33 @@ class MinecraftAgentClient:
         if self.recorder is None:
             return self._send_request(method, endpoint, **options)
         started = time.perf_counter()
+        ok = False
+        err_info: Optional[Dict[str, Any]] = None
         try:
-            return self._send_request(method, endpoint, **options)
+            res = self._send_request(method, endpoint, **options)
+            ok = True
+            return res
+        except APIError as err:
+            err_info = {
+                "endpoint": endpoint,
+                "method": method,
+                "code": err.code,
+                "message": err.message,
+                "action_state": err.details.get("action_state"),
+                "duration_ms": round(1000 * (time.perf_counter() - started)),
+            }
+            raise
         finally:
+            dur = round(1000 * (time.perf_counter() - started))
             try:
                 self.recorder.record("INFO", "mc_api", "API_TIMING", {
                     "endpoint": endpoint,
                     "method": method,
-                    "duration_ms": round(1000 * (time.perf_counter() - started)),
+                    "duration_ms": dur,
+                    "ok": ok,
                 })
+                if err_info is not None:
+                    self.recorder.record("WARN", "mc_api", "API_ERROR", err_info)
             except Exception:
                 pass
 
