@@ -71,7 +71,7 @@ def _capture(args):
         password = password or auth.get("password")
     if not username or not password:
         raise ValueError("set MC_AGENT_USER/MC_AGENT_PASSWORD, or pass --api-config with a single allowed username")
-    from core.client import MinecraftAgentClient
+    from v2.kernel.client import MinecraftAgentClient
     client = MinecraftAgentClient(base_url=args.base, username=username, password=password)
     attempt = {"time": datetime.now(timezone.utc).isoformat(), "ok": False}
     try:

@@ -1,0 +1,446 @@
+"""L1 MultiHopNavigator: abolishes 32m local limit, slices >22m relays, falls back to 3D micro-dig/pillar/bridge.
+
+Enforces the Single-Write Macro-Tick contract: each call to `step_toward()` executes AT MOST ONE
+write action wrapped in `PendingTransactionJournal`, then immediately returns control to the caller/BT.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+import math
+from typing import Any, Callable, Dict, Optional, Sequence, Tuple
+
+from v2.domain import BOAT_ITEMS, Coord3, LEAF_BLOCKS, NON_SOLID_BLOCKS, SCAFFOLD_BLOCKS, block_coord, dist2_xz, dist3, pick_best_item
+from v2.gateway.pathfinder_3d import NavStep, Pathfinder3D
+from v2.gateway.surface_swim import SurfaceSwimExecutor
+from v2.gateway.world_proxy import VirtualWorldGateway
+from v2.kernel.client import APIError, MinecraftAgentClient
+from v2.kernel.journal import PendingTransactionJournal
+
+
+@dataclass(frozen=True)
+class NavOutcome:
+    status: str  # "REACHED" | "PROGRESSED" | "BLOCKED" | "UNKNOWN" | "NEEDS_SUBTASK"
+    action_taken: str = "none"
+    reason: str = ""
+    details: Dict[str, Any] = field(default_factory=dict)
+
+
+class MultiHopNavigator:
+    """Two-tier navigator: 18-22m relay slicing + Pathfinder3D micro-dig/bridge/pillar + SurfaceSwim."""
+
+    RELAY_THRESHOLD = 22.0
+    RELAY_STEP = 20.0
+    MIN_PROGRESS_METERS = 0.35
+
+    def __init__(
+        self,
+        gateway: VirtualWorldGateway,
+        journal: PendingTransactionJournal,
+        *,
+        pathfinder: Optional[Pathfinder3D] = None,
+        swimmer: Optional[SurfaceSwimExecutor] = None,
+    ) -> None:
+        self.gateway = gateway
+        self.client: MinecraftAgentClient = gateway.client
+        self.journal = journal
+        self.pathfinder = pathfinder or Pathfinder3D(gateway)
+        self.swimmer = swimmer or SurfaceSwimExecutor(self.client, journal)
+        self._stall_counts: Dict[Tuple[str, Coord3], int] = {}
+        self._last_pos_for_target: Dict[Tuple[str, Coord3], Tuple[float, float, float]] = {}
+        self._pending_pillar: Optional[Tuple[str, Coord3, str]] = None
+
+    def reset_target_state(self, dimension: str, target: Coord3) -> None:
+        self._stall_counts.pop((dimension, target), None)
+        self._last_pos_for_target.pop((dimension, target), None)
+
+    def _run_write(
+        self,
+        endpoint: str,
+        payload: Dict[str, Any],
+        dimension: str,
+        pos: Sequence[float],
+        fn: Callable[[], Dict[str, Any]],
+        *,
+        unknown_center: Optional[Coord3] = None,
+    ) -> Tuple[Optional[Dict[str, Any]], Optional[NavOutcome]]:
+        tx_id = self.journal.begin_write(endpoint, payload, dimension=dimension, pos=pos)
+        try:
+            res = fn()
+        except APIError as err:
+            if err.details.get("action_state") == "unknown":
+                self.journal.resolve_write(tx_id, "unknown", details={"code": err.code, "message": err.message})
+                self.gateway.invalidate_unknown_radius(dimension, unknown_center or block_coord(pos))
+                return None, NavOutcome("UNKNOWN", action_taken=endpoint, reason=err.code)
+            self.journal.resolve_write(tx_id, "failed_known", details={"code": err.code})
+            return None, NavOutcome("BLOCKED", action_taken=endpoint, reason=err.code, details=err.details)
+        self.journal.resolve_write(tx_id, "confirmed")
+        return res, None
+
+    def _precision_nudge(
+        self,
+        dim: str,
+        cur_p: Tuple[float, float, float],
+        tgt: Tuple[float, float, float],
+    ) -> NavOutcome:
+        """Bridge upstream goNear() <= (range + 0.5)m deadband with one bounded edge-safe sneak pulse."""
+        dx = float(tgt[0]) - cur_p[0]
+        dz = float(tgt[2]) - cur_p[2]
+        d_xz = math.hypot(dx, dz)
+        if d_xz < 1e-4:
+            return NavOutcome("PROGRESSED", action_taken="none", reason="precision_aligned")
+        yaw = math.atan2(-dx, -dz)
+        ms = max(140, min(420, int((d_xz / 1.3) * 1000)))
+        payload = {"forward": True, "sneak": True, "yaw": round(yaw, 3), "ms": ms}
+        res, err_out = self._run_write(
+            "control",
+            payload,
+            dim,
+            cur_p,
+            lambda: self.client.control(forward=True, sneak=True, yaw=yaw, ms=ms, wait=True),
+        )
+        if err_out is not None:
+            return err_out
+        return NavOutcome(
+            "PROGRESSED",
+            action_taken="control",
+            reason="precision_nudge",
+            details=res.get("result", {}) if res else {},
+        )
+
+    @staticmethod
+    def _deflect_waypoint_from_threats(
+        cur_p: Tuple[float, float, float],
+        wp_x: float,
+        wp_z: float,
+        threats: Sequence[Tuple[float, float, float]],
+        *,
+        avoid_radius: float = 9.0,
+    ) -> Tuple[float, float, bool]:
+        """If the segment cur_p -> (wp_x, wp_z) passes within avoid_radius of a threat, deflect laterally."""
+        if not threats:
+            return wp_x, wp_z, False
+        dx = wp_x - cur_p[0]
+        dz = wp_z - cur_p[2]
+        seg_len_sq = dx * dx + dz * dz
+        if seg_len_sq < 1e-4:
+            return wp_x, wp_z, False
+        seg_len = math.sqrt(seg_len_sq)
+        for tx, _ty, tz in threats:
+            # Closest point on segment cur_p -> wp to threat (tx, tz)
+            t = max(0.0, min(1.0, ((tx - cur_p[0]) * dx + (tz - cur_p[2]) * dz) / seg_len_sq))
+            cx = cur_p[0] + t * dx
+            cz = cur_p[2] + t * dz
+            d_perp = math.hypot(cx - tx, cz - tz)
+            if d_perp < avoid_radius:
+                # Choose perpendicular direction pointing away from the threat
+                px1, pz1 = -dz / seg_len, dx / seg_len
+                px2, pz2 = dz / seg_len, -dx / seg_len
+                mid_x = cur_p[0] + 0.5 * dx
+                mid_z = cur_p[2] + 0.5 * dz
+                c1 = (mid_x + px1 * (avoid_radius + 2.0), mid_z + pz1 * (avoid_radius + 2.0))
+                c2 = (mid_x + px2 * (avoid_radius + 2.0), mid_z + pz2 * (avoid_radius + 2.0))
+                if math.hypot(c1[0] - tx, c1[1] - tz) >= math.hypot(c2[0] - tx, c2[1] - tz):
+                    return round(c1[0], 1), round(c1[1], 1), True
+                return round(c2[0], 1), round(c2[1], 1), True
+        return wp_x, wp_z, False
+
+    def step_toward(
+        self,
+        target_pos: Sequence[float],
+        status: Dict[str, Any],
+        *,
+        tolerance: float = 2.0,
+        inventory_counts: Optional[Dict[str, int]] = None,
+        avoid_block_breaking: Optional[Callable[[Coord3], bool]] = None,
+        prefer_3d: bool = False,
+        xz_only: bool = False,
+        threat_positions: Optional[Sequence[Tuple[float, float, float]]] = None,
+        nearby_entities: Optional[Sequence[Dict[str, Any]]] = None,
+    ) -> NavOutcome:
+        """Perform AT MOST ONE bounded navigation/clearing/bridging/pillaring write step toward target_pos."""
+        pos = status.get("pos") or [0.0, 64.0, 0.0]
+        cur_p = (float(pos[0]), float(pos[1]), float(pos[2]))
+        dim = str(status.get("dimension") or "overworld")
+        tgt = (float(target_pos[0]), float(target_pos[1]), float(target_pos[2]))
+        tgt_cell = block_coord(tgt)
+        inv = inventory_counts or {}
+        threats = [tuple(float(v) for v in tp) for tp in (threat_positions or ()) if len(tp) == 3]
+
+        distance = dist2_xz(cur_p, tgt) if xz_only else dist3(cur_p, tgt)
+        if distance <= tolerance:
+            self._pending_pillar = None
+            self.reset_target_state(dim, tgt_cell)
+            if status.get("in_vehicle"):
+                _, err_out = self._run_write("dismount", {}, dim, cur_p, lambda: self.client.dismount())
+                if err_out is not None:
+                    return err_out
+                return NavOutcome("PROGRESSED", action_taken="dismount", reason="dismounted_at_target")
+            return NavOutcome("REACHED", action_taken="none", reason="within_tolerance")
+
+        # 0) Complete pending pillar-up placement launched on previous tick while airborne!
+        if self._pending_pillar is not None:
+            p_dim, p_target, p_item = self._pending_pillar
+            if p_dim == dim and inv.get(p_item, 0) > 0:
+                if block_coord(cur_p) == p_target and not status.get("on_ground", True):
+                    # Still rising toward jump apex (y < p_target.y + 1.0) -> keep armed for next tick!
+                    return NavOutcome("PROGRESSED", action_taken="none", reason="pillar_rising")
+                self._pending_pillar = None
+                if block_coord(cur_p) != p_target and cur_p[1] >= p_target[1] + 0.8:
+                    res, err_out = self._run_write(
+                        "place", {"item": p_item, "pos": list(p_target)}, dim, cur_p,
+                        lambda: self.client.place_block(p_item, p_target[0], p_target[1], p_target[2]),
+                        unknown_center=p_target,
+                    )
+                    if err_out is not None:
+                        if err_out.status == "BLOCKED" and err_out.reason == "blocked_by_self":
+                            self.gateway.unreachable.record_blocked_edge(dim, p_target, (p_target[0], p_target[1] + 1, p_target[2]))
+                        return err_out
+                    self.gateway.write_through_place(dim, p_target, p_item)
+                    self._stall_counts[(dim, tgt_cell)] = 0
+                    return NavOutcome("PROGRESSED", action_taken="place", reason="pillared_up", details={"pos": list(p_target)})
+                # Jump landed back on same cell without rising (e.g. ceiling/lag) -> blacklist this pillar edge immediately!
+                self.gateway.unreachable.record_blocked_edge(dim, p_target, (p_target[0], p_target[1] + 1, p_target[2]))
+            else:
+                self._pending_pillar = None
+
+        # 0.5) Already riding a vehicle (e.g. boat crossing water) -> steer via move_to or dismount at shore
+        if status.get("in_vehicle"):
+            if not status.get("in_water") and dist2_xz(cur_p, tgt) <= max(tolerance + 2.0, 3.5):
+                _, err_out = self._run_write("dismount", {}, dim, cur_p, lambda: self.client.dismount())
+                if err_out is not None:
+                    return err_out
+                return NavOutcome("PROGRESSED", action_taken="dismount", reason="dismounted_on_shore")
+            rx, rz = tgt[0], tgt[2]
+            if dist2_xz(cur_p, tgt) > self.RELAY_THRESHOLD:
+                ratio = self.RELAY_STEP / max(1e-6, dist2_xz(cur_p, tgt))
+                rx = cur_p[0] + (tgt[0] - cur_p[0]) * min(1.0, ratio)
+                rz = cur_p[2] + (tgt[2] - cur_p[2]) * min(1.0, ratio)
+            payload = {"x": round(rx, 1), "z": round(rz, 1), "range": max(tolerance, 2.0), "timeout_ms": 10000}
+            res, err_out = self._run_write(
+                "move_to", payload, dim, cur_p,
+                lambda: self.client.move_to(x=payload["x"], z=payload["z"], range=payload["range"], timeout_ms=10000),
+            )
+            if err_out is not None:
+                if err_out.status == "BLOCKED":
+                    # Hit shore or obstacle while boating -> dismount on next tick
+                    self.gateway.unreachable.record_blocked_edge(dim, block_coord(cur_p), tgt_cell)
+                return err_out
+            return NavOutcome("PROGRESSED", action_taken="move_to", reason="drive_vehicle", details=res.get("result", {}) if res else {})
+
+        # 1) Water crossing: use boat if available for >10m crossing, else SurfaceSwimExecutor
+        if status.get("in_water") or status.get("submerged"):
+            if not status.get("submerged") and dist2_xz(cur_p, tgt) > 10.0:
+                # Mount an already-deployed boat right next to us
+                for ent in (nearby_entities or ()):
+                    ename = str(ent.get("name") or "")
+                    epos = ent.get("pos")
+                    if ename.endswith("_boat") or ename == "boat" or ename == "bamboo_raft":
+                        if isinstance(epos, list) and len(epos) == 3 and dist3(cur_p, epos) <= 3.5:
+                            eid = int(ent["id"])
+                            _, err_out = self._run_write(
+                                "interact", {"entity_id": eid}, dim, cur_p,
+                                lambda _eid=eid: self.client.interact(entity_id=_eid),
+                            )
+                            if err_out is None:
+                                return NavOutcome("PROGRESSED", action_taken="interact", reason="boarded_boat")
+                            if err_out.status == "UNKNOWN":
+                                return err_out
+                            break
+                # Or deploy a boat from inventory on water surface
+                boat_item = pick_best_item(inv, BOAT_ITEMS)
+                if boat_item is not None and not self.gateway.unreachable.is_blocked(dim, block_coord(cur_p), "deploy_boat"):
+                    deploy_cell = list(block_coord(cur_p))
+                    _, err_out = self._run_write(
+                        "use_item", {"item": boat_item, "target": {"pos": deploy_cell}}, dim, cur_p,
+                        lambda bi=boat_item, dc=deploy_cell: self.client.use_item(bi, target={"pos": dc}),
+                    )
+                    if err_out is None:
+                        return NavOutcome("PROGRESSED", action_taken="use_item", reason="deployed_boat")
+                    if err_out.status == "UNKNOWN":
+                        return err_out
+                    self.gateway.unreachable.record_failure(dim, block_coord(cur_p), "deploy_boat", err_out.reason)
+
+            swim_res = self.swimmer.swim_step(tgt, status)
+            if swim_res.status == "UNKNOWN":
+                return NavOutcome("UNKNOWN", action_taken="control", reason=swim_res.reason)
+            if swim_res.status == "FAILED":
+                return NavOutcome("BLOCKED", action_taken="control", reason=swim_res.reason)
+            return NavOutcome("PROGRESSED", action_taken="control", reason=swim_res.status.lower())
+
+        key = (dim, tgt_cell)
+        prev_pos = self._last_pos_for_target.get(key)
+        stalled = prev_pos is not None and dist3(prev_pos, cur_p) < self.MIN_PROGRESS_METERS
+        if stalled:
+            self._stall_counts[key] = self._stall_counts.get(key, 0) + 1
+            if self._stall_counts[key] >= 6:
+                self._stall_counts[key] = 0
+                self.gateway.unreachable.record_failure(dim, tgt_cell, "navigate", "stalled_no_displacement")
+                self.gateway.unreachable.record_failure(dim, tgt_cell, "navigate", "stalled_no_displacement")
+                return NavOutcome("BLOCKED", action_taken="move_to", reason="stalled_no_displacement")
+        elif prev_pos is not None:
+            self._stall_counts[key] = 0
+        self._last_pos_for_target[key] = cur_p
+
+        use_3d = prefer_3d or self._stall_counts.get(key, 0) >= 1
+        fx_b, fy_b, fz_b = block_coord(cur_p)
+        underground_enclosed = fy_b < 58 and any(
+            (ent := self.gateway.get_block(dim, (fx_b, fy_b + dy, fz_b), allow_fetch=False)) is not None
+            and ent.name not in (NON_SOLID_BLOCKS | LEAF_BLOCKS)
+            for dy in range(2, 6)
+        )
+        relay_step = 12.0 if underground_enclosed else self.RELAY_STEP
+        relay_timeout_ms = 5000 if (underground_enclosed or self._stall_counts.get(key, 0) > 0) else 8000
+        direct_timeout_ms = 5000 if (underground_enclosed or self._stall_counts.get(key, 0) > 0) else 10000
+
+        # 2) Direct or relay move_to (no 32m hard cap!), with threat-repulsion lateral deflection
+        if not use_3d:
+            if distance > self.RELAY_THRESHOLD:
+                ratio = relay_step / max(1e-6, dist2_xz(cur_p, tgt))
+                rx = cur_p[0] + (tgt[0] - cur_p[0]) * min(1.0, ratio)
+                rz = cur_p[2] + (tgt[2] - cur_p[2]) * min(1.0, ratio)
+                rx, rz, deflected = self._deflect_waypoint_from_threats(cur_p, rx, rz, threats)
+                payload = {"x": round(rx, 1), "z": round(rz, 1), "range": 2.0, "timeout_ms": relay_timeout_ms}
+                res, err_out = self._run_write(
+                    "move_to", payload, dim, cur_p,
+                    lambda: self.client.move_to(x=payload["x"], z=payload["z"], range=2.0, timeout_ms=relay_timeout_ms),
+                )
+            else:
+                wx, wz, deflected = self._deflect_waypoint_from_threats(cur_p, tgt[0], tgt[2], threats)
+                ry = None if (xz_only or deflected) else tgt[1]
+                w_range = 2.0 if deflected else tolerance
+                if (not deflected) and (not xz_only) and ry is not None and abs(float(ry) - cur_p[1]) < 0.5:
+                    d_exact = dist3(cur_p, tgt)
+                    d_xz = dist2_xz(cur_p, tgt)
+                    if d_exact <= 0.55 or (stalled and d_xz <= 1.15 and tolerance < 0.6):
+                        return self._precision_nudge(dim, cur_p, tgt)
+                    if d_exact <= w_range + 0.55:
+                        w_range = 0.0
+                payload = {"x": round(wx, 2), "y": ry, "z": round(wz, 2), "range": w_range, "timeout_ms": direct_timeout_ms}
+                res, err_out = self._run_write(
+                    "move_to", payload, dim, cur_p,
+                    lambda: self.client.move_to(x=payload["x"], y=ry, z=payload["z"], range=w_range, timeout_ms=direct_timeout_ms),
+                )
+
+            if err_out is None:
+                return NavOutcome("PROGRESSED", action_taken="move_to", reason="threat_detour" if deflected else "", details=res.get("result", {}) if res else {})
+            if err_out.status == "UNKNOWN":
+                return err_out
+            # move_to failed (e.g. path_not_found across leaves/wall/pit) -> escalate to 3D on next tick
+            self._stall_counts[key] = self._stall_counts.get(key, 0) + 1
+            return NavOutcome("PROGRESSED", action_taken="move_to_fallback_3d", reason=err_out.reason)
+
+        # 3) Local 3D A* step (micro-dig / pillar-up / bridge / detour walk) with dynamic threat repulsion
+        scaffold = pick_best_item(inv, SCAFFOLD_BLOCKS)
+        start_cell = block_coord(cur_p)
+        sub_goal = tgt_cell
+        if dist3(start_cell, tgt_cell) > 9.0:
+            ratio = 8.0 / max(1e-6, dist3(start_cell, tgt_cell))
+            sub_goal = (
+                int(round(start_cell[0] + (tgt_cell[0] - start_cell[0]) * ratio)),
+                int(round(start_cell[1] + (tgt_cell[1] - start_cell[1]) * ratio)),
+                int(round(start_cell[2] + (tgt_cell[2] - start_cell[2]) * ratio)),
+            )
+
+        steps = self.pathfinder.plan(
+            dim,
+            start_cell,
+            sub_goal,
+            tolerance=min(tolerance, 2.0),
+            has_scaffold=scaffold is not None,
+            avoid_block_breaking=avoid_block_breaking,
+            threat_positions=threats,
+        )
+        if not steps:
+            self.gateway.unreachable.record_failure(dim, tgt_cell, "navigate", "no_3d_path")
+            return NavOutcome("BLOCKED", action_taken="pathfinder_3d", reason="no_3d_path")
+
+        step: NavStep = steps[0]
+        # If an upcoming dig step is already within reach (<= 3.8m), execute the dig directly
+        # instead of wasting a tick on a tiny walk adjustment.
+        for upcoming in steps[:4]:
+            if upcoming.action == "dig" and dist3(cur_p, (upcoming.target[0] + 0.5, upcoming.target[1] + 0.5, upcoming.target[2] + 0.5)) <= 3.8:
+                step = upcoming
+                break
+            if upcoming.action != "walk":
+                break
+
+        if step.action == "dig":
+            res, err_out = self._run_write(
+                "dig", {"pos": list(step.target)}, dim, cur_p,
+                lambda: self.client.dig(list(step.target), collect=True),
+                unknown_center=step.target,
+            )
+            if err_out is not None:
+                if err_out.status == "BLOCKED":
+                    self.gateway.unreachable.record_failure(dim, step.target, "dig", err_out.reason)
+                return err_out
+            self.gateway.write_through_dig(dim, step.target)
+            # Keep 3D active if a 2nd block (e.g. lower half of 1x2 wall) still needs digging
+            if step.extra is None:
+                self._stall_counts[key] = 0
+            return NavOutcome("PROGRESSED", action_taken="dig", reason="cleared_3d_obstacle", details={"pos": list(step.target)})
+
+        if step.action == "bridge" and scaffold is not None:
+            res, err_out = self._run_write(
+                "place", {"item": scaffold, "pos": list(step.target)}, dim, cur_p,
+                lambda: self.client.place_block(scaffold, step.target[0], step.target[1], step.target[2]),
+                unknown_center=step.target,
+            )
+            if err_out is not None:
+                if err_out.status == "BLOCKED":
+                    self.gateway.unreachable.record_blocked_edge(dim, start_cell, step.stand_after)
+                    self.gateway.unreachable.record_failure(dim, step.target, "place", err_out.reason)
+                return err_out
+            self.gateway.write_through_place(dim, step.target, scaffold)
+            self._stall_counts[key] = 0
+            return NavOutcome("PROGRESSED", action_taken="place", reason="bridged_gap", details={"pos": list(step.target)})
+
+        if step.action == "pillar_up" and scaffold is not None:
+            # On real mineflayer (session.js:2255), placing inside own feet cell fails with `blocked_by_self`
+            # unless the bot is already airborne (jumping). Emit a bounded jump pulse first (<= 1 write/tick).
+            if status.get("on_ground", True) and block_coord(cur_p) == step.target:
+                res, err_out = self._run_write(
+                    "control", {"jump": True, "ms": 500, "wait": False}, dim, cur_p,
+                    lambda: self.client.control(jump=True, ms=500, wait=False),
+                )
+                if err_out is not None:
+                    return err_out
+                self._pending_pillar = (dim, step.target, scaffold)
+                return NavOutcome("PROGRESSED", action_taken="control", reason="pillar_jump_launch")
+            res, err_out = self._run_write(
+                "place", {"item": scaffold, "pos": list(step.target)}, dim, cur_p,
+                lambda: self.client.place_block(scaffold, step.target[0], step.target[1], step.target[2]),
+                unknown_center=step.target,
+            )
+            if err_out is not None:
+                if err_out.status == "BLOCKED" and err_out.reason == "blocked_by_self":
+                    self.gateway.unreachable.record_blocked_edge(dim, start_cell, step.stand_after)
+                return err_out
+            self.gateway.write_through_place(dim, step.target, scaffold)
+            self._stall_counts[key] = 0
+            return NavOutcome("PROGRESSED", action_taken="place", reason="pillared_up", details={"pos": list(step.target)})
+
+        # Default: walk step (coalesce consecutive plain walk steps up to 6 blocks, exact range=0.4)
+        walk_end = step.stand_after
+        has_following_non_walk = False
+        for s in steps[1:6]:
+            if s.action != "walk":
+                has_following_non_walk = True
+                break
+            walk_end = s.stand_after
+        walk_center = (walk_end[0] + 0.5, float(walk_end[1]), walk_end[2] + 0.5)
+        if abs(walk_center[1] - cur_p[1]) < 0.5 and dist3(cur_p, walk_center) <= 0.55:
+            return self._precision_nudge(dim, cur_p, walk_center)
+        walk_range = 0.0 if dist3(cur_p, walk_center) <= 0.95 else 0.4
+        res, err_out = self._run_write(
+            "move_to", {"x": walk_center[0], "y": walk_center[1], "z": walk_center[2], "range": walk_range}, dim, cur_p,
+            lambda: self.client.move_to(x=walk_center[0], y=walk_center[1], z=walk_center[2], range=walk_range, timeout_ms=8000),
+        )
+        if err_out is not None:
+            if err_out.status == "BLOCKED":
+                self.gateway.unreachable.record_blocked_edge(dim, start_cell, step.stand_after)
+            return err_out
+        if not has_following_non_walk and not stalled:
+            self._stall_counts[key] = 0
+        return NavOutcome("PROGRESSED", action_taken="move_to", reason="3d_walk_step", details={"to": list(walk_end)})

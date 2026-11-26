@@ -22,8 +22,33 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from core.client import MinecraftAgentClient
-from core.rcon import RconManager
+from v2.kernel.client import MinecraftAgentClient
+
+try:
+    from mcrcon import MCRcon as _MCRcon
+except ImportError:
+    _MCRcon = None  # type: ignore[assignment]
+
+
+class RconManager:
+    """Thin RCON command wrapper for multi-bot arena staging."""
+
+    def __init__(self, host: str = "127.0.0.1", port: int = 25575, password: str = "") -> None:
+        self.host = str(host)
+        self.port = int(port)
+        self.password = str(password)
+
+    def command(self, cmd: str) -> str:
+        if _MCRcon is None:
+            raise RuntimeError("mcrcon package is not installed")
+        with _MCRcon(self.host, self.password, port=self.port) as rcon:
+            return str(rcon.command(cmd))
+
+    def execute(self, cmd: str) -> str:
+        return self.command(cmd)
+
+    def disconnect(self) -> None:
+        return None
 
 DEFAULT_SPREAD_GRID: Tuple[Tuple[int, int], ...] = (
     (0, 0),

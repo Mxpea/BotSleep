@@ -1,6 +1,47 @@
 # 配置、客户端、生存、赛事与监控验证
 
-> 架构变更、异机部署运行步骤、Token/耗时账单与逻辑审计汇总另见 [交接文档](HANDOFF.md)。
+> 架构变更、异机部署运行步骤、Token/耗时账单与逻辑审计汇总另见 [交接文档](HANDOFF.md)。过夜全量测试与 API/Token 专题报告见 [OVERNIGHT_TEST_REPORT_20261126.md](OVERNIGHT_TEST_REPORT_20261126.md) 与 [API_AND_TOKEN_REPORT_20261126.md](API_AND_TOKEN_REPORT_20261126.md)；9-Bot 90 分钟与双 API 压测详报见 [LIVE9_90M_REPORT_20261126.md](LIVE9_90M_REPORT_20261126.md)。
+
+## BotSleep v2 地下结构修复 + 9-Bot 90 分钟双 API 压测 + 代码覆盖（2026-11-26）
+
+- **离线覆盖率 (`5e9a9cf`, `scratch/measure_v2_coverage.py`)**：`78 / 78` 单元测试 OK（`0` fail/err/skip，追踪下 `109.343s`，常规 `.\.venv\Scripts\python.exe -B -m unittest discover -s tests_v2 -v` `34.292s`）；`v2/` 全量 63 个文件共 `6,690 / 8,279` 可执行行被命中，**行覆盖率 `80.81%`**（`domain.py` `95.08%`、`observability` `85.52%`、`planner` `84.35%`、`bt` `83.54%`、`gateway` `83.03%`、`tasks` `81.16%`、`kernel` `79.19%`、`primitives` `77.11%`、`app.py` `57.93%`）。
+- **单 Bot 15 分钟 R4 验证 (`single_r4_15m`, `SleepBot1`)**：单主路 API（`qwen3.6-35b-a3b`）实测 `907.15s` / `560 ticks`，`rc=0`，获得 `[Stone Age]` 与 `[Getting an Upgrade]`，`7` 次 `LLM_HTTP`（`8,908` tokens，`0` 错误，`0` 溢出）；`11` 次 `not_ready` 全数经软进展消化。
+- **9-Bot 90 分钟双 API 压测 (`v2_live9_90m`, `SleepBot1..SleepBot9`)**：全新存档、单端口 `mc-agent-api :18900`，**9/9 全员 `rc=0` 正常退出**（最长 `5407.17s`），`0` 条 Python 异常。服务端记录 `24` 项成就（`9/9` 石器与石镐、`4/9` 获 `[Acquire Hardware]`，`2/9` 获 `[Isn't It Iron Pick]`，前排 `SleepBot1` 于 `+35.5m/+36.3m` 达成铁锭/铁镐，`SleepBot4` 挂载 `enter_nether` 但未及进下界 `0/9`），总死亡 `18` 次。`LLM_HTTP` 共 `2,291` 次（`3,508,582` tokens）：主路 `qwen3.6-35b-a3b` `1,946` 次（84.94%，`2` 次 `HTTP 429`）+ 溢出路 `deepseek-ai/DeepSeek-V4.1-Flash-1017` `345` 次（15.06%，`0` 错误）；`SleepBot2` 溺水/水下高频游泳（`428` tick）及 `SleepBot8` 水边高频重规划（`953` 次请求/`1,464,734` tokens）为下一阶段重点修复项。
+
+## BotSleep v2 过夜单 Bot 迭代 + 9-Bot 30 分钟实服压测 + 代码覆盖（2026-11-26）
+
+- **源码基线与环境**：`develop-tianya/rewrite-v2`（提交 `5e176a8` / `e528d86` / `cf39ed1` → `5bd6766` → `c53d3ad` → `c696764` → 终态修复 **`7b14b12`** + 本次文档同步），Windows 11 / `.venv` Python 3.13，Leaves `1.21.11`（`difficulty=easy`、每次实验前删档重置），官方未修改 `mc-agent-api` `1.3.19`（`http://127.0.0.1:18900/api/v1`，`git diff --stat` 为空）。
+- **离线验证与代码覆盖（`7b14b12` 终态，不连接真实服务器）**：
+  - `.\.venv\Scripts\python.exe -B -m unittest discover -s tests_v2 -v`：**77 项全部通过**（`33.727s`，`0` 跳过、`0` 失败）。
+  - 标准库 `trace.Trace` + `dis.findlinestarts`（`scratch/measure_v2_coverage.py`，`77/77` OK，`105.651s`）：`v2/` 全部 62 个文件累计 **`6,529 / 8,089` 可执行行 = `80.71%`**（`domain.py` 95.08%、`observability` 85.52%、`planner` 84.15%、`bt` 83.54%、`gateway` 82.90%、`tasks` 81.69%、`kernel` 78.71%、`primitives` 76.40%、`app.py` 57.84%）。
+- **实服结果汇总（共 5 场 / 13 个 Bot 实例 / ~4.96 Bot·小时，详情见两份专题报告）**：
+  - **单 Bot（仅主路 `qwen3.6-35b-a3b`）**：R1（competition，`290.55s`）修复 `HorizonSelector` `x1` 误拼（`5bd6766`）；R1b（competition，`274.41s`）获 `2` 成就 **`comp_score=10`** 并修复垫脚轮询休眠与空闲 `update_progress` 连发（`c53d3ad`）；R2（daily+speedrun，`561.73s`）修复 `LocalRecoveryBranch` 暗水无限游泳锁死与 `furnacex1x1` 拼接（`c696764`）；R3（daily+speedrun，`491.09s`）跑满 480s `rc=0`，零卡死达成木镐→石镐→熔炉→煤矿→铁镐分支并获 2 成就。
+  - **9-Bot 分散出生 30 分钟双 API 压测（`v2_live9`，`--min-dist 1500` 实测 `1731.1`）**：**9/9 全员 `rc=0` 正常退出**（`1800.24s–1808.78s`），`0` Python 未捕获异常；Leaves 服务端累计 **21 项成就**（`9/9` 石镐、`2/9` 铁锭、`1/9` 铁镐），共 **6 次死亡**（4 名 Bot 全场 0 死）；全夜累计真实调用 `338` 次主路（`0` 溢出、`0` `unknown` 写入、`486,306` total tokens）；赛后对 `bot_6` 500 拍零位移空转与丢弃异步请求遥测缺失已在 **`7b14b12`** 根因修复（待下一轮实服长跑复测，`30 min` 内尚无 Bot 进入 `the_nether`）。
+
+## BotSleep v2（`develop-tianya/rewrite-v2`）L0–L4 分层重写离线与实服验证（2026-11-26）
+
+- **源码基线与环境**：`develop-tianya/rewrite-v2`（提交 `2385ae5` → `3e48e92` → `52f6aa8` + 本次文档更新），Windows / `.venv` Python 3.13；相邻上游 `E:\Program Save\VisualCode\mc-agent-api`（1.3.19）保持**零源码改动**（仅 Node 启动后自动生成未跟踪运行缓存目录 `data/`，源码 `git diff` 为空）。
+- **离线验证结果（不连接真实 Minecraft 服务器，不能替代实服验收）**：
+  - `.\.venv\Scripts\python.exe -B -m unittest discover -s tests_v2 -v`：**72 项全部通过**（`35.401s`，`0` 跳过、`0` 失败），涵盖：
+    - `test_00_layer_boundaries.py` & `test_10_ops_and_cli.py`：AST 单向层间依赖门禁（L0–L4 零逆向导入），`main.py` / `bot_sleep.py` / `client.py` / `v2/` / `scripts/` / `integrations/` 零 `core/agent/skills/debug` 耦合（仅 `scripts/botctl.py` 可选探测 `legacy.core.survival_state`），以及 `botctl` / `multi_bot_runner` / `ninjabrain` 离线回归；
+    - `test_01_simulator.py`：`VirtualMcApiServer` 复现上游 `find_blocks` 跳过空气与非暴露块、`interact(bucket)` `y+0.85` 射线遮挡、`window/act` `{op: put/take, to/from}` 延迟烧炼、Mineflayer `yaw=0` 朝 `-Z`、Java 版岩浆遇邻格水成黑曜石、`goNear()` `<= range + 0.5` 死区提前返回、`control` 需按键校验及 `move_to` 无 32 格人为上限；
+    - `tests_v2/kernel/`：WAL `UnifiedWorldDB` 并发写入、`PendingTransactionJournal` 未知写跨重启硬冻结、`instance_lock` 防重入、`AsyncReadPool` 线程本地 Session 隔离与 `ModelRequestGate` 串行并发=1；
+    - `tests_v2/gateway/`：54 格跨树叶墙多跳导航、落差水岸 `y+0.85` 遮挡清除、`Pathfinder3D` 保护谓词与起点 3×3 预取/有界按需补读、`MultiHopNavigator._precision_nudge` 跨接 `goNear` 0.5m 盲区、浮水氧气门控；
+    - `tests_v2/bt/`、`test_08_anti_deadlock_and_hysteresis.py`：骷髅抢占纯内存 `stop()`（0 网络写）、`PendingUnknownGuard` 冻结、Bounding-Sphere L1–L4 退避阶梯、树冠侧移寻树干逐级安全下树、持盾进出半径迟滞（raise/retreat/strike/lower）与 `LoopWatchdog`（含 `smelt_waiting_furnace` 与有界 `nether_portal_waiting`）；
+    - `tests_v2/tasks/`、`test_07_review_regressions.py`、`test_09_api_utilization_and_mold.py`：886 配方 `TaskCatalogue` 递归求解、非橡木自适应开局、空手出生→两炉烧铁→浇筑 10 格黑曜石模进下界端到端仿真、45 无条件 + 54 条件 override 赛事门禁，以及水优先/岩浆后倒顺浇筑、安全水坑、8 格以上避让岩浆池与传送门冷却等待；
+    - `tests_v2/planner/`：15 张 `skills_kb/*.md` 零依赖 BM25 召回、60 轮历史 `SemanticCompactor` `<= 6,600` 字节、`PORTAL_GATE_READY`、`AsyncLLMReplanNode`。
+  - `.\.venv\Scripts\python.exe -m compileall -q main.py bot_sleep.py client.py v2 scripts integrations` 与 `.\.venv\Scripts\python.exe main.py --config config.example.yaml --check-config`、`scripts/botctl.py --help`、`scripts/multi_bot_runner.py --help` 均通过。
+- **真实服务器专项与端到端联调结果（重置存档 `E:\Program Save\VisualCode\minecraft-server`，Leaves 1.21.11 + 官方未修改 `mc-agent-api` 1.3.19，`difficulty=easy`）**：
+  - **Round 3 完整 4 用例一次性回归（提交 `3e48e92` 基线）**：
+    - **Case A（不平整地形 10 块黑曜石浇筑 → 点火 → 进下界）**：`t=219` 抵达 `the_nether`，最终坐标 `(35.4, 92.0, 36.5)`、`hp=20.0`、`goal=COMPLETED`。实服验证了先放水后放岩浆顺序、`>=8m` 避让岩浆池、`protected_cells` 防门前挖坑、`MultiHopNavigator._precision_nudge` 桥接 `goNear()` 死区与 `nether_portal_waiting`（`control(sneak=True, ms=650)`）等待原版 4 秒传送冷却；
+    - **Case B1（>5m 高树冠侧移至树干安全下树）**：从 `[258.5, 108.0, 200.5]` 侧移至树干 `(263, 106, 200)` 逐格安全落地 `[262.5, 101.0, 199.7]`，**`hp=20.0`（0 摔伤）** 并于 `t=9` 正常恢复制造 `oak_planks`；
+    - **Case B2（`difficulty=easy` 骷髅遭遇与举盾迟滞）**：依次观测到 `safety_shield_raise:skeleton (hyst=True)` → `safety_retreat` → `safety_strike` → 威胁清除后干净触发 `safety_shield_lower (hyst=False)`；
+    - **Case C（`main.py --mode survival --objective daily --max-steps 20` + 本地回环 Mock LLM）**：退出码 `0`，共 `10` 次 LLM 调用，每次请求体积严格为 `[3431, 3714, 4002, 4024, 4028, 4028, 4028, 4028, 4028, 4028]` 字节（全部 `<= 6,600` B），干净登出且 `0 pending` 未决写入。
+  - **此前专项实服验证（已随分支演进记录，Leaves 1.21.11）**：`V2LiveDay3` 零作弊丛林出生 28 ticks 合成石镐（缓存命中 0.52）；`V2LivePhys` `SmeltItemTask("iron_ingot", 2)` 30.7s（22 ticks）通过 `window/view` + `window/act` 收回 2 个真实铁锭；`SurfaceSwimExecutor` `-Z` 北向位移实测（`dz=-0.70`）。
+- **尚未实服验证（严禁混同已通过）**：
+  - 尚未在真实服务器运行「零作弊空手出生 → 全程自寻资源与岩浆池浇筑下界门进下界」单 Bot 完整无干预长跑；
+  - 尚未在真实服务器挂载真实远端大模型（`llm.enabled: true`）跑 **9-Bot 90 分钟分散出生压测**与 **`--objective competition` 实服计分验收**。
+  - 旧版 v1 单元测试已归档至 `legacy/tests/`，随 v1 代码退役不再作为 v2 门禁执行。
 
 ## 双 API 溢出与 `v24`–`v31` 九 Bot 1.5 小时进地狱实服压测收官（2026-11-24 – 2026-11-25）
 

@@ -17,9 +17,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from core.config import ConfigError, load_config
-from core.model_gate import ModelGateError, ModelRequestGate
-from core.survival_state import SurvivalJournal
+from v2.kernel.config import ConfigError, load_config
+from v2.kernel.journal import InstanceLockError, PendingTransactionJournal
+from v2.kernel.model_gate import ModelGateError, ModelRequestGate
+from v2.kernel.storage import UnifiedWorldDB
 
 DEFAULT_CONFIG_PATH = "config.yaml"
 
@@ -57,14 +58,36 @@ def inspect_runtime(
     world_id = survival["world_id"]
     objective = survival.get("objective", "starter")
 
-    journal = SurvivalJournal(
-        survival["state_dir"],
-        endpoint=endpoint,
-        username=username,
-        world_id=world_id,
-    )
-    instance = journal.instance_status()
-    pending = journal.state.get("pending")
+    # Inspect v2 UnifiedWorldDB / PendingTransactionJournal (without mutating state)
+    v2_db_path = UnifiedWorldDB.scope_db_path(survival["state_dir"], endpoint, username, world_id)
+    v2_lock_path = v2_db_path.with_suffix(".instance.lock")
+    v2_locked = False
+    v2_pending = None
+    if v2_lock_path.exists():
+        # Non-blocking probe on existing lock file
+        probe_db = UnifiedWorldDB(v2_db_path, api_base_url=endpoint, username=username, world_id=world_id)
+        try:
+            probe_journal = PendingTransactionJournal(probe_db)
+            try:
+                with probe_journal.instance_lock():
+                    v2_locked = False
+            except InstanceLockError:
+                v2_locked = True
+            v2_pending = probe_journal.get_pending()
+        finally:
+            probe_db.close()
+    elif v2_db_path.is_file():
+        probe_db = UnifiedWorldDB(v2_db_path, api_base_url=endpoint, username=username, world_id=world_id)
+        try:
+            v2_pending = PendingTransactionJournal(probe_db).get_pending()
+        finally:
+            probe_db.close()
+
+    instance = {
+        "locked": bool(v2_locked),
+        "v2_locked": bool(v2_locked),
+    }
+    pending = v2_pending
 
     llm_cfg = config.get("llm", {})
     if llm_cfg.get("enabled"):
@@ -106,9 +129,11 @@ def inspect_runtime(
         },
         "instance": instance,
         "journal": {
-            "directory": str(journal.directory),
-            "updated_at": journal.state.get("updated_at"),
+            "directory": str(v2_db_path.parent),
+            "v2_db": str(v2_db_path),
+            "updated_at": None,
             "pending": pending,
+            "v2_pending": v2_pending,
         },
         "model_gate": gate_snapshot,
         "ready_to_replace": len(block_reasons) == 0,
