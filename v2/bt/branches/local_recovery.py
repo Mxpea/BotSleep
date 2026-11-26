@@ -18,6 +18,8 @@ from v2.domain import (
     LEAF_BLOCKS,
     LOG_BLOCKS,
     NON_SOLID_BLOCKS,
+    PASS_THROUGH_BLOCKS,
+    SOFT_OCCLUDERS,
     block_coord,
     dist3,
 )
@@ -25,6 +27,20 @@ from v2.gateway.surface_swim import SurfaceSwimExecutor
 from v2.gateway.world_proxy import VirtualWorldGateway
 from v2.kernel.client import APIError
 from v2.kernel.journal import PendingTransactionJournal
+
+_SHORE_BEARINGS: Tuple[Tuple[float, float], ...] = (
+    (1.0, 0.0),
+    (0.707, 0.707),
+    (0.0, 1.0),
+    (-0.707, 0.707),
+    (-1.0, 0.0),
+    (-0.707, -0.707),
+    (0.0, -1.0),
+    (0.707, -0.707),
+)
+_WATER_BANK_DIG_BLOCKS = SOFT_OCCLUDERS | LEAF_BLOCKS | frozenset({
+    "sand", "red_sand", "gravel", "clay", "mud", "snow_block",
+})
 
 
 class LocalRecoveryBranch(Node):
@@ -60,30 +76,67 @@ class LocalRecoveryBranch(Node):
         self._swim_cooldown_until: float = 0.0
 
     def _pick_swim_target(self, bb: Blackboard) -> Tuple[float, float, float]:
-        """Prefer nearby dry/air shore block over blind yaw=0 when escaping water."""
+        """Prefetch 3D shore cells and prefer nearby dry bank, rotating bearing when none visible."""
         fx, fy, fz = block_coord(bb.pos)
+        coords = [
+            (fx + dx, fy + dy, fz + dz)
+            for dx in range(-2, 3)
+            for dz in range(-2, 3)
+            for dy in (-1, 0, 1, 2)
+        ]
+        fetched = self.gateway.prefetch_blocks(bb.dimension, coords)
+        offsets = sorted(
+            ((dx, dz) for dx in range(-2, 3) for dz in range(-2, 3) if (dx, dz) != (0, 0)),
+            key=lambda d: (d[0] * d[0] + d[1] * d[1], abs(d[0]) + abs(d[1])),
+        )
         for dy in (1, 0):
-            for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            for dx, dz in offsets:
                 cand = (fx + dx, fy + dy, fz + dz)
-                below = self.gateway.get_block(bb.dimension, (cand[0], cand[1] - 1, cand[2]), allow_fetch=False)
-                feet = self.gateway.get_block(bb.dimension, cand, allow_fetch=False)
-                head = self.gateway.get_block(bb.dimension, (cand[0], cand[1] + 1, cand[2]), allow_fetch=False)
+                below = fetched.get((cand[0], cand[1] - 1, cand[2]))
+                feet = fetched.get(cand)
+                head = fetched.get((cand[0], cand[1] + 1, cand[2]))
                 if (
-                    feet is not None and feet.name in NON_SOLID_BLOCKS and feet.name != "water"
-                    and (head is None or (head.name in NON_SOLID_BLOCKS and head.name != "water"))
-                    and (below is None or below.name not in NON_SOLID_BLOCKS)
+                    feet is not None and feet.name in PASS_THROUGH_BLOCKS and feet.name not in HAZARD_BLOCKS
+                    and (head is None or (head.name in PASS_THROUGH_BLOCKS and head.name not in HAZARD_BLOCKS))
+                    and below is not None and below.name not in NON_SOLID_BLOCKS and below.name not in HAZARD_BLOCKS
                 ):
                     return (cand[0] + 0.5, float(cand[1]) + 0.5, cand[2] + 0.5)
+        if self._swim_consec > 0:
+            bx, bz = _SHORE_BEARINGS[(self._swim_consec - 1) % len(_SHORE_BEARINGS)]
+            return (bb.pos[0] + bx * 3.0, bb.pos[1] + 1.0, bb.pos[2] + bz * 3.0)
         return (bb.pos[0], bb.pos[1] + 2.0, bb.pos[2])
 
     def _try_dig_swim_ceiling(self, bb: Blackboard) -> Optional[Status]:
-        """If trapped in water beneath a breakable solid ceiling, dig an overhead air opening."""
+        """If trapped in water beneath a ceiling or soft riverbank overhang, dig an opening."""
         fx, fy, fz = block_coord(bb.pos)
         for dy in (2, 1):
             c = (fx, fy + dy, fz)
             ent = self.gateway.get_block(bb.dimension, c, allow_fetch=True)
             if ent is not None and ent.name not in NON_SOLID_BLOCKS and ent.name not in HAZARD_BLOCKS and ent.name != "bedrock":
                 bb.last_action_outcome = "recovery_swim_dig_ceiling"
+                res_status = self._write_action(
+                    bb, "dig", {"pos": list(c), "collect": False},
+                    lambda _c=c: self.gateway.client.dig(list(_c), collect=False),
+                )
+                if res_status == Status.RUNNING and not bb.get("pending_frozen"):
+                    self.gateway.write_through_dig(bb.dimension, c)
+                return res_status
+        bank_coords = [
+            (fx + dx, fy + dy, fz + dz)
+            for dy in (1, 0)
+            for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1))
+        ]
+        bank_fetched = self.gateway.prefetch_blocks(bb.dimension, bank_coords)
+        for c in bank_coords:
+            ent = bank_fetched.get(c)
+            if (
+                ent is not None
+                and ent.name in _WATER_BANK_DIG_BLOCKS
+                and ent.name not in NON_SOLID_BLOCKS
+                and ent.name not in HAZARD_BLOCKS
+                and not self.gateway.unreachable.is_blocked(bb.dimension, c, "dig")
+            ):
+                bb.last_action_outcome = "recovery_swim_dig_bank"
                 res_status = self._write_action(
                     bb, "dig", {"pos": list(c), "collect": False},
                     lambda _c=c: self.gateway.client.dig(list(_c), collect=False),
@@ -151,6 +204,16 @@ class LocalRecoveryBranch(Node):
 
     def update(self, bb: Blackboard) -> Status:
         st = bb.status
+        in_water = bool(st.get("in_water") or st.get("submerged"))
+        on_ground = bool(st.get("on_ground", False))
+        if in_water:
+            dry_streak = 0
+        elif on_ground:
+            dry_streak = int(bb.get("dry_footing_streak", 0) or 0) + 1
+        else:
+            dry_streak = int(bb.get("dry_footing_streak", 0) or 0)
+        bb.set("dry_footing_streak", dry_streak, writer=self.name)
+
         # 1) Urgent eating when hungry or low health
         if (bb.food <= self.food_threshold or (bb.health <= self.low_health_threshold and bb.food < 20)):
             food = self._best_food(bb.inventory_counts)
@@ -162,10 +225,10 @@ class LocalRecoveryBranch(Node):
                 )
 
         # 2) Water shore buoyancy: escape drowning or do a bounded shore-hop without starving AI replan
-        in_water = bool(st.get("in_water") or st.get("submerged"))
         if not in_water:
             self._swim_consec = 0
             self._swim_anchor = None
+            self._swimmer.reset()
         else:
             needs_air = bool(st.get("submerged")) or bb.oxygen < 16
             now = time.monotonic()
@@ -180,10 +243,14 @@ class LocalRecoveryBranch(Node):
                         self._swim_anchor = bb.pos
                         return dig_res
                 if self._swim_consec >= 3 and (not needs_air or stalled_in_water):
-                    # Yield to PhysicalUnstuckBranch / AsyncLLMReplanNode instead of spinning forever
+                    # Yield to PhysicalUnstuckBranch & lock LLM replanning until dry footing returns
                     self._swim_cooldown_until = now + 8.0
                     self._swim_consec = 0
                     self._swim_anchor = None
+                    bb.set("unstuck_needed", True, writer=self.name)
+                    if int(bb.get("unstuck_level", 0) or 0) <= 0:
+                        bb.set("unstuck_level", 1, writer=self.name)
+                    bb.set("water_replan_lock_until", now + 15.0, writer=self.name)
                     bb.last_action_outcome = "recovery_swim_yield"
                     return Status.FAILURE
                 target_pos = self._pick_swim_target(bb)

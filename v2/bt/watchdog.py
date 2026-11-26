@@ -74,14 +74,16 @@ class LoopWatchdogNode(Node):
             unstuck_level = 0
         self._last_inv_sig = inv_sig
 
-        # Bounding-Sphere progress invariant (ignores idle, sleeping, frozen, furnace wait, or active safety preemption)
+        # Bounding-Sphere progress invariant (ignores idle, sleeping, frozen, furnace wait, or active safety preemption;
+        # stays active when in_water/submerged even between goals so bobbing still escalates PhysicalUnstuckBranch)
+        in_water = bool(bb.status.get("in_water") or bb.status.get("submerged"))
         skip_sphere = (
             bb.paused
             or bool(bb.get("pending_frozen"))
             or bool(bb.status.get("is_sleeping", False))
             or bb.last_action_outcome in {"smelt_waiting_furnace", "nether_portal_waiting"}
             or bb.active_branch in {"HardSafetyBranch", "PendingUnknownGuard"}
-            or (not bb.active_goal_name and unstuck_level == 0)
+            or (not bb.active_goal_name and unstuck_level == 0 and not in_water)
         )
         sphere_stalled = False
         if not skip_sphere:
@@ -108,7 +110,8 @@ class LoopWatchdogNode(Node):
                     self._ticks_since_unstuck = 0
                     sphere_stalled = True
                     self.stalled = True
-                    self.stall_signature = f"bounding_sphere@{bb.active_goal_name}(r={radius:.2f}m,L{next_level})"
+                    goal_label = bb.active_goal_name or ("water" if in_water else "idle")
+                    self.stall_signature = f"bounding_sphere@{goal_label}(r={radius:.2f}m,L{next_level})"
                     bb.set("bounding_sphere_stalled", True, writer=self.name)
                     bb.set("watchdog_reason", self.stall_signature, writer=self.name)
 

@@ -8,14 +8,31 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import math
-from typing import Any, Callable, Dict, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-from v2.domain import BOAT_ITEMS, Coord3, LEAF_BLOCKS, NON_SOLID_BLOCKS, SCAFFOLD_BLOCKS, block_coord, dist2_xz, dist3, pick_best_item
+from v2.domain import (
+    BOAT_ITEMS,
+    Coord3,
+    HAZARD_BLOCKS,
+    LEAF_BLOCKS,
+    NON_SOLID_BLOCKS,
+    PASS_THROUGH_BLOCKS,
+    SCAFFOLD_BLOCKS,
+    SOFT_OCCLUDERS,
+    block_coord,
+    dist2_xz,
+    dist3,
+    pick_best_item,
+)
 from v2.gateway.pathfinder_3d import NavStep, Pathfinder3D
 from v2.gateway.surface_swim import SurfaceSwimExecutor
 from v2.gateway.world_proxy import VirtualWorldGateway
 from v2.kernel.client import APIError, MinecraftAgentClient
 from v2.kernel.journal import PendingTransactionJournal
+
+_WATER_SOFT_DIG_BLOCKS = SOFT_OCCLUDERS | LEAF_BLOCKS | frozenset({
+    "sand", "red_sand", "gravel", "clay", "mud", "snow_block",
+})
 
 
 @dataclass(frozen=True)
@@ -48,11 +65,23 @@ class MultiHopNavigator:
         self.swimmer = swimmer or SurfaceSwimExecutor(self.client, journal)
         self._stall_counts: Dict[Tuple[str, Coord3], int] = {}
         self._last_pos_for_target: Dict[Tuple[str, Coord3], Tuple[float, float, float]] = {}
+        self._water_steps: Dict[Tuple[str, Coord3], int] = {}
+        self._water_stalls: Dict[Tuple[str, Coord3], int] = {}
+        self._water_anchor_pos: Dict[Tuple[str, Coord3], Tuple[float, float, float]] = {}
+        self._water_last_pos: Dict[Tuple[str, Coord3], Tuple[float, float, float]] = {}
         self._pending_pillar: Optional[Tuple[str, Coord3, str]] = None
 
+    def _reset_water_state(self, key: Tuple[str, Coord3]) -> None:
+        self._water_steps.pop(key, None)
+        self._water_stalls.pop(key, None)
+        self._water_anchor_pos.pop(key, None)
+        self._water_last_pos.pop(key, None)
+
     def reset_target_state(self, dimension: str, target: Coord3) -> None:
-        self._stall_counts.pop((dimension, target), None)
-        self._last_pos_for_target.pop((dimension, target), None)
+        key = (dimension, target)
+        self._stall_counts.pop(key, None)
+        self._last_pos_for_target.pop(key, None)
+        self._reset_water_state(key)
 
     def _run_write(
         self,
@@ -145,6 +174,141 @@ class MultiHopNavigator:
                 return round(c2[0], 1), round(c2[1], 1), True
         return wp_x, wp_z, False
 
+    def _try_water_shoreline_recovery(
+        self,
+        dim: str,
+        cur_p: Tuple[float, float, float],
+        tgt: Tuple[float, float, float],
+        status: Dict[str, Any],
+        inv: Dict[str, int],
+        avoid_block_breaking: Optional[Callable[[Coord3], bool]],
+        *,
+        stalls: int,
+    ) -> Optional[NavOutcome]:
+        """When water pulses stall, prefetch 3D shore cells and step to dry bank, dig soft overhang, or place scaffold."""
+        fx, fy, fz = block_coord(cur_p)
+        coords = [
+            (fx + dx, fy + dy, fz + dz)
+            for dx in range(-2, 3)
+            for dz in range(-2, 3)
+            for dy in (-1, 0, 1, 2)
+        ]
+        fetched = self.gateway.prefetch_blocks(dim, coords)
+
+        dry_shores: List[Tuple[float, Coord3]] = []
+        for dy in (1, 0):
+            for dx in range(-2, 3):
+                for dz in range(-2, 3):
+                    if dx == 0 and dz == 0:
+                        continue
+                    cand = (fx + dx, fy + dy, fz + dz)
+                    below = fetched.get((cand[0], cand[1] - 1, cand[2]))
+                    feet = fetched.get(cand)
+                    head = fetched.get((cand[0], cand[1] + 1, cand[2]))
+                    if (
+                        feet is not None and feet.name in PASS_THROUGH_BLOCKS and feet.name not in HAZARD_BLOCKS
+                        and (head is None or (head.name in PASS_THROUGH_BLOCKS and head.name not in HAZARD_BLOCKS))
+                        and below is not None and below.name not in NON_SOLID_BLOCKS and below.name not in HAZARD_BLOCKS
+                    ):
+                        score = dist2_xz((cand[0] + 0.5, cand[1], cand[2] + 0.5), tgt) + 0.25 * math.hypot(dx, dz)
+                        dry_shores.append((score, cand))
+        dry_shores.sort(key=lambda item: item[0])
+
+        # On first shoreline recovery attempt (stalls == 2), swim straight onto an adjacent unobstructed dry bank
+        if stalls == 2 and dry_shores:
+            best_shore = dry_shores[0][1]
+            if abs(best_shore[0] - fx) <= 1 and abs(best_shore[2] - fz) <= 1:
+                swim_res = self.swimmer.swim_step(
+                    (best_shore[0] + 0.5, float(best_shore[1]) + 0.5, best_shore[2] + 0.5),
+                    status,
+                    yaw_offset_rad=0.0,
+                )
+                if swim_res.status == "UNKNOWN":
+                    return NavOutcome("UNKNOWN", action_taken="control", reason=swim_res.reason)
+                if swim_res.status == "FAILED":
+                    return NavOutcome("BLOCKED", action_taken="control", reason=swim_res.reason)
+                return NavOutcome("PROGRESSED", action_taken="control", reason="water_shore_step")
+
+        # Dig obstructing 1-block overhead ceiling or soft bank/overhang
+        dig_candidates: List[Coord3] = [(fx, fy + 2, fz), (fx, fy + 1, fz)]
+        cardinals = sorted(
+            ((1, 0), (-1, 0), (0, 1), (0, -1)),
+            key=lambda d: dist2_xz((fx + d[0] + 0.5, fy, fz + d[1] + 0.5), tgt),
+        )
+        for dy in (1, 0):
+            for dx, dz in cardinals:
+                dig_candidates.append((fx + dx, fy + dy, fz + dz))
+        for c in dig_candidates:
+            ent = fetched.get(c)
+            if ent is None or ent.name in NON_SOLID_BLOCKS or ent.name in HAZARD_BLOCKS or ent.name == "bedrock":
+                continue
+            if ent.name not in _WATER_SOFT_DIG_BLOCKS:
+                continue
+            if avoid_block_breaking is not None and avoid_block_breaking(c):
+                continue
+            if self.gateway.unreachable.is_blocked(dim, c, "dig"):
+                continue
+            _, err_out = self._run_write(
+                "dig", {"pos": list(c)}, dim, cur_p,
+                lambda _c=c: self.client.dig(list(_c), collect=True),
+                unknown_center=c,
+            )
+            if err_out is not None:
+                if err_out.status == "BLOCKED":
+                    self.gateway.unreachable.record_failure(dim, c, "dig", err_out.reason)
+                return err_out
+            self.gateway.write_through_dig(dim, c)
+            return NavOutcome("PROGRESSED", action_taken="dig", reason="water_shore_clear", details={"pos": list(c)})
+
+        # Place scaffold block at adjacent water/air cell with dry headroom to step onto
+        scaffold = pick_best_item(inv, SCAFFOLD_BLOCKS)
+        if scaffold is not None:
+            for dx, dz in cardinals:
+                c = (fx + dx, fy, fz + dz)
+                if self.gateway.unreachable.is_blocked(dim, c, "place"):
+                    continue
+                cell_ent = fetched.get(c)
+                above1 = fetched.get((c[0], c[1] + 1, c[2]))
+                above2 = fetched.get((c[0], c[1] + 2, c[2]))
+                if (
+                    cell_ent is not None and cell_ent.name in NON_SOLID_BLOCKS and cell_ent.name not in HAZARD_BLOCKS
+                    and above1 is not None and above1.name in PASS_THROUGH_BLOCKS and above1.name not in HAZARD_BLOCKS
+                    and above2 is not None and above2.name in PASS_THROUGH_BLOCKS and above2.name not in HAZARD_BLOCKS
+                ):
+                    has_support = any(
+                        (nbr := fetched.get((c[0] + ndx, c[1] + ndy, c[2] + ndz))) is not None
+                        and nbr.name not in NON_SOLID_BLOCKS
+                        for ndx, ndy, ndz in ((0, -1, 0), (1, 0, 0), (-1, 0, 0), (0, 0, 1), (0, 0, -1))
+                    )
+                    if not has_support:
+                        continue
+                    _, err_out = self._run_write(
+                        "place", {"item": scaffold, "pos": list(c)}, dim, cur_p,
+                        lambda _s=scaffold, _c=c: self.client.place_block(_s, _c[0], _c[1], _c[2]),
+                        unknown_center=c,
+                    )
+                    if err_out is not None:
+                        if err_out.status == "BLOCKED":
+                            self.gateway.unreachable.record_failure(dim, c, "place", err_out.reason)
+                        return err_out
+                    self.gateway.write_through_place(dim, c, scaffold)
+                    return NavOutcome("PROGRESSED", action_taken="place", reason="water_shore_scaffold", details={"pos": list(c)})
+
+        # Otherwise steer directly toward any prefetched dry shore cell within radius 2
+        if dry_shores:
+            best_shore = dry_shores[0][1]
+            swim_res = self.swimmer.swim_step(
+                (best_shore[0] + 0.5, float(best_shore[1]) + 0.5, best_shore[2] + 0.5),
+                status,
+                yaw_offset_rad=0.0,
+            )
+            if swim_res.status == "UNKNOWN":
+                return NavOutcome("UNKNOWN", action_taken="control", reason=swim_res.reason)
+            if swim_res.status == "FAILED":
+                return NavOutcome("BLOCKED", action_taken="control", reason=swim_res.reason)
+            return NavOutcome("PROGRESSED", action_taken="control", reason="water_shore_step")
+        return None
+
     def step_toward(
         self,
         target_pos: Sequence[float],
@@ -228,7 +392,8 @@ class MultiHopNavigator:
                 return err_out
             return NavOutcome("PROGRESSED", action_taken="move_to", reason="drive_vehicle", details=res.get("result", {}) if res else {})
 
-        # 1) Water crossing: use boat if available for >10m crossing, else SurfaceSwimExecutor
+        # 1) Water crossing: use boat if available for >10m crossing, else SurfaceSwimExecutor + shoreline recovery
+        key = (dim, tgt_cell)
         if status.get("in_water") or status.get("submerged"):
             if not status.get("submerged") and dist2_xz(cur_p, tgt) > 10.0:
                 # Mount an already-deployed boat right next to us
@@ -243,6 +408,7 @@ class MultiHopNavigator:
                                 lambda _eid=eid: self.client.interact(entity_id=_eid),
                             )
                             if err_out is None:
+                                self._water_last_pos[key] = cur_p
                                 return NavOutcome("PROGRESSED", action_taken="interact", reason="boarded_boat")
                             if err_out.status == "UNKNOWN":
                                 return err_out
@@ -256,10 +422,40 @@ class MultiHopNavigator:
                         lambda bi=boat_item, dc=deploy_cell: self.client.use_item(bi, target={"pos": dc}),
                     )
                     if err_out is None:
+                        self._water_last_pos[key] = cur_p
                         return NavOutcome("PROGRESSED", action_taken="use_item", reason="deployed_boat")
                     if err_out.status == "UNKNOWN":
                         return err_out
                     self.gateway.unreachable.record_failure(dim, block_coord(cur_p), "deploy_boat", err_out.reason)
+
+            prev_steps = self._water_steps.get(key, 0)
+            prev_wpos = self._water_last_pos.get(key)
+            anchor = self._water_anchor_pos.setdefault(key, cur_p)
+            if prev_steps >= 4 and dist3(anchor, cur_p) < 0.5:
+                self._reset_water_state(key)
+                self.gateway.unreachable.record_failure(dim, tgt_cell, "navigate", "water_stalled_no_displacement")
+                self.gateway.unreachable.record_failure(dim, tgt_cell, "navigate", "water_stalled_no_displacement")
+                return NavOutcome("BLOCKED", action_taken="control", reason="water_stalled_no_displacement")
+
+            if prev_wpos is not None and dist3(prev_wpos, cur_p) < self.MIN_PROGRESS_METERS:
+                stalls = self._water_stalls.get(key, 0) + 1
+            elif prev_wpos is not None:
+                stalls = 0
+                if dist3(anchor, cur_p) >= 0.5:
+                    self._water_anchor_pos[key] = cur_p
+                    prev_steps = 0
+            else:
+                stalls = 0
+            self._water_steps[key] = prev_steps + 1
+            self._water_stalls[key] = stalls
+            self._water_last_pos[key] = cur_p
+
+            if stalls >= 2:
+                rec_out = self._try_water_shoreline_recovery(
+                    dim, cur_p, tgt, status, inv, avoid_block_breaking, stalls=stalls
+                )
+                if rec_out is not None:
+                    return rec_out
 
             swim_res = self.swimmer.swim_step(tgt, status)
             if swim_res.status == "UNKNOWN":
@@ -268,7 +464,8 @@ class MultiHopNavigator:
                 return NavOutcome("BLOCKED", action_taken="control", reason=swim_res.reason)
             return NavOutcome("PROGRESSED", action_taken="control", reason=swim_res.status.lower())
 
-        key = (dim, tgt_cell)
+        self._reset_water_state(key)
+        self.swimmer.reset()
         prev_pos = self._last_pos_for_target.get(key)
         stalled = prev_pos is not None and dist3(prev_pos, cur_p) < self.MIN_PROGRESS_METERS
         if stalled:

@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from v2.bt.blackboard import Blackboard
 from v2.bt.goal_mount import ActiveGoalMount
 from v2.bt.kernel import Node, Status
+from v2.domain import dist3
 from v2.planner.compactor import SemanticCompactor
 from v2.planner.deps_explainer import DepsExplainer
 from v2.planner.horizon_selector import HorizonSelector
@@ -179,9 +180,34 @@ class AsyncLLMReplanNode(Node):
         self.last_response: Optional[LLMResponse] = None
         self._error_streak: int = 0
         self._next_retry_at: float = 0.0
+        self._last_replan_pos: Optional[Tuple[float, float, float]] = None
+        self._last_replan_inv: Optional[Tuple[Tuple[str, int], ...]] = None
+        self._same_pos_replan_streak: int = 0
+        self._same_pos_cooldown_until: float = 0.0
 
     def bump_context_version(self) -> None:
         self._context_version += 1
+
+    @staticmethod
+    def _inventory_signature(bb: Blackboard) -> Tuple[Tuple[str, int], ...]:
+        return tuple(sorted((k, int(v)) for k, v in bb.inventory_counts.items() if v > 0))
+
+    def _record_completed_replan(self, bb: Blackboard) -> None:
+        cur_pos = bb.pos
+        inv_sig = self._inventory_signature(bb)
+        if (
+            self._last_replan_pos is not None
+            and dist3(cur_pos, self._last_replan_pos) <= 2.5
+            and inv_sig == self._last_replan_inv
+        ):
+            self._same_pos_replan_streak += 1
+            cooldown = min(20.0, 4.0 * float(2 ** (self._same_pos_replan_streak - 1)))
+            self._same_pos_cooldown_until = time.monotonic() + cooldown
+        else:
+            self._same_pos_replan_streak = 0
+            self._same_pos_cooldown_until = 0.0
+        self._last_replan_pos = cur_pos
+        self._last_replan_inv = inv_sig
 
     def update(self, bb: Blackboard) -> Status:
         if bb.get("pending_frozen"):
@@ -195,6 +221,7 @@ class AsyncLLMReplanNode(Node):
                 self.last_response = llm_resp
                 self._error_streak = 0
                 self._next_retry_at = 0.0
+                self._record_completed_replan(bb)
                 bb.set("last_plan_result", res, writer=self.name)
                 if task is not None:
                     self.goal_mount.mount(task, bb)
@@ -205,6 +232,7 @@ class AsyncLLMReplanNode(Node):
                 self.last_response = llm_resp
                 self._error_streak = 0
                 self._next_retry_at = 0.0
+                self._record_completed_replan(bb)
                 bb.set("last_plan_result", res, writer=self.name)
                 if task is not None:
                     self.goal_mount.mount(task, bb)
@@ -221,6 +249,15 @@ class AsyncLLMReplanNode(Node):
             bb.last_action_outcome = "llm_thinking_async"
             return Status.RUNNING
 
+        # 2.5) Water cooldown lock: never spam LLM replans while bobbing in water or before dry footing stabilizes
+        now = time.monotonic()
+        in_water = bool(bb.status.get("in_water") or bb.status.get("submerged"))
+        water_lock_until = float(bb.get("water_replan_lock_until", 0.0) or 0.0)
+        dry_footing_streak = int(bb.get("dry_footing_streak", 0) or 0)
+        if in_water or (now < water_lock_until and dry_footing_streak < 2):
+            bb.last_action_outcome = "llm_wait_dry_footing"
+            return Status.RUNNING
+
         # 3) Submit a new background planning job (or run deterministic HorizonSelector instantaneously)
         needs_ai = bb.goal_status in {"NEEDS_AI", "FAILED_LOCAL"} or bool(bb.get("watchdog_stalled"))
         if self.planner.brain is None:
@@ -232,8 +269,19 @@ class AsyncLLMReplanNode(Node):
                 return Status.SUCCESS
             return Status.RUNNING
 
-        if time.monotonic() < self._next_retry_at:
+        if now < self._next_retry_at:
             bb.last_action_outcome = "llm_error_backoff"
+            return Status.RUNNING
+
+        cur_pos = bb.pos
+        inv_sig = self._inventory_signature(bb)
+        if self._last_replan_pos is not None and (
+            dist3(cur_pos, self._last_replan_pos) > 2.5 or inv_sig != self._last_replan_inv
+        ):
+            self._same_pos_replan_streak = 0
+            self._same_pos_cooldown_until = 0.0
+        elif now < self._same_pos_cooldown_until:
+            bb.last_action_outcome = "llm_same_pos_cooldown"
             return Status.RUNNING
 
         messages, tools = self.planner.build_request_payload(bb, needs_ai=needs_ai)
