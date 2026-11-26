@@ -2,7 +2,7 @@
 
 > **基线与分支**：基于 `main` (`c6859dcaf7a23efe3794298cac082bb60b3efeb5`) 拉出 `develop-tianya/rewrite-v2`。
 > **硬性前提**：相邻上游仓库 `mc-agent-api` 保持**绝对零本地源码修改**；一切虚拟化、缓存、多跳路由与容错均在 `BotSleep` 内闭环。
-> **落地状态（2026-11-26）**：已完成 `L0–L4` 全层重构、主入口切流并合入 `main`；旧版 `core/`、`agent/`、`skills/`、`debug/`、`probe_api.py`、`tests/` 永久归档于 Git 分支 `archive/v1` 与标签 `archive/v1-final`（`c6859dc`），当前主分支已清空临时 `legacy/` 目录。`tests_v2` `78 / 78` 离线回归全绿（行覆盖率 `80.81%`），并完成 Leaves 1.21.11 单机 15 分钟验证及 9-Bot `1.5h`（5400s）双 API 实服长跑压测（详见 [TESTING.md](TESTING.md) 与 [LIVE9_90M_REPORT_20261126.md](LIVE9_90M_REPORT_20261126.md)；9/9 `rc=0`，40 分钟铁镐线达标，进下界 `0/9`）。
+> **落地状态（2026-11-26）**：已完成 `L0–L4` 全层重构、主入口切流并合入 `main`；旧版 `core/`、`agent/`、`skills/`、`debug/`、`probe_api.py`、`tests/` 永久归档于 Git 标签 `archive/v1-final`（`c6859dc`），已合入分支以 `archive/*` 标签留存，当前主分支已清空临时 `legacy/` 目录。`tests_v2` `78 / 78` 离线回归全绿（行覆盖率 `80.81%`），并完成 Leaves 1.21.11 单机 15 分钟验证及 9-Bot `1.5h`（5400s）双 API 实服长跑压测（详见 [TESTING.md](TESTING.md) 与 [LIVE9_90M_REPORT_20261126.md](LIVE9_90M_REPORT_20261126.md)；9/9 `rc=0`，40 分钟铁镐线达标，进下界 `0/9`）。
 
 ---
 

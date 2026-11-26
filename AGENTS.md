@@ -2,7 +2,7 @@
 
 ## 项目结构与模块组织
 
-BotSleep 基于 `mc-agent-api` 控制 Minecraft 机器人。当前 `main` 分支已切流至 **BotSleep v2**（L0–L4 单向五层行为树微内核架构）；旧版 v1 代码永久归档于 Git 分支 `archive/v1` 与标签 `archive/v1-final`（`c6859dc`）。
+BotSleep 基于 `mc-agent-api` 控制 Minecraft 机器人。当前 `main` 分支已切流至 **BotSleep v2**（L0–L4 单向五层行为树微内核架构）；旧版 v1 代码永久归档于 Git 标签 `archive/v1-final`（`c6859dc`），已合入的历史开发分支均以 `archive/*` 标签保留。
 
 - **用户约束（2026-11-16）**：允许拉取相邻 `mc-agent-api` 的官方更新；不要在该仓库修改或提交本地源码补丁。所有适配和修复在 `BotSleep` 内完成；上游行为不足时记录限制，不依赖本地 API 补丁。
 

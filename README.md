@@ -84,9 +84,9 @@ Copy-Item config.example.yaml config.yaml
 
 ## 旧版本归档与拉取升级说明
 
-BotSleep v1 终态代码已永久归档保存于 Git：
-- 归档分支：`archive/v1`（指向 `c6859dc`）
-- 归档标签：`archive/v1-final`（指向 `c6859dc`）
+BotSleep v1 终态代码与各已合入/收口历史分支均已转为 Git 标签永久保留（仓库分支列表仅保留活动主干/开发分支，避免闭合分支杂乱显示）：
+- **v1 终态归档标签**：`archive/v1-final`（指向 `c6859dc`）
+- **历史功能节点标签**：`archive/rewrite-v2`、`archive/api-model-opt`、`archive/ai-iron-diamond-loop`、`archive/shelter-workflow`、`archive/portal-workflow`、`node/web-view-20261119`
 
 协作者从旧版 `main` 同步至当前新版时，直接执行常规拉取即可（非强推历史）：
 
@@ -97,7 +97,7 @@ git pull
 
 - Git 会**自动删除**旧版根目录 `agent/`、`core/`、`debug/`、`skills/`、`tests/` 及 `probe_api.py`，并拉取新版 `v2/`、`skills_kb/` 与 `tests_v2/`。
 - 若本机此前运行过旧代码，旧目录下可能残留未被 Git 追踪的 `__pycache__/` 或本地运行产物；如有空目录残留，可安全手动删除。
-- 如需查阅或对比旧版源码，可切换至 `archive/v1` 或 `archive/v1-final`（`git checkout archive/v1-final`）。
+- 如需查阅或对比旧版源码，可切换至归档标签（`git checkout archive/v1-final`）。
 
 ## 更多文档
 
