@@ -1,6 +1,12 @@
 # 配置、客户端、生存、赛事与监控验证
 
-> 架构变更、异机部署运行步骤、Token/耗时账单与逻辑审计汇总另见 [交接文档](HANDOFF.md)。过夜全量测试与 API/Token 专题报告见 [OVERNIGHT_TEST_REPORT_20261126.md](OVERNIGHT_TEST_REPORT_20261126.md) 与 [API_AND_TOKEN_REPORT_20261126.md](API_AND_TOKEN_REPORT_20261126.md)。
+> 架构变更、异机部署运行步骤、Token/耗时账单与逻辑审计汇总另见 [交接文档](HANDOFF.md)。过夜全量测试与 API/Token 专题报告见 [OVERNIGHT_TEST_REPORT_20261126.md](OVERNIGHT_TEST_REPORT_20261126.md) 与 [API_AND_TOKEN_REPORT_20261126.md](API_AND_TOKEN_REPORT_20261126.md)；9-Bot 90 分钟与双 API 压测详报见 [LIVE9_90M_REPORT_20261126.md](LIVE9_90M_REPORT_20261126.md)。
+
+## BotSleep v2 地下结构修复 + 9-Bot 90 分钟双 API 压测 + 代码覆盖（2026-11-26）
+
+- **离线覆盖率 (`5e9a9cf`, `scratch/measure_v2_coverage.py`)**：`78 / 78` 单元测试 OK（`0` fail/err/skip，追踪下 `109.343s`，常规 `.\.venv\Scripts\python.exe -B -m unittest discover -s tests_v2 -v` `34.292s`）；`v2/` 全量 63 个文件共 `6,690 / 8,279` 可执行行被命中，**行覆盖率 `80.81%`**（`domain.py` `95.08%`、`observability` `85.52%`、`planner` `84.35%`、`bt` `83.54%`、`gateway` `83.03%`、`tasks` `81.16%`、`kernel` `79.19%`、`primitives` `77.11%`、`app.py` `57.93%`）。
+- **单 Bot 15 分钟 R4 验证 (`single_r4_15m`, `SleepBot1`)**：单主路 API（`qwen3.6-35b-a3b`）实测 `907.15s` / `560 ticks`，`rc=0`，获得 `[Stone Age]` 与 `[Getting an Upgrade]`，`7` 次 `LLM_HTTP`（`8,908` tokens，`0` 错误，`0` 溢出）；`11` 次 `not_ready` 全数经软进展消化。
+- **9-Bot 90 分钟双 API 压测 (`v2_live9_90m`, `SleepBot1..SleepBot9`)**：全新存档、单端口 `mc-agent-api :18900`，**9/9 全员 `rc=0` 正常退出**（最长 `5407.17s`），`0` 条 Python 异常。服务端记录 `24` 项成就（`9/9` 石器与石镐、`4/9` 获 `[Acquire Hardware]`，`2/9` 获 `[Isn't It Iron Pick]`，前排 `SleepBot1` 于 `+35.5m/+36.3m` 达成铁锭/铁镐，`SleepBot4` 挂载 `enter_nether` 但未及进下界 `0/9`），总死亡 `18` 次。`LLM_HTTP` 共 `2,291` 次（`3,508,582` tokens）：主路 `qwen3.6-35b-a3b` `1,946` 次（84.94%，`2` 次 `HTTP 429`）+ 溢出路 `deepseek-ai/DeepSeek-V4.1-Flash-1017` `345` 次（15.06%，`0` 错误）；`SleepBot2` 溺水/水下高频游泳（`428` tick）及 `SleepBot8` 水边高频重规划（`953` 次请求/`1,464,734` tokens）为下一阶段重点修复项。
 
 ## BotSleep v2 过夜单 Bot 迭代 + 9-Bot 30 分钟实服压测 + 代码覆盖（2026-11-26）
 
