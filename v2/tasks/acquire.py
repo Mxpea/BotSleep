@@ -13,11 +13,17 @@ from v2.primitives.container import ContainerPrimitive
 from v2.primitives.craft import CraftPrimitive
 from v2.primitives.dig_collect import DigCollectPrimitive
 from v2.primitives.fluid import FluidPrimitive
+from v2.primitives.navigate import NavigatePrimitive
 from v2.primitives.place_build import PlaceBuildPrimitive
 from v2.tasks.base import Task
 from v2.tasks.catalogue import OVERWORLD_LOG_TYPES, TaskCatalogue
 from v2.tasks.explore import ExploreUntilTask
-from v2.tasks.surface import ReturnToSurfaceTask, is_underground
+from v2.tasks.surface import (
+    ReturnToSurfaceTask,
+    is_underground,
+    load_anchor_landmark,
+    save_anchor_landmark,
+)
 
 
 def _has_pickaxe_tier(counts: Dict[str, int], required: str) -> bool:
@@ -70,13 +76,41 @@ class SmeltItemTask(Task):
         self.poll_interval_seconds = max(0.0, float(poll_interval_seconds))
         self._container = ContainerPrimitive(ctx)
         self._place = PlaceBuildPrimitive(ctx)
+        self._nav = NavigatePrimitive(ctx)
         self._last_window: Optional[Dict[str, Any]] = None
         self._last_window_pos: Optional[Coord3] = None
         self._last_window_at: float = 0.0
         self._next_inspect_at: float = 0.0
+        self._placed_furnace_pos: Optional[Coord3] = None
+        self._awaiting_placed_furnace: bool = False
+        self._furnace_pickup_attempted: bool = False
+        self._batch_mine_active: bool = False
+        self._batch_mine_done: bool = False
+        self._furnace_landmark_exhausted: bool = False
+        self._furnace_nav_stalls: int = 0
+        self._furnace_nav_steps: int = 0
+        self._furnace_nav_last_pos: Optional[Tuple[float, float, float]] = None
+
+    def _should_pickup_placed_furnace(self, bb: Blackboard) -> bool:
+        if self._placed_furnace_pos is None or self._furnace_pickup_attempted:
+            return False
+        if bb.inventory_counts.get("furnace", 0) != 0:
+            return False
+        if not any(bb.inventory_counts.get(p, 0) > 0 for p in PICKAXE_TIERS):
+            return False
+        p = self._placed_furnace_pos
+        if dist3(bb.pos, (p[0] + 0.5, p[1] + 0.5, p[2] + 0.5)) > 5.0:
+            return False
+        win = self._last_window if self._last_window_pos == p else None
+        if win is None or _section_count(win, "input") != 0 or _section_count(win, "output") != 0:
+            return False
+        ent = self.ctx.gateway.peek_block(bb.dimension, p)
+        if ent is not None and ent.name != "furnace":
+            return False
+        return True
 
     def is_finished(self, bb: Blackboard) -> bool:
-        return bb.inventory_counts.get(self.output_item, 0) >= self.count
+        return bb.inventory_counts.get(self.output_item, 0) >= self.count and not self._should_pickup_placed_furnace(bb)
 
     def _pick_fuel(self, counts: Dict[str, int]) -> Optional[str]:
         for fuel in FUEL_ITEMS:
@@ -100,18 +134,85 @@ class SmeltItemTask(Task):
         have = bb.inventory_counts.get(self.output_item, 0)
         missing = max(0, self.count - have)
         if missing == 0:
+            if self._should_pickup_placed_furnace(bb):
+                p = self._placed_furnace_pos
+                assert p is not None
+                self._furnace_pickup_attempted = True
+                self._placed_furnace_pos = None
+                ent = self.ctx.gateway.get_block(bb.dimension, p, allow_fetch=True)
+                if ent is not None and ent.name == "furnace":
+                    out = self.ctx.execute_write(
+                        bb,
+                        "dig",
+                        {"pos": list(p), "collect": True},
+                        lambda _p=p: self.ctx.client.dig(list(_p), collect=True),
+                        unknown_center=p,
+                        record_unreachable_action="dig",
+                    )
+                    if out.status == "OK":
+                        self.ctx.gateway.write_through_dig(bb.dimension, p)
+                        if bb.get("last_furnace_anchor") == p:
+                            bb.set("last_furnace_anchor", None, writer="smelt")
+                        return "COMPLETED"
+                    if out.status == "UNKNOWN":
+                        return "UNKNOWN"
             return "COMPLETED"
 
         # 1) Check placed furnaces within 16m
         furnaces = self.ctx.gateway.scan_blocks(bb.dimension, ["furnace"], radius=16, limit=6)
         if not furnaces:
+            if not self._furnace_landmark_exhausted:
+                anchor = load_anchor_landmark(self.ctx.gateway.db, bb, "last_furnace_anchor", "furnace", writer="smelt")
+                if (
+                    anchor is not None
+                    and dist3(bb.pos, (anchor[0] + 0.5, anchor[1] + 0.5, anchor[2] + 0.5)) <= 24.0
+                    and not self.ctx.gateway.unreachable.is_blocked(bb.dimension, anchor, "furnace")
+                ):
+                    center = (anchor[0] + 0.5, anchor[1] + 0.5, anchor[2] + 0.5)
+                    if dist3(bb.pos, center) <= 12.0:
+                        self._furnace_landmark_exhausted = True
+                    else:
+                        if self._furnace_nav_last_pos is not None and dist3(self._furnace_nav_last_pos, bb.pos) < 0.35:
+                            self._furnace_nav_stalls += 1
+                        elif self._furnace_nav_last_pos is not None:
+                            self._furnace_nav_stalls = 0
+                        self._furnace_nav_last_pos = bb.pos
+                        self._furnace_nav_steps += 1
+                        if self._furnace_nav_stalls >= 4 or self._furnace_nav_steps > 12:
+                            self._furnace_landmark_exhausted = True
+                        else:
+                            n_out = self._nav.step_to(bb, center, tolerance=3.5)
+                            if n_out.status == "UNKNOWN":
+                                return "UNKNOWN"
+                            if n_out.status in {"OK", "PROGRESSED"}:
+                                return "RUNNING"
+                            if n_out.status == "FAILED_LOCAL":
+                                self.ctx.gateway.unreachable.record_failure(bb.dimension, anchor, "furnace", n_out.reason)
+                                self._furnace_landmark_exhausted = True
+                            if bb.writes_this_tick >= 1:
+                                return "RUNNING"
+                else:
+                    self._furnace_landmark_exhausted = True
+
             if bb.inventory_counts.get("furnace", 0) > 0:
                 out = self._place.place_near_player(bb, "furnace")
+                if out.status == "OK":
+                    raw_pos = out.details.get("pos") if isinstance(out.details, dict) else None
+                    if isinstance(raw_pos, (list, tuple)) and len(raw_pos) == 3:
+                        placed: Coord3 = (int(raw_pos[0]), int(raw_pos[1]), int(raw_pos[2]))
+                        self._placed_furnace_pos = placed
+                        save_anchor_landmark(self.ctx.gateway.db, bb, "last_furnace_anchor", "furnace", placed, writer="smelt")
+                    else:
+                        self._awaiting_placed_furnace = True
                 return "RUNNING" if out.status in {"OK", "PROGRESSED"} else out.status
             return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, "furnace", 1))
 
         furnaces.sort(key=lambda r: float(r.get("dist", 999.0)))
         fpos: Coord3 = tuple(int(v) for v in furnaces[0]["pos"])  # type: ignore[assignment]
+        if self._awaiting_placed_furnace and self._placed_furnace_pos is None:
+            self._placed_furnace_pos = fpos
+            self._awaiting_placed_furnace = False
+        save_anchor_landmark(self.ctx.gateway.db, bb, "last_furnace_anchor", "furnace", fpos, writer="smelt")
         now = time.monotonic()
 
         # 2) Check cached furnace snapshot; if stale or unknown, inspect via window/view (1 action)
@@ -168,7 +269,28 @@ class SmeltItemTask(Task):
 
         need_raw_more = max(0, missing - in_cnt)
         raw_have = bb.inventory_counts.get(smelt.input_item, 0)
-        if need_raw_more > 0 and raw_have < need_raw_more:
+        batch_eligible = (
+            self.output_item == "iron_ingot"
+            and self.count >= 3
+            and in_cnt == 0
+            and bb.health >= 12.0
+            and not self._batch_mine_done
+        )
+        if batch_eligible and (self._batch_mine_active or (need_raw_more > 0 and raw_have < need_raw_more)):
+            target_raw = min(8, max(6, missing))
+            if raw_have < target_raw:
+                self._batch_mine_active = True
+                res = self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, smelt.input_item, target_raw))
+                if res in {"FAILED_LOCAL", "NEEDS_AI"}:
+                    self._batch_mine_done = True
+                    self._batch_mine_active = False
+                    if bb.inventory_counts.get(smelt.input_item, 0) >= need_raw_more:
+                        return "RUNNING"
+                return res
+            self._batch_mine_done = True
+            self._batch_mine_active = False
+            self._clear_child(bb)
+        elif need_raw_more > 0 and raw_have < need_raw_more:
             return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, smelt.input_item, need_raw_more))
 
         need_fuel = not burning and fuel_cnt <= 0
@@ -176,13 +298,25 @@ class SmeltItemTask(Task):
         if need_fuel and fuel is None:
             return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, "coal", max(1, math.ceil(missing / 8))))
 
+        load_input_count = (
+            min(raw_have, 8)
+            if (smelt.input_item == "raw_iron" and raw_have > need_raw_more)
+            else need_raw_more
+        )
+        if fuel is None:
+            fuel_load_count = 0
+        elif smelt.input_item == "raw_iron" and raw_have > need_raw_more:
+            fuel_load_count = 1
+        else:
+            fuel_load_count = max(1, math.ceil(missing / 8))
+
         load_out = self._container.load_furnace(
             bb,
             fpos,
-            input_item=smelt.input_item if need_raw_more > 0 else None,
-            input_count=need_raw_more,
+            input_item=smelt.input_item if load_input_count > 0 else None,
+            input_count=load_input_count,
             fuel_item=fuel,
-            fuel_count=max(1, math.ceil(missing / 8)) if fuel else 0,
+            fuel_count=fuel_load_count,
         )
         if load_out.status == "OK":
             self._last_window = self._extract_window(load_out.details)
@@ -194,6 +328,16 @@ class SmeltItemTask(Task):
 
     def stop(self, bb: Blackboard) -> None:
         self._last_window = None
+        self._last_window_pos = None
+        self._placed_furnace_pos = None
+        self._awaiting_placed_furnace = False
+        self._furnace_pickup_attempted = False
+        self._batch_mine_active = False
+        self._batch_mine_done = False
+        self._furnace_landmark_exhausted = False
+        self._furnace_nav_stalls = 0
+        self._furnace_nav_steps = 0
+        self._furnace_nav_last_pos = None
         super().stop(bb)
 
 
@@ -219,12 +363,29 @@ class AcquireItemTask(Task):
         self._craft = CraftPrimitive(ctx)
         self._place = PlaceBuildPrimitive(ctx)
         self._fluid = FluidPrimitive(ctx)
+        self._placed_table_pos: Optional[Coord3] = None
+        self._table_pickup_attempted: bool = False
+
+    def _should_pickup_placed_table(self, bb: Blackboard) -> bool:
+        if self._depth != 0 or self._table_pickup_attempted or self._placed_table_pos is None:
+            return False
+        if bb.inventory_counts.get("crafting_table", 0) != 0:
+            return False
+        p = self._placed_table_pos
+        if dist3(bb.pos, (p[0] + 0.5, p[1] + 0.5, p[2] + 0.5)) > 5.0:
+            return False
+        ent = self.ctx.gateway.peek_block(bb.dimension, p)
+        if ent is not None and ent.name != "crafting_table":
+            return False
+        return True
 
     def is_finished(self, bb: Blackboard) -> bool:
-        return bb.inventory_counts.get(self.item, 0) >= self.count
+        return bb.inventory_counts.get(self.item, 0) >= self.count and not self._should_pickup_placed_table(bb)
 
     def stop(self, bb: Blackboard) -> None:
         self._dig.clear_cache()
+        self._placed_table_pos = None
+        self._table_pickup_attempted = False
         super().stop(bb)
 
     def _acquire_liquid_bucket(self, bb: Blackboard, liquid_name: str) -> str:
@@ -274,6 +435,26 @@ class AcquireItemTask(Task):
 
         have = bb.inventory_counts.get(self.item, 0)
         if have >= self.count:
+            if self._should_pickup_placed_table(bb):
+                p = self._placed_table_pos
+                assert p is not None
+                self._table_pickup_attempted = True
+                self._placed_table_pos = None
+                ent = self.ctx.gateway.get_block(bb.dimension, p, allow_fetch=True)
+                if ent is not None and ent.name == "crafting_table":
+                    out = self._craft.ctx.execute_write(
+                        bb,
+                        "dig",
+                        {"pos": list(p), "collect": True},
+                        lambda _p=p: self._craft.ctx.client.dig(list(_p), collect=True),
+                        unknown_center=p,
+                        record_unreachable_action="dig",
+                    )
+                    if out.status == "OK":
+                        self.ctx.gateway.write_through_dig(bb.dimension, p)
+                        return "COMPLETED"
+                    if out.status == "UNKNOWN":
+                        return "UNKNOWN"
             return "COMPLETED"
         missing = self.count - have
 
@@ -362,6 +543,12 @@ class AcquireItemTask(Task):
                 if bb.inventory_counts.get("crafting_table", 0) < 1:
                     return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, "crafting_table", 1, _depth=self._depth + 1))
                 out = self._place.place_near_player(bb, "crafting_table")
+                if out.status == "OK":
+                    raw_pos = out.details.get("pos") if isinstance(out.details, dict) else None
+                    if isinstance(raw_pos, (list, tuple)) and len(raw_pos) == 3:
+                        self._placed_table_pos = (int(raw_pos[0]), int(raw_pos[1]), int(raw_pos[2]))
+                    else:
+                        self._placed_table_pos = self._craft.find_nearby_table(bb)
                 return "RUNNING" if out.status in {"OK", "PROGRESSED"} else out.status
 
         # Check all recipe ingredients recursively

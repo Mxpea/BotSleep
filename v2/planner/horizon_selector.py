@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from v2.bt.blackboard import Blackboard
+from v2.domain import FOOD_ITEMS, PASSIVE_ANIMALS, dist3
 from v2.tasks.catalogue import TaskCatalogue
 from v2.tasks.competition.manager import CompetitionManager
 
@@ -43,9 +44,48 @@ class HorizonSelector:
         inv = bb.inventory_counts
         return inv.get("iron_pickaxe", 0) >= 1 or inv.get("iron_ingot", 0) >= 4
 
+    @staticmethod
+    def _active_corpse_candidate(bb: Blackboard) -> Optional[HorizonCandidate]:
+        drop = bb.get("active_corpse_drop")
+        if (
+            isinstance(drop, dict)
+            and isinstance(drop.get("pos"), (list, tuple))
+            and len(drop["pos"]) == 3
+            and float(drop.get("loaded_elapsed", 0.0) or 0.0) < 300.0
+        ):
+            return HorizonCandidate("recover_corpse", "death_drop", 1, 1, "CORPSE_RECOVERY")
+        return None
+
+    @staticmethod
+    def _daytime_food_hunt_candidate(
+        bb: Blackboard,
+        corpse_cand: Optional[HorizonCandidate],
+    ) -> Optional[HorizonCandidate]:
+        if corpse_cand is not None or bb.dimension != "overworld":
+            return None
+        raw_tod = bb.status.get("time_of_day")
+        tod = (int(raw_tod) if raw_tod is not None else 1000) % 24000
+        if not (0 <= tod < 12000):
+            return None
+        inv = bb.inventory_counts
+        total_food = sum(inv.get(k, 0) for k in FOOD_ITEMS)
+        if not (total_food < 4 or (bb.food <= 14 and total_food < 2)):
+            return None
+        for ent in bb.entities:
+            if not isinstance(ent, dict) or str(ent.get("name") or "") not in PASSIVE_ANIMALS:
+                continue
+            epos = ent.get("pos")
+            if isinstance(epos, (list, tuple)) and len(epos) == 3:
+                if dist3(bb.pos, epos) <= 16.0:
+                    return HorizonCandidate("hunt_food", "food", 4, 4, "FOOD_HUNT")
+            elif ent.get("dist") is not None and float(ent["dist"]) <= 16.0:
+                return HorizonCandidate("hunt_food", "food", 4, 4, "FOOD_HUNT")
+        return None
+
     def select_top(self, bb: Blackboard, *, limit: int = 5) -> List[HorizonCandidate]:
         inv = bb.inventory_counts
         candidates: List[HorizonCandidate] = []
+        corpse_cand = self._active_corpse_candidate(bb)
 
         # Competition mode: rank directly-achievable scoring tasks cleanly in natural progression order!
         if self.objective == "competition" and self.competition is not None:
@@ -103,9 +143,14 @@ class HorizonSelector:
                 -(c.points / max(1, c.est_steps)),
                 c.est_steps,
             ))
+            if corpse_cand is not None:
+                candidates = [corpse_cand] + candidates
             return candidates[:limit]
 
         # Survival / speedrun progression ladder
+        if corpse_cand is not None:
+            candidates.append(corpse_cand)
+
         portal_ready = self.is_portal_gate_ready(bb)
         if portal_ready:
             # Pin EnterNetherTask at #1 with compact fast-track cost so small models don't drift into slow loops!
@@ -118,9 +163,14 @@ class HorizonSelector:
             )
             candidates.append(HorizonCandidate("enter_nether", "the_nether", 1, max(1, est_portal), "PORTAL_GATE_READY"))
 
+        food_hunt = self._daytime_food_hunt_candidate(bb, corpse_cand)
+        if food_hunt is not None:
+            candidates.append(food_hunt)
+
         has_iron_pick = inv.get("iron_pickaxe", 0) > 0 or inv.get("diamond_pickaxe", 0) > 0
         has_stone_pick = has_iron_pick or inv.get("stone_pickaxe", 0) > 0
         has_melee_weapon = any(k.endswith(("_sword", "_axe")) and v > 0 for k, v in inv.items())
+        iron_ingots = inv.get("iron_ingot", 0)
         milestones = [
             ("acquire", "wooden_pickaxe", 1, "tier1"),
             ("acquire", "stone_pickaxe", 1, "tier2"),
@@ -140,18 +190,28 @@ class HorizonSelector:
                 continue
             if item == "stone_sword" and has_melee_weapon:
                 continue
+            if item == "water_bucket" and not (has_iron_pick or iron_ingots >= 6 or inv.get("bucket", 0) >= 1):
+                continue
+            if item in {"flint_and_steel", "shield"} and not ((has_iron_pick and inv.get("water_bucket", 0) >= 1) or iron_ingots >= 7):
+                continue
             if inv.get(item, 0) < cnt:
                 est = self.catalogue.estimate_steps(item, cnt, inv)
+                if item == "stone_sword":
+                    if has_stone_pick:
+                        est = max(1, min(est, 6))
+                    else:
+                        est = max(est, self.catalogue.estimate_steps("stone_pickaxe", 1, inv) + 1)
                 candidates.append(HorizonCandidate(goal, item, cnt, est, tag))
 
         if bb.dimension == "the_nether":
             candidates.append(HorizonCandidate("explore", "nether_fortress", 1, 15, "nether_explore"))
 
-        # Keep PORTAL_GATE_READY pinned #1 if present; sort remaining by fewest steps
-        pinned = [c for c in candidates if c.priority_tag == "PORTAL_GATE_READY"]
-        rest = [c for c in candidates if c.priority_tag != "PORTAL_GATE_READY"]
+        # Pin CORPSE_RECOVERY #1, then PORTAL_GATE_READY; sort remaining by fewest steps
+        corpse_pinned = [c for c in candidates if c.priority_tag == "CORPSE_RECOVERY"]
+        portal_pinned = [c for c in candidates if c.priority_tag == "PORTAL_GATE_READY"]
+        rest = [c for c in candidates if c.priority_tag not in {"CORPSE_RECOVERY", "PORTAL_GATE_READY"}]
         rest.sort(key=lambda c: c.est_steps)
-        return (pinned + rest)[:limit]
+        return (corpse_pinned + portal_pinned + rest)[:limit]
 
     def format_top(self, bb: Blackboard, *, limit: int = 5) -> str:
         top = self.select_top(bb, limit=limit)
