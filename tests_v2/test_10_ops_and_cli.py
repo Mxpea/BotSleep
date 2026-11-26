@@ -365,3 +365,81 @@ class TestOpsAndCliCutover(unittest.TestCase):
             finally:
                 client.close()
                 db.close()
+
+    def test_alcove_dig_surface_escape_gravel_flint_and_ore_alias(self) -> None:
+        from tests_v2.sim.virtual_mc_api import VirtualMcApiServer, VirtualMcHttpServer
+        from v2.bt.blackboard import Blackboard
+        from v2.gateway import VirtualWorldGateway
+        from v2.kernel import APIError, MinecraftAgentClient, PendingTransactionJournal, UnifiedWorldDB
+        from v2.planner import IntentCompiler
+        from v2.primitives import PlaceBuildPrimitive, PrimitiveContext
+        from v2.tasks import AcquireItemTask, ExploreUntilTask, ReturnToSurfaceTask, TaskCatalogue, is_underground
+
+        # 1) Narrow 1x2 stone tunnel: place_near_player digs 1x1 safe alcove (skipping water-adjacent east side) and places
+        sim = VirtualMcApiServer(spawn_pos=(0.5, 48.0, 0.5))
+        sim.fill(-3, 47, -3, 3, 52, 3, "stone")
+        sim.set_block(0, 48, 0, "air")
+        sim.set_block(0, 49, 0, "air")
+        # Adjacent water east of (1,48,0) so east cell must be skipped as hazardous, picking west (-1,48,0)
+        sim.set_block(2, 48, 0, "water")
+        sim.give("crafting_table", 1)
+        sim.give("gravel", 2)
+        with tempfile.TemporaryDirectory() as td, VirtualMcHttpServer(sim) as srv:
+            db = UnifiedWorldDB.for_scope(td, srv.base_url, "CaveBot", "w1")
+            client = MinecraftAgentClient(srv.base_url, "CaveBot", "pw")
+            try:
+                client.login()
+                journal = PendingTransactionJournal(db)
+                gw = VirtualWorldGateway(client, db=db)
+                ctx = PrimitiveContext(gw, journal)
+                place = PlaceBuildPrimitive(ctx)
+                bb = Blackboard()
+                bb.status = {"pos": [0.5, 48.0, 0.5], "dimension": "overworld"}
+                bb.inventory = client.inventory()["result"]
+                bb.inventory_counts = {"crafting_table": 1, "gravel": 2}
+
+                # Tick 1: simulate upstream auto_place returning no_support -> local probe -> alcove dig (-1,48,0)
+                place._auto_place_failed_at = ("overworld", (0, 48, 0))
+                out1 = place.place_near_player(bb, "crafting_table")
+                self.assertEqual(out1.status, "PROGRESSED")
+                self.assertEqual(out1.reason, "place_alcove_cleared")
+                self.assertEqual(client.get_block(0, 48, 0)["result"]["name"], "air")
+                self.assertEqual(client.get_block(-1, 48, 0)["result"]["name"], "air")
+                self.assertEqual(client.get_block(1, 48, 0)["result"]["name"], "stone")
+
+                # Tick 2: cleared alcove (-1,48,0) now allows placement cleanly
+                out2 = place.place_near_player(bb, "crafting_table")
+                self.assertEqual(out2.status, "OK")
+                self.assertEqual(client.get_block(-1, 48, 0)["result"]["name"], "crafting_table")
+
+                # 2) Underground detection & ExploreUntilTask -> ReturnToSurfaceTask escalation
+                self.assertTrue(is_underground(bb, gw))
+                exp = ExploreUntilTask(ctx, lambda _b, _g: False, name="find_water")
+                st_exp = exp.on_tick(bb)
+                self.assertEqual(st_exp, "RUNNING")
+                self.assertIsInstance(exp._active_child, ReturnToSurfaceTask)
+
+                # 3) AcquireItemTask("flint") places inventory gravel when no exposed natural gravel exists
+                sim.set_block(0, 48, 1, "air")
+                acq = AcquireItemTask(ctx, TaskCatalogue(), "flint", 1)
+                bb.inventory_counts = {"gravel": 2}
+                st_flint = acq.on_tick(bb)
+                self.assertEqual(st_flint, "RUNNING")
+                self.assertLess(client.get_inventory_counts().get("gravel", 0), 2)
+
+                # 4) Raw-ore alias normalization + not_ready never blacklists unreachable cells
+                compiler = IntentCompiler(ctx, TaskCatalogue(), objective="daily")
+                _, res_ore = compiler.compile_tool_call("run_goal", {"goal": "mine", "item": "iron_ore", "count": 6}, bb)
+                self.assertTrue(res_ore["ok"])
+                self.assertEqual(res_ore["mounted"], "mine:raw_ironx6")
+
+                def _not_ready():
+                    raise APIError("not_ready", "world is still loading")
+
+                nr_out = ctx.execute_write(bb, "dig", {"pos": [5, 48, 5]}, _not_ready, unknown_center=(5, 48, 5))
+                self.assertEqual(nr_out.status, "PROGRESSED")
+                self.assertEqual(nr_out.reason, "not_ready")
+                self.assertFalse(gw.unreachable.is_blocked("overworld", (5, 48, 5), "dig"))
+            finally:
+                client.close()
+                db.close()

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Optional
 
 from v2.bt.blackboard import Blackboard
-from v2.domain import AIR_BLOCKS, Coord3, NON_SOLID_BLOCKS, block_coord, dist3
+from v2.domain import AIR_BLOCKS, Coord3, HAZARD_BLOCKS, LIQUID_BLOCKS, NON_SOLID_BLOCKS, block_coord, dist3
 from v2.primitives.base import ActionOutcome, PrimitiveContext
 from v2.primitives.navigate import NavigatePrimitive
 
@@ -99,5 +99,61 @@ class PlaceBuildPrimitive:
                 if c_ent is not None and c_ent.name in AIR_BLOCKS and b_ent is not None and b_ent.name not in NON_SOLID_BLOCKS:
                     self._auto_place_failed_at = None
                     return self.place_at(bb, item, cell)
+
+        # 3) Narrow tunnel / corner fallback: safely dig a 1x1 side alcove with solid floor and zero liquid/hazard neighbors
+        protected_blocks = frozenset({
+            "bedrock", "obsidian", "crafting_table", "furnace", "chest",
+            "blast_furnace", "smoker", "nether_portal",
+        })
+        alcove_cands = [(fx + dx, fy, fz + dz) for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1))]
+        alcove_probe = []
+        for cx, cy, cz in alcove_cands:
+            alcove_probe.extend([
+                (cx, cy, cz),
+                (cx, cy - 1, cz),
+                (cx, cy + 1, cz),
+                (cx + 1, cy, cz),
+                (cx - 1, cy, cz),
+                (cx, cy, cz + 1),
+                (cx, cy, cz - 1),
+            ])
+        alcove_fetched = self.ctx.gateway.prefetch_blocks(bb.dimension, alcove_probe, max_age=3.0)
+        for cell in alcove_cands:
+            cx, cy, cz = cell
+            if self.ctx.gateway.unreachable.is_blocked(bb.dimension, cell, "dig"):
+                continue
+            if self.ctx.gateway.unreachable.is_blocked(bb.dimension, cell, "place"):
+                continue
+            target_ent = alcove_fetched.get(cell)
+            below_ent = alcove_fetched.get((cx, cy - 1, cz))
+            if below_ent is None or below_ent.name in (NON_SOLID_BLOCKS | HAZARD_BLOCKS | LIQUID_BLOCKS):
+                continue
+            if target_ent is None or target_ent.name in (AIR_BLOCKS | HAZARD_BLOCKS | LIQUID_BLOCKS | protected_blocks):
+                continue
+            if target_ent.name.endswith("_bed"):
+                continue
+            neighbors = (
+                alcove_fetched.get((cx, cy + 1, cz)),
+                alcove_fetched.get((cx + 1, cy, cz)),
+                alcove_fetched.get((cx - 1, cy, cz)),
+                alcove_fetched.get((cx, cy, cz + 1)),
+                alcove_fetched.get((cx, cy, cz - 1)),
+            )
+            if any(nb is not None and nb.name in (HAZARD_BLOCKS | LIQUID_BLOCKS) for nb in neighbors):
+                continue
+            dig_out = self.ctx.execute_write(
+                bb,
+                "dig",
+                {"pos": list(cell), "collect": False},
+                lambda _c=cell: self.ctx.client.dig(list(_c), collect=False),
+                unknown_center=cell,
+                record_unreachable_action="dig",
+            )
+            if dig_out.status == "OK":
+                self.ctx.gateway.write_through_dig(bb.dimension, cell)
+                self._auto_place_failed_at = (bb.dimension, cur_cell)
+                return ActionOutcome("PROGRESSED", "dig", reason="place_alcove_cleared", details={"pos": list(cell)})
+            return dig_out
+
         bb.last_failure_reason = "place:no_adjacent_clear_spot"
         return ActionOutcome("FAILED_LOCAL", "place", reason="no_adjacent_clear_spot")

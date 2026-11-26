@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 import math
 from typing import Any, Callable, Dict, Optional, Sequence, Tuple
 
-from v2.domain import BOAT_ITEMS, Coord3, SCAFFOLD_BLOCKS, block_coord, dist2_xz, dist3, pick_best_item
+from v2.domain import BOAT_ITEMS, Coord3, LEAF_BLOCKS, NON_SOLID_BLOCKS, SCAFFOLD_BLOCKS, block_coord, dist2_xz, dist3, pick_best_item
 from v2.gateway.pathfinder_3d import NavStep, Pathfinder3D
 from v2.gateway.surface_swim import SurfaceSwimExecutor
 from v2.gateway.world_proxy import VirtualWorldGateway
@@ -283,18 +283,27 @@ class MultiHopNavigator:
         self._last_pos_for_target[key] = cur_p
 
         use_3d = prefer_3d or self._stall_counts.get(key, 0) >= 1
+        fx_b, fy_b, fz_b = block_coord(cur_p)
+        underground_enclosed = fy_b < 58 and any(
+            (ent := self.gateway.get_block(dim, (fx_b, fy_b + dy, fz_b), allow_fetch=False)) is not None
+            and ent.name not in (NON_SOLID_BLOCKS | LEAF_BLOCKS)
+            for dy in range(2, 6)
+        )
+        relay_step = 12.0 if underground_enclosed else self.RELAY_STEP
+        relay_timeout_ms = 5000 if (underground_enclosed or self._stall_counts.get(key, 0) > 0) else 8000
+        direct_timeout_ms = 5000 if (underground_enclosed or self._stall_counts.get(key, 0) > 0) else 10000
 
         # 2) Direct or relay move_to (no 32m hard cap!), with threat-repulsion lateral deflection
         if not use_3d:
             if distance > self.RELAY_THRESHOLD:
-                ratio = self.RELAY_STEP / max(1e-6, dist2_xz(cur_p, tgt))
+                ratio = relay_step / max(1e-6, dist2_xz(cur_p, tgt))
                 rx = cur_p[0] + (tgt[0] - cur_p[0]) * min(1.0, ratio)
                 rz = cur_p[2] + (tgt[2] - cur_p[2]) * min(1.0, ratio)
                 rx, rz, deflected = self._deflect_waypoint_from_threats(cur_p, rx, rz, threats)
-                payload = {"x": round(rx, 1), "z": round(rz, 1), "range": 2.0, "timeout_ms": 8000}
+                payload = {"x": round(rx, 1), "z": round(rz, 1), "range": 2.0, "timeout_ms": relay_timeout_ms}
                 res, err_out = self._run_write(
                     "move_to", payload, dim, cur_p,
-                    lambda: self.client.move_to(x=payload["x"], z=payload["z"], range=2.0, timeout_ms=8000),
+                    lambda: self.client.move_to(x=payload["x"], z=payload["z"], range=2.0, timeout_ms=relay_timeout_ms),
                 )
             else:
                 wx, wz, deflected = self._deflect_waypoint_from_threats(cur_p, tgt[0], tgt[2], threats)
@@ -307,10 +316,10 @@ class MultiHopNavigator:
                         return self._precision_nudge(dim, cur_p, tgt)
                     if d_exact <= w_range + 0.55:
                         w_range = 0.0
-                payload = {"x": round(wx, 2), "y": ry, "z": round(wz, 2), "range": w_range, "timeout_ms": 10000}
+                payload = {"x": round(wx, 2), "y": ry, "z": round(wz, 2), "range": w_range, "timeout_ms": direct_timeout_ms}
                 res, err_out = self._run_write(
                     "move_to", payload, dim, cur_p,
-                    lambda: self.client.move_to(x=payload["x"], y=ry, z=payload["z"], range=w_range, timeout_ms=10000),
+                    lambda: self.client.move_to(x=payload["x"], y=ry, z=payload["z"], range=w_range, timeout_ms=direct_timeout_ms),
                 )
 
             if err_out is None:

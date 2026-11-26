@@ -30,6 +30,20 @@ def _fn_tool(name: str, desc: str, props: Dict[str, Any], required: List[str]) -
     }
 
 
+_RAW_DROP_ALIASES: Dict[str, str] = {
+    "iron_ore": "raw_iron",
+    "deepslate_iron_ore": "raw_iron",
+    "gold_ore": "raw_gold",
+    "deepslate_gold_ore": "raw_gold",
+    "copper_ore": "raw_copper",
+    "deepslate_copper_ore": "raw_copper",
+    "coal_ore": "coal",
+    "deepslate_coal_ore": "coal",
+    "diamond_ore": "diamond",
+    "deepslate_diamond_ore": "diamond",
+}
+
+
 class IntentCompiler:
     """Generates dynamic minimal tool schemas and compiles LLM tool calls into L3 Task instances."""
 
@@ -98,6 +112,7 @@ class IntentCompiler:
                 item = m.group(1)
                 if raw_count <= 1:
                     count = max(1, int(m.group(2)))
+        item = _RAW_DROP_ALIASES.get(item, item)
         return item, count
 
     def compile_tool_call(

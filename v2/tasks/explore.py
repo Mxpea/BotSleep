@@ -12,6 +12,7 @@ from v2.gateway.world_proxy import VirtualWorldGateway
 from v2.primitives.base import PrimitiveContext
 from v2.primitives.navigate import NavigatePrimitive
 from v2.tasks.base import Task
+from v2.tasks.surface import ReturnToSurfaceTask, is_underground
 
 
 class ExploreUntilTask(Task):
@@ -30,12 +31,14 @@ class ExploreUntilTask(Task):
         name: str = "explore_until",
         step_distance: float = 20.0,
         max_steps: int = 8,
+        prefer_surface: bool = True,
     ) -> None:
         super().__init__(name)
         self.ctx = ctx
         self.predicate = predicate
         self.step_distance = float(step_distance)
         self.max_steps = max(1, int(max_steps))
+        self.prefer_surface = bool(prefer_surface)
         self._nav = NavigatePrimitive(ctx)
         self._origin: Optional[Tuple[float, float, float]] = None
         self._sector_idx: int = 0
@@ -45,6 +48,8 @@ class ExploreUntilTask(Task):
         return bool(self.predicate(bb, self.ctx.gateway))
 
     def on_tick(self, bb: Blackboard) -> str:
+        if self.prefer_surface and is_underground(bb, self.ctx.gateway):
+            return self.run_child(bb, ReturnToSurfaceTask(self.ctx))
         if self._origin is None:
             self._origin = bb.pos
         if self._steps_taken >= self.max_steps:

@@ -8,6 +8,7 @@ from v2.tasks.mining import MineResourceTask
 from v2.tasks.nether_portal import EnterNetherTask
 from v2.tasks.shelter import BuildShelterTask
 from v2.tasks.stronghold_end import StrongholdLocateTask
+from v2.tasks.surface import ReturnToSurfaceTask, is_underground
 
 __all__ = [
     "AcquireItemTask",
@@ -18,9 +19,11 @@ __all__ = [
     "MacroSequenceTask",
     "MineResourceTask",
     "RecipeEntry",
+    "ReturnToSurfaceTask",
     "SmeltEntry",
     "SmeltItemTask",
     "StrongholdLocateTask",
     "Task",
     "TaskCatalogue",
+    "is_underground",
 ]

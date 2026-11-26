@@ -311,6 +311,11 @@ class AcquireItemTask(Task):
                 explore_types = list(gather.block_types)
 
             if out.reason == "no_exposed_block_found":
+                # Inventory gravel -> place and re-dig in place to farm flint before wandering surface
+                if self.item == "flint" and bb.inventory_counts.get("gravel", 0) >= 1:
+                    place_out = self._place.place_near_player(bb, "gravel")
+                    if place_out.status in {"OK", "PROGRESSED"}:
+                        return "RUNNING"
                 # For underground stone/ores, dig a safe staircase down instead of wandering grassy plains!
                 if gather.preferred_y is not None:
                     from v2.tasks.mining import MineResourceTask

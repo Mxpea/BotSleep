@@ -334,6 +334,11 @@ def run_v2_session(
                 if poll_s > 0 and tick_status == Status.RUNNING:
                     if rt.bb.get("fast_tick_once"):
                         time.sleep(0.18)
+                    elif rt.bb.writes_this_tick > 0 and rt.bb.last_action_outcome not in {
+                        "smelt_waiting_furnace",
+                        "nether_portal_waiting",
+                    } and not str(rt.bb.last_action_outcome).endswith(":not_ready"):
+                        time.sleep(min(poll_s, 0.25))
                     else:
                         time.sleep(min(poll_s, 1.0))
 

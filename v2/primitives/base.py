@@ -62,6 +62,9 @@ class PrimitiveContext:
                 return ActionOutcome("UNKNOWN", endpoint, reason=err.code, details=err.details)
             self.journal.resolve_write(tx_id, "failed_known", details={"code": err.code, "message": err.message})
             bb.last_action_outcome = f"{endpoint}:failed:{err.code}"
+            if err.code == "not_ready":
+                # Transient chunk/world reload window (~3.5s after respawn): do not poison unreachable or failure reason
+                return ActionOutcome("PROGRESSED", endpoint, reason="not_ready", details=err.details)
             bb.last_failure_reason = f"{endpoint}:{err.code}"
             failures = list(bb.get("recent_primitive_failures") or ())
             failures.append({
