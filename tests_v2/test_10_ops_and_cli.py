@@ -19,7 +19,7 @@ from v2.kernel.journal import PendingTransactionJournal
 from v2.kernel.storage import UnifiedWorldDB
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-FORBIDDEN_TOP_MODULES = frozenset({"core", "agent", "skills", "debug"})
+FORBIDDEN_TOP_MODULES = frozenset({"core", "agent", "skills", "debug", "legacy"})
 
 
 def _write_temp_config(directory: Path, example_path: Path) -> Path:
@@ -42,6 +42,7 @@ class TestOpsAndCliCutover(unittest.TestCase):
         for folder in ("v2", "scripts", "integrations"):
             targets.extend(sorted((REPO_ROOT / folder).rglob("*.py")))
 
+        self.assertFalse((REPO_ROOT / "legacy").exists(), "Archived v1 legacy/ dir must not exist on v2 main")
         violations = []
         for py_file in targets:
             tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
@@ -54,8 +55,6 @@ class TestOpsAndCliCutover(unittest.TestCase):
                 elif isinstance(node, ast.ImportFrom) and node.module:
                     top = node.module.split(".")[0]
                     if top in FORBIDDEN_TOP_MODULES:
-                        violations.append(f"{py_file.relative_to(REPO_ROOT)}:{node.lineno} from {node.module}")
-                    elif node.module.startswith("legacy.") and py_file.relative_to(REPO_ROOT).as_posix() != "scripts/botctl.py":
                         violations.append(f"{py_file.relative_to(REPO_ROOT)}:{node.lineno} from {node.module}")
         self.assertEqual(violations, [], f"Unexpected legacy imports found: {violations}")
 

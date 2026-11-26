@@ -1,12 +1,12 @@
 # BotSleep 架构与实现状态
 
-更新：2026-11-26（`develop-tianya/rewrite-v2` 完成 L0–L4 重写切流与 `legacy/` 归档，对应总纲见 [REWRITE_V2_MASTERPLAN.md](REWRITE_V2_MASTERPLAN.md) 与 [REWRITE_V2_AGENT_PLAN.md](REWRITE_V2_AGENT_PLAN.md)）。验证结果见 [TESTING.md](TESTING.md)，历史交接背景见 [HANDOFF.md](../HANDOFF.md)。
+更新：2026-11-26（已通过 `develop-tianya/rewrite-v2` 完成 L0–L4 重写并合入 `main`；旧版 v1 源码永久归档于 Git 分支 `archive/v1` 与标签 `archive/v1-final` @ `c6859dc`，对应总纲见 [REWRITE_V2_MASTERPLAN.md](REWRITE_V2_MASTERPLAN.md) 与 [REWRITE_V2_AGENT_PLAN.md](REWRITE_V2_AGENT_PLAN.md)）。验证结果见 [TESTING.md](TESTING.md) 与 [LIVE9_90M_REPORT_20261126.md](LIVE9_90M_REPORT_20261126.md)，历史交接背景见 [HANDOFF.md](../HANDOFF.md)。
 
 ## 1. 当前入口与运行模式（BotSleep v2）
 
-`main.py` → `v2/kernel/config.py` 加载默认值、YAML、环境变量与命令行覆盖，初始化单向五层微内核并在 `v2/orchestrator/runtime.py` 中运行。根目录 `bot_sleep.py`（转发 `main.py`）与 `client.py`（转发 `v2.kernel.client`）保留兼容薄壳，不再复制实现；普通依赖为 `requirements.txt` 中的 `requests` 与 `PyYAML`。
+`main.py` → `v2/kernel/config.py` 加载默认值、YAML、环境变量与命令行覆盖，初始化单向五层微内核并在 `v2/app.py` 中运行。根目录 `bot_sleep.py`（转发 `main.py`）与 `client.py`（转发 `v2.kernel.client`）保留兼容薄壳，不再复制实现；普通依赖为 `requirements.txt` 中的 `requests` 与 `PyYAML`。
 
-旧版过程式代码与旧测试套件（原 `core/`、`agent/`、`skills/`、`debug/`、`probe_api.py`、`tests/`）已全部通过 `git mv` 归档至 `legacy/`，除 `scripts/botctl.py` 可选只读检查 `legacy.core.survival_state` 外，现网入口、`v2/`、`scripts/` 与 `integrations/` 已实现零旧模块依赖（由 `tests_v2/test_10_ops_and_cli.py` AST 守护）。
+旧版过程式代码与旧测试套件（原 `core/`、`agent/`、`skills/`、`debug/`、`probe_api.py`、`tests/`）已永久归档至 Git 分支 `archive/v1` 及标签 `archive/v1-final`（`c6859dc`），当前 `main` 工作区已彻底移除上述旧文件及临时 `legacy/` 目录；`v2/`、`scripts/` 与 `integrations/` 实现零旧模块依赖（由 `tests_v2/test_10_ops_and_cli.py` AST 守护）。
 
 | 模式 | 控制器 / 规划器 | 完成与退出 |
 |---|---|---|
@@ -43,6 +43,7 @@ flowchart TD
 
 ## 4. 协作开发与分支规范
 
-- **主分支 (`main`)**：保持纯净且可稳定部署的代码基准。
-- **个人工作分支 (`develop-tianya/rewrite-v2`)**：当前 L0–L4 重写与实服验证所在分支（归档旧代码于 `legacy/`）；外部 `mc-agent-api` 始终保持零源码改动。
+- **主分支 (`main`)**：当前运行 **BotSleep v2**（L0–L4 架构）的稳定基准分支；拉取更新时 Git 自动清理旧版根目录并切至 `v2/`。
+- **旧版归档 (`archive/v1` / `archive/v1-final`)**：原 v1 代码终态（`c6859dc`）永久归档保存于独立分支与标签，不再占用主工作树。
+- **开发分支 (`develop-tianya/rewrite-v2`)**：L0–L4 重写与持续实服优化所在开发分支；外部 `mc-agent-api` 始终保持零源码改动。
 - **存档与密钥安全**：Minecraft 运行世界（`world/`）物理隔绝在独立服务端；`config.yaml`、`.env`、`.venv/` 与 `logs/` 已配置 `.gitignore` 绝不入库，示例见 `config.example.yaml`。

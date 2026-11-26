@@ -22,11 +22,6 @@ from v2.kernel.journal import InstanceLockError, PendingTransactionJournal
 from v2.kernel.model_gate import ModelGateError, ModelRequestGate
 from v2.kernel.storage import UnifiedWorldDB
 
-try:
-    from legacy.core.survival_state import SurvivalJournal as _LegacySurvivalJournal
-except ImportError:
-    _LegacySurvivalJournal = None  # type: ignore[assignment]
-
 DEFAULT_CONFIG_PATH = "config.yaml"
 
 
@@ -88,29 +83,11 @@ def inspect_runtime(
         finally:
             probe_db.close()
 
-    # Also inspect legacy v1 SurvivalJournal if present so old checkpoints/locks are never overlooked
-    legacy_instance: Dict[str, Any] = {"locked": False}
-    legacy_pending = None
-    legacy_dir = str(v2_db_path.parent)
-    legacy_updated_at = None
-    if _LegacySurvivalJournal is not None:
-        journal = _LegacySurvivalJournal(
-            survival["state_dir"],
-            endpoint=endpoint,
-            username=username,
-            world_id=world_id,
-        )
-        legacy_instance = journal.instance_status()
-        legacy_pending = journal.state.get("pending")
-        legacy_dir = str(journal.directory)
-        legacy_updated_at = journal.state.get("updated_at")
-
     instance = {
-        **legacy_instance,
-        "locked": bool(v2_locked or legacy_instance.get("locked", False)),
-        "v2_locked": v2_locked,
+        "locked": bool(v2_locked),
+        "v2_locked": bool(v2_locked),
     }
-    pending = v2_pending if v2_pending is not None else legacy_pending
+    pending = v2_pending
 
     llm_cfg = config.get("llm", {})
     if llm_cfg.get("enabled"):
@@ -152,9 +129,9 @@ def inspect_runtime(
         },
         "instance": instance,
         "journal": {
-            "directory": legacy_dir,
+            "directory": str(v2_db_path.parent),
             "v2_db": str(v2_db_path),
-            "updated_at": legacy_updated_at,
+            "updated_at": None,
             "pending": pending,
             "v2_pending": v2_pending,
         },
