@@ -184,6 +184,11 @@ class AsyncLLMReplanNode(Node):
         self._last_replan_inv: Optional[Tuple[Tuple[str, int], ...]] = None
         self._same_pos_replan_streak: int = 0
         self._same_pos_cooldown_until: float = 0.0
+        self._last_submit_pos: Optional[Tuple[float, float, float]] = None
+        self._last_submit_inv: Optional[Tuple[Tuple[str, int], ...]] = None
+        self._submit_same_pos_streak: int = 0
+        self._submit_cooldown_until: float = 0.0
+        self._in_flight_inv: Optional[Tuple[Tuple[str, int], ...]] = None
 
     def bump_context_version(self) -> None:
         self._context_version += 1
@@ -216,6 +221,7 @@ class AsyncLLMReplanNode(Node):
         # 1) Check if an async model result is ready (compile & record on main BT thread!)
         ready = self.worker.poll(expected_context_version=self._context_version)
         if ready is not None:
+            self._in_flight_inv = None
             if ready.ok and isinstance(ready.value, LLMResponse):
                 task, res, llm_resp = self.planner.apply_llm_response(ready.value, bb)
                 self.last_response = llm_resp
@@ -249,12 +255,17 @@ class AsyncLLMReplanNode(Node):
             bb.last_action_outcome = "llm_thinking_async"
             return Status.RUNNING
 
-        # 2.5) Water cooldown lock: never spam LLM replans while bobbing in water or before dry footing stabilizes
+        # 2.5) Water cooldown lock & wet-flicker hysteresis: never spam LLM replans until dry footing stabilizes
         now = time.monotonic()
         in_water = bool(bb.status.get("in_water") or bb.status.get("submerged"))
         water_lock_until = float(bb.get("water_replan_lock_until", 0.0) or 0.0)
         dry_footing_streak = int(bb.get("dry_footing_streak", 0) or 0)
-        if in_water or (now < water_lock_until and dry_footing_streak < 2):
+        last_wet_at = float(bb.get("last_wet_at", 0.0) or 0.0)
+        if (
+            in_water
+            or (now < water_lock_until and dry_footing_streak < 2)
+            or (last_wet_at > 0.0 and (now - last_wet_at) < 10.0 and dry_footing_streak < 3)
+        ):
             bb.last_action_outcome = "llm_wait_dry_footing"
             return Status.RUNNING
 
@@ -280,7 +291,12 @@ class AsyncLLMReplanNode(Node):
         ):
             self._same_pos_replan_streak = 0
             self._same_pos_cooldown_until = 0.0
-        elif now < self._same_pos_cooldown_until:
+        if self._last_submit_pos is not None and (
+            dist3(cur_pos, self._last_submit_pos) > 2.5 or inv_sig != self._last_submit_inv
+        ):
+            self._submit_same_pos_streak = 0
+            self._submit_cooldown_until = 0.0
+        if now < self._same_pos_cooldown_until or now < self._submit_cooldown_until:
             bb.last_action_outcome = "llm_same_pos_cooldown"
             return Status.RUNNING
 
@@ -288,11 +304,34 @@ class AsyncLLMReplanNode(Node):
         brain = self.planner.brain
         job_id = uuid.uuid4().hex[:8]
         ctx_ver = self._context_version
-        self.worker.submit(job_id, ctx_ver, lambda m=messages, t=tools, b=brain: b.chat(m, tools=t))
+        if self.worker.submit(job_id, ctx_ver, lambda m=messages, t=tools, b=brain: b.chat(m, tools=t)):
+            if (
+                self._last_submit_pos is not None
+                and dist3(cur_pos, self._last_submit_pos) <= 2.5
+                and inv_sig == self._last_submit_inv
+            ):
+                self._submit_same_pos_streak += 1
+                submit_cooldown = min(30.0, 4.0 * float(2 ** (self._submit_same_pos_streak - 1)))
+                self._submit_cooldown_until = now + submit_cooldown
+            else:
+                self._submit_same_pos_streak = 0
+                self._submit_cooldown_until = 0.0
+            self._last_submit_pos = cur_pos
+            self._last_submit_inv = inv_sig
+            self._in_flight_inv = inv_sig
         bb.last_action_outcome = "llm_submitted_async"
         return Status.RUNNING
 
     def stop(self, bb: Blackboard) -> None:
-        """Pure-memory stop: invalidate stale in-flight proposal when preempted by HardSafety."""
-        self._context_version += 1
+        """Pure-memory stop: preserve in-flight future on brief benign recovery/unstuck when inventory unchanged."""
+        inv_unchanged = self._in_flight_inv is not None and self._inventory_signature(bb) == self._in_flight_inv
+        benign_preempt = (
+            not bb.get("pending_frozen")
+            and bb.active_branch != "HardSafetyBranch"
+            and not bb.last_action_outcome.startswith("safety_")
+            and bb.last_action_outcome.startswith(("recovery_", "unstuck_"))
+        )
+        if not (inv_unchanged and benign_preempt):
+            self._context_version += 1
+            self._in_flight_inv = None
         super().stop(bb)

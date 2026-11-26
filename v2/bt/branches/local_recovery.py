@@ -22,9 +22,13 @@ from v2.domain import (
     LOG_BLOCKS,
     NON_SOLID_BLOCKS,
     PASS_THROUGH_BLOCKS,
+    PICKAXE_TIERS,
+    SCAFFOLD_BLOCKS,
     SOFT_OCCLUDERS,
+    WATER_BLOCKS,
     block_coord,
     dist3,
+    pick_best_item,
 )
 from v2.gateway.surface_swim import SurfaceSwimExecutor
 from v2.gateway.world_proxy import VirtualWorldGateway
@@ -44,6 +48,14 @@ _SHORE_BEARINGS: Tuple[Tuple[float, float], ...] = (
 _WATER_BANK_DIG_BLOCKS = SOFT_OCCLUDERS | LEAF_BLOCKS | frozenset({
     "sand", "red_sand", "gravel", "clay", "mud", "snow_block",
 })
+_WATER_HARD_ROCK_BANK_BLOCKS = frozenset({
+    "stone", "deepslate", "cobblestone", "cobbled_deepslate",
+    "andesite", "diorite", "granite", "tuff", "sandstone",
+})
+_CARDINAL_OFFSETS_2D: Tuple[Tuple[int, int], ...] = ((1, 0), (-1, 0), (0, 1), (0, -1))
+_CARDINAL_OFFSETS_3D: Tuple[Coord3, ...] = (
+    (1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1),
+)
 
 
 class LocalRecoveryBranch(Node):
@@ -143,27 +155,47 @@ class LocalRecoveryBranch(Node):
             return (bb.pos[0] + bx * 3.0, bb.pos[1] + 1.0, bb.pos[2] + bz * 3.0)
         return (bb.pos[0], bb.pos[1] + 2.0, bb.pos[2])
 
+    def _dig_swim_cell(self, bb: Blackboard, c: Coord3, outcome: str) -> Status:
+        bb.last_action_outcome = outcome
+        res_status = self._write_action(
+            bb, "dig", {"pos": list(c), "collect": False},
+            lambda _c=c: self.gateway.client.dig(list(_c), collect=False),
+        )
+        if res_status == Status.RUNNING and not bb.get("pending_frozen"):
+            self.gateway.write_through_dig(bb.dimension, c)
+        elif res_status == Status.FAILURE:
+            self.gateway.unreachable.record_failure(bb.dimension, c, "dig", bb.last_action_outcome)
+        return res_status
+
     def _try_dig_swim_ceiling(self, bb: Blackboard) -> Optional[Status]:
-        """If trapped in water beneath a ceiling or soft riverbank overhang, dig an opening."""
+        """If trapped in water beneath a ceiling or riverbank overhang, dig an opening or climb-out step."""
         fx, fy, fz = block_coord(bb.pos)
         for dy in (2, 1):
             c = (fx, fy + dy, fz)
             ent = self.gateway.get_block(bb.dimension, c, allow_fetch=True)
-            if ent is not None and ent.name not in NON_SOLID_BLOCKS and ent.name not in HAZARD_BLOCKS and ent.name != "bedrock":
-                bb.last_action_outcome = "recovery_swim_dig_ceiling"
-                res_status = self._write_action(
-                    bb, "dig", {"pos": list(c), "collect": False},
-                    lambda _c=c: self.gateway.client.dig(list(_c), collect=False),
-                )
-                if res_status == Status.RUNNING and not bb.get("pending_frozen"):
-                    self.gateway.write_through_dig(bb.dimension, c)
-                return res_status
+            if (
+                ent is not None
+                and ent.name not in NON_SOLID_BLOCKS
+                and ent.name not in HAZARD_BLOCKS
+                and ent.name != "bedrock"
+                and not self.gateway.unreachable.is_blocked(bb.dimension, c, "dig")
+            ):
+                return self._dig_swim_cell(bb, c, "recovery_swim_dig_ceiling")
+
         bank_coords = [
             (fx + dx, fy + dy, fz + dz)
             for dy in (1, 0)
-            for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1))
+            for dx, dz in _CARDINAL_OFFSETS_2D
         ]
-        bank_fetched = self.gateway.prefetch_blocks(bb.dimension, bank_coords)
+        has_pickaxe = pick_best_item(bb.inventory_counts, PICKAXE_TIERS) is not None
+        probe_coords: List[Coord3] = list(bank_coords)
+        if has_pickaxe:
+            for dx, dz in _CARDINAL_OFFSETS_2D:
+                cx, cy, cz = fx + dx, fy + 1, fz + dz
+                for ndx, ndy, ndz in _CARDINAL_OFFSETS_3D:
+                    probe_coords.append((cx + ndx, cy + ndy, cz + ndz))
+        bank_fetched = self.gateway.prefetch_blocks(bb.dimension, probe_coords)
+
         for c in bank_coords:
             ent = bank_fetched.get(c)
             if (
@@ -173,14 +205,75 @@ class LocalRecoveryBranch(Node):
                 and ent.name not in HAZARD_BLOCKS
                 and not self.gateway.unreachable.is_blocked(bb.dimension, c, "dig")
             ):
-                bb.last_action_outcome = "recovery_swim_dig_bank"
-                res_status = self._write_action(
-                    bb, "dig", {"pos": list(c), "collect": False},
-                    lambda _c=c: self.gateway.client.dig(list(_c), collect=False),
-                )
-                if res_status == Status.RUNNING and not bb.get("pending_frozen"):
-                    self.gateway.write_through_dig(bb.dimension, c)
-                return res_status
+                return self._dig_swim_cell(bb, c, "recovery_swim_dig_bank")
+
+        if has_pickaxe:
+            hard_candidates: List[Tuple[int, Coord3]] = []
+            for dx, dz in _CARDINAL_OFFSETS_2D:
+                c = (fx + dx, fy + 1, fz + dz)
+                ent = bank_fetched.get(c)
+                if (
+                    ent is None
+                    or ent.name not in _WATER_HARD_ROCK_BANK_BLOCKS
+                    or ent.name in HAZARD_BLOCKS
+                    or ent.name in {"bedrock", "obsidian"}
+                    or self.gateway.unreachable.is_blocked(bb.dimension, c, "dig")
+                ):
+                    continue
+                if any(
+                    (nbr := bank_fetched.get((c[0] + ndx, c[1] + ndy, c[2] + ndz))) is not None
+                    and nbr.name in HAZARD_BLOCKS
+                    for ndx, ndy, ndz in _CARDINAL_OFFSETS_3D
+                ):
+                    continue
+                above = bank_fetched.get((c[0], c[1] + 1, c[2]))
+                has_headroom = 0 if (above is not None and above.name in NON_SOLID_BLOCKS) else 1
+                hard_candidates.append((has_headroom, c))
+            hard_candidates.sort(key=lambda item: item[0])
+            if hard_candidates:
+                return self._dig_swim_cell(bb, hard_candidates[0][1], "recovery_swim_dig_bank")
+        return None
+
+    def _try_plug_water(self, bb: Blackboard) -> Optional[Status]:
+        """Plug adjacent or feet water cells with scaffold blocks to kill flow and pillar out."""
+        scaffold = pick_best_item(bb.inventory_counts, SCAFFOLD_BLOCKS)
+        if scaffold is None:
+            return None
+        fx, fy, fz = block_coord(bb.pos)
+        candidates: List[Coord3] = [
+            (fx + dx, fy + dy, fz + dz)
+            for dy in (0, 1)
+            for dx, dz in _CARDINAL_OFFSETS_2D
+        ]
+        candidates.append((fx, fy, fz))
+        probe_coords: List[Coord3] = []
+        for c in candidates:
+            probe_coords.append(c)
+            for ndx, ndy, ndz in _CARDINAL_OFFSETS_3D:
+                probe_coords.append((c[0] + ndx, c[1] + ndy, c[2] + ndz))
+        fetched = self.gateway.prefetch_blocks(bb.dimension, probe_coords)
+
+        for cell in candidates:
+            if self.gateway.unreachable.is_blocked(bb.dimension, cell, "place"):
+                continue
+            ent = fetched.get(cell)
+            if ent is None or ent.name not in WATER_BLOCKS:
+                continue
+            nbrs = [fetched.get((cell[0] + ndx, cell[1] + ndy, cell[2] + ndz)) for ndx, ndy, ndz in _CARDINAL_OFFSETS_3D]
+            if any(nbr is not None and nbr.name in HAZARD_BLOCKS for nbr in nbrs):
+                continue
+            if not any(nbr is not None and nbr.name not in NON_SOLID_BLOCKS for nbr in nbrs):
+                continue
+            bb.last_action_outcome = "recovery_swim_plug_water"
+            res_status = self._write_action(
+                bb, "place", {"item": scaffold, "pos": list(cell)},
+                lambda _s=scaffold, _c=cell: self.gateway.client.place_block(_s, _c[0], _c[1], _c[2]),
+            )
+            if res_status == Status.RUNNING and not bb.get("pending_frozen"):
+                self.gateway.write_through_place(bb.dimension, cell, scaffold)
+            elif res_status == Status.FAILURE:
+                self.gateway.unreachable.record_failure(bb.dimension, cell, "place", bb.last_action_outcome)
+            return res_status
         return None
 
     def _find_nearby_beds(self, bb: Blackboard) -> List[Coord3]:
@@ -287,6 +380,7 @@ class LocalRecoveryBranch(Node):
         on_ground = bool(st.get("on_ground", False))
         if in_water:
             dry_streak = 0
+            bb.set("last_wet_at", time.monotonic(), writer=self.name)
         elif on_ground:
             dry_streak = int(bb.get("dry_footing_streak", 0) or 0) + 1
         else:
@@ -324,9 +418,16 @@ class LocalRecoveryBranch(Node):
                 if stalled_in_water:
                     dig_res = self._try_dig_swim_ceiling(bb)
                     if dig_res is not None:
-                        self._swim_consec = 0
-                        self._swim_anchor = bb.pos
+                        if dig_res == Status.RUNNING:
+                            self._swim_consec = 0
+                            self._swim_anchor = bb.pos
                         return dig_res
+                    plug_res = self._try_plug_water(bb)
+                    if plug_res is not None:
+                        if plug_res == Status.RUNNING:
+                            self._swim_consec = 0
+                            self._swim_anchor = bb.pos
+                        return plug_res
                 if self._swim_consec >= 3 and (not needs_air or stalled_in_water):
                     # Yield to PhysicalUnstuckBranch & lock LLM replanning until dry footing returns
                     self._swim_cooldown_until = now + 8.0
