@@ -392,10 +392,34 @@ class MultiHopNavigator:
                 return err_out
             return NavOutcome("PROGRESSED", action_taken="move_to", reason="drive_vehicle", details=res.get("result", {}) if res else {})
 
-        # 1) Water crossing: use boat if available for >10m crossing, else SurfaceSwimExecutor + shoreline recovery
+        # 1) Water tracking & open long-distance crossing (boat / direct swim only when >10m and unstalled)
         key = (dim, tgt_cell)
-        if status.get("in_water") or status.get("submerged"):
-            if not status.get("submerged") and dist2_xz(cur_p, tgt) > 10.0:
+        in_water = bool(status.get("in_water") or status.get("submerged"))
+        water_stalls = 0
+        if in_water:
+            prev_steps = self._water_steps.get(key, 0)
+            prev_wpos = self._water_last_pos.get(key)
+            anchor = self._water_anchor_pos.setdefault(key, cur_p)
+            if prev_steps >= 4 and dist3(anchor, cur_p) < 0.5:
+                self._reset_water_state(key)
+                self.gateway.unreachable.record_failure(dim, tgt_cell, "navigate", "water_stalled_no_displacement")
+                self.gateway.unreachable.record_failure(dim, tgt_cell, "navigate", "water_stalled_no_displacement")
+                return NavOutcome("BLOCKED", action_taken="control", reason="water_stalled_no_displacement")
+
+            if prev_wpos is not None and dist3(prev_wpos, cur_p) < self.MIN_PROGRESS_METERS:
+                water_stalls = self._water_stalls.get(key, 0) + 1
+            elif prev_wpos is not None:
+                water_stalls = 0
+                if dist3(anchor, cur_p) >= 0.5:
+                    self._water_anchor_pos[key] = cur_p
+                    prev_steps = 0
+            else:
+                water_stalls = 0
+            self._water_steps[key] = prev_steps + 1
+            self._water_stalls[key] = water_stalls
+            self._water_last_pos[key] = cur_p
+
+            if not status.get("submerged") and dist2_xz(cur_p, tgt) > 10.0 and water_stalls == 0:
                 # Mount an already-deployed boat right next to us
                 for ent in (nearby_entities or ()):
                     ename = str(ent.get("name") or "")
@@ -428,58 +452,32 @@ class MultiHopNavigator:
                         return err_out
                     self.gateway.unreachable.record_failure(dim, block_coord(cur_p), "deploy_boat", err_out.reason)
 
-            prev_steps = self._water_steps.get(key, 0)
-            prev_wpos = self._water_last_pos.get(key)
-            anchor = self._water_anchor_pos.setdefault(key, cur_p)
-            if prev_steps >= 4 and dist3(anchor, cur_p) < 0.5:
-                self._reset_water_state(key)
-                self.gateway.unreachable.record_failure(dim, tgt_cell, "navigate", "water_stalled_no_displacement")
-                self.gateway.unreachable.record_failure(dim, tgt_cell, "navigate", "water_stalled_no_displacement")
-                return NavOutcome("BLOCKED", action_taken="control", reason="water_stalled_no_displacement")
+                swim_res = self.swimmer.swim_step(tgt, status)
+                if swim_res.status == "UNKNOWN":
+                    return NavOutcome("UNKNOWN", action_taken="control", reason=swim_res.reason)
+                if swim_res.status == "FAILED":
+                    return NavOutcome("BLOCKED", action_taken="control", reason=swim_res.reason)
+                return NavOutcome("PROGRESSED", action_taken="control", reason=swim_res.status.lower())
 
-            if prev_wpos is not None and dist3(prev_wpos, cur_p) < self.MIN_PROGRESS_METERS:
-                stalls = self._water_stalls.get(key, 0) + 1
-            elif prev_wpos is not None:
-                stalls = 0
-                if dist3(anchor, cur_p) >= 0.5:
-                    self._water_anchor_pos[key] = cur_p
-                    prev_steps = 0
-            else:
-                stalls = 0
-            self._water_steps[key] = prev_steps + 1
-            self._water_stalls[key] = stalls
-            self._water_last_pos[key] = cur_p
-
-            if stalls >= 2:
-                rec_out = self._try_water_shoreline_recovery(
-                    dim, cur_p, tgt, status, inv, avoid_block_breaking, stalls=stalls
-                )
-                if rec_out is not None:
-                    return rec_out
-
-            swim_res = self.swimmer.swim_step(tgt, status)
-            if swim_res.status == "UNKNOWN":
-                return NavOutcome("UNKNOWN", action_taken="control", reason=swim_res.reason)
-            if swim_res.status == "FAILED":
-                return NavOutcome("BLOCKED", action_taken="control", reason=swim_res.reason)
-            return NavOutcome("PROGRESSED", action_taken="control", reason=swim_res.status.lower())
-
-        self._reset_water_state(key)
-        self.swimmer.reset()
-        prev_pos = self._last_pos_for_target.get(key)
-        stalled = prev_pos is not None and dist3(prev_pos, cur_p) < self.MIN_PROGRESS_METERS
-        if stalled:
-            self._stall_counts[key] = self._stall_counts.get(key, 0) + 1
-            if self._stall_counts[key] >= 6:
+            stalled = water_stalls > 0
+            use_3d = True
+        else:
+            self._reset_water_state(key)
+            self.swimmer.reset()
+            prev_pos = self._last_pos_for_target.get(key)
+            stalled = prev_pos is not None and dist3(prev_pos, cur_p) < self.MIN_PROGRESS_METERS
+            if stalled:
+                self._stall_counts[key] = self._stall_counts.get(key, 0) + 1
+                if self._stall_counts[key] >= 6:
+                    self._stall_counts[key] = 0
+                    self.gateway.unreachable.record_failure(dim, tgt_cell, "navigate", "stalled_no_displacement")
+                    self.gateway.unreachable.record_failure(dim, tgt_cell, "navigate", "stalled_no_displacement")
+                    return NavOutcome("BLOCKED", action_taken="move_to", reason="stalled_no_displacement")
+            elif prev_pos is not None:
                 self._stall_counts[key] = 0
-                self.gateway.unreachable.record_failure(dim, tgt_cell, "navigate", "stalled_no_displacement")
-                self.gateway.unreachable.record_failure(dim, tgt_cell, "navigate", "stalled_no_displacement")
-                return NavOutcome("BLOCKED", action_taken="move_to", reason="stalled_no_displacement")
-        elif prev_pos is not None:
-            self._stall_counts[key] = 0
-        self._last_pos_for_target[key] = cur_p
+            self._last_pos_for_target[key] = cur_p
+            use_3d = prefer_3d or self._stall_counts.get(key, 0) >= 1
 
-        use_3d = prefer_3d or self._stall_counts.get(key, 0) >= 1
         fx_b, fy_b, fz_b = block_coord(cur_p)
         underground_enclosed = fy_b < 58 and any(
             (ent := self.gateway.get_block(dim, (fx_b, fy_b + dy, fz_b), allow_fetch=False)) is not None
@@ -527,7 +525,14 @@ class MultiHopNavigator:
             self._stall_counts[key] = self._stall_counts.get(key, 0) + 1
             return NavOutcome("PROGRESSED", action_taken="move_to_fallback_3d", reason=err_out.reason)
 
-        # 3) Local 3D A* step (micro-dig / pillar-up / bridge / detour walk) with dynamic threat repulsion
+        # 3) Local 3D A* step (micro-dig / pillar-up / bridge / swim / climb_shore / detour walk)
+        if in_water and water_stalls >= 2:
+            rec_out = self._try_water_shoreline_recovery(
+                dim, cur_p, tgt, status, inv, avoid_block_breaking, stalls=water_stalls
+            )
+            if rec_out is not None:
+                return rec_out
+
         scaffold = pick_best_item(inv, SCAFFOLD_BLOCKS)
         start_cell = block_coord(cur_p)
         sub_goal = tgt_cell
@@ -549,6 +554,13 @@ class MultiHopNavigator:
             threat_positions=threats,
         )
         if not steps:
+            if in_water:
+                swim_res = self.swimmer.swim_step(tgt, status)
+                if swim_res.status == "UNKNOWN":
+                    return NavOutcome("UNKNOWN", action_taken="control", reason=swim_res.reason)
+                if swim_res.status == "FAILED":
+                    return NavOutcome("BLOCKED", action_taken="control", reason=swim_res.reason)
+                return NavOutcome("PROGRESSED", action_taken="control", reason=swim_res.status.lower())
             self.gateway.unreachable.record_failure(dim, tgt_cell, "navigate", "no_3d_path")
             return NavOutcome("BLOCKED", action_taken="pathfinder_3d", reason="no_3d_path")
 
@@ -561,6 +573,16 @@ class MultiHopNavigator:
                 break
             if upcoming.action != "walk":
                 break
+
+        if step.action in ("swim", "climb_shore") or (in_water and step.action == "walk"):
+            swim_tgt = (step.stand_after[0] + 0.5, float(step.stand_after[1]), step.stand_after[2] + 0.5)
+            swim_res = self.swimmer.swim_step(swim_tgt, status)
+            if swim_res.status == "UNKNOWN":
+                return NavOutcome("UNKNOWN", action_taken="control", reason=swim_res.reason)
+            if swim_res.status == "FAILED":
+                return NavOutcome("BLOCKED", action_taken="control", reason=swim_res.reason)
+            reason = "3d_climb_shore" if step.action == "climb_shore" else swim_res.status.lower()
+            return NavOutcome("PROGRESSED", action_taken="control", reason=reason, details={"to": list(step.stand_after)})
 
         if step.action == "dig":
             res, err_out = self._run_write(
@@ -576,7 +598,8 @@ class MultiHopNavigator:
             # Keep 3D active if a 2nd block (e.g. lower half of 1x2 wall) still needs digging
             if step.extra is None:
                 self._stall_counts[key] = 0
-            return NavOutcome("PROGRESSED", action_taken="dig", reason="cleared_3d_obstacle", details={"pos": list(step.target)})
+            dig_reason = "water_shore_clear" if in_water else "cleared_3d_obstacle"
+            return NavOutcome("PROGRESSED", action_taken="dig", reason=dig_reason, details={"pos": list(step.target)})
 
         if step.action == "bridge" and scaffold is not None:
             res, err_out = self._run_write(

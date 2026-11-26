@@ -70,8 +70,10 @@ class SurfaceSwimExecutor:
                 self._stagnant_pulses = 0
         self._last_pos = cur_p
 
-        dx = float(target_pos[0]) - cur_p[0]
-        dz = float(target_pos[2]) - cur_p[2]
+        tx = math.floor(float(target_pos[0])) + 0.5
+        tz = math.floor(float(target_pos[2])) + 0.5
+        dx = tx - cur_p[0]
+        dz = tz - cur_p[2]
         # Mineflayer yaw convention (session.js:896,2992): 0 faces -Z, pi/2 faces -X
         yaw = math.atan2(-dx, -dz)
 
@@ -86,10 +88,12 @@ class SurfaceSwimExecutor:
             yaw = math.atan2(math.sin(yaw + offset), math.cos(yaw + offset))
             lateral_deflected = True
 
-        payload = {"forward": forward, "jump": True, "yaw": round(yaw, 3), "ms": self.pulse_ms}
+        payload = {"forward": forward, "jump": True, "sprint": False, "yaw": round(yaw, 3), "ms": self.pulse_ms}
         tx_id = self.journal.begin_write("control", payload, dimension=dim, pos=pos)
         try:
-            res = self.client.control(forward=forward, jump=True, yaw=yaw, ms=self.pulse_ms, wait=True)
+            res = self.client.control(
+                forward=forward, jump=True, sprint=False, yaw=yaw, ms=self.pulse_ms, wait=True
+            )
         except APIError as err:
             if err.details.get("action_state") == "unknown":
                 self.journal.resolve_write(tx_id, "unknown", details={"code": err.code, "message": err.message})

@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+from collections import deque
 import math
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from v2.bt.blackboard import Blackboard
 from v2.bt.branches.unstuck import PhysicalUnstuckBranch
 from v2.bt.kernel import Node, Status
 from v2.domain import (
     AIR_BLOCKS,
+    ARMOR_EQUIP_SLOT_BY_INVENTORY_KEY,
+    ARMOR_RANK,
     BED_BLOCKS,
     Coord3,
     FOOD_ITEMS,
@@ -74,9 +77,10 @@ class LocalRecoveryBranch(Node):
         self._swim_consec: int = 0
         self._swim_anchor: Optional[Tuple[float, float, float]] = None
         self._swim_cooldown_until: float = 0.0
+        self._equip_cooldown_until: Dict[str, float] = {}
 
     def _pick_swim_target(self, bb: Blackboard) -> Tuple[float, float, float]:
-        """Prefetch 3D shore cells and prefer nearby dry bank, rotating bearing when none visible."""
+        """Prefetch 5x3x5 (+headroom) around player and BFS for the nearest reachable standable dry shore cell."""
         fx, fy, fz = block_coord(bb.pos)
         coords = [
             (fx + dx, fy + dy, fz + dz)
@@ -85,22 +89,55 @@ class LocalRecoveryBranch(Node):
             for dy in (-1, 0, 1, 2)
         ]
         fetched = self.gateway.prefetch_blocks(bb.dimension, coords)
-        offsets = sorted(
-            ((dx, dz) for dx in range(-2, 3) for dz in range(-2, 3) if (dx, dz) != (0, 0)),
-            key=lambda d: (d[0] * d[0] + d[1] * d[1], abs(d[0]) + abs(d[1])),
-        )
-        for dy in (1, 0):
-            for dx, dz in offsets:
-                cand = (fx + dx, fy + dy, fz + dz)
-                below = fetched.get((cand[0], cand[1] - 1, cand[2]))
-                feet = fetched.get(cand)
-                head = fetched.get((cand[0], cand[1] + 1, cand[2]))
-                if (
-                    feet is not None and feet.name in PASS_THROUGH_BLOCKS and feet.name not in HAZARD_BLOCKS
-                    and (head is None or (head.name in PASS_THROUGH_BLOCKS and head.name not in HAZARD_BLOCKS))
-                    and below is not None and below.name not in NON_SOLID_BLOCKS and below.name not in HAZARD_BLOCKS
-                ):
-                    return (cand[0] + 0.5, float(cand[1]) + 0.5, cand[2] + 0.5)
+
+        def is_standable_shore(cand: Coord3) -> bool:
+            below = fetched.get((cand[0], cand[1] - 1, cand[2]))
+            feet = fetched.get(cand)
+            head = fetched.get((cand[0], cand[1] + 1, cand[2]))
+            return (
+                feet is not None and feet.name in PASS_THROUGH_BLOCKS and feet.name not in HAZARD_BLOCKS
+                and (head is None or (head.name in PASS_THROUGH_BLOCKS and head.name not in HAZARD_BLOCKS))
+                and below is not None and below.name not in NON_SOLID_BLOCKS and below.name not in HAZARD_BLOCKS
+            )
+
+        def is_passable_swim(cell: Coord3) -> bool:
+            ent = fetched.get(cell)
+            head = fetched.get((cell[0], cell[1] + 1, cell[2]))
+            return (
+                ent is not None and ent.name in NON_SOLID_BLOCKS and ent.name not in HAZARD_BLOCKS and ent.name != "lava"
+                and (head is None or (head.name in NON_SOLID_BLOCKS and head.name not in HAZARD_BLOCKS and head.name != "lava"))
+            )
+
+        start: Coord3 = (fx, fy, fz)
+        queue: deque[Coord3] = deque([start])
+        visited: Set[Coord3] = {start}
+        while queue:
+            cx, cy, cz = queue.popleft()
+            for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                nx, nz = cx + dx, cz + dz
+                if abs(nx - fx) > 2 or abs(nz - fz) > 2:
+                    continue
+                # Check diagonal climb-up shore (cy + 1) and same-level shore (cy)
+                for ny in (cy + 1, cy):
+                    if ny < fy - 1 or ny > fy + 1:
+                        continue
+                    cand = (nx, ny, nz)
+                    if cand != start and is_standable_shore(cand):
+                        if ny == cy + 1:
+                            above_cur = fetched.get((cx, cy + 2, cz))
+                            if above_cur is not None and (above_cur.name not in NON_SOLID_BLOCKS or above_cur.name in HAZARD_BLOCKS):
+                                continue
+                        return (cand[0] + 0.5, float(cand[1]) + 0.5, cand[2] + 0.5)
+                nxt = (nx, cy, nz)
+                if nxt not in visited and is_passable_swim(nxt):
+                    visited.add(nxt)
+                    queue.append(nxt)
+            if cy + 1 <= fy + 1:
+                up = (cx, cy + 1, cz)
+                if up not in visited and is_passable_swim(up):
+                    visited.add(up)
+                    queue.append(up)
+
         if self._swim_consec > 0:
             bx, bz = _SHORE_BEARINGS[(self._swim_consec - 1) % len(_SHORE_BEARINGS)]
             return (bb.pos[0] + bx * 3.0, bb.pos[1] + 1.0, bb.pos[2] + bz * 3.0)
@@ -202,6 +239,48 @@ class LocalRecoveryBranch(Node):
         self.journal.resolve_write(tx_id, "confirmed")
         return Status.RUNNING
 
+    def _try_auto_equip(self, bb: Blackboard) -> Optional[Status]:
+        """Auto-equip strictly better armor piece or offhand shield using L0 domain tables."""
+        now = time.monotonic()
+        armor_state = bb.inventory.get("armor") if isinstance(bb.inventory.get("armor"), dict) else {}
+        suffix_by_inv_key = {"head": "_helmet", "chest": "_chestplate", "legs": "_leggings", "feet": "_boots"}
+
+        for inv_key, suffix in suffix_by_inv_key.items():
+            cur_piece = armor_state.get(inv_key)
+            cur_name = cur_piece.get("name", "") if isinstance(cur_piece, dict) else ""
+            cur_rank = next((r for mat, r in ARMOR_RANK.items() if cur_name.startswith(mat + "_")), 0)
+            best_name: Optional[str] = None
+            best_rank = cur_rank
+            for item_name, cnt in bb.inventory_counts.items():
+                if cnt > 0 and item_name.endswith(suffix) and now >= self._equip_cooldown_until.get(item_name, 0.0):
+                    rank = next((r for mat, r in ARMOR_RANK.items() if item_name.startswith(mat + "_")), 0)
+                    if rank > best_rank:
+                        best_rank = rank
+                        best_name = item_name
+            if best_name is not None:
+                equip_slot = ARMOR_EQUIP_SLOT_BY_INVENTORY_KEY[inv_key]
+                bb.last_action_outcome = f"recovery_equip:{best_name}"
+                res = self._write_action(
+                    bb, "equip", {"item": best_name, "slot": equip_slot},
+                    lambda bn=best_name, es=equip_slot: self.gateway.client.equip(bn, slot=es),
+                )
+                if res == Status.FAILURE:
+                    self._equip_cooldown_until[best_name] = now + 10.0
+                return res
+
+        offhand = bb.inventory.get("offhand")
+        off_name = offhand.get("name", "") if isinstance(offhand, dict) else ""
+        if off_name != "shield" and bb.inventory_counts.get("shield", 0) > 0 and now >= self._equip_cooldown_until.get("shield", 0.0):
+            bb.last_action_outcome = "recovery_equip:shield"
+            res = self._write_action(
+                bb, "equip", {"item": "shield", "slot": "off-hand"},
+                lambda: self.gateway.client.equip("shield", slot="off-hand"),
+            )
+            if res == Status.FAILURE:
+                self._equip_cooldown_until["shield"] = now + 10.0
+            return res
+        return None
+
     def update(self, bb: Blackboard) -> Status:
         st = bb.status
         in_water = bool(st.get("in_water") or st.get("submerged"))
@@ -213,6 +292,12 @@ class LocalRecoveryBranch(Node):
         else:
             dry_streak = int(bb.get("dry_footing_streak", 0) or 0)
         bb.set("dry_footing_streak", dry_streak, writer=self.name)
+
+        # 0) Auto-equip best armor / offhand shield when not drowning
+        if not (in_water and (bool(st.get("submerged")) or bb.oxygen < 16)):
+            equip_res = self._try_auto_equip(bb)
+            if equip_res is not None:
+                return equip_res
 
         # 1) Urgent eating when hungry or low health
         if (bb.food <= self.food_threshold or (bb.health <= self.low_health_threshold and bb.food < 20)):
