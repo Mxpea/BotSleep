@@ -120,10 +120,12 @@ class HorizonSelector:
 
         has_iron_pick = inv.get("iron_pickaxe", 0) > 0 or inv.get("diamond_pickaxe", 0) > 0
         has_stone_pick = has_iron_pick or inv.get("stone_pickaxe", 0) > 0
+        has_melee_weapon = any(k.endswith(("_sword", "_axe")) and v > 0 for k, v in inv.items())
         milestones = [
             ("acquire", "wooden_pickaxe", 1, "tier1"),
             ("acquire", "stone_pickaxe", 1, "tier2"),
             ("acquire", "furnace", 1, "smelt_prep"),
+            ("acquire", "stone_sword", 1, "defense_early"),
             ("acquire", "iron_pickaxe", 1, "tier3"),
             ("acquire", "water_bucket", 1, "portal_kit"),
             ("acquire", "flint_and_steel", 1, "portal_kit"),
@@ -135,6 +137,8 @@ class HorizonSelector:
             if item == "stone_pickaxe" and (has_iron_pick or portal_ready):
                 continue
             if item == "furnace" and portal_ready:
+                continue
+            if item == "stone_sword" and has_melee_weapon:
                 continue
             if inv.get(item, 0) < cnt:
                 est = self.catalogue.estimate_steps(item, cnt, inv)

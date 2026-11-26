@@ -1,21 +1,27 @@
-"""L2 HardSafety branches: PendingUnknownGuard + Lava/Fire/Drown/Threat preemption.
+"""L2 HardSafety branches: PendingUnknownGuard + Lava/Fire/Drown/Combat/Threat preemption.
 
-Includes v22/v31 battlefield rule:
+Includes v22/v31/v32 battlefield rules:
 - Canopy & sealed burrow ground-mob exemption: when elevated `|dy| >= 3` above a ground melee
   mob (zombie/spider) and NOT recently hurt, do NOT infinitely preempt canopy descent or crafting.
-  Ranged mobs (skeleton/pillager) or actual `hurt` events always trigger threat response.
+- 3-condition walled-threat exemption: exempt a threat for 15s ONLY when (1) not recently hurt,
+  (2) ray_cells LOS is occluded by solid blocks, and (3) retreat failed >= 2 times with
+  path_not_found/stalled AND dist > 3.5. Any hurt event clears temporary exemptions.
+- Dead-end / clear-LOS fallback: when retreat fails with clear LOS or recently_hurt, melee
+  strike for knockback if dist <= 3.5 with a weapon, else dig/cap emergency sealed burrow.
 """
 
 from __future__ import annotations
 
+from collections import deque
 import math
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple
 
 from v2.bt.blackboard import Blackboard
 from v2.bt.kernel import Node, Status
 from v2.domain import (
     AIR_BLOCKS,
+    FOOD_ITEMS,
     HAZARD_BLOCKS,
     HOSTILE_MOBS,
     LIQUID_BLOCKS,
@@ -23,17 +29,41 @@ from v2.domain import (
     PASS_THROUGH_BLOCKS,
     RANGED_MOBS,
     SCAFFOLD_BLOCKS,
-    WATER_BLOCKS,
     Coord3,
     block_coord,
     dist2_xz,
     dist3,
     pick_best_item,
 )
+from v2.gateway.pathfinder_3d import Pathfinder3D
 from v2.gateway.surface_swim import SurfaceSwimExecutor
-from v2.gateway.world_proxy import VirtualWorldGateway
+from v2.gateway.world_proxy import VirtualWorldGateway, ray_cells
 from v2.kernel.client import APIError
 from v2.kernel.journal import PendingTransactionJournal
+
+_WEAPON_BASE_DAMAGE: Dict[str, float] = {
+    "netherite_axe": 10.0,
+    "diamond_axe": 9.0,
+    "iron_axe": 9.0,
+    "stone_axe": 9.0,
+    "netherite_sword": 8.0,
+    "diamond_sword": 7.0,
+    "golden_axe": 7.0,
+    "wooden_axe": 7.0,
+    "iron_sword": 6.0,
+    "stone_sword": 5.0,
+    "golden_sword": 4.0,
+    "wooden_sword": 4.0,
+}
+
+_MATERIAL_RANK: Dict[str, int] = {
+    "netherite": 6,
+    "diamond": 5,
+    "iron": 4,
+    "stone": 3,
+    "golden": 2,
+    "wooden": 1,
+}
 
 
 class PendingUnknownGuard(Node):
@@ -55,7 +85,7 @@ class PendingUnknownGuard(Node):
 
 
 class HardSafetyBranch(Node):
-    """Reactive survival reflexes: lava/fire escape, low-oxygen surfacing, shield defense, and hysteresis threat evasion."""
+    """Reactive survival reflexes: lava/fire escape, drowning, emergency eating, combat/shield, and terrain-aware evasion."""
 
     def __init__(
         self,
@@ -80,6 +110,8 @@ class HardSafetyBranch(Node):
         self.low_oxygen_threshold = int(low_oxygen_threshold)
         self._swimmer = SurfaceSwimExecutor(gateway.client, journal)
         self._douse_cooldown_until: float = 0.0
+        self._eat_cooldown_until: float = 0.0
+        self._equip_fail_until: float = 0.0
         self._evasion_active: bool = False
         self._evasion_dwell_until: float = 0.0
         self._shield_raised: bool = False
@@ -87,14 +119,54 @@ class HardSafetyBranch(Node):
         self._drown_stalls: int = 0
         self._last_all_near: List[Tuple[float, Dict[str, Any]]] = []
         self._last_retreat_failed: bool = False
+        self._last_write_error_code: str = ""
         self._burrow_origin: Optional[Coord3] = None
         self._burrow_deep: bool = False
 
-    def _collect_actionable_threats(self, bb: Blackboard, max_radius: float) -> List[Tuple[float, Dict[str, Any]]]:
-        """Collect all actionable hostiles within max_radius, exempting unreachable canopy/burrow ground melee mobs."""
+        # Burst-damage & hurt tracking
+        self._prev_health: Optional[float] = None
+        self._hp_history: Deque[Tuple[float, float]] = deque(maxlen=32)
+        self._burst_until: float = 0.0
+
+        # Walled-threat exemption & stall tracking
+        self._retreat_path_fails: Dict[int, int] = {}
+        self._exempt_threats: Dict[int, float] = {}
+        self._pending_retreat_check: Optional[Tuple[int, Tuple[float, float, float], float]] = None
+        self._retreat_blocked_eid: Optional[int] = None
+
+    def stop(self, bb: Blackboard) -> None:
+        """Pure-memory reset on preemption (zero HTTP calls)."""
+        self._burrow_origin = None
+        self._burrow_deep = False
+        self._shield_raised = False
+        self._pending_retreat_check = None
+        super().stop(bb)
+
+    @staticmethod
+    def _is_recently_hurt(bb: Blackboard, hp_dropped: bool = False) -> bool:
+        if hp_dropped or any(e.get("type") == "hurt" for e in bb.recent_events):
+            return True
+        return bb.last_hurt_at > 0.0 and (time.time() - bb.last_hurt_at) <= 6.0
+
+    def _collect_actionable_threats(
+        self,
+        bb: Blackboard,
+        max_radius: float,
+        *,
+        recently_hurt: Optional[bool] = None,
+    ) -> List[Tuple[float, Dict[str, Any]]]:
+        """Collect actionable hostiles within max_radius, honoring canopy/burrow/walled exemptions."""
         px, py, pz = bb.pos
-        recently_hurt = (time.time() - bb.last_hurt_at) <= 6.0
+        hurt = self._is_recently_hurt(bb) if recently_hurt is None else recently_hurt
         in_burrow = bool(bb.get("in_sealed_burrow", False))
+        now_mono = time.monotonic()
+
+        if hurt:
+            self._exempt_threats.clear()
+        else:
+            expired = [eid for eid, exp in self._exempt_threats.items() if exp <= now_mono]
+            for eid in expired:
+                self._exempt_threats.pop(eid, None)
 
         candidates: List[Tuple[float, Dict[str, Any]]] = []
         for ent in bb.entities:
@@ -105,28 +177,34 @@ class HardSafetyBranch(Node):
             epos = ent.get("pos")
             if not isinstance(epos, list) or len(epos) != 3:
                 continue
+            eid = int(ent.get("id", -1))
+            if not hurt and eid in self._exempt_threats:
+                continue
             d3 = dist3((px, py, pz), epos)
             if d3 > max_radius:
                 continue
             dy = py - float(epos[1])
             is_ranged = name in RANGED_MOBS
 
-            # Sealed burrow exemption unless actually hurt
-            if in_burrow and not recently_hurt:
+            if in_burrow and not hurt:
                 continue
-            # High canopy / elevation exemption: ground melee mob >= 3 blocks below and not recently hurt
-            if not is_ranged and dy >= 3.0 and not recently_hurt:
+            if not is_ranged and dy >= 3.0 and not hurt:
                 continue
             candidates.append((d3, ent))
 
         candidates.sort(key=lambda pair: pair[0])
         return candidates
 
-    def _find_actionable_threat(self, bb: Blackboard) -> Optional[Dict[str, Any]]:
-        """Apply enter/exit radius hysteresis + dwell timer and publish active threat coords for navigation repulsion."""
+    def _find_actionable_threat(
+        self,
+        bb: Blackboard,
+        *,
+        recently_hurt: Optional[bool] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Apply enter/exit radius hysteresis + dwell timer and publish active threat coords."""
         now = time.monotonic()
         repulsion_scan_r = max(self.threat_exit_radius + 4.0, 16.0)
-        all_near = self._collect_actionable_threats(bb, repulsion_scan_r)
+        all_near = self._collect_actionable_threats(bb, repulsion_scan_r, recently_hurt=recently_hurt)
         self._last_all_near = all_near
         bb.set(
             "active_threat_positions",
@@ -149,7 +227,6 @@ class HardSafetyBranch(Node):
             bb.set("threat_hysteresis_active", False, writer=self.name)
             return None
 
-        # Hysteresis active: keep evading until threat clears threat_exit_radius AND dwell timer elapses
         if closest_dist <= self.threat_exit_radius or now < self._evasion_dwell_until:
             if closest_dist <= self.threat_radius:
                 self._evasion_dwell_until = now + self.threat_dwell_seconds
@@ -167,12 +244,20 @@ class HardSafetyBranch(Node):
         off = bb.inventory.get("offhand")
         return isinstance(off, dict) and off.get("name") == "shield"
 
-    def _write_action(self, bb: Blackboard, endpoint: str, payload: Dict[str, Any], fn: Any) -> Tuple[Status, Optional[Dict[str, Any]], bool]:
+    def _write_action(
+        self,
+        bb: Blackboard,
+        endpoint: str,
+        payload: Dict[str, Any],
+        fn: Any,
+    ) -> Tuple[Status, Optional[Dict[str, Any]], bool]:
+        self._last_write_error_code = ""
         tx_id = self.journal.begin_write(endpoint, payload, dimension=bb.dimension, pos=bb.pos)
         bb.writes_this_tick += 1
         try:
             env = fn()
         except APIError as err:
+            self._last_write_error_code = err.code
             if err.details.get("action_state") == "unknown":
                 self.journal.resolve_write(tx_id, "unknown", details={"code": err.code, "message": err.message})
                 self.gateway.invalidate_unknown_radius(bb.dimension, block_coord(bb.pos))
@@ -187,84 +272,261 @@ class HardSafetyBranch(Node):
         return Status.RUNNING, (res if isinstance(res, dict) else {}), True
 
     @staticmethod
-    def _has_melee_weapon(counts: Dict[str, int]) -> bool:
-        return any(k.endswith(("_sword", "_axe")) and v > 0 for k, v in counts.items())
+    def _best_melee_weapon(counts: Dict[str, int]) -> Optional[str]:
+        """Rank inventory _sword/_axe by real MC damage, breaking ties by material tier."""
+        best_score: Optional[Tuple[float, int, int]] = None
+        best_name: Optional[str] = None
+        for name, cnt in counts.items():
+            if cnt <= 0 or not name.endswith(("_sword", "_axe")):
+                continue
+            mat = name.rsplit("_", 1)[0]
+            mat_rank = _MATERIAL_RANK.get(mat, 0)
+            dmg = _WEAPON_BASE_DAMAGE.get(name, 4.0 + mat_rank)
+            score = (dmg, mat_rank, 1 if name.endswith("_sword") else 0)
+            if best_score is None or score > best_score:
+                best_score = score
+                best_name = name
+        return best_name
 
-    _SCAFFOLD_DROPPING_BLOCKS = frozenset({
-        "stone", "cobblestone", "cobbled_deepslate", "deepslate", "dirt", "grass_block",
-        "netherrack", "andesite", "diorite", "granite", "oak_planks", "spruce_planks", "birch_planks",
-    })
+    @classmethod
+    def _has_melee_weapon(cls, counts: Dict[str, int]) -> bool:
+        return cls._best_melee_weapon(counts) is not None
+
+    @staticmethod
+    def _held_item_name(bb: Blackboard) -> Optional[str]:
+        for source in (bb.status.get("held"), bb.inventory.get("held")):
+            if isinstance(source, dict) and isinstance(source.get("name"), str):
+                return source["name"]
+        return None
+
+    def _strike_with_best_weapon(self, bb: Blackboard, threat: Dict[str, Any], tname: str) -> Status:
+        """Equip highest-damage sword/axe if not held, otherwise execute knockback attack."""
+        best = self._best_melee_weapon(bb.inventory_counts)
+        now = time.monotonic()
+        if best is not None and self._held_item_name(bb) != best and now >= self._equip_fail_until:
+            bb.last_action_outcome = f"safety_equip:{best}"
+            status_ret, _, ok = self._write_action(
+                bb,
+                "equip",
+                {"item": best, "slot": "hand"},
+                lambda _b=best: self.gateway.client.equip(_b, slot="hand"),
+            )
+            if not ok:
+                self._equip_fail_until = now + 4.0
+            return status_ret
+
+        eid = int(threat["id"])
+        bb.last_action_outcome = f"safety_strike:{tname}"
+        status_ret, _, _ = self._write_action(
+            bb,
+            "attack",
+            {"entity_id": eid},
+            lambda _id=eid: self.gateway.client.attack(_id, timeout_ms=2500, max_hits=2),
+        )
+        return status_ret
+
+    def _is_los_occluded(self, bb: Blackboard, epos: Sequence[float], *, prefetch: bool = True) -> bool:
+        """Return True if a solid block lies along ray_cells between player eye and entity eye."""
+        px, py, pz = bb.pos
+        eye = (px, py + 1.62, pz)
+        ent_eye = (float(epos[0]), float(epos[1]) + 1.5, float(epos[2]))
+        fx, fy, fz = block_coord((px, py, pz))
+        ent_cell = block_coord(ent_eye)
+        skip = {(fx, fy, fz), (fx, fy + 1, fz), ent_cell}
+        cells = [c for c in ray_cells(eye, ent_eye)[:24] if c not in skip]
+        if not cells:
+            return False
+        if prefetch:
+            fetched = self.gateway.prefetch_blocks(bb.dimension, cells)
+            return any(
+                (ent := fetched.get(c)) is not None and ent.name not in NON_SOLID_BLOCKS
+                for c in cells
+            )
+        return any(
+            (ent := self.gateway.get_block(bb.dimension, c, allow_fetch=False)) is not None
+            and ent.name not in NON_SOLID_BLOCKS
+            for c in cells
+        )
+
+    @staticmethod
+    def _pick_emergency_food(bb: Blackboard, recent_burst_damage: bool) -> Optional[str]:
+        """Select safe emergency food: normal food only when food < 18, or golden apple anytime."""
+        counts = bb.inventory_counts
+        has_egap = counts.get("enchanted_golden_apple", 0) > 0
+        has_gapple = counts.get("golden_apple", 0) > 0 or has_egap
+        gapple_name = "enchanted_golden_apple" if has_egap else "golden_apple"
+
+        normal_avail = [
+            (0 if name == "rotten_flesh" else 1, val, name)
+            for name, val in FOOD_ITEMS.items()
+            if name != "golden_apple" and counts.get(name, 0) > 0
+        ]
+        normal_avail.sort(reverse=True)
+        best_normal = normal_avail[0][2] if normal_avail else None
+
+        if bb.food < 18 and best_normal is not None:
+            if has_gapple and (bb.health <= 6.0 or recent_burst_damage):
+                return gapple_name
+            return best_normal
+        if has_gapple:
+            return gapple_name
+        return None
+
+    def _is_safe_eating_window(self, bb: Blackboard, closest_dist: float) -> bool:
+        if bool(bb.get("in_sealed_burrow", False)) or closest_dist >= 5.5:
+            return True
+        return all(
+            self._is_los_occluded(bb, ent["pos"], prefetch=True)
+            for d_ent, ent in self._last_all_near
+            if d_ent < 5.5
+        )
+
+    def _try_exempt_walled_threat(
+        self,
+        bb: Blackboard,
+        threat: Dict[str, Any],
+        d: float,
+        recently_hurt: bool,
+        occluded: bool,
+    ) -> bool:
+        """Exempt threat for 15s ONLY when unhurt + wall-occluded + >=2 retreat fails + dist > 3.5."""
+        if recently_hurt or not occluded or d <= 3.5:
+            return False
+        eid = int(threat.get("id", -1))
+        if eid < 0 or self._retreat_path_fails.get(eid, 0) < 2:
+            return False
+        self._exempt_threats[eid] = time.monotonic() + 15.0
+        self._retreat_path_fails.pop(eid, None)
+        if self._retreat_blocked_eid == eid:
+            self._retreat_blocked_eid = None
+        self._evasion_active = False
+        self._last_retreat_failed = False
+        bb.set("threat_hysteresis_active", False, writer=self.name)
+        return True
+
     _BURROW_PROTECTED = frozenset({
         "bedrock", "obsidian", "crafting_table", "furnace", "chest", "blast_furnace", "smoker", "nether_portal",
     })
 
-    def _is_dry_retreat_path(self, bb: Blackboard, tx: float, tz: float) -> bool:
-        px, py, pz = bb.pos
-        fy = math.floor(py)
-        dist = math.hypot(tx - px, tz - pz)
-        steps = max(2, int(math.ceil(dist / 1.5)))
-        seen_cols: set[Tuple[int, int]] = {(math.floor(px), math.floor(pz))}
-        for i in range(1, steps + 1):
-            frac = i / steps
-            bx = math.floor(px + (tx - px) * frac)
-            bz = math.floor(pz + (tz - pz) * frac)
-            if (bx, bz) in seen_cols:
-                continue
-            seen_cols.add((bx, bz))
-            feet = self.gateway.get_block(bb.dimension, (bx, fy, bz), allow_fetch=True)
-            head = self.gateway.get_block(bb.dimension, (bx, fy + 1, bz), allow_fetch=True)
-            floor = self.gateway.get_block(bb.dimension, (bx, fy - 1, bz), allow_fetch=True)
-            for ent in (feet, head, floor):
-                if ent is not None and ent.name in (LIQUID_BLOCKS | HAZARD_BLOCKS):
-                    return False
-            if floor is None:
+    def _lower_shield(self, bb: Blackboard) -> Status:
+        self._shield_raised = False
+        bb.last_action_outcome = "safety_shield_lower"
+        status_ret, _, _ = self._write_action(
+            bb, "posture", {"sneak": False, "shield": False, "jump": False},
+            lambda: self.gateway.client.posture(sneak=False, shield=False, jump=False),
+        )
+        return status_ret
+
+    def _is_dry_ground_cell(self, dimension: str, cell: Coord3) -> bool:
+        cx, cy, cz = cell
+        floor = self.gateway.get_block(dimension, (cx, cy - 1, cz), allow_fetch=True)
+        feet = self.gateway.get_block(dimension, (cx, cy, cz), allow_fetch=True)
+        head = self.gateway.get_block(dimension, (cx, cy + 1, cz), allow_fetch=True)
+        if floor is None or floor.name in (NON_SOLID_BLOCKS | HAZARD_BLOCKS):
+            return False
+        for ent in (feet, head):
+            if ent is None or ent.name not in PASS_THROUGH_BLOCKS or ent.name in HAZARD_BLOCKS:
                 return False
-            if feet is not None and feet.name not in PASS_THROUGH_BLOCKS:
-                # Allow 1-block step up only if head and fy+2 are dry pass-through
-                head2 = self.gateway.get_block(bb.dimension, (bx, fy + 2, bz), allow_fetch=True)
-                if (
-                    (head is not None and head.name not in PASS_THROUGH_BLOCKS)
-                    or (head2 is not None and head2.name not in PASS_THROUGH_BLOCKS)
-                ):
-                    return False
-            else:
-                if head is not None and head.name not in PASS_THROUGH_BLOCKS:
-                    return False
-                if floor.name in NON_SOLID_BLOCKS:
-                    sub = self.gateway.get_block(bb.dimension, (bx, fy - 2, bz), allow_fetch=True)
-                    if sub is None or sub.name in (NON_SOLID_BLOCKS | HAZARD_BLOCKS):
-                        return False
         return True
 
-    def _select_dry_retreat_target(
+    def _find_dry_stand_cell(self, dimension: str, bx: int, fy: int, bz: int) -> Optional[Coord3]:
+        for dy in (0, 1, -1):
+            cand = (bx, fy + dy, bz)
+            if self._is_dry_ground_cell(dimension, cand):
+                return cand
+        return None
+
+    def _select_terrain_retreat_target(
         self,
         bb: Blackboard,
-        epos: Any,
+        threat: Dict[str, Any],
         d: float,
-    ) -> Tuple[float, float, bool]:
-        px, _, pz = bb.pos
-        vx, vz = px - float(epos[0]), pz - float(epos[2])
+    ) -> Tuple[float, Optional[float], float, bool]:
+        """Compute multi-threat repulsion points and plan terrain-aware retreat via Pathfinder3D."""
+        px, py, pz = bb.pos
+        fy = math.floor(py)
+        start_cell = block_coord((px, py, pz))
+        all_threat_pos: List[Tuple[float, float, float]] = [
+            tuple(float(v) for v in ent["pos"]) for _, ent in self._last_all_near
+        ]
+        if not all_threat_pos:
+            ep = threat["pos"]
+            all_threat_pos = [(float(ep[0]), float(ep[1]), float(ep[2]))]
+
+        vx, vz = 0.0, 0.0
+        for tx, _, tz in all_threat_pos:
+            dx, dz = px - tx, pz - tz
+            dist_xz = math.hypot(dx, dz)
+            if dist_xz < 1e-4:
+                continue
+            w = 1.0 / max(1.0, dist_xz * dist_xz)
+            vx += (dx / dist_xz) * w
+            vz += (dz / dist_xz) * w
         norm = math.hypot(vx, vz)
         if norm < 1e-6:
-            ux, uz = 1.0, 0.0
-        else:
-            ux, uz = vx / norm, vz / norm
+            ep = threat["pos"]
+            vx, vz = px - float(ep[0]), pz - float(ep[2])
+            norm = math.hypot(vx, vz)
+        ux, uz = (vx / norm, vz / norm) if norm >= 1e-6 else (1.0, 0.0)
+
         retreat_step = min(max(6.0, self.threat_exit_radius - d + 2.5), 10.0)
-        distances = tuple(dict.fromkeys([retreat_step, min(retreat_step, 6.0), 4.0]))
-        primary_angles = (0.0, 45.0, -45.0, 90.0, -90.0)
-        fallback_angles = (135.0, -135.0)
-        for angle_group, dist_list in ((primary_angles, distances), (fallback_angles, (4.0,))):
-            for dist_cand in dist_list:
-                for deg in angle_group:
-                    rad = math.radians(deg)
-                    ca, sa = math.cos(rad), math.sin(rad)
-                    dx = ux * ca - uz * sa
-                    dz = ux * sa + uz * ca
-                    cx = round(px + dx * dist_cand, 1)
-                    cz = round(pz + dz * dist_cand, 1)
-                    if self._is_dry_retreat_path(bb, cx, cz):
-                        return cx, cz, True
-        return round(px + ux * retreat_step, 1), round(pz + uz * retreat_step, 1), False
+        distances = tuple(dict.fromkeys([retreat_step, min(retreat_step, 6.0), 4.5]))
+        angles = (0.0, 45.0, -45.0, 90.0, -90.0, 135.0, -135.0)
+
+        # Prefetch candidate landing columns in one batch to keep latency minimal
+        probe_coords: List[Coord3] = []
+        raw_candidates: List[Tuple[int, int, float]] = []
+        seen_xz: set[Tuple[int, int]] = set()
+        for dist_cand in distances:
+            for deg in angles:
+                rad = math.radians(deg)
+                ca, sa = math.cos(rad), math.sin(rad)
+                dx = ux * ca - uz * sa
+                dz = ux * sa + uz * ca
+                bx = math.floor(px + dx * dist_cand)
+                bz = math.floor(pz + dz * dist_cand)
+                if (bx, bz) in seen_xz or (bx, bz) == (start_cell[0], start_cell[2]):
+                    continue
+                seen_xz.add((bx, bz))
+                raw_candidates.append((bx, bz, abs(deg)))
+                for dy in (-2, -1, 0, 1, 2):
+                    probe_coords.append((bx, fy + dy, bz))
+        self.gateway.prefetch_blocks(bb.dimension, probe_coords)
+
+        dry_goals: List[Tuple[float, float, Coord3]] = []
+        for bx, bz, abs_deg in raw_candidates:
+            stand = self._find_dry_stand_cell(bb.dimension, bx, fy, bz)
+            if stand is None:
+                continue
+            min_t_dist = min(
+                math.dist((stand[0] + 0.5, float(stand[1]), stand[2] + 0.5), tp)
+                for tp in all_threat_pos
+            )
+            # Prefer larger clearance from all threats while respecting repulsion alignment
+            score = min_t_dist - (abs_deg / 180.0) * 1.5
+            dry_goals.append((score, abs_deg, stand))
+
+        dry_goals.sort(key=lambda item: (-item[0], item[1]))
+        pf = Pathfinder3D(self.gateway)
+        for _, _, goal in dry_goals[:4]:
+            steps = pf.plan(
+                bb.dimension,
+                start_cell,
+                goal,
+                tolerance=2.0,
+                allow_dig=False,
+                allow_pillar=False,
+                allow_bridge=False,
+                threat_positions=all_threat_pos,
+                max_expansions=160,
+            )
+            if steps:
+                dest = steps[-1].stand_after
+                if dist2_xz(bb.pos, (dest[0] + 0.5, float(dest[1]), dest[2] + 0.5)) >= 1.5:
+                    ry = float(dest[1]) if dest[1] != fy else None
+                    return dest[0] + 0.5, ry, dest[2] + 0.5, True
+
+        return round(px + ux * retreat_step, 1), None, round(pz + uz * retreat_step, 1), False
 
     def _can_safe_burrow(self, bb: Blackboard) -> bool:
         fx, fy, fz = block_coord(bb.pos)
@@ -282,13 +544,7 @@ class HardSafetyBranch(Node):
                 nb = self.gateway.get_block(bb.dimension, (fx + dx, fy + dy, fz + dz), allow_fetch=True)
                 if nb is not None and nb.name in (LIQUID_BLOCKS | HAZARD_BLOCKS):
                     return False
-        has_scaffold = pick_best_item(bb.inventory_counts, SCAFFOLD_BLOCKS) is not None
-        if not has_scaffold:
-            has_scaffold = (
-                d1.name in self._SCAFFOLD_DROPPING_BLOCKS
-                or d2.name in self._SCAFFOLD_DROPPING_BLOCKS
-            )
-        return has_scaffold
+        return pick_best_item(bb.inventory_counts, SCAFFOLD_BLOCKS) is not None
 
     def _step_emergency_burrow(self, bb: Blackboard) -> Optional[Status]:
         if self._burrow_origin is None:
@@ -337,7 +593,6 @@ class HardSafetyBranch(Node):
                     self._burrow_origin = None
                     self._burrow_deep = False
                 return status_ret
-            # Already dug; allow gravity settle
             bb.last_action_outcome = "safety_burrow_settle"
             return Status.RUNNING
 
@@ -393,11 +648,52 @@ class HardSafetyBranch(Node):
         if not st.get("alive", True):
             return Status.RUNNING
 
-        # 1) In lava or on fire -> immediate water bucket douse (with cooldown on failure) or jump-escape
+        now_mono = time.monotonic()
+        hp_dropped = self._prev_health is not None and bb.health < self._prev_health
+        self._hp_history.append((now_mono, bb.health))
+        while self._hp_history and (now_mono - self._hp_history[0][0]) > 4.0:
+            self._hp_history.popleft()
+        max_recent_hp = max((hp for _, hp in self._hp_history), default=bb.health)
+        event_burst = any(
+            e.get("type") == "hurt" and float(e.get("damage") or e.get("amount") or 0.0) >= 4.0
+            for e in bb.recent_events
+        )
+        if (max_recent_hp - bb.health) >= 4.0 or event_burst:
+            self._burst_until = now_mono + 6.0
+        elif bb.health >= 19.0:
+            self._burst_until = 0.0
+        recent_burst_damage = (now_mono < self._burst_until) or bool(bb.get("recent_burst_damage", False))
+
+        recently_hurt = self._is_recently_hurt(bb, hp_dropped=hp_dropped)
+        self._prev_health = bb.health
+        if recently_hurt:
+            self._exempt_threats.clear()
+            self._retreat_path_fails.clear()
+            self._pending_retreat_check = None
+            self._retreat_blocked_eid = None
+
+        if self._pending_retreat_check is not None:
+            prev_eid, start_pos, start_dist = self._pending_retreat_check
+            self._pending_retreat_check = None
+            ent_match = next(
+                (
+                    e for e in bb.entities
+                    if int(e.get("id", -1)) == prev_eid and isinstance(e.get("pos"), list) and len(e["pos"]) == 3
+                ),
+                None,
+            )
+            if ent_match is not None:
+                d_now = dist3(bb.pos, ent_match["pos"])
+                moved = dist3(bb.pos, start_pos)
+                if moved < 0.35 and (d_now - start_dist) < 0.35:
+                    self._retreat_path_fails[prev_eid] = self._retreat_path_fails.get(prev_eid, 0) + 1
+                else:
+                    self._retreat_path_fails[prev_eid] = 0
+
+        # 1) In lava or on fire -> immediate water bucket douse or jump-escape
         if st.get("in_lava") or st.get("on_fire"):
             px, py, pz = bb.pos
-            now = time.monotonic()
-            if bb.inventory_counts.get("water_bucket", 0) > 0 and now >= self._douse_cooldown_until:
+            if bb.inventory_counts.get("water_bucket", 0) > 0 and now_mono >= self._douse_cooldown_until:
                 feet = block_coord((px, py, pz))
                 bb.last_action_outcome = "safety_douse_water"
                 status_ret, res, ok = self._write_action(
@@ -405,7 +701,7 @@ class HardSafetyBranch(Node):
                     lambda: self.gateway.client.interact(pos=list(feet), item="water_bucket"),
                 )
                 if not ok or (res is not None and res.get("changed") is False and not res.get("used")):
-                    self._douse_cooldown_until = now + 4.0
+                    self._douse_cooldown_until = now_mono + 4.0
                 return status_ret
             bb.last_action_outcome = "safety_escape_lava"
             status_ret, _, _ = self._write_action(
@@ -414,7 +710,7 @@ class HardSafetyBranch(Node):
             )
             return status_ret
 
-        # 2) Low oxygen / drowning -> dig ceiling if trapped beneath stone, else pure surface buoyancy pulse
+        # 2) Low oxygen / drowning -> dig ceiling if trapped, else surface buoyancy pulse
         if st.get("submerged") and bb.oxygen <= self.low_oxygen_threshold:
             if self._drown_last_pos is not None and (bb.pos[1] - self._drown_last_pos[1]) < 0.35:
                 self._drown_stalls += 1
@@ -445,40 +741,35 @@ class HardSafetyBranch(Node):
         self._drown_stalls = 0
         self._drown_last_pos = None
 
-        # 3) Night sealed-burrow exit check (dawn arrived OR healed >= 14.0 and safe)
+        # 3) Sealed-burrow exit check (dawn arrived without close hostiles OR healed >= 14.0 and safe)
         tod = int(st.get("time_of_day", 1000)) % 24000
         is_night = bb.dimension == "overworld" and (12541 <= tod <= 23458)
-        recently_hurt = (time.time() - bb.last_hurt_at) <= 6.0
         if bool(bb.get("in_sealed_burrow", False)):
-            if not is_night:
+            close_hostiles = [
+                ent for ent in bb.entities
+                if (str(ent.get("name") or "") in HOSTILE_MOBS or str(ent.get("type") or "") == "hostile")
+                and isinstance(ent.get("pos"), list) and len(ent["pos"]) == 3
+                and dist3(bb.pos, ent["pos"]) <= self.threat_radius
+            ]
+            if (not is_night and not close_hostiles) or (bb.health >= 14.0 and not recently_hurt and not close_hostiles):
                 bb.set("in_sealed_burrow", False, writer=self.name)
                 self._burrow_origin = None
                 self._burrow_deep = False
-            elif bb.health >= 14.0 and not recently_hurt:
-                close_hostiles = [
-                    ent for ent in bb.entities
-                    if (str(ent.get("name") or "") in HOSTILE_MOBS or str(ent.get("type") or "") == "hostile")
-                    and isinstance(ent.get("pos"), list) and len(ent["pos"]) == 3
-                    and dist3(bb.pos, ent["pos"]) <= self.threat_radius
-                ]
-                if not close_hostiles:
-                    bb.set("in_sealed_burrow", False, writer=self.name)
-                    self._burrow_origin = None
-                    self._burrow_deep = False
 
-        if not is_night or bb.health >= 14.0:
+        if self._burrow_origin is not None and (not is_night and not self._last_retreat_failed) and bb.health >= 14.0:
             self._burrow_origin = None
             self._burrow_deep = False
 
-        # 4) Actionable nearby hostile threat (with enter/exit hysteresis + shield posture + emergency night burrow)
-        threat = self._find_actionable_threat(bb)
+        # 4) Actionable nearby hostile threat (hysteresis + night burrow + safe eating + shield + combat/retreat)
+        threat = self._find_actionable_threat(bb, recently_hurt=recently_hurt)
 
         if (
             not bool(bb.get("in_sealed_burrow", False))
             and is_night
-            and bb.health <= 8.0
+            and bb.health <= 10.0
             and not st.get("in_water")
             and not st.get("submerged")
+            and (self._burrow_origin is not None or pick_best_item(bb.inventory_counts, SCAFFOLD_BLOCKS) is not None)
         ):
             has_ranged = any(str(e.get("name") or "") in RANGED_MOBS for _, e in self._last_all_near)
             should_burrow = (
@@ -500,20 +791,57 @@ class HardSafetyBranch(Node):
 
         if threat is None:
             self._last_retreat_failed = False
+            self._retreat_blocked_eid = None
             if self._shield_raised or bool(st.get("blocking", False)):
-                self._shield_raised = False
-                bb.last_action_outcome = "safety_shield_lower"
-                status_ret, _, _ = self._write_action(
-                    bb, "posture", {"sneak": False, "shield": False, "jump": False},
-                    lambda: self.gateway.client.posture(sneak=False, shield=False, jump=False),
-                )
-                return status_ret
+                return self._lower_shield(bb)
             return Status.FAILURE
 
         epos = threat["pos"]
         px, py, pz = bb.pos
         d = dist3((px, py, pz), epos)
         tname = str(threat.get("name") or "")
+        eid = int(threat.get("id", -1))
+        occluded = self._is_los_occluded(bb, epos, prefetch=True)
+
+        if self._try_exempt_walled_threat(bb, threat, d, recently_hurt, occluded):
+            if self._shield_raised or bool(st.get("blocking", False)):
+                return self._lower_shield(bb)
+            return Status.FAILURE
+
+        # Continue in-progress dead-end burrow if started
+        if self._burrow_origin is not None and not bool(bb.get("in_sealed_burrow", False)):
+            burrow_res = self._step_emergency_burrow(bb)
+            if burrow_res is not None:
+                return burrow_res
+
+        # Safe emergency eating BEFORE non-urgent retreat (only when food/health qualify AND safe window holds)
+        if now_mono >= self._eat_cooldown_until and (bb.health <= 10.0 or recent_burst_damage):
+            food_item = self._pick_emergency_food(bb, recent_burst_damage)
+            if food_item is not None and self._is_safe_eating_window(bb, d):
+                self._shield_raised = False
+                bb.last_action_outcome = f"safety_eat:{food_item}"
+                status_ret, _, ok = self._write_action(
+                    bb,
+                    "use_item",
+                    {"item": food_item},
+                    lambda _f=food_item: self.gateway.client.use_item(_f),
+                )
+                if not ok:
+                    self._eat_cooldown_until = now_mono + 3.0
+                return status_ret
+
+        # Dead-end / clear-LOS fallback when previous retreat was blocked with path_not_found
+        if self._retreat_blocked_eid == eid and (not occluded or recently_hurt):
+            if d <= 3.5 and tname != "creeper" and self._has_melee_weapon(bb.inventory_counts):
+                return self._strike_with_best_weapon(bb, threat, tname)
+            burrow_res = self._step_emergency_burrow(bb)
+            if burrow_res is not None:
+                return burrow_res
+
+        # Close-range (< 3.0m) or healthy (<= 3.5m) melee knockback strike against non-creepers with clear LOS
+        has_weapon = self._has_melee_weapon(bb.inventory_counts)
+        if not occluded and tname != "creeper" and has_weapon and (d < 3.0 or (d <= 3.5 and bb.health >= 12.0)):
+            return self._strike_with_best_weapon(bb, threat, tname)
 
         # Raise shield via posture(shield=True) against ranged mobs, creepers, or low-HP melee threats
         wants_shield = (tname in RANGED_MOBS or tname == "creeper" or bb.health < 12.0) and self._has_shield(bb)
@@ -527,20 +855,41 @@ class HardSafetyBranch(Node):
                 self._shield_raised = True
             return status_ret
 
-        # If healthy and melee-range with an actual sword/axe and not a creeper, strike once; otherwise dry-deflected retreat!
-        if d <= 3.5 and bb.health >= 12.0 and tname != "creeper" and self._has_melee_weapon(bb.inventory_counts):
-            bb.last_action_outcome = f"safety_strike:{tname}"
-            status_ret, _, _ = self._write_action(
-                bb, "attack", {"entity_id": threat["id"]},
-                lambda: self.gateway.client.attack(int(threat["id"]), timeout_ms=2500, max_hits=2),
-            )
-            return status_ret
+        # Terrain-aware retreat via Pathfinder3D
+        rx, ry, rz, found_path = self._select_terrain_retreat_target(bb, threat, d)
+        if not found_path:
+            if not occluded or recently_hurt:
+                if d <= 3.5 and tname != "creeper" and has_weapon:
+                    return self._strike_with_best_weapon(bb, threat, tname)
+                burrow_res = self._step_emergency_burrow(bb)
+                if burrow_res is not None:
+                    return burrow_res
+            elif d > 3.5 and eid >= 0 and self._retreat_path_fails.get(eid, 0) >= 1:
+                self._retreat_path_fails[eid] = self._retreat_path_fails.get(eid, 0) + 1
+                if self._try_exempt_walled_threat(bb, threat, d, recently_hurt, occluded):
+                    if self._shield_raised or bool(st.get("blocking", False)):
+                        return self._lower_shield(bb)
+                    return Status.FAILURE
 
-        rx, rz, found_dry = self._select_dry_retreat_target(bb, epos, d)
+        move_payload: Dict[str, Any] = {"x": rx, "z": rz, "range": 1.5, "timeout_ms": 4000}
+        if ry is not None:
+            move_payload["y"] = ry
         bb.last_action_outcome = f"safety_retreat:{tname}"
         status_ret, _, ok = self._write_action(
-            bb, "move_to", {"x": rx, "z": rz, "range": 1.5, "timeout_ms": 4000},
-            lambda: self.gateway.client.move_to(x=rx, z=rz, range=1.5, timeout_ms=4000),
+            bb,
+            "move_to",
+            move_payload,
+            lambda: self.gateway.client.move_to(x=rx, y=ry, z=rz, range=1.5, timeout_ms=4000),
         )
-        self._last_retreat_failed = (not ok) or (not found_dry)
+        self._last_retreat_failed = (not ok) or (not found_path)
+        if not ok:
+            self._pending_retreat_check = None
+            if eid >= 0 and (self._last_write_error_code == "path_not_found" or not found_path):
+                self._retreat_path_fails[eid] = self._retreat_path_fails.get(eid, 0) + 1
+                self._retreat_blocked_eid = eid
+                self._try_exempt_walled_threat(bb, threat, d, recently_hurt, occluded)
+        else:
+            self._retreat_blocked_eid = None
+            if eid >= 0:
+                self._pending_retreat_check = (eid, bb.pos, d)
         return status_ret
