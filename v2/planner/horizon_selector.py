@@ -67,14 +67,14 @@ class HorizonSelector:
                 "minecraft:story/enchant_item": 600,
                 "minecraft:adventure/crafters_crafting_crafters": 600,
             }
-            for entry in self.competition.selectable_tasks()[:24]:
+            for entry in self.competition.selectable_tasks():
                 route = self.catalogue.advancement_route(entry.id)
                 if route is None:
                     continue
                 kind, target = route
                 if kind == "enter_nether":
                     if self.is_portal_gate_ready(bb):
-                        est = 12
+                        est = 8
                     else:
                         est = (
                             self.catalogue.estimate_steps("iron_pickaxe", 1, inv)
@@ -89,7 +89,7 @@ class HorizonSelector:
                     eff_est += 400
                 if not has_stone_tool and target in {"iron_ingot", "iron_pickaxe", "iron_chestplate", "shield", "bucket", "water_bucket", "lava_bucket"}:
                     eff_est += 80
-                tag = "PORTAL_GATE_READY" if (kind == "enter_nether" and self.is_portal_gate_ready(bb)) else f"comp_{entry.points}pt"
+                tag = "PORTAL_GATE_READY" if (entry.id == "minecraft:story/enter_the_nether" and self.is_portal_gate_ready(bb)) else f"comp_{entry.points}pt"
                 candidates.append(HorizonCandidate(
                     goal="select_task",
                     item=entry.id,
@@ -106,16 +106,20 @@ class HorizonSelector:
             return candidates[:limit]
 
         # Survival / speedrun progression ladder
-        if self.is_portal_gate_ready(bb):
-            # Pin EnterNetherTask at #1 so small models don't drift into redundant wood/axe loops!
-            est_portal = (
+        portal_ready = self.is_portal_gate_ready(bb)
+        if portal_ready:
+            # Pin EnterNetherTask at #1 with compact fast-track cost so small models don't drift into slow loops!
+            est_portal = min(
+                8,
                 self.catalogue.estimate_steps("iron_pickaxe", 1, inv)
                 + self.catalogue.estimate_steps("water_bucket", 1, inv)
                 + self.catalogue.estimate_steps("flint_and_steel", 1, inv)
-                + 8
+                + 4,
             )
-            candidates.append(HorizonCandidate("enter_nether", "the_nether", 1, est_portal, "PORTAL_GATE_READY"))
+            candidates.append(HorizonCandidate("enter_nether", "the_nether", 1, max(1, est_portal), "PORTAL_GATE_READY"))
 
+        has_iron_pick = inv.get("iron_pickaxe", 0) > 0 or inv.get("diamond_pickaxe", 0) > 0
+        has_stone_pick = has_iron_pick or inv.get("stone_pickaxe", 0) > 0
         milestones = [
             ("acquire", "wooden_pickaxe", 1, "tier1"),
             ("acquire", "stone_pickaxe", 1, "tier2"),
@@ -126,6 +130,12 @@ class HorizonSelector:
             ("acquire", "shield", 1, "defense"),
         ]
         for goal, item, cnt, tag in milestones:
+            if item == "wooden_pickaxe" and (has_stone_pick or portal_ready):
+                continue
+            if item == "stone_pickaxe" and (has_iron_pick or portal_ready):
+                continue
+            if item == "furnace" and portal_ready:
+                continue
             if inv.get(item, 0) < cnt:
                 est = self.catalogue.estimate_steps(item, cnt, inv)
                 candidates.append(HorizonCandidate(goal, item, cnt, est, tag))

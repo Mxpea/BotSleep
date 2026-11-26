@@ -17,6 +17,7 @@ from v2.primitives.place_build import PlaceBuildPrimitive
 from v2.tasks.base import Task
 from v2.tasks.catalogue import OVERWORLD_LOG_TYPES, TaskCatalogue
 from v2.tasks.explore import ExploreUntilTask
+from v2.tasks.surface import ReturnToSurfaceTask, is_underground
 
 
 def _has_pickaxe_tier(counts: Dict[str, int], required: str) -> bool:
@@ -225,6 +226,8 @@ class AcquireItemTask(Task):
     def _acquire_liquid_bucket(self, bb: Blackboard, liquid_name: str) -> str:
         if bb.inventory_counts.get("bucket", 0) < 1:
             return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, "bucket", 1, _depth=self._depth + 1))
+        if liquid_name == "water" and is_underground(bb, self.ctx.gateway):
+            return self.run_child(bb, ReturnToSurfaceTask(self.ctx))
         rows = self.ctx.gateway.scan_blocks(
             bb.dimension,
             [liquid_name],
@@ -285,6 +288,16 @@ class AcquireItemTask(Task):
         if gather is not None:
             if gather.min_pickaxe and not _has_pickaxe_tier(bb.inventory_counts, gather.min_pickaxe):
                 return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, gather.min_pickaxe, 1, _depth=self._depth + 1))
+            # Prioritize carried gravel place->dig loop for flint before hunting distant natural gravel!
+            if self.item == "flint" and bb.inventory_counts.get("gravel", 0) >= 1:
+                near_out = self._dig.dig_nearest_of_types(bb, ("gravel",), radius=5, collect=True, max_dy=2.0)
+                if near_out.status in {"OK", "PROGRESSED"}:
+                    self.local_failures = 0
+                    return "RUNNING"
+                if near_out.reason == "no_exposed_block_found":
+                    place_out = self._place.place_near_player(bb, "gravel")
+                    if place_out.status in {"OK", "PROGRESSED"}:
+                        return "RUNNING"
             max_dy = 4.0 if gather.preferred_y is not None else None
             out = self._dig.dig_nearest_of_types(bb, gather.block_types, radius=32, collect=True, max_dy=max_dy)
             if out.status in {"OK", "PROGRESSED"}:
