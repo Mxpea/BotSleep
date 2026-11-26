@@ -223,6 +223,10 @@ class AcquireItemTask(Task):
     def is_finished(self, bb: Blackboard) -> bool:
         return bb.inventory_counts.get(self.item, 0) >= self.count
 
+    def stop(self, bb: Blackboard) -> None:
+        self._dig.clear_cache()
+        super().stop(bb)
+
     def _acquire_liquid_bucket(self, bb: Blackboard, liquid_name: str) -> str:
         if bb.inventory_counts.get("bucket", 0) < 1:
             return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, "bucket", 1, _depth=self._depth + 1))
