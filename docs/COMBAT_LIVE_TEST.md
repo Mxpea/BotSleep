@@ -1,3 +1,6 @@
+> [!WARNING]
+> **历史文档（BotSleep v1，已归档）**：本文档描述的是旧版 v1 实现（已归档于 Git 标签 `archive/v1-final` @ `c6859dc`），**不再适用于当前 `main` 分支的 BotSleep v2**。请勿按文中的旧路径（`core/`、`agent/`、`skills/`、`debug/`、`tests/`）或旧命令执行。当前现行架构、配置与测试/运行方式请查阅 [README.md](../README.md)、[文档总目录](README.md)、[ARCHITECTURE.md](ARCHITECTURE.md) 与 [TESTING.md](TESTING.md)。
+
 # 自保与随行拾取实服测试手册
 
 **状态：待人工验收。** A 组可在包含 `dev-aure` 整合提交 `064989a` 的工作树执行。从仓库根目录启动，开测前记录实际提交及本地改动。参考环境：Java 1.21.11、mc-agent-api 1.3.14。C01 另需包含骨粉目标改动；B 组是 [V1 设计](COMBAT_AND_LOOT_DESIGN.md) 的未来验收项，现版不跑、不记通过或失败。

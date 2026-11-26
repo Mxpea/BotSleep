@@ -1,6 +1,6 @@
 # BotSleep 配置与赛事参数指南
 
-更新：2026-11-22。本指南说明如何配置 Bot 接入目标 Minecraft 服务器、各模式（尤其是比赛模式 `competition` 与日常模式 `daily`）的默认/推荐配置，以及 [core/config.py](../core/config.py) 中全部可调参数的含义与约束。
+更新：2026-11-26（**BotSleep v2**，`main` 分支）。本指南说明如何配置 Bot 接入目标 Minecraft 服务器、各模式（尤其是比赛模式 `competition` 与日常模式 `daily`）的默认/推荐配置，以及 [v2/kernel/config.py](../v2/kernel/config.py) 中全部可调参数的含义与约束。
 
 > [!IMPORTANT]
 > 代码内置默认值（`agent.mode: sleep`、`survival.objective: starter`、`llm.enabled: false`）**仅面向最小自动睡眠与基础测试**。若要跑完整生存或参加比赛，必须按下方推荐配置显式启用 `survival`、`daily` / `competition` 与 `llm.enabled: true`。
@@ -15,9 +15,9 @@
 
 BotSleep 读取配置的严格优先级（后者被前者覆盖）：
 1. `--username`（命令行参数，覆盖 `agent.name`） / `--mode` / `--objective`
-2. 环境变量：`MC_AGENT_API`、`MC_AGENT_USER`、`MC_AGENT_PASSWORD`、`BOTSLEEP_LLM_API_KEY`、`BOTSLEEP_LLM_BASE_URL`、`BOTSLEEP_LLM_MODEL`
+2. 环境变量：`MC_AGENT_API`、`MC_AGENT_USER`、`MC_AGENT_PASSWORD`、`BOTSLEEP_LLM_API_KEY`、`BOTSLEEP_LLM_BASE_URL`、`BOTSLEEP_LLM_MODEL`（及双 API 溢出变量 `BOTSLEEP_LLM_OVERFLOW_*`）
 3. 配置文件：`--config <路径>` > 环境变量 `BOTSLEEP_CONFIG` > 仓库根目录 `config.yaml`
-4. 代码默认字典：[core/config.py](../core/config.py) 中的 `DEFAULTS`
+4. 代码默认字典：[v2/kernel/config.py](../v2/kernel/config.py) 中的 `DEFAULTS`
 
 > 真实密码、API Key、RCON 凭据禁止提交进 Git 仓库；`config.yaml` 与 `.env` 默认已被忽略。相对路径（如 `logs`、`runtime/survival`、`session_file`）均**相对 YAML 配置文件所在目录**解析，而非命令行当前工作目录。
 
@@ -62,9 +62,9 @@ BotSleep 读取配置的严格优先级（后者被前者覆盖）：
 | 场景 | `agent.mode` | `survival.objective` | `llm.enabled` | 说明 |
 | --- | --- | --- | --- | --- |
 | 默认最小自动睡眠 | `sleep` | — | `false` | 不连大模型，仅找床睡觉 |
-| 基础石器调试（不推荐长跑） | `survival` | `starter` | 可选 | 仅木/石器/熔炉，无 `AutonomousTaskController` |
-| **日常长线生存（推荐测试）** | **`survival`** | **`daily`** | **`true`** | 13 项日常任务 + 12 类自主子循环 + 侦察 + 夜间防卡死 |
-| **正式赛事计分（打比赛用）** | **`survival`** | **`competition`** | **`true`** | 基于服务端 advancement 计分，含 40 项赛事工具与生命周期管理 |
+| 基础石器调试（不推荐长跑） | `survival` | `starter` | 可选 | 仅木/石器开局与基础工具链校验 |
+| **日常长线生存（推荐测试）** | **`survival`** | **`daily`** | **`true`** | v2 L0–L4 行为树 + 15 张 `skills_kb/*.md` + 886 配方无状态递归任务 |
+| **正式赛事计分（打比赛用）** | **`survival`** | **`competition`** | **`true`** | 基于服务端 `/advancements` 计分，含 5 个赛事生命周期工具（45 无条件 + 54 条件 override 门禁） |
 
 ### 2. 比赛模式推荐配置（直接复制修改 `<占位符>` 使用）
 
@@ -148,7 +148,7 @@ debug:
 
 ---
 
-## 四、全量参数含义与合法区间（对照 `core/config.py`）
+## 四、全量参数含义与合法区间（对照 `v2/kernel/config.py`）
 
 ### 1. `mc_api`（API 网关连接）
 
@@ -237,9 +237,16 @@ debug:
 | `temperature` | `0.3` | `0..2` | 采样温度；原生 `tool_calls` 建议保持 `0.1~0.3` |
 | `max_tokens` | `2048` | 整数 `128..32768` | 单次模型输出 token 上限 |
 | `timeout_seconds` | `60` | 正数 | **不要低于 `60`**：网络超时不重试，直接落入持久化 `uncertain` 锁防止并发重复调用 |
-| `max_history_turns` | `10` | 整数 `1..64` | 本地保留历史交互轮数（超出 `30KB`/`48KB` 字节预算仍会触发自动旧轮裁剪） |
+| `max_history_turns` | `10` | 整数 `1..64` | 本地保留历史交互轮数（结合 v2 `SemanticCompactor` 将发送上下文压缩在 `<= 6.6KB` 内） |
 | `max_repair_attempts` | `1` | 整数 `0..2` | 参数/格式校验不通过时，原轮向模型补充错误提示自愈修正的次数 |
 | `tls_version` | `"auto"` | `"auto"` \| `"1.2"` | 是否强制使用 TLS 1.2（证书与域名校验保持开启）；遇部分代理/网关断连可改 `"1.2"` |
+| `gate_wait_seconds` | `600` | 正数 | 跨 Bot 共享 `concurrency=1` AI 模型门禁时的 FIFO 排队超时（秒） |
+| `recover_uncertain_transport` | `true` | 布尔 | 超时/断网落入 `uncertain` 锁后，在传输恢复窗口后按有界退避自动恢复 |
+| `retry_backoff_seconds` | `[4, 16, 32, 64, 128, 256]` | 正数列表 | 显式失败后的重规划退避序列（秒） |
+| `overflow.enabled` | `false` | 布尔 | 是否开启备用溢出模型路由（仅在主路排队忙时分流；**比赛模式强制关闭**，除非显式设 `allow_in_competition: true`） |
+| `overflow.allow_in_competition` | `false` | 布尔 | 赛事模式允许溢出开关 |
+| `overflow.base_url` / `api_key` / `model` | 见 `config.example.yaml` | 字符串 | 溢出路网关、密钥（建议 `BOTSLEEP_LLM_OVERFLOW_API_KEY`）与请求路由名 |
+| `overflow.primary_wait_seconds` / `cooldown_seconds` | `1.5` / `45` | 正数 | 切换溢出前等待主路门禁秒数，以及主路报错后的冷却秒数 |
 
 ### 8. `debug`、`mining`、`sleep` 与 `rcon`
 
@@ -257,14 +264,14 @@ debug:
 
 - **仅验证配置是否合法（不连接服务器）**：
   ```powershell
-  .\.venv\Scripts\python.exe main.py --config match_config.yaml --check-config
+  .\.venv\Scripts\python.exe -B main.py --config config.yaml --check-config
   ```
 - **中途暂停/断线后从最新状态恢复（绝不自动重放未知写操作）**：
   ```powershell
-  .\.venv\Scripts\python.exe main.py --config match_config.yaml --mode survival --objective competition --resume
+  .\.venv\Scripts\python.exe -B main.py --config config.yaml --mode survival --objective competition --resume
   ```
 - **解除 `MODEL_REQUEST_UNCERTAIN` 锁（必须先人工确认模型服务端已无在途请求）**：
   ```powershell
-  .\.venv\Scripts\python.exe main.py --config match_config.yaml --mode survival --objective competition --acknowledge-model-idle --resume
+  .\.venv\Scripts\python.exe -B main.py --config config.yaml --mode survival --objective competition --acknowledge-model-idle --resume
   ```
-- **快速排坑对照**：详见 [DEBUG_GUIDE.md](DEBUG_GUIDE.md) 的“常见踩坑与排查清单”。
+- **跨机运行与测试规范**：详见 [README.md](../README.md) 的跨机器环境一致性清单及 [TESTING.md](TESTING.md)。

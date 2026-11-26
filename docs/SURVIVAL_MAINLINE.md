@@ -1,3 +1,6 @@
+> [!WARNING]
+> **历史文档（BotSleep v1，已归档）**：本文档描述的是旧版 v1 实现（已归档于 Git 标签 `archive/v1-final` @ `c6859dc`），**不再适用于当前 `main` 分支的 BotSleep v2**。请勿按文中的旧路径（`core/`、`agent/`、`skills/`、`debug/`、`tests/`）或旧命令执行。当前现行架构、配置与测试/运行方式请查阅 [README.md](../README.md)、[文档总目录](README.md)、[ARCHITECTURE.md](ARCHITECTURE.md) 与 [TESTING.md](TESTING.md)。
+
 # 无龙普通生存服的通关主线
 
 当前世界的终点是一个能长期维持食物、工具与住所的基地。普通的 `daily` 生存配置默认按章推进。已有自定义 `operator_goal` 或 `local_opening` 的配置可用 `survival.autonomy.mainline: true` 显式切换。程序每次完整观察后选择第一个欠缺的章节，本地长任务处理前置和失败。实时监控的「生存主线」显示当前章节。饥饿、伤害、危险生物和夜间避险可以中断施工，安全恢复后程序继续检查章节条件。

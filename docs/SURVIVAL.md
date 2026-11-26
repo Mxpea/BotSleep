@@ -1,3 +1,6 @@
+> [!WARNING]
+> **历史文档（BotSleep v1，已归档）**：本文档描述的是旧版 v1 实现（已归档于 Git 标签 `archive/v1-final` @ `c6859dc`），**不再适用于当前 `main` 分支的 BotSleep v2**。请勿按文中的旧路径（`core/`、`agent/`、`skills/`、`debug/`、`tests/`）或旧命令执行。当前现行架构、配置与测试/运行方式请查阅 [README.md](../README.md)、[文档总目录](README.md)、[ARCHITECTURE.md](ARCHITECTURE.md) 与 [TESTING.md](TESTING.md)。
+
 # 生存与 harness
 
 `survival.objective: starter` 保留下面的初期工具链；`daily` 接通日常生存任务板、分层记忆、食物/铁器/熔炼/床/住所/储物/死亡掉落恢复与持续维护，见 [DAILY_SURVIVAL.md](DAILY_SURVIVAL.md)。模型与规则模式共用已验证技能，但模型模式不会在请求失败时偷偷切换规则采集。单模型请求槽跨进程持久化；未知模型请求与未知游戏动作分别恢复。

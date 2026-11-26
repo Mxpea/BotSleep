@@ -20,66 +20,101 @@
 | `v2/observability/` | 脱敏 `FlightRecorder`、`MonitorServer` 本机只读监控与聊天调试 |
 | `scripts/`、`integrations/ninjabrain/` | 只读运维检查 `botctl.py`、多机分散出生压测器 `multi_bot_runner.py`、要塞计算与采样模块 |
 
-## 安装与运行
+## 跨机器环境一致性清单（推荐先核对）
 
-需要 Python 3.10+。在仓库根目录使用 PowerShell：
+为避免不同电脑上跑出环境、编码、旧状态或依赖差异，请统一遵循以下基线：
+
+- **Python 与依赖版本**：使用 Python `3.10 – 3.13` 独立虚拟环境 `.venv`，严格从 [requirements.txt](requirements.txt) 安装（`requests>=2.31,<3`、`PyYAML>=6,<7`；可选 RCON 依赖见 [requirements-dev.txt](requirements-dev.txt)），不要依赖全局 `pip` 环境。
+- **终端与文件 UTF-8 编码**：Windows 终端建议设置 `$env:PYTHONUTF8="1"`（Linux/macOS 默认 UTF-8，可选 `export PYTHONUTF8=1`），避免系统默认编码（如 GBK）导致中文日志或 JSON 读写异常。
+- **外部运行基线**：相邻 `mc-agent-api` `1.3.19`（保持原版源码零改动，默认监听 `http://127.0.0.1:18900/api/v1`）+ Minecraft Java `1.21.11`（实服基线 Leaves `1.21.11`、`difficulty=easy`）。
+- **状态与存档严格隔离**：`survival.state_dir` 按 `(endpoint, username, world_id)` 持久化 WAL 数据库与 `pending` 锁。**每次更换或重置 Minecraft 世界，必须修改 `survival.world_id` 或清理旧 `survival.state_dir`**，否则旧方块记忆/黑名单/锁会干扰新世界。
+- **环境变量优先级排查**：环境变量会覆盖 YAML，跨机出现行为不一致时先检查本机是否残留以下变量：
+  `BOTSLEEP_CONFIG`、`MC_AGENT_API`、`MC_AGENT_USER`、`MC_AGENT_PASSWORD`、`BOTSLEEP_LLM_BASE_URL`、`BOTSLEEP_LLM_API_KEY`、`BOTSLEEP_LLM_MODEL`、`BOTSLEEP_LLM_OVERFLOW_BASE_URL`、`BOTSLEEP_LLM_OVERFLOW_API_KEY`、`BOTSLEEP_LLM_OVERFLOW_MODEL`。
+- **老工作区缓存清理**：若从旧版 v1 `git pull` 升级，清理旧目录残余未追踪的 `__pycache__/` 空文件夹即可。
+
+> **安全注意**：真实 API 密钥、机器人口令与 RCON 凭据仅存本地 `config.yaml` 或环境变量，切勿提交入库；`config.yaml`、`.env`、`.venv/`、`logs/`、`runtime/` 均在 `.gitignore` 中忽略。
+
+## 安装、校验与运行
+
+### 1. 创建隔离环境并校验配置
+
+Windows（PowerShell）：
 
 ```powershell
+$env:PYTHONUTF8="1"
 python -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 Copy-Item config.example.yaml config.yaml
 .\.venv\Scripts\python.exe -B main.py --config config.yaml --check-config
 ```
 
-运行前需启动 Minecraft 服务端及 `mc-agent-api`（默认 `http://127.0.0.1:18900/api/v1`）：
+Linux / macOS（Bash）：
+
+```bash
+export PYTHONUTF8=1
+python3 -m venv .venv
+./.venv/bin/python -m pip install -r requirements.txt
+cp config.example.yaml config.yaml
+./.venv/bin/python -B main.py --config config.yaml --check-config
+```
+
+`--check-config` 不连接游戏、API 或大模型；成功时输出 `Configuration valid.`。
+
+### 2. 启动运行（需先启动 Minecraft 服务端与 `mc-agent-api`）
+
+以下命令将 `<PY>` 替换为 `.\.venv\Scripts\python.exe`（Windows）或 `./.venv/bin/python`（Linux/macOS）：
 
 ```powershell
 # 默认自动睡眠；单次有界尝试可加 --once
-.\.venv\Scripts\python.exe -B main.py --config config.yaml
+<PY> -B main.py --config config.yaml
 
 # 初期石器 / 日常生存 / 赛事（competition 需启用 llm.enabled 并关闭聊天调试）
-.\.venv\Scripts\python.exe -B main.py --config config.yaml --mode survival --objective starter
-.\.venv\Scripts\python.exe -B main.py --config config.yaml --mode survival --objective daily
-.\.venv\Scripts\python.exe -B main.py --config config.yaml --mode survival --objective competition
+<PY> -B main.py --config config.yaml --mode survival --objective starter
+<PY> -B main.py --config config.yaml --mode survival --objective daily
+<PY> -B main.py --config config.yaml --mode survival --objective competition
 
 # 存在 pending 未知写动作或需断线续跑时
-.\.venv\Scripts\python.exe -B main.py --config config.yaml --mode survival --resume
+<PY> -B main.py --config config.yaml --mode survival --resume
 
 # 退出后保持连接（不主动登出）
-.\.venv\Scripts\python.exe -B main.py --config config.yaml --keep-connected
+<PY> -B main.py --config config.yaml --keep-connected
 
-# 只读检查实例锁、pending 与模型门禁状态
-.\.venv\Scripts\python.exe -B scripts/botctl.py --config config.yaml status
+# 只读检查实例锁、pending 与模型门禁状态（不连网）
+<PY> -B scripts/botctl.py --config config.yaml status
 
 # 多 Bot 分散出生并发压测（需配置好服务端后使用）
-.\.venv\Scripts\python.exe -B scripts/multi_bot_runner.py --help
+<PY> -B scripts/multi_bot_runner.py --help
 ```
 
 配置覆盖顺序：
 - 配置文件：`--config` > `BOTSLEEP_CONFIG` > `config.yaml`
 - 账号：`--username` > `MC_AGENT_USER` > YAML > 默认值
 - API 与口令：`MC_AGENT_API` / `MC_AGENT_PASSWORD` > YAML > 默认值
-- 模型网关：`BOTSLEEP_LLM_BASE_URL` / `BOTSLEEP_LLM_API_KEY` / `BOTSLEEP_LLM_MODEL` > YAML > 默认值
+- 模型网关：`BOTSLEEP_LLM_BASE_URL` / `BOTSLEEP_LLM_API_KEY` / `BOTSLEEP_LLM_MODEL` > YAML > 默认值（全部参数见 [CONFIGURATION.md](docs/CONFIGURATION.md)）
 
-> **安全注意**：真实 API 密钥、机器人口令与 RCON 凭据仅存本地 `config.yaml` 或环境变量，切勿提交入库；`config.yaml`、`.env`、`.venv/`、`logs/`、`runtime/` 均在 `.gitignore` 中忽略。
+## 离线测试与实服基准
 
-## 测试与验证基准
-
-离线全量单元测试覆盖仿真服务器、层间单向 AST 门禁、WAL/pending、3D 寻路与门户/赛事回归：
+离线全量单元测试仅使用 Python 标准库 `unittest` 与纯内存仿真 `VirtualMcApiServer`，**不连接真实 Minecraft、网络或大模型 API**，在任何系统上运行结果应完全一致：
 
 ```powershell
+# Windows (PowerShell)
 .\.venv\Scripts\python.exe -B -m unittest discover -s tests_v2 -v
+
+# Linux / macOS (Bash)
+./.venv/bin/python -B -m unittest discover -s tests_v2 -v
 ```
 
-当前基线（2026-11-26）验证摘要（详情见 [TESTING.md](docs/TESTING.md) 与 [LIVE9_90M_REPORT_20261126.md](docs/LIVE9_90M_REPORT_20261126.md)）：
-- **离线回归**：`tests_v2` **`78 / 78` 全部通过**（`0` 跳过/`0` 失败），`v2/` 全量 63 文件行覆盖率 **`80.81%`**（`6,690 / 8,279` 行）。
-- **实服压测（Leaves 1.21.11 + `mc-agent-api :18900`）**：9-Bot（`SleepBot1..SleepBot9`）`1.5h`（5400s）双 API 实服测试全员 **`9/9 rc=0`** 零未捕获异常退出；前排 `+35.5m / +36.3m` 达成铁锭/铁镐，双 API 路由平稳分流；该轮尚未进入下界（`0/9`），水边震荡与铁后下界过渡仍在持续优化。
+- **预期通过标准**：输出 **`Ran 78 tests ... OK`**（`0` failed / `0` errors / `0` skipped）。
+- **测试范围**：AST 单向层边界守护（`test_00`、`test_10`）、仿真服务器（`test_01`）、L0–L4 分层回归、反卡死/举盾迟滞（`test_08`）、10 格模具保护（`test_09`）与运维/要塞助手（`test_10`）。
+- **当前验证基线（2026-11-26，详情见 [TESTING.md](docs/TESTING.md) 与 [LIVE9_90M_REPORT_20261126.md](docs/LIVE9_90M_REPORT_20261126.md)）**：
+  - 离线 `tests_v2` **`78 / 78` 通过**，`v2/` 全量 63 文件行覆盖率 **`80.81%`**（`6,690 / 8,279` 行）。
+  - 实服 9-Bot（`SleepBot1..SleepBot9`）`1.5h`（5400s）双 API 压测全员 **`9/9 rc=0`** 零未捕获异常退出；前排 `+35.5m / +36.3m` 达成铁锭/铁镐，双 API 平稳分流；该轮进下界仍为 `0/9`，水边震荡与铁后下界过渡仍在持续优化。
 
-要塞计算引擎（`integrations/ninjabrain/`）需 JDK 11+：
+要塞计算引擎（`integrations/ninjabrain/`）另需 JDK 11+：
 
 ```powershell
-.\.venv\Scripts\python.exe -m integrations.ninjabrain setup
-.\.venv\Scripts\python.exe -m integrations.ninjabrain calculate --input data/examples/stronghold_throws.json
+<PY> -m integrations.ninjabrain setup
+<PY> -m integrations.ninjabrain calculate --input data/examples/stronghold_throws.json
 ```
 
 ## 旧版本归档与拉取升级说明
@@ -99,10 +134,10 @@ git pull
 - 若本机此前运行过旧代码，旧目录下可能残留未被 Git 追踪的 `__pycache__/` 或本地运行产物；如有空目录残留，可安全手动删除。
 - 如需查阅或对比旧版源码，可切换至归档标签（`git checkout archive/v1-final`）。
 
-## 更多文档
+## 文档导航
 
-- [架构与运行链路](docs/ARCHITECTURE.md)
-- [v2 重构总方案](docs/REWRITE_V2_MASTERPLAN.md) / [开发执行计划](docs/REWRITE_V2_AGENT_PLAN.md)
+- **[文档总目录（区分现行 v2 与历史归档 v1）](docs/README.md)**
+- [架构与运行链路](docs/ARCHITECTURE.md) / [v2 重构总方案](docs/REWRITE_V2_MASTERPLAN.md) / [开发执行计划](docs/REWRITE_V2_AGENT_PLAN.md)
 - [配置与赛事参数指南](docs/CONFIGURATION.md)
 - [测试记录](docs/TESTING.md) / [9-Bot 90 分钟与双 API 压测报告](docs/LIVE9_90M_REPORT_20261126.md)
-- [要塞计算与采样](docs/STRONGHOLD.md) / [历史交接文档](HANDOFF.md)
+- [要塞计算与采样](docs/STRONGHOLD.md) / [赛事规则目录说明](data/competition/README.md)

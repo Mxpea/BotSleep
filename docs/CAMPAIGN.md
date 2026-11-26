@@ -1,3 +1,6 @@
+> [!WARNING]
+> **历史文档（BotSleep v1，已归档）**：本文档描述的是旧版 v1 实现（已归档于 Git 标签 `archive/v1-final` @ `c6859dc`），**不再适用于当前 `main` 分支的 BotSleep v2**。请勿按文中的旧路径（`core/`、`agent/`、`skills/`、`debug/`、`tests/`）或旧命令执行。当前现行架构、配置与测试/运行方式请查阅 [README.md](../README.md)、[文档总目录](README.md)、[ARCHITECTURE.md](ARCHITECTURE.md) 与 [TESTING.md](TESTING.md)。
+
 # Java 生存通关流程
 
 这一流程供有下界、末地和末影龙的 Java 生存存档使用。它把装备、交通、资源、要塞和末地战斗接到现有 harness。每个步骤先观察，经过验证后再进入下一步。阶段和最近的结果会发布到实时监控。普通基地维护模式见 [SURVIVAL_MAINLINE.md](SURVIVAL_MAINLINE.md)。

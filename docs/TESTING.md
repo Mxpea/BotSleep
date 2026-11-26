@@ -41,7 +41,12 @@
 - **尚未实服验证（严禁混同已通过）**：
   - 尚未在真实服务器运行「零作弊空手出生 → 全程自寻资源与岩浆池浇筑下界门进下界」单 Bot 完整无干预长跑；
   - 尚未在真实服务器挂载真实远端大模型（`llm.enabled: true`）跑 **9-Bot 90 分钟分散出生压测**与 **`--objective competition` 实服计分验收**。
-  - 旧版 v1 单元测试已归档至 `legacy/tests/`，随 v1 代码退役不再作为 v2 门禁执行。
+  - 旧版 v1 单元测试已随 `archive/v1-final`（`c6859dc`）归档，不再作为 `main` 分支门禁执行。
+
+---
+
+> [!WARNING]
+> **以下为 BotSleep v1 历史测试记录（归档基线 `archive/v1-final` @ `c6859dc`）**：下文涉及 `tests/`、`core/`、`skills/` 等旧路径与旧命令，仅作历史演进对照，**请勿在当前 `main`（v2）分支直接执行**。当前 v2 离线测试请统一运行 `python -B -m unittest discover -s tests_v2 -v`。
 
 ## 双 API 溢出与 `v24`–`v31` 九 Bot 1.5 小时进地狱实服压测收官（2026-11-24 – 2026-11-25）
 

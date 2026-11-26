@@ -1,3 +1,9 @@
+> [!WARNING]
+> **历史文档（BotSleep v1，已归档）**：本文档描述的是旧版 v1 实现（已归档于 Git 标签 `archive/v1-final` @ `c6859dc`），**不再适用于当前 `main` 分支的 BotSleep v2**。请勿按文中的旧路径（`core/`、`agent/`、`skills/`、`debug/`、`tests/`）或旧命令执行。当前现行架构、配置与测试/运行方式请查阅 [README.md](../README.md)、[文档总目录](README.md)、[ARCHITECTURE.md](ARCHITECTURE.md) 与 [TESTING.md](TESTING.md)。
+
+> [!NOTE]
+> **BotSleep v2 现行监控入口差异**：v2 只读面板已迁移至 `v2/observability/monitor.py`（启用 `debug.monitor.enabled: true` 后访问 `http://127.0.0.1:18930`）；文中提及的 v1 `python -m debug.monitor_tail` CLI 已移除，现对应库辅助函数 `v2/observability/monitor_tail.py::read_flight_events`。
+
 # 只读运行监控
 
 启用 `debug.monitor.enabled: true` 后访问本机 `http://127.0.0.1:18930`（默认）。监控只消费运行时已发布事件，不读游戏/API、配置或日志，不启动模型请求。网页每 0.5 秒 GET 本机状态和事件；连接重试仅刷新监控数据，不是模型或游戏动作重试。

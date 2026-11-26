@@ -1,3 +1,6 @@
+> [!WARNING]
+> **历史文档（BotSleep v1，已归档）**：本文档描述的是旧版 v1 实现（已归档于 Git 标签 `archive/v1-final` @ `c6859dc`），**不再适用于当前 `main` 分支的 BotSleep v2**。请勿按文中的旧路径（`core/`、`agent/`、`skills/`、`debug/`、`tests/`）或旧命令执行。当前现行架构、配置与测试/运行方式请查阅 [README.md](../README.md)、[文档总目录](README.md)、[ARCHITECTURE.md](ARCHITECTURE.md) 与 [TESTING.md](TESTING.md)。
+
 # 程序建筑投影
 
 在通关模式里设置 `survival.projection: timber_house`。预设保存在 `data/projections`。程序在生存模式按坐标扫描现有地形，登记已经符合投影的方块，按阶段计算库存差额。备料复用本地采集、制作和熔炼任务。监控的「建筑投影」显示已核验格数、施工阶段和剩余材料。

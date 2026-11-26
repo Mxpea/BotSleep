@@ -1,3 +1,6 @@
+> [!WARNING]
+> **历史文档（BotSleep v1，已归档）**：本文档描述的是旧版 v1 实现（已归档于 Git 标签 `archive/v1-final` @ `c6859dc`），**不再适用于当前 `main` 分支的 BotSleep v2**。请勿按文中的旧路径（`core/`、`agent/`、`skills/`、`debug/`、`tests/`）或旧命令执行。当前现行架构、配置与测试/运行方式请查阅 [README.md](../README.md)、[文档总目录](README.md)、[ARCHITECTURE.md](ARCHITECTURE.md) 与 [TESTING.md](TESTING.md)。
+
 # 日常生存：任务、反馈与长期记忆
 
 当前说明更新于 2026-11-16；下方保留较早的测试与实服记录。`survival.objective: daily` 在初期工具链之上持续检查食物、材料、设施与安全，不以取得石器后的 `goal_complete` 结束。当前 starter/daily/competition 工具数为 9/35/40；新增战斗、取液与条件岩浆狩猎已接入源码及离线回归，普通地图的完整日常闭环仍须真实验收。历史采木、制作或专用平坦场石器成功不能替代这项验收，统一验证记录见 [TESTING.md](TESTING.md)。

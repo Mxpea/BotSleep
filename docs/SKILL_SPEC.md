@@ -1,3 +1,6 @@
+> [!WARNING]
+> **历史文档（BotSleep v1，已归档）**：本文档描述的是旧版 v1 实现（已归档于 Git 标签 `archive/v1-final` @ `c6859dc`），**不再适用于当前 `main` 分支的 BotSleep v2**。请勿按文中的旧路径（`core/`、`agent/`、`skills/`、`debug/`、`tests/`）或旧命令执行。当前现行架构、配置与测试/运行方式请查阅 [README.md](../README.md)、[文档总目录](README.md)、[ARCHITECTURE.md](ARCHITECTURE.md) 与 [TESTING.md](TESTING.md)。
+
 # BotSleep 技能规范文档 (SKILL SPECIFICATION)
 
 当前说明更新：2026-11-16，包含此前 `3801be9` 基线之后的适配与技能扩展；该哈希仅为历史核对基线。本文区分模型已绑定技能、独立开发技能和未接入提案；实现存在不等于实服验收。验证结果见 [TESTING.md](TESTING.md)。

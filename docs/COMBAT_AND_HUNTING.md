@@ -1,3 +1,6 @@
+> [!WARNING]
+> **历史文档（BotSleep v1，已归档）**：本文档描述的是旧版 v1 实现（已归档于 Git 标签 `archive/v1-final` @ `c6859dc`），**不再适用于当前 `main` 分支的 BotSleep v2**。请勿按文中的旧路径（`core/`、`agent/`、`skills/`、`debug/`、`tests/`）或旧命令执行。当前现行架构、配置与测试/运行方式请查阅 [README.md](../README.md)、[文档总目录](README.md)、[ARCHITECTURE.md](ARCHITECTURE.md) 与 [TESTING.md](TESTING.md)。
+
 # 狩猎、战斗与桶类操作
 
 本轮针对 Java 1.21.11 / 官方 mc-agent-api 1.3.14 实现；2026-11-16 查阅资料。适用于普通生存模式的已观察实体，不面向玩家对战。只有离线证据的功能不能记成实服击杀或完整生存验收。

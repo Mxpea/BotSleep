@@ -1,3 +1,6 @@
+> [!WARNING]
+> **历史文档（BotSleep v1，已归档）**：本文档描述的是旧版 v1 实现（已归档于 Git 标签 `archive/v1-final` @ `c6859dc`），**不再适用于当前 `main` 分支的 BotSleep v2**。请勿按文中的旧路径（`core/`、`agent/`、`skills/`、`debug/`、`tests/`）或旧命令执行。当前现行架构、配置与测试/运行方式请查阅 [README.md](../README.md)、[文档总目录](README.md)、[ARCHITECTURE.md](ARCHITECTURE.md) 与 [TESTING.md](TESTING.md)。
+
 # 自保与随行掉落收集设计
 
 **状态：自保和已拾取骨头的利用已接入，实服待验。** `starter` 支持对符合条件的孤立僵尸单击反击；`daily` / `competition` 的现有 `craft` 目标支持用库存中的骨头制作骨粉。通用随行需求、插入拾取动作、资源保全和扩展物种策略仍是设计方向。现行战斗见 [狩猎、战斗与桶类操作](COMBAT_AND_HUNTING.md)。本设计仅针对 Minecraft 生存模式的怪物，不涉及玩家对战。

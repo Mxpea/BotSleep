@@ -1,3 +1,6 @@
+> [!WARNING]
+> **历史文档（BotSleep v1，已归档）**：本文档描述的是旧版 v1 实现（已归档于 Git 标签 `archive/v1-final` @ `c6859dc`），**不再适用于当前 `main` 分支的 BotSleep v2**。请勿按文中的旧路径（`core/`、`agent/`、`skills/`、`debug/`、`tests/`）或旧命令执行。当前现行架构、配置与测试/运行方式请查阅 [README.md](../README.md)、[文档总目录](README.md)、[ARCHITECTURE.md](ARCHITECTURE.md) 与 [TESTING.md](TESTING.md)。
+
 # Harness 接口契约与架构决策
 
 更新：2026-11-16；`3801be9` 为此前合并核对基线，当前还包含目标程序扩展。状态：**第 2 节、明确标为当前实现的赛事工具与目标程序是现有接口；其余未实现入口仍是设计提案**。路径均相对本仓库；部署地址、账号与凭据由配置提供。

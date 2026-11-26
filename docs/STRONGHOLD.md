@@ -47,7 +47,7 @@
 
 默认角度误差来自 0.1 方块坐标舍入和轨迹跨度的保守估计，**尚未经真实投眼校准**；只有确认测量误差后才使用 `--sigma` 覆盖。模型概率不是实机成功率保证。非原版要塞生成、空岛未生成要塞、不同投掷指向不同要塞时，推断可能失败或失真。
 
-## Python 与技能接口
+## Python 与上层集成状态
 
 ```python
 from integrations.ninjabrain import EyeThrow, StrongholdCalculator
@@ -58,15 +58,15 @@ result = StrongholdCalculator().calculate([
 ])
 ```
 
-`skills.stronghold.CalculateStrongholdSkill().execute(throws=[...])` 返回标准 `SkillResult`；它只计算、不投眼。`agent/tools.py` 以独立常量 `STRONGHOLD_TOOL_DEFINITION` 保留 `calculate_stronghold` 的工具结构；它没有加入 starter/daily 的9/31项模型工具目录。现行 `core/survival_harness.py` 已实现生存调度，但尚未绑定采眼与要塞计算；`skills/stronghold_localization/SKILL.md` 也未自动加载，不能据独立 CLI 可用认定模型已经能自主调用。
+`integrations/ninjabrain/` 已在 BotSleep v2 中与旧版 v1 代码彻底解耦：纯命令行 `python -m integrations.ninjabrain setup|calculate|capture` 可直接独立使用；v2 生存流中的要塞与末地阶段骨架位于 `v2/tasks/stronghold_end.py`（对应微技能卡 `skills_kb/13_stronghold_eyes.md`），主循环目前尚未对 `capture` 投眼采样流程完成实服全打通验收。
 
 ## 验证与来源
 
 ```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+.\.venv\Scripts\python.exe -B -m unittest discover -s tests_v2 -v
 ```
 
-测试覆盖坐标方向、负区块、多点拟合、歧义实体、错误响应、缺失依赖，以及官方真实计算引擎的已知目标、基线变化和矛盾观测。未安装 JAR 时会显式跳过引擎测试。已完成五次真实投眼的坐标采样与多观测计算验证，结果见下节；传送门房尚未通过实地挖掘确认。
+其中 `tests_v2/test_10_ops_and_cli.py` 离线验证了 `integrations/ninjabrain/` 的掉落识别、坐标方向与无旧依赖 AST 门禁；若安装了 JDK 11+ 并执行过 `setup`，也可运行官方计算引擎回归（未安装 JAR 时对应真实引擎测试会按设计跳过）。
 
 上游版本、许可证及分发说明见 `third_party/ninjabrain/NOTICE.md` 和 `LICENSE`。
 
