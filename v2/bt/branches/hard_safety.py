@@ -299,7 +299,14 @@ class HardSafetyBranch(Node):
                 return source["name"]
         return None
 
-    def _strike_with_best_weapon(self, bb: Blackboard, threat: Dict[str, Any], tname: str) -> Status:
+    def _strike_with_best_weapon(
+        self,
+        bb: Blackboard,
+        threat: Dict[str, Any],
+        tname: str,
+        *,
+        max_hits: int = 2,
+    ) -> Status:
         """Equip highest-damage sword/axe if not held, otherwise execute knockback attack."""
         best = self._best_melee_weapon(bb.inventory_counts)
         now = time.monotonic()
@@ -321,7 +328,7 @@ class HardSafetyBranch(Node):
             bb,
             "attack",
             {"entity_id": eid},
-            lambda _id=eid: self.gateway.client.attack(_id, timeout_ms=2500, max_hits=2),
+            lambda _id=eid, _mh=int(max_hits): self.gateway.client.attack(_id, timeout_ms=2500, max_hits=_mh),
         )
         return status_ret
 
@@ -831,15 +838,15 @@ class HardSafetyBranch(Node):
                 return status_ret
 
         # Dead-end / clear-LOS fallback when previous retreat was blocked with path_not_found
+        has_weapon = self._has_melee_weapon(bb.inventory_counts)
         if self._retreat_blocked_eid == eid and (not occluded or recently_hurt):
-            if d <= 3.5 and tname != "creeper" and self._has_melee_weapon(bb.inventory_counts):
-                return self._strike_with_best_weapon(bb, threat, tname)
+            if tname != "creeper" and ((d <= 3.5 and has_weapon) or d <= 2.5):
+                return self._strike_with_best_weapon(bb, threat, tname, max_hits=2 if has_weapon else 1)
             burrow_res = self._step_emergency_burrow(bb)
             if burrow_res is not None:
                 return burrow_res
 
         # Close-range (< 3.0m) or healthy (<= 3.5m) melee knockback strike against non-creepers with clear LOS
-        has_weapon = self._has_melee_weapon(bb.inventory_counts)
         if not occluded and tname != "creeper" and has_weapon and (d < 3.0 or (d <= 3.5 and bb.health >= 12.0)):
             return self._strike_with_best_weapon(bb, threat, tname)
 
@@ -859,8 +866,8 @@ class HardSafetyBranch(Node):
         rx, ry, rz, found_path = self._select_terrain_retreat_target(bb, threat, d)
         if not found_path:
             if not occluded or recently_hurt:
-                if d <= 3.5 and tname != "creeper" and has_weapon:
-                    return self._strike_with_best_weapon(bb, threat, tname)
+                if tname != "creeper" and ((d <= 3.5 and has_weapon) or d <= 2.5):
+                    return self._strike_with_best_weapon(bb, threat, tname, max_hits=2 if has_weapon else 1)
                 burrow_res = self._step_emergency_burrow(bb)
                 if burrow_res is not None:
                     return burrow_res
