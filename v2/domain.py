@@ -225,3 +225,31 @@ def compact_shelter_spec(origin: Coord3, facing: str = "north", material: str = 
         bed_offset=(1, 1, 1),
         chest_offset=(-1, 1, 1),
     )
+
+
+LOOT_WHITELIST_ITEMS: FrozenSet[str] = frozenset({
+    "iron_ingot", "gold_ingot", "diamond", "emerald", "obsidian", "crying_obsidian",
+    "flint_and_steel", "flint", "iron_nugget", "gold_nugget", "bucket", "water_bucket",
+    "iron_pickaxe", "iron_sword", "iron_axe", "iron_shovel",
+    "iron_helmet", "iron_chestplate", "iron_leggings", "iron_boots",
+    "golden_helmet", "golden_chestplate", "golden_leggings", "golden_boots",
+    "golden_apple", "enchanted_golden_apple", "bread", "apple",
+    "cooked_beef", "cooked_porkchop", "cooked_mutton", "cooked_chicken", "baked_potato",
+    "coal", "oak_log", "spruce_log", "birch_log", "saddle", "name_tag",
+    "arrow", "ender_pearl", "blaze_rod", "fire_charge",
+})
+
+VALUABLE_STASH_ITEMS: FrozenSet[str] = frozenset({
+    "diamond", "emerald", "iron_ingot", "gold_ingot", "raw_iron", "raw_gold",
+    "obsidian", "flint_and_steel", "water_bucket", "bucket",
+    "golden_apple", "enchanted_golden_apple", "blaze_rod", "ender_pearl",
+    "diamond_pickaxe", "diamond_sword", "diamond_chestplate",
+    "iron_pickaxe", "iron_sword", "iron_helmet", "iron_chestplate", "iron_leggings", "iron_boots",
+})
+
+DEEP_DARK_BLOCKS: FrozenSet[str] = frozenset({
+    "sculk_sensor", "calibrated_sculk_sensor", "sculk_shrieker", "sculk_catalyst",
+})
+
+STONE_MOLD_ITEMS: Tuple[str, ...] = ("cobblestone", "cobbled_deepslate")
+
