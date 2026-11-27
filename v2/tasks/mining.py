@@ -78,6 +78,7 @@ class MineResourceTask(Task):
         self._dir_idx: int = 0
         self._dirs = ((1, 0), (0, 1), (-1, 0), (0, -1))
         self._tried_mine_shaft: bool = False
+        self._entry_reached: bool = False
         self._mine_shaft_stalls: int = 0
         self._mine_shaft_last_pos: Optional[Tuple[float, float, float]] = None
         self._surface_anchor_saved: bool = False
@@ -88,6 +89,7 @@ class MineResourceTask(Task):
     def stop(self, bb: Blackboard) -> None:
         self._dig.clear_cache()
         self._tried_mine_shaft = False
+        self._entry_reached = False
         self._mine_shaft_stalls = 0
         self._mine_shaft_last_pos = None
         self._surface_anchor_saved = False
@@ -154,11 +156,7 @@ class MineResourceTask(Task):
         if fy >= 58:
             if not self._surface_anchor_saved:
                 prev_surf = load_anchor_landmark(db, bb, "last_surface_anchor", "surface_entry", writer="mining")
-                if (
-                    prev_surf is None
-                    or dist3(prev_surf, (fx, fy, fz)) > 48.0
-                    or (not is_underground(bb, self.ctx.gateway) and fy >= prev_surf[1])
-                ):
+                if prev_surf is None or dist3(prev_surf, (fx, fy, fz)) > 64.0:
                     save_anchor_landmark(db, bb, "last_surface_anchor", "surface_entry", (fx, fy, fz), writer="mining")
                 self._surface_anchor_saved = True
         else:
@@ -238,10 +236,24 @@ class MineResourceTask(Task):
         if opp is not None:
             return opp
 
-        # 2.5) Above y >= 58: try reusing remembered mine_shaft within 48m before digging a brand-new staircase
+        # 2.5) Above y >= 58: walk back into remembered surface_entry shaft mouth first, then reuse mine_shaft
         if fy >= 58 and not self._tried_mine_shaft:
-            shaft = load_anchor_landmark(self.ctx.gateway.db, bb, "last_mine_anchor", "mine_shaft", writer="mining")
-            if shaft is not None and dist3(bb.pos, shaft) <= 48.0:
+            db = self.ctx.gateway.db
+            entry = load_anchor_landmark(db, bb, "last_surface_anchor", "surface_entry", writer="mining")
+            shaft = load_anchor_landmark(db, bb, "last_mine_anchor", "mine_shaft", writer="mining")
+            reuse_target: Optional[Coord3] = None
+            entering_mouth = False
+            if entry is not None and shaft is not None and not self._entry_reached and dist3(bb.pos, entry) <= 64.0:
+                if dist3(bb.pos, entry) <= 3.0:
+                    self._entry_reached = True
+                    self._mine_shaft_stalls = 0
+                    self._mine_shaft_last_pos = None
+                else:
+                    reuse_target = entry
+                    entering_mouth = True
+            if reuse_target is None and shaft is not None and dist3(bb.pos, shaft) <= 64.0:
+                reuse_target = shaft
+            if reuse_target is not None:
                 if self._mine_shaft_last_pos is not None and dist3(self._mine_shaft_last_pos, bb.pos) < 0.35:
                     self._mine_shaft_stalls += 1
                 elif self._mine_shaft_last_pos is not None:
@@ -250,11 +262,16 @@ class MineResourceTask(Task):
                 if self._mine_shaft_stalls >= 6:
                     self._tried_mine_shaft = True
                 else:
-                    n_out = self._nav.step_to(bb, (shaft[0] + 0.5, float(shaft[1]), shaft[2] + 0.5), tolerance=2.0)
+                    n_out = self._nav.step_to(bb, (reuse_target[0] + 0.5, float(reuse_target[1]), reuse_target[2] + 0.5), tolerance=2.0)
                     if n_out.status == "UNKNOWN":
                         return "UNKNOWN"
                     if n_out.status == "OK":
-                        self._tried_mine_shaft = True
+                        if entering_mouth:
+                            self._entry_reached = True
+                            self._mine_shaft_stalls = 0
+                            self._mine_shaft_last_pos = None
+                        else:
+                            self._tried_mine_shaft = True
                         if bb.writes_this_tick >= 1:
                             return "RUNNING"
                     elif n_out.status == "PROGRESSED":

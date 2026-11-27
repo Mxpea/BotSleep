@@ -396,6 +396,7 @@ class PhysicalUnstuckBranch(Node):
             inventory_counts=bb.inventory_counts,
             prefer_3d=True,
             threat_positions=bb.get("active_threat_positions"),
+            avoid_hard_rock_without_pick=True,
         )
         if out.action_taken != "none":
             bb.writes_this_tick += 1
@@ -449,6 +450,7 @@ class PhysicalUnstuckBranch(Node):
             xz_only=True,
             threat_positions=threats,
             nearby_entities=bb.entities,
+            avoid_hard_rock_without_pick=True,
         )
         if out.action_taken != "none":
             bb.writes_this_tick += 1

@@ -17,6 +17,7 @@ from v2.domain import (
     LEAF_BLOCKS,
     NON_SOLID_BLOCKS,
     PASS_THROUGH_BLOCKS,
+    PICKAXE_TIERS,
     SCAFFOLD_BLOCKS,
     SOFT_OCCLUDERS,
     block_coord,
@@ -24,6 +25,18 @@ from v2.domain import (
     dist3,
     pick_best_item,
 )
+
+_HARD_ROCK_NO_PICK_BLOCKS = frozenset({
+    "stone", "deepslate", "cobblestone", "cobbled_deepslate",
+    "andesite", "diorite", "granite", "tuff", "sandstone",
+    "red_sandstone", "blackstone", "basalt", "netherrack",
+    "obsidian", "iron_ore", "deepslate_iron_ore", "coal_ore",
+    "deepslate_coal_ore", "gold_ore", "deepslate_gold_ore",
+    "copper_ore", "deepslate_copper_ore", "diamond_ore",
+    "deepslate_diamond_ore", "lapis_ore", "deepslate_lapis_ore",
+    "redstone_ore", "deepslate_redstone_ore", "emerald_ore",
+    "deepslate_emerald_ore",
+})
 from v2.gateway.pathfinder_3d import NavStep, Pathfinder3D
 from v2.gateway.surface_swim import SurfaceSwimExecutor
 from v2.gateway.world_proxy import VirtualWorldGateway
@@ -321,6 +334,7 @@ class MultiHopNavigator:
         xz_only: bool = False,
         threat_positions: Optional[Sequence[Tuple[float, float, float]]] = None,
         nearby_entities: Optional[Sequence[Dict[str, Any]]] = None,
+        avoid_hard_rock_without_pick: Optional[bool] = None,
     ) -> NavOutcome:
         """Perform AT MOST ONE bounded navigation/clearing/bridging/pillaring write step toward target_pos."""
         pos = status.get("pos") or [0.0, 64.0, 0.0]
@@ -544,13 +558,32 @@ class MultiHopNavigator:
                 int(round(start_cell[2] + (tgt_cell[2] - start_cell[2]) * ratio)),
             )
 
+        enforce_rock_guard = (
+            avoid_hard_rock_without_pick
+            if avoid_hard_rock_without_pick is not None
+            else (start_cell[1] < 58)
+        )
+        no_pickaxe = (
+            enforce_rock_guard
+            and (inventory_counts is not None)
+            and (not any(inv.get(p, 0) > 0 for p in PICKAXE_TIERS))
+        )
+        plan_avoid = avoid_block_breaking
+        if no_pickaxe:
+            def _avoid_rock_bare_hand(cell: Coord3, _base=avoid_block_breaking, _d=dim) -> bool:
+                if _base is not None and _base(cell):
+                    return True
+                ent = self.gateway.peek_block(_d, cell)
+                return ent is not None and ent.name in _HARD_ROCK_NO_PICK_BLOCKS
+            plan_avoid = _avoid_rock_bare_hand
+
         steps = self.pathfinder.plan(
             dim,
             start_cell,
             sub_goal,
             tolerance=min(tolerance, 2.0),
             has_scaffold=scaffold is not None,
-            avoid_block_breaking=avoid_block_breaking,
+            avoid_block_breaking=plan_avoid,
             threat_positions=threats,
         )
         if not steps:
@@ -585,6 +618,11 @@ class MultiHopNavigator:
             return NavOutcome("PROGRESSED", action_taken="control", reason=reason, details={"to": list(step.stand_after)})
 
         if step.action == "dig":
+            if no_pickaxe:
+                dig_ent = self.gateway.peek_block(dim, step.target)
+                if dig_ent is not None and dig_ent.name in _HARD_ROCK_NO_PICK_BLOCKS:
+                    self.gateway.unreachable.record_failure(dim, step.target, "dig", "no_pickaxe_for_stone")
+                    return NavOutcome("BLOCKED", action_taken="none", reason="no_pickaxe_for_stone", details={"pos": list(step.target)})
             res, err_out = self._run_write(
                 "dig", {"pos": list(step.target)}, dim, cur_p,
                 lambda: self.client.dig(list(step.target), collect=True),

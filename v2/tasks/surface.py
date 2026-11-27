@@ -219,6 +219,9 @@ class ReturnToSurfaceTask(Task):
 
         # 2) Conservative 3-high staircase fallback (+ fast water plug before rotating direction)
         fx, fy, fz = block_coord(bb.pos)
+        if fy >= self.target_y or any(bb.inventory_counts.get(p, 0) > 0 for p in PICKAXE_TIERS):
+            if int(bb.get("surface_no_pick_hard_digs", 0) or 0) != 0:
+                bb.set("surface_no_pick_hard_digs", 0, writer="surface")
         for _ in range(len(self._dirs)):
             dx, dz = self._dirs[self._dir_idx % len(self._dirs)]
             # Clear overhead at current column + headroom at next elevated step (fy+1, fy+2)
@@ -264,7 +267,8 @@ class ReturnToSurfaceTask(Task):
                         or ent.name.endswith(("_log", "_planks"))
                     )
                     has_pick = any(bb.inventory_counts.get(p, 0) > 0 for p in PICKAXE_TIERS)
-                    if not is_soft_or_wood and not has_pick and self._no_pick_hard_digs >= 2:
+                    hard_digs = max(self._no_pick_hard_digs, int(bb.get("surface_no_pick_hard_digs", 0) or 0))
+                    if not is_soft_or_wood and not has_pick and hard_digs >= 2:
                         bb.last_failure_reason = "surface_escape:no_pickaxe"
                         return "NEEDS_AI"
                     d_out = self._dig.dig_block(bb, cell, collect=False)
@@ -275,7 +279,8 @@ class ReturnToSurfaceTask(Task):
                         and isinstance(d_out.details, dict)
                         and "no proper tool" in str(d_out.details.get("warning") or "").lower()
                     ):
-                        self._no_pick_hard_digs += 1
+                        self._no_pick_hard_digs = hard_digs + 1
+                        bb.set("surface_no_pick_hard_digs", self._no_pick_hard_digs, writer="surface")
                     return "RUNNING" if d_out.status in {"OK", "PROGRESSED"} else d_out.status
             if blocked:
                 self._dir_idx += 1
