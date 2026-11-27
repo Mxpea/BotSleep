@@ -280,12 +280,34 @@ class MinecraftAgentClient:
     def _action_timeout(self, deadline_seconds: float) -> float:
         return max(self.timeout_seconds, deadline_seconds + self.ACTION_MARGIN_SECONDS)
 
+    @staticmethod
+    def _extract_target_coord(endpoint: str, payload: Optional[Dict[str, Any]]) -> Optional[List[int]]:
+        """Extract integer block coordinates from spatial action payloads for heatmap telemetry."""
+        if endpoint not in {"dig", "place", "move_to", "interact"} or not isinstance(payload, dict):
+            return None
+        if "x" in payload and "z" in payload:
+            x, z = payload.get("x"), payload.get("z")
+            y = payload.get("y", 0)
+            if (
+                not isinstance(x, bool) and isinstance(x, (int, float))
+                and not isinstance(y, bool) and isinstance(y, (int, float))
+                and not isinstance(z, bool) and isinstance(z, (int, float))
+            ):
+                return [int(math.floor(float(x))), int(math.floor(float(y))), int(math.floor(float(z)))]
+        for key in ("pos", "ref"):
+            seq = payload.get(key)
+            if isinstance(seq, (list, tuple)) and len(seq) == 3:
+                if all(not isinstance(v, bool) and isinstance(v, (int, float)) for v in seq):
+                    return [int(math.floor(float(v))) for v in seq]
+        return None
+
     def _request(self, method: str, endpoint: str, **options: Any) -> Dict[str, Any]:
         if self.recorder is None:
             return self._send_request(method, endpoint, **options)
         started = time.perf_counter()
         ok = False
         err_info: Optional[Dict[str, Any]] = None
+        target = self._extract_target_coord(endpoint, options.get("payload"))
         try:
             res = self._send_request(method, endpoint, **options)
             ok = True
@@ -299,16 +321,21 @@ class MinecraftAgentClient:
                 "action_state": err.details.get("action_state"),
                 "duration_ms": round(1000 * (time.perf_counter() - started)),
             }
+            if target is not None:
+                err_info["target"] = target
             raise
         finally:
             dur = round(1000 * (time.perf_counter() - started))
             try:
-                self.recorder.record("INFO", "mc_api", "API_TIMING", {
+                timing_data: Dict[str, Any] = {
                     "endpoint": endpoint,
                     "method": method,
                     "duration_ms": dur,
                     "ok": ok,
-                })
+                }
+                if target is not None:
+                    timing_data["target"] = target
+                self.recorder.record("INFO", "mc_api", "API_TIMING", timing_data)
                 if err_info is not None:
                     self.recorder.record("WARN", "mc_api", "API_ERROR", err_info)
             except Exception:

@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 import threading
 import time
-from typing import Any, Callable, Dict, Iterable, Optional, Set
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set
 
 
 class FlightRecorder:
@@ -27,6 +27,7 @@ class FlightRecorder:
         self.sink = sink
         self.console = bool(console)
         self._lock = threading.Lock()
+        self._listeners: List[Callable[[Dict[str, Any]], None]] = []
         self._secrets: Set[str] = {s for s in secrets if isinstance(s, str) and len(s) >= 3}
         self.log_path: Optional[Path] = None
         if self.enabled:
@@ -38,6 +39,13 @@ class FlightRecorder:
         if isinstance(secret, str) and len(secret) >= 3:
             with self._lock:
                 self._secrets.add(secret)
+
+    def add_listener(self, listener: Callable[[Dict[str, Any]], None]) -> None:
+        """Register an in-process passive listener invoked on each recorded entry."""
+        if callable(listener):
+            with self._lock:
+                if listener not in self._listeners:
+                    self._listeners.append(listener)
 
     def _scrub(self, value: Any) -> Any:
         if isinstance(value, str):
@@ -70,6 +78,13 @@ class FlightRecorder:
         if self.sink is not None:
             try:
                 self.sink(entry)
+            except Exception:
+                pass
+        with self._lock:
+            listeners = list(self._listeners)
+        for listener in listeners:
+            try:
+                listener(entry)
             except Exception:
                 pass
         return entry
