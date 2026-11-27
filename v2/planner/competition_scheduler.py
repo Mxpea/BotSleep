@@ -137,6 +137,8 @@ class CompetitionScheduler:
                 continue
             kind, target = route
             spec = ADVANCEMENT_GRAPH.get(aid)
+            if spec is not None and "nether" in spec.capabilities_req and bb.dimension != "the_nether":
+                continue
 
             # Estimate remaining step cost cleanly (preserving test_23 est_steps=44 for avoid_vibration)
             if kind == "enter_nether":
@@ -193,11 +195,17 @@ class CompetitionScheduler:
                 if est_minutes * 60.0 > rem_sec * _TIME_FIT_WINDOW:
                     time_fit = 0.05
 
-            # 5) Exponential failure decay
+            # 5) Exponential failure decay + surface-first T0 sweep
             fails = int(fail_counts.get(aid, 0))
             decay = 0.55 ** fails
+            surface_mult = 1.0
+            if bb.dimension == "overworld" and bb.pos[1] >= 56.0:
+                if aid == "minecraft:husbandry/plant_seed":
+                    surface_mult = 1.35
+                elif aid == "minecraft:adventure/kill_a_mob" and ("hostile" in signals or is_night_or_rain):
+                    surface_mult = 1.25
 
-            ppm = (eff_pts / max(0.35, est_minutes)) * opp_mult * gate_mult * time_fit * decay
+            ppm = (eff_pts / max(0.35, est_minutes)) * opp_mult * gate_mult * time_fit * decay * surface_mult
 
             is_portal_top = (aid == "minecraft:story/enter_the_nether" and portal_ready)
             if is_portal_top:

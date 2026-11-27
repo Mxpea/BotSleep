@@ -402,11 +402,12 @@ class HardSafetyBranch(Node):
         recently_hurt: bool,
         occluded: bool,
     ) -> bool:
-        """Exempt threat for 15s ONLY when unhurt + wall-occluded + >=2 retreat fails + dist > 3.5."""
-        if recently_hurt or not occluded or d <= 3.5:
+        """Exempt wall-occluded threat for 15s when unhurt + occluded + (>=2 fails at d>3.5 or >=3 fails close)."""
+        if recently_hurt or not occluded:
             return False
         eid = int(threat.get("id", -1))
-        if eid < 0 or self._retreat_path_fails.get(eid, 0) < 2:
+        fails = self._retreat_path_fails.get(eid, 0)
+        if eid < 0 or fails < (2 if d > 3.5 else 3):
             return False
         self._exempt_threats[eid] = time.monotonic() + 15.0
         self._retreat_path_fails.pop(eid, None)
@@ -997,7 +998,7 @@ class HardSafetyBranch(Node):
         self._last_retreat_failed = (not ok) or (not found_path)
         if not ok:
             self._pending_retreat_check = None
-            if eid >= 0 and (self._last_write_error_code == "path_not_found" or not found_path):
+            if eid >= 0 and (self._last_write_error_code in {"path_not_found", "timeout", "stalled"} or not found_path):
                 self._retreat_path_fails[eid] = self._retreat_path_fails.get(eid, 0) + 1
                 self._retreat_blocked_eid = eid
                 self._try_exempt_walled_threat(bb, threat, d, recently_hurt, occluded)

@@ -104,6 +104,34 @@ class TestCompetitionDagAndActions(unittest.TestCase):
         glow_top = [c.item for c in sched.select_top(bb_det, limit=4)]
         self.assertIn("minecraft:husbandry/make_a_sign_glow", glow_top)
 
+        # 6) Nether dimension gate: Nether-only tasks excluded while in overworld
+        all_ow_ids = [c.item for c in sched.select_top(bb_det, limit=50)]
+        self.assertNotIn("minecraft:adventure/spyglass_at_ghast", all_ow_ids)
+        self.assertNotIn("minecraft:nether/distract_piglin", all_ow_ids)
+        self.assertNotIn("minecraft:nether/obtain_crying_obsidian", all_ow_ids)
+
+    def test_walled_close_spider_exemption_and_mine_prep_wood(self) -> None:
+        from v2.bt.branches.hard_safety import HardSafetyBranch
+        from v2.kernel.journal import PendingTransactionJournal
+
+        sim = VirtualMcApiServer(spawn_pos=(0.5, 64.0, 0.5))
+        sim.fill(-4, 63, -4, 4, 63, 4, "stone")
+        sim.set_block(1, 65, 0, "stone")
+        with tempfile.TemporaryDirectory() as td, VirtualMcHttpServer(sim) as srv:
+            db, journal, client, gw, ctx = _make_runtime_ctx(sim, td, srv.base_url, "SpiderBot")
+            try:
+                hs = HardSafetyBranch(gw, journal)
+                bb = Blackboard()
+                bb.status = {"dimension": "overworld", "pos": [0.5, 64.0, 0.5]}
+                threat = {"id": 88, "name": "spider", "type": "hostile", "pos": [2.5, 64.0, 0.5]}
+                hs._retreat_path_fails[88] = 2
+                self.assertFalse(hs._try_exempt_walled_threat(bb, threat, 2.0, False, True))
+                hs._retreat_path_fails[88] = 3
+                self.assertTrue(hs._try_exempt_walled_threat(bb, threat, 2.0, False, True))
+            finally:
+                client.close()
+                db.close()
+
     def test_gather_mob_drop_shears_and_cobweb(self) -> None:
         sim = VirtualMcApiServer(spawn_pos=(0.5, 64.0, 0.5))
         sim.fill(-6, 63, -6, 6, 63, 6, "grass_block")

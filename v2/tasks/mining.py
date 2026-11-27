@@ -11,7 +11,9 @@ from v2.domain import (
     FOOD_ITEMS,
     HAZARD_BLOCKS,
     LIQUID_BLOCKS,
+    LOG_BLOCKS,
     NON_SOLID_BLOCKS,
+    PLANK_ITEMS,
     SCAFFOLD_BLOCKS,
     WATER_BLOCKS,
     block_coord,
@@ -214,6 +216,21 @@ class MineResourceTask(Task):
             return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, gather.min_pickaxe, 1))
 
         fx, fy, fz = block_coord(bb.pos)
+        # 1b) Before descending deep from surface, secure >= 12 plank-equivalents when surface trees exist
+        if fy >= 58 and self.target_y <= 32 and self.item in _DEEP_OPPORTUNISTIC_ITEMS:
+            inv = bb.inventory_counts
+            wood_eq = (
+                4 * sum(inv.get(l, 0) for l in LOG_BLOCKS)
+                + sum(inv.get(p, 0) for p in PLANK_ITEMS)
+                + (inv.get("stick", 0) // 2)
+            )
+            if wood_eq < 12 and self.ctx.gateway.scan_blocks(bb.dimension, list(LOG_BLOCKS), radius=24, limit=1):
+                need_logs = max(1, (12 - wood_eq + 3) // 4)
+                return self.run_child(
+                    bb,
+                    AcquireItemTask(self.ctx, self.catalogue, "oak_log", inv.get("oak_log", 0) + need_logs),
+                )
+
         self._update_mining_anchors(bb, fx, fy, fz)
 
         # 2) Cave-first: scan exposed ore veins within 24m near current elevation (ignore sealed far-Y pockets)
