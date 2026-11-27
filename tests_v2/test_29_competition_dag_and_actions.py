@@ -240,6 +240,7 @@ class TestCompetitionDagAndActions(unittest.TestCase):
             max_runtime_seconds=7200,
             max_steps=16000,
         )
+        self.assertEqual(cfg["survival"]["max_steps"], 10000)
         self.assertEqual(cfg["survival"]["competition"]["max_seconds"], 7200)
         self.assertEqual(cfg["survival"]["competition"]["max_steps"], 16000)
 

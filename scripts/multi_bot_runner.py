@@ -135,7 +135,7 @@ def build_bot_config(
         survival["max_runtime_seconds"] = int(max_runtime_seconds)
         comp["max_seconds"] = int(max_runtime_seconds)
     if max_steps is not None:
-        survival["max_steps"] = int(max_steps)
+        survival["max_steps"] = min(10000, int(max_steps))
         comp["max_steps"] = int(max_steps)
 
     debug = cfg.setdefault("debug", {})
