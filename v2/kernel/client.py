@@ -864,12 +864,25 @@ class MinecraftAgentClient:
         budget = self._action_timeout(budget_ms) if timeout_seconds is None else self._positive(timeout_seconds, "timeout_seconds")
         return self._request("POST", "control", payload=payload, timeout_seconds=budget)
 
-    def attack(self, entity_id: int, *, timeout_ms: int = 6000, max_hits: int = 6) -> Dict[str, Any]:
+    def attack(
+        self,
+        entity_id: int,
+        *,
+        timeout_ms: int = 6000,
+        max_hits: int = 6,
+        stop_on: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
         deadline = self._positive(timeout_ms, "timeout_ms") / 1000.0
+        effective_stop_on = ["death"] if stop_on is None else list(stop_on)
         return self._request(
             "POST",
             "attack",
-            payload={"entity_id": int(entity_id), "timeout": int(timeout_ms), "max_hits": int(max_hits), "stop_on": ["hurt", "death"]},
+            payload={
+                "entity_id": int(entity_id),
+                "timeout": int(timeout_ms),
+                "max_hits": int(max_hits),
+                "stop_on": effective_stop_on,
+            },
             timeout_seconds=self._action_timeout(deadline + 35.0),
         )
 

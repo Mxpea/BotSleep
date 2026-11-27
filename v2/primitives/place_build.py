@@ -49,6 +49,9 @@ class PlaceBuildPrimitive:
         if bb.inventory_counts.get(item, 0) < 1:
             bb.last_failure_reason = f"place:missing_{item}"
             return ActionOutcome("FAILED_LOCAL", "place", reason=f"missing_{item}")
+        if bool(bb.status.get("in_water") or bb.status.get("submerged")):
+            bb.last_failure_reason = "place:in_water_no_support"
+            return ActionOutcome("FAILED_LOCAL", "place", reason="in_water_no_support")
 
         cur_cell = block_coord(bb.pos)
         # 1) Try upstream 1ms in-memory autoPlaceSite unless it already returned no_support at this exact cell

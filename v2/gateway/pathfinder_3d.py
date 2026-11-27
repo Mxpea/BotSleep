@@ -14,21 +14,23 @@ from v2.domain import (
     HAZARD_BLOCKS,
     LIQUID_BLOCKS,
     NON_SOLID_BLOCKS,
+    PASS_THROUGH_BLOCKS,
     SCAFFOLD_BLOCKS,
     SOFT_OCCLUDERS,
+    WATER_BLOCKS,
     dist3,
 )
 from v2.gateway.world_proxy import VirtualWorldGateway
 
 
 MICRO_DIG_ALLOWED = SOFT_OCCLUDERS | frozenset({
-    "stone", "cobblestone", "deepslate", "netherrack", "sandstone", "clay", "gravel", "sand",
+    "stone", "cobblestone", "deepslate", "netherrack", "sandstone", "clay", "gravel", "sand", "red_sand", "mud",
 })
 
 
 @dataclass(frozen=True)
 class NavStep:
-    action: str  # "walk" | "dig" | "pillar_up" | "bridge"
+    action: str  # "walk" | "dig" | "pillar_up" | "bridge" | "swim" | "climb_shore"
     target: Coord3
     stand_after: Coord3
     extra: Optional[Coord3] = None
@@ -78,6 +80,13 @@ class Pathfinder3D:
                         pen += 8.0
             return pen
 
+        # Dynamic start-in-fluid relaxation: widen corridor & lower swim cost when starting in water
+        start_entry = gw.peek_block(dimension, start)
+        if start_entry is None:
+            start_entry = gw.get_block(dimension, start, max_age=30.0)
+        start_in_water = start_entry is not None and start_entry.name in WATER_BLOCKS
+        water_swim_cost = 1.6 if start_in_water else 3.2
+
         # Prefetch a compact local 3D corridor (bounded read budget; warm cache hits avoid HTTP reads)
         dx = goal[0] - start[0]
         dy = goal[1] - start[1]
@@ -85,7 +94,7 @@ class Pathfinder3D:
         dist = max(1.0, math.sqrt(dx * dx + dy * dy + dz * dz))
         steps_preview = min(9, int(math.ceil(dist)))
         probe_coords: List[Coord3] = []
-        corridor_xz = 4 if threats else 2
+        corridor_xz = 4 if (threats or start_in_water) else 2
         for s in range(0, steps_preview + 1):
             t = s / max(1, steps_preview)
             cx = int(round(start[0] + dx * min(1.0, t * (steps_preview / dist))))
@@ -95,8 +104,9 @@ class Pathfinder3D:
                 for oz in range(-corridor_xz, corridor_xz + 1):
                     for oy in (-1, 0, 1, 2):
                         probe_coords.append((cx + ox, cy + oy, cz + oz))
-        for ox in range(-3, 4):
-            for oz in range(-3, 4):
+        local_xz = 4 if start_in_water else 3
+        for ox in range(-local_xz, local_xz + 1):
+            for oz in range(-local_xz, local_xz + 1):
                 for oy in (-2, -1, 0, 1, 2, 3):
                     probe_coords.append((start[0] + ox, start[1] + oy, start[2] + oz))
         gw.prefetch_blocks(dimension, probe_coords)
@@ -111,13 +121,21 @@ class Pathfinder3D:
                 e = gw.get_block(dimension, c, max_age=30.0)
             return e.name if e is not None else None
 
+        def is_water(c: Coord3) -> bool:
+            nm = block_name(c)
+            return nm is not None and nm in WATER_BLOCKS
+
         def is_safe_solid(c: Coord3) -> bool:
             nm = block_name(c)
             return nm is not None and nm not in NON_SOLID_BLOCKS and nm not in HAZARD_BLOCKS
 
         def is_safe_air(c: Coord3) -> bool:
             nm = block_name(c)
-            return nm is not None and nm in NON_SOLID_BLOCKS and nm not in HAZARD_BLOCKS and nm != "lava"
+            return nm is not None and nm in PASS_THROUGH_BLOCKS and nm not in HAZARD_BLOCKS
+
+        def is_water_or_air(c: Coord3) -> bool:
+            nm = block_name(c)
+            return nm is not None and (nm in WATER_BLOCKS or (nm in PASS_THROUGH_BLOCKS and nm not in HAZARD_BLOCKS))
 
         def can_dig_cell(c: Coord3) -> bool:
             if not allow_dig or avoid_fn(c) or gw.unreachable.is_blocked(dimension, c, "dig"):
@@ -158,52 +176,100 @@ class Pathfinder3D:
                 return path
 
             cx, cy, cz = cur
+            cur_in_water = is_water(cur)
             neighbors: List[Tuple[Coord3, NavStep, float]] = []
 
-            # 1) Pillar up when stuck in pit or goal is higher (higher cost than step-up dig so staircase ramps are preferred)
-            if allow_pillar and has_scaffold and is_safe_air((cx, cy + 2, cz)) and is_safe_solid((cx, cy - 1, cz)):
+            if cur_in_water:
+                # (a) Vertical buoyant ascent so submerged bots surface to reach climb_shore
+                if is_water_or_air((cx, cy + 1, cz)) and is_water_or_air((cx, cy + 2, cz)):
+                    nxt = (cx, cy + 1, cz)
+                    if not gw.unreachable.is_edge_blocked(dimension, cur, nxt):
+                        neighbors.append((nxt, NavStep("swim", nxt, nxt), 1.2))
+            elif allow_pillar and has_scaffold and is_safe_air((cx, cy + 2, cz)) and is_safe_solid((cx, cy - 1, cz)):
+                # 1) Pillar up when stuck in pit or goal is higher (higher cost than step-up dig so staircase ramps are preferred)
                 nxt = (cx, cy + 1, cz)
                 if not gw.unreachable.is_edge_blocked(dimension, cur, nxt):
                     neighbors.append((nxt, NavStep("pillar_up", cur, nxt), 5.5))
 
-            # 2) Cardinal moves: walk / step-up / drop / micro-dig / bridge
+            # 2) Cardinal moves: swim / climb_shore / walk / step-up / drop / micro-dig / bridge
             for ox, oz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
                 nx, nz = cx + ox, cz + oz
 
-                # Same level walk
-                if is_safe_solid((nx, cy - 1, nz)) and is_safe_air((nx, cy, nz)) and is_safe_air((nx, cy + 1, nz)):
-                    nxt = (nx, cy, nz)
-                    if not gw.unreachable.is_edge_blocked(dimension, cur, nxt):
-                        neighbors.append((nxt, NavStep("walk", nxt, nxt), 1.0))
+                if cur_in_water:
+                    # (b) Horizontal water swim moves or same-level shore step
+                    if is_water((nx, cy, nz)) and is_water_or_air((nx, cy + 1, nz)):
+                        nxt = (nx, cy, nz)
+                        if not gw.unreachable.is_edge_blocked(dimension, cur, nxt):
+                            neighbors.append((nxt, NavStep("swim", nxt, nxt), water_swim_cost))
+                    elif is_safe_solid((nx, cy - 1, nz)) and is_safe_air((nx, cy, nz)) and is_safe_air((nx, cy + 1, nz)):
+                        nxt = (nx, cy, nz)
+                        if not gw.unreachable.is_edge_blocked(dimension, cur, nxt):
+                            neighbors.append((nxt, NavStep("swim", nxt, nxt), 1.8))
+                    elif is_safe_air((nx, cy, nz)) and is_safe_air((nx, cy + 1, nz)) and is_water((nx, cy - 1, nz)):
+                        nxt = (nx, cy - 1, nz)
+                        if not gw.unreachable.is_edge_blocked(dimension, cur, nxt):
+                            neighbors.append((nxt, NavStep("swim", nxt, nxt), water_swim_cost + 0.2))
 
-                # Step up +1
-                elif (
-                    is_safe_solid((nx, cy, nz))
-                    and is_safe_air((cx, cy + 2, cz))
-                    and is_safe_air((nx, cy + 1, nz))
-                    and is_safe_air((nx, cy + 2, nz))
-                ):
-                    nxt = (nx, cy + 1, nz)
-                    if not gw.unreachable.is_edge_blocked(dimension, cur, nxt):
-                        neighbors.append((nxt, NavStep("walk", nxt, nxt), 1.4))
+                    # (c) Diagonal climb_shore from water up onto safe solid bank
+                    if (
+                        is_safe_solid((nx, cy, nz))
+                        and is_water_or_air((cx, cy + 1, cz))
+                        and is_safe_air((cx, cy + 2, cz))
+                        and is_safe_air((nx, cy + 1, nz))
+                        and is_safe_air((nx, cy + 2, nz))
+                    ):
+                        nxt = (nx, cy + 1, nz)
+                        if not gw.unreachable.is_edge_blocked(dimension, cur, nxt):
+                            neighbors.append((nxt, NavStep("climb_shore", nxt, nxt), 2.0))
+                else:
+                    # Same level walk
+                    if is_safe_solid((nx, cy - 1, nz)) and is_safe_air((nx, cy, nz)) and is_safe_air((nx, cy + 1, nz)):
+                        nxt = (nx, cy, nz)
+                        if not gw.unreachable.is_edge_blocked(dimension, cur, nxt):
+                            neighbors.append((nxt, NavStep("walk", nxt, nxt), 1.0))
 
-                # Safe drop 1..3
-                elif is_safe_air((nx, cy, nz)) and is_safe_air((nx, cy + 1, nz)):
-                    dropped = False
-                    for drop in (1, 2, 3):
-                        if is_safe_solid((nx, cy - drop - 1, nz)) and is_safe_air((nx, cy - drop, nz)):
-                            nxt = (nx, cy - drop, nz)
-                            if not gw.unreachable.is_edge_blocked(dimension, cur, nxt):
-                                neighbors.append((nxt, NavStep("walk", nxt, nxt), 1.3 + 0.2 * drop))
-                            dropped = True
-                            break
-                    # Bridge across 1-block gap/water/lava if holding scaffold
-                    if not dropped and allow_bridge and has_scaffold:
-                        below_nm = block_name((nx, cy - 1, nz))
-                        if below_nm in (AIR_BLOCKS | LIQUID_BLOCKS):
-                            nxt = (nx, cy, nz)
-                            if not gw.unreachable.is_edge_blocked(dimension, cur, nxt):
-                                neighbors.append((nxt, NavStep("bridge", (nx, cy - 1, nz), nxt), 3.5))
+                    # Step up +1 (guard against mid-air double-jump directly over water)
+                    elif (
+                        not is_water((cx, cy - 1, cz))
+                        and is_safe_solid((nx, cy, nz))
+                        and is_safe_air((cx, cy + 2, cz))
+                        and is_safe_air((nx, cy + 1, nz))
+                        and is_safe_air((nx, cy + 2, nz))
+                    ):
+                        nxt = (nx, cy + 1, nz)
+                        if not gw.unreachable.is_edge_blocked(dimension, cur, nxt):
+                            neighbors.append((nxt, NavStep("walk", nxt, nxt), 1.4))
+
+                    # Same-level dry-to-water entry (high cost so dry bots route around puddles)
+                    elif is_water((nx, cy, nz)) and is_water_or_air((nx, cy + 1, nz)):
+                        nxt = (nx, cy, nz)
+                        if not gw.unreachable.is_edge_blocked(dimension, cur, nxt):
+                            neighbors.append((nxt, NavStep("swim", nxt, nxt), 4.5))
+
+                    # Safe drop 1..3 (or drop into water / bridge across gap)
+                    elif is_safe_air((nx, cy, nz)) and is_safe_air((nx, cy + 1, nz)):
+                        dropped = False
+                        for drop in (1, 2, 3):
+                            if is_safe_solid((nx, cy - drop - 1, nz)) and is_safe_air((nx, cy - drop, nz)):
+                                nxt = (nx, cy - drop, nz)
+                                if not gw.unreachable.is_edge_blocked(dimension, cur, nxt):
+                                    neighbors.append((nxt, NavStep("walk", nxt, nxt), 1.3 + 0.2 * drop))
+                                dropped = True
+                                break
+                            if drop <= 2 and is_water((nx, cy - drop, nz)):
+                                nxt = (nx, cy - drop, nz)
+                                if not gw.unreachable.is_edge_blocked(dimension, cur, nxt):
+                                    neighbors.append((nxt, NavStep("swim", nxt, nxt), 4.5))
+                                dropped = True
+                                break
+                        # Bridge across 1-block gap/water/lava if holding scaffold
+                        if not dropped or (allow_bridge and has_scaffold):
+                            if allow_bridge and has_scaffold:
+                                below_nm = block_name((nx, cy - 1, nz))
+                                if below_nm in (AIR_BLOCKS | LIQUID_BLOCKS):
+                                    nxt = (nx, cy, nz)
+                                    if not gw.unreachable.is_edge_blocked(dimension, cur, nxt):
+                                        neighbors.append((nxt, NavStep("bridge", (nx, cy - 1, nz), nxt), 3.5))
 
                 # Micro-dig through 1x2 barrier (leaves/dirt/wall)
                 if allow_dig and is_safe_solid((nx, cy - 1, nz)):
@@ -217,8 +283,8 @@ class Pathfinder3D:
                             cost = 2.6 + (1.0 if extra is not None else 0.0)
                             neighbors.append((nxt, NavStep("dig", dig_target, nxt, extra=extra), cost))
 
-                # Step-up +1 micro-dig (climb out of pits/caves via staircase without pillar blocked_by_self!)
-                if allow_dig and is_safe_solid((nx, cy, nz)):
+                # Step-up +1 micro-dig (climb out of pits/caves/riverbanks via staircase without pillar blocked_by_self!)
+                if allow_dig and is_safe_solid((nx, cy, nz)) and (not cur_in_water or is_water_or_air((cx, cy + 1, cz))):
                     c_head = (cx, cy + 2, cz)
                     n_low = (nx, cy + 1, nz)
                     n_high = (nx, cy + 2, nz)

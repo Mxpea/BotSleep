@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any, Optional, Tuple
+
 from v2.bt.blackboard import Blackboard
 from v2.domain import (
     AIR_BLOCKS,
@@ -10,8 +12,12 @@ from v2.domain import (
     LEAF_BLOCKS,
     LIQUID_BLOCKS,
     NON_SOLID_BLOCKS,
+    PICKAXE_TIERS,
     SCAFFOLD_BLOCKS,
+    SOFT_OCCLUDERS,
+    WATER_BLOCKS,
     block_coord,
+    dist3,
     pick_best_item,
 )
 from v2.gateway.world_proxy import VirtualWorldGateway
@@ -22,9 +28,46 @@ from v2.primitives.place_build import PlaceBuildPrimitive
 from v2.tasks.base import Task
 
 
+def save_anchor_landmark(db: Any, bb: Blackboard, bb_slot: str, kind: str, pos: Coord3, *, writer: str = "surface") -> None:
+    """Persist an anchor coordinate to Blackboard and UnifiedWorldDB landmarks (or duck-typed mock)."""
+    coord = (int(pos[0]), int(pos[1]), int(pos[2]))
+    bb.set(bb_slot, coord, writer=writer)
+    if db is None:
+        return
+    if hasattr(db, "save_landmark"):
+        db.save_landmark(bb.dimension, kind, "latest", coord)
+    elif hasattr(db, "upsert_landmark"):
+        db.upsert_landmark(bb.dimension, kind, "latest", coord)
+
+
+def load_anchor_landmark(db: Any, bb: Blackboard, bb_slot: str, kind: str, *, writer: str = "surface") -> Optional[Coord3]:
+    """Read an anchor coordinate from Blackboard first, falling back to UnifiedWorldDB landmarks."""
+    cached = bb.get(bb_slot)
+    if isinstance(cached, (list, tuple)) and len(cached) == 3:
+        return (int(cached[0]), int(cached[1]), int(cached[2]))
+    if db is None:
+        return None
+    row: Optional[dict] = None
+    if hasattr(db, "list_landmarks"):
+        rows = db.list_landmarks(bb.dimension, kind=kind)
+        row = next((r for r in rows if r.get("name") == "latest"), rows[0] if rows else None)
+    elif hasattr(db, "get_landmark"):
+        row = db.get_landmark(bb.dimension, kind, "latest")
+    if isinstance(row, dict):
+        pos = row.get("pos")
+        if isinstance(pos, (list, tuple)) and len(pos) == 3:
+            coord = (int(pos[0]), int(pos[1]), int(pos[2]))
+            bb.set(bb_slot, coord, writer=writer)
+            return coord
+    return None
+
+
 _PROTECTED_SURFACE_BLOCKS = frozenset({
     "bedrock", "obsidian", "crafting_table", "furnace", "chest",
     "blast_furnace", "smoker", "nether_portal",
+})
+_SOFT_SURFACE_DIG_BLOCKS = SOFT_OCCLUDERS | LEAF_BLOCKS | frozenset({
+    "sand", "red_sand", "gravel", "clay", "mud", "snow_block",
 })
 
 
@@ -63,6 +106,49 @@ class ReturnToSurfaceTask(Task):
         self._dir_idx: int = 0
         self._steps: int = 0
         self._dirs = ((1, 0), (0, 1), (-1, 0), (0, -1))
+        self._surface_route_exhausted: bool = False
+        self._surface_route_stalls: int = 0
+        self._surface_route_last_pos: Optional[Tuple[float, float, float]] = None
+        self._no_pick_hard_digs: int = 0
+
+    def stop(self, bb: Blackboard) -> None:
+        self._dig.clear_cache()
+        self._surface_route_exhausted = False
+        self._surface_route_stalls = 0
+        self._surface_route_last_pos = None
+        self._no_pick_hard_digs = 0
+        super().stop(bb)
+
+    def _try_plug_water_cell(self, bb: Blackboard, cell: Coord3) -> Optional[str]:
+        scaffold = pick_best_item(bb.inventory_counts, SCAFFOLD_BLOCKS)
+        if scaffold is None or self.ctx.gateway.unreachable.is_blocked(bb.dimension, cell, "place"):
+            return None
+        p_out = self._place.place_at(bb, scaffold, cell)
+        if p_out.status == "UNKNOWN":
+            return "UNKNOWN"
+        if p_out.status in {"OK", "PROGRESSED"}:
+            return "RUNNING"
+        return "FAILED_WRITE" if bb.writes_this_tick >= 1 else None
+
+    def _find_plug_water_neighbor(self, bb: Blackboard, cell: Coord3) -> Optional[Coord3]:
+        """If cell is blocked only by lateral water (no lava / overhead liquid), return that water neighbor to plug."""
+        cx, cy, cz = cell
+        lateral = [(cx + 1, cy, cz), (cx - 1, cy, cz), (cx, cy, cz + 1), (cx, cy, cz - 1)]
+        probe = [(cx, cy, cz), (cx, cy + 1, cz)] + lateral
+        fetched = self.ctx.gateway.prefetch_blocks(bb.dimension, probe, max_age=3.0)
+        target_ent = fetched.get((cx, cy, cz))
+        if target_ent is not None and (target_ent.name in _PROTECTED_SURFACE_BLOCKS or target_ent.name.endswith("_bed")):
+            return None
+        overhead = fetched.get((cx, cy + 1, cz))
+        if overhead is not None and (overhead.name in HAZARD_BLOCKS or overhead.name in LIQUID_BLOCKS):
+            return None
+        if any((ent := fetched.get(c)) is not None and ent.name in HAZARD_BLOCKS for c in lateral):
+            return None
+        for c in lateral:
+            ent = fetched.get(c)
+            if ent is not None and ent.name in WATER_BLOCKS:
+                return c
+        return None
 
     def is_finished(self, bb: Blackboard) -> bool:
         if bb.dimension != "overworld":
@@ -97,6 +183,41 @@ class ReturnToSurfaceTask(Task):
             bb.last_failure_reason = "surface_escape_budget_exhausted"
             return "NEEDS_AI"
 
+        # 1) Fast-path return via remembered surface_entry within 64m (bounded to max 6 stalled/blocked ticks)
+        if not self._surface_route_exhausted:
+            anchor = load_anchor_landmark(self.ctx.gateway.db, bb, "last_surface_anchor", "surface_entry", writer="surface")
+            if anchor is not None and dist3(bb.pos, anchor) <= 64.0:
+                anchor_center = (anchor[0] + 0.5, float(anchor[1]), anchor[2] + 0.5)
+                if dist3(bb.pos, anchor_center) <= 1.8 and anchor[1] < self.target_y:
+                    self._surface_route_exhausted = True
+                else:
+                    if self._surface_route_last_pos is not None and dist3(self._surface_route_last_pos, bb.pos) < 0.35:
+                        self._surface_route_stalls += 1
+                    elif self._surface_route_last_pos is not None:
+                        self._surface_route_stalls = 0
+                    self._surface_route_last_pos = bb.pos
+                    if self._surface_route_stalls >= 6:
+                        self._surface_route_exhausted = True
+                    else:
+                        n_out = self._nav.step_to(bb, anchor_center, tolerance=1.5)
+                        if n_out.status == "UNKNOWN":
+                            return "UNKNOWN"
+                        if n_out.status == "OK":
+                            self._surface_route_exhausted = True
+                            if bb.writes_this_tick >= 1:
+                                return "RUNNING"
+                        elif n_out.status == "PROGRESSED":
+                            return "RUNNING"
+                        elif n_out.status == "FAILED_LOCAL":
+                            self._surface_route_stalls += 1
+                            if self._surface_route_stalls >= 6:
+                                self._surface_route_exhausted = True
+                            if bb.writes_this_tick >= 1 or not self._surface_route_exhausted:
+                                return "RUNNING"
+            else:
+                self._surface_route_exhausted = True
+
+        # 2) Conservative 3-high staircase fallback (+ fast water plug before rotating direction)
         fx, fy, fz = block_coord(bb.pos)
         for _ in range(len(self._dirs)):
             dx, dz = self._dirs[self._dir_idx % len(self._dirs)]
@@ -113,13 +234,48 @@ class ReturnToSurfaceTask(Task):
             for cell in clearance:
                 ent = fetched.get(cell)
                 if ent is not None and ent.name not in (AIR_BLOCKS | LEAF_BLOCKS):
+                    if ent.name in WATER_BLOCKS:
+                        plug_res = self._try_plug_water_cell(bb, cell)
+                        if plug_res in {"RUNNING", "UNKNOWN"}:
+                            return plug_res
+                        blocked = True
+                        if plug_res == "FAILED_WRITE":
+                            self._dir_idx += 1
+                            return "RUNNING"
+                        break
                     if ent.name in (HAZARD_BLOCKS | LIQUID_BLOCKS) or not self._is_safe_to_dig(bb, cell):
+                        water_nb = self._find_plug_water_neighbor(bb, cell)
+                        if water_nb is not None:
+                            plug_res = self._try_plug_water_cell(bb, water_nb)
+                            if plug_res in {"RUNNING", "UNKNOWN"}:
+                                return plug_res
+                            blocked = True
+                            if plug_res == "FAILED_WRITE":
+                                self._dir_idx += 1
+                                return "RUNNING"
+                            break
                         blocked = True
                         break
                     if self.ctx.gateway.unreachable.is_blocked(bb.dimension, cell, "dig"):
                         blocked = True
                         break
+                    is_soft_or_wood = (
+                        ent.name in _SOFT_SURFACE_DIG_BLOCKS
+                        or ent.name.endswith(("_log", "_planks"))
+                    )
+                    has_pick = any(bb.inventory_counts.get(p, 0) > 0 for p in PICKAXE_TIERS)
+                    if not is_soft_or_wood and not has_pick and self._no_pick_hard_digs >= 2:
+                        bb.last_failure_reason = "surface_escape:no_pickaxe"
+                        return "NEEDS_AI"
                     d_out = self._dig.dig_block(bb, cell, collect=False)
+                    if (
+                        not is_soft_or_wood
+                        and not has_pick
+                        and d_out.status == "OK"
+                        and isinstance(d_out.details, dict)
+                        and "no proper tool" in str(d_out.details.get("warning") or "").lower()
+                    ):
+                        self._no_pick_hard_digs += 1
                     return "RUNNING" if d_out.status in {"OK", "PROGRESSED"} else d_out.status
             if blocked:
                 self._dir_idx += 1

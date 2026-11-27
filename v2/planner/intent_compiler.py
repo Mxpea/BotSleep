@@ -76,7 +76,13 @@ class IntentCompiler:
                 "run_goal",
                 "Mount stateless L3 goal",
                 {
-                    "goal": {"type": "string", "enum": ["acquire", "mine", "enter_nether", "build_shelter", "explore", "locate_stronghold"]},
+                    "goal": {
+                        "type": "string",
+                        "enum": [
+                            "acquire", "mine", "enter_nether", "build_shelter",
+                            "explore", "locate_stronghold", "recover_corpse", "hunt_food",
+                        ],
+                    },
                     "item": {"type": "string"},
                     "count": {"type": "integer"},
                 },
@@ -175,6 +181,14 @@ class IntentCompiler:
                 return ExploreUntilTask(self.ctx, lambda _b, _g: False, name="explore_open", max_steps=4), {"ok": True, "mounted": "explore"}
             if goal == "locate_stronghold":
                 return StrongholdLocateTask(self.ctx, self.catalogue), {"ok": True, "mounted": "locate_stronghold"}
+            if goal == "recover_corpse":
+                from v2.tasks.corpse import RecoverDeathDropTask
+
+                return RecoverDeathDropTask(self.ctx, self.catalogue), {"ok": True, "mounted": "recover_corpse"}
+            if goal == "hunt_food":
+                from v2.tasks.food import HuntFoodTask
+
+                return HuntFoodTask(self.ctx), {"ok": True, "mounted": "hunt_food"}
             return None, {"ok": False, "error": f"unknown_goal:{goal}"}
 
         if name == "repair_step":

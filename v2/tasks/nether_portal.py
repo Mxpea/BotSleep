@@ -10,10 +10,23 @@ Real Minecraft Java obsidian casting physics & uneven-terrain mold hardening:
 
 from __future__ import annotations
 
-from typing import List, Optional, Set, Tuple
+import math
+import time
+from typing import Dict, List, Optional, Set, Tuple
 
 from v2.bt.blackboard import Blackboard
-from v2.domain import AIR_BLOCKS, Coord3, HAZARD_BLOCKS, LIQUID_BLOCKS, NON_SOLID_BLOCKS, block_coord, dist3
+from v2.domain import (
+    AIR_BLOCKS,
+    Coord3,
+    HAZARD_BLOCKS,
+    LIQUID_BLOCKS,
+    NON_SOLID_BLOCKS,
+    PASS_THROUGH_BLOCKS,
+    WATER_BLOCKS,
+    block_coord,
+    dist2_xz,
+    dist3,
+)
 from v2.primitives.base import PrimitiveContext
 from v2.primitives.dig_collect import DigCollectPrimitive
 from v2.primitives.fluid import FluidPrimitive
@@ -22,11 +35,22 @@ from v2.primitives.place_build import PlaceBuildPrimitive
 from v2.tasks.acquire import AcquireItemTask
 from v2.tasks.base import Task
 from v2.tasks.catalogue import TaskCatalogue
-from v2.tasks.explore import ExploreUntilTask
+from v2.tasks.surface import is_underground
 
 
 class EnterNetherTask(Task):
     """Stateless self-healing Nether Portal cast (with cobblestone side-mold walls), ignite, and entry task."""
+
+    _WIDE_SECTOR_DIRS: Tuple[Tuple[float, float], ...] = (
+        (1.0, 0.0), (0.0, 1.0), (-1.0, 0.0), (0.0, -1.0),
+        (0.707, 0.707), (-0.707, 0.707), (-0.707, -0.707), (0.707, -0.707),
+    )
+    _WIDE_SECTOR_STEP: float = 52.0
+    _MAX_TICKS_PER_SECTOR: int = 8
+    _MAX_SURFACE_SECTORS_BEFORE_DESCENT: int = 4
+    _MAX_SURFACE_SECTORS_TOTAL: int = 8
+    _MAX_UNDERGROUND_TICKS: int = 260
+    _LAVA_SEARCH_TARGET_Y: int = 11
 
     def __init__(self, ctx: PrimitiveContext, catalogue: TaskCatalogue) -> None:
         super().__init__("enter_nether")
@@ -37,17 +61,39 @@ class EnterNetherTask(Task):
         self._fluid = FluidPrimitive(ctx)
         self._place = PlaceBuildPrimitive(ctx)
         self._portal_anchor: Optional[Coord3] = None
+        self._portal_axis: str = "x"
+        self._portal_complete_unlit: bool = False
         self._parked_water_pos: Optional[Coord3] = None
         self._quench_water_pos: Optional[Coord3] = None
         self._water_pit_pos: Optional[Coord3] = None
+        self._search_origin: Optional[Tuple[float, float, float]] = None
+        self._surface_sector_idx: int = 0
+        self._surface_sectors_visited: int = 0
+        self._surface_sector_ticks: int = 0
+        self._current_sector_target: Optional[Tuple[float, float, float]] = None
+        self._underground_search_active: bool = False
+        self._underground_blocked: bool = False
+        self._underground_ticks: int = 0
+        self._underground_dir_idx: int = 0
 
     def is_finished(self, bb: Blackboard) -> bool:
         return bb.dimension == "the_nether"
 
     @staticmethod
-    def _frame_cells(anchor: Coord3) -> List[Coord3]:
-        """10 required obsidian coordinates of a 4x5 portal frame (width along X, bottom interior at anchor)."""
+    def _frame_cells(anchor: Coord3, axis: str = "x") -> List[Coord3]:
+        """10 required obsidian coordinates of a 4x5 portal frame (width along X or Z, bottom interior at anchor)."""
         ax, ay, az = anchor
+        if axis == "z":
+            return [
+                # Bottom 2
+                (ax, ay - 1, az), (ax, ay - 1, az + 1),
+                # Left pillar 3 (bottom to top)
+                (ax, ay, az - 1), (ax, ay + 1, az - 1), (ax, ay + 2, az - 1),
+                # Right pillar 3 (bottom to top)
+                (ax, ay, az + 2), (ax, ay + 1, az + 2), (ax, ay + 2, az + 2),
+                # Top 2
+                (ax, ay + 3, az), (ax, ay + 3, az + 1),
+            ]
         return [
             # Bottom 2
             (ax, ay - 1, az), (ax + 1, ay - 1, az),
@@ -60,8 +106,10 @@ class EnterNetherTask(Task):
         ]
 
     @staticmethod
-    def _interior_cells(anchor: Coord3) -> List[Coord3]:
+    def _interior_cells(anchor: Coord3, axis: str = "x") -> List[Coord3]:
         ax, ay, az = anchor
+        if axis == "z":
+            return [(ax, ay + h, az + w) for h in (0, 1, 2) for w in (0, 1)]
         return [(ax + w, ay + h, az) for h in (0, 1, 2) for w in (0, 1)]
 
     @staticmethod
@@ -372,6 +420,321 @@ class EnterNetherTask(Task):
                 return c
         return None
 
+    def _mark_sector_excluded(self, bb: Blackboard, x: float, z: float, *, ttl: float = 300.0) -> None:
+        now = time.time()
+        excluded: Dict[Tuple[int, int], float] = {
+            k: v for k, v in (bb.get("excluded_sectors") or {}).items() if v > now
+        }
+        sec = (math.floor(float(x) / 16.0), math.floor(float(z) / 16.0))
+        excluded[sec] = now + ttl
+        bb.set("excluded_sectors", excluded, writer=self.name)
+
+    def _scan_existing_obsidian_portal(self, bb: Blackboard, radius: int = 48) -> Tuple[Optional[Coord3], str, int]:
+        """Detect a complete unlit 4x5 portal (either axis) or reusable >=4-obsidian ruined portal (X-axis)."""
+        rows = self.ctx.gateway.scan_blocks(bb.dimension, ["obsidian"], radius=radius, limit=48)
+        obs_set: Set[Coord3] = set()
+        for r in rows:
+            pos = r.get("pos")
+            if isinstance(pos, list) and len(pos) == 3:
+                obs_set.add((int(pos[0]), int(pos[1]), int(pos[2])))
+        if len(obs_set) < 4:
+            return None, "x", 0
+
+        scored: List[Tuple[int, float, Coord3, str]] = []
+        seen: Set[Tuple[Coord3, str]] = set()
+        for ox, oy, oz in obs_set:
+            for cand_anchor, axis in (
+                ((ox, oy + 1, oz), "x"),
+                ((ox - 1, oy + 1, oz), "x"),
+                ((ox, oy + 1, oz), "z"),
+                ((ox, oy + 1, oz - 1), "z"),
+            ):
+                key = (cand_anchor, axis)
+                if key in seen:
+                    continue
+                seen.add(key)
+                frame = self._frame_cells(cand_anchor, axis=axis)
+                hits = sum(1 for c in frame if c in obs_set)
+                if hits < 4:
+                    continue
+                if axis == "z" and hits < 10:
+                    continue
+                d = dist3(bb.pos, (cand_anchor[0] + 0.5, float(cand_anchor[1]), cand_anchor[2] + 0.5))
+                scored.append((-hits, d, cand_anchor, axis))
+
+        scored.sort(key=lambda item: (item[0], item[1]))
+        best_partial: Optional[Tuple[Coord3, str, int]] = None
+        for _, _, cand_anchor, axis in scored[:4]:
+            frame = self._frame_cells(cand_anchor, axis=axis)
+            interior = self._interior_cells(cand_anchor, axis=axis)
+            fetched = self.ctx.gateway.prefetch_blocks(bb.dimension, frame + interior, max_age=3.0)
+            if any(
+                (ent := fetched.get(c)) is not None and ent.name in {"crying_obsidian", "bedrock"}
+                for c in frame
+            ):
+                continue
+            obs_count = sum(
+                1 for c in frame if (ent := fetched.get(c)) is not None and ent.name == "obsidian"
+            )
+            if obs_count == 10:
+                return cand_anchor, axis, 10
+            if axis == "x" and obs_count >= 4 and best_partial is None:
+                best_partial = (cand_anchor, "x", obs_count)
+        return best_partial if best_partial is not None else (None, "x", 0)
+
+    def _pick_next_surface_sector(self, bb: Blackboard) -> Optional[Tuple[float, float, float]]:
+        if self._search_origin is None:
+            self._search_origin = bb.pos
+        now = time.time()
+        excluded: Dict[Tuple[int, int], float] = bb.get("excluded_sectors") or {}
+        total_slots = len(self._WIDE_SECTOR_DIRS) * 2
+        candidates: List[Tuple[int, float, float, Tuple[float, float, float]]] = []
+        for offset in range(total_slots):
+            idx = self._surface_sector_idx + offset
+            dx, dz = self._WIDE_SECTOR_DIRS[idx % len(self._WIDE_SECTOR_DIRS)]
+            ring = 1 + (idx // len(self._WIDE_SECTOR_DIRS))
+            cand = (
+                round(self._search_origin[0] + dx * self._WIDE_SECTOR_STEP * ring, 1),
+                self._search_origin[1],
+                round(self._search_origin[2] + dz * self._WIDE_SECTOR_STEP * ring, 1),
+            )
+            sec = (math.floor(cand[0] / 16.0), math.floor(cand[2] / 16.0))
+            if excluded.get(sec, 0.0) > now:
+                continue
+            candidates.append((idx, dx, dz, cand))
+            if len(candidates) >= len(self._WIDE_SECTOR_DIRS):
+                break
+        if not candidates:
+            return None
+
+        fx, fy, fz = block_coord(bb.pos)
+        probe_coords: List[Coord3] = []
+        for _, dx, dz, _ in candidates:
+            for dist in (10.0, 20.0):
+                px = math.floor(bb.pos[0] + dx * dist)
+                pz = math.floor(bb.pos[2] + dz * dist)
+                for dy in (-1, 0, 1):
+                    probe_coords.append((px, fy + dy, pz))
+        fetched = (
+            self.ctx.gateway.prefetch_blocks(bb.dimension, probe_coords, max_age=5.0)
+            if hasattr(self.ctx.gateway, "prefetch_blocks")
+            else {}
+        )
+        if not isinstance(fetched, dict):
+            fetched = {}
+
+        best_full_dry: Optional[Tuple[int, Tuple[float, float, float]]] = None
+        best_partial_dry: Optional[Tuple[int, Tuple[float, float, float]]] = None
+        best_neutral: Optional[Tuple[int, Tuple[float, float, float]]] = None
+
+        for idx, dx, dz, cand in candidates:
+            water_hits = 0
+            dry_hits = 0
+            for dist in (10.0, 20.0):
+                px = math.floor(bb.pos[0] + dx * dist)
+                pz = math.floor(bb.pos[2] + dz * dist)
+                b_below = fetched.get((px, fy - 1, pz))
+                b_feet = fetched.get((px, fy, pz))
+                b_head = fetched.get((px, fy + 1, pz))
+                has_water = any(
+                    ent is not None and getattr(ent, "name", None) in WATER_BLOCKS
+                    for ent in (b_below, b_feet, b_head)
+                )
+                if has_water:
+                    water_hits += 1
+                    continue
+                standable_low = (
+                    b_below is not None
+                    and getattr(b_below, "name", None) not in NON_SOLID_BLOCKS
+                    and getattr(b_below, "name", None) not in HAZARD_BLOCKS
+                    and (b_feet is None or getattr(b_feet, "name", None) in PASS_THROUGH_BLOCKS)
+                )
+                standable_high = (
+                    b_feet is not None
+                    and getattr(b_feet, "name", None) not in NON_SOLID_BLOCKS
+                    and getattr(b_feet, "name", None) not in HAZARD_BLOCKS
+                    and (b_head is None or getattr(b_head, "name", None) in PASS_THROUGH_BLOCKS)
+                )
+                if standable_low or standable_high:
+                    dry_hits += 1
+
+            if water_hits > 0 and dry_hits == 0:
+                self._mark_sector_excluded(bb, cand[0], cand[2], ttl=300.0)
+                continue
+            if dry_hits == 2 and water_hits == 0 and best_full_dry is None:
+                best_full_dry = (idx, cand)
+            elif dry_hits >= 1 and water_hits == 0 and best_partial_dry is None:
+                best_partial_dry = (idx, cand)
+            elif water_hits == 0 and best_neutral is None:
+                best_neutral = (idx, cand)
+
+        chosen = best_full_dry or best_partial_dry or best_neutral
+        if chosen is None:
+            return None
+        self._surface_sector_idx = chosen[0] + 1
+        return chosen[1]
+
+    def _is_safe_lava_dig(self, bb: Blackboard, cell: Coord3) -> bool:
+        cx, cy, cz = cell
+        probe = [
+            (cx, cy, cz),
+            (cx, cy + 1, cz),
+            (cx + 1, cy, cz),
+            (cx - 1, cy, cz),
+            (cx, cy, cz + 1),
+            (cx, cy, cz - 1),
+        ]
+        fetched = self.ctx.gateway.prefetch_blocks(bb.dimension, probe, max_age=3.0)
+        target_ent = fetched.get((cx, cy, cz))
+        protected = set(bb.get("protected_cells") or ()) | {
+            "bedrock", "obsidian", "crafting_table", "furnace", "chest", "nether_portal",
+        }
+        if target_ent is not None and (target_ent.name in protected or target_ent.name.endswith("_bed")):
+            return False
+        if (cx, cy, cz) in (bb.get("protected_cells") or ()):
+            return False
+        return not any(
+            (ent := fetched.get(c)) is not None and (ent.name in HAZARD_BLOCKS or ent.name in LIQUID_BLOCKS)
+            for c in probe
+        )
+
+    def _step_underground_lava_descent(self, bb: Blackboard) -> Optional[str]:
+        """Deterministically staircase down to y <= 11 and tunnel safely until a lava source enters scan radius."""
+        fx, fy, fz = block_coord(bb.pos)
+        dirs = ((1, 0), (0, 1), (-1, 0), (0, -1))
+        if fy > self._LAVA_SEARCH_TARGET_Y:
+            for _ in range(len(dirs)):
+                dx, dz = dirs[self._underground_dir_idx % len(dirs)]
+                stair_cells = [(fx + dx, fy + 1, fz + dz), (fx + dx, fy, fz + dz), (fx + dx, fy - 1, fz + dz)]
+                floor_after = (fx + dx, fy - 2, fz + dz)
+                fetched = self.ctx.gateway.prefetch_blocks(bb.dimension, stair_cells + [floor_after], max_age=3.0)
+                floor_ent = fetched.get(floor_after)
+                if floor_ent is None or floor_ent.name in NON_SOLID_BLOCKS or floor_ent.name in HAZARD_BLOCKS:
+                    self._underground_dir_idx += 1
+                    continue
+                blocked = False
+                for cell in stair_cells:
+                    ent = fetched.get(cell)
+                    if ent is not None and ent.name not in AIR_BLOCKS:
+                        if self.ctx.gateway.unreachable.is_blocked(bb.dimension, cell, "dig") or not self._is_safe_lava_dig(bb, cell):
+                            blocked = True
+                            break
+                        d_out = self._dig.dig_block(bb, cell, collect=True)
+                        return "RUNNING" if d_out.status in {"OK", "PROGRESSED"} else d_out.status
+                if blocked:
+                    self._underground_dir_idx += 1
+                    continue
+                n_out = self._nav.step_to(bb, (fx + dx + 0.5, float(fy - 1), fz + dz + 0.5), tolerance=0.6)
+                if n_out.status == "FAILED_LOCAL":
+                    self._underground_dir_idx += 1
+                    continue
+                return "RUNNING" if n_out.status in {"OK", "PROGRESSED"} else n_out.status
+            return None
+
+        # At y <= 11: dig safe 2-high horizontal tunnel
+        for _ in range(len(dirs)):
+            dx, dz = dirs[self._underground_dir_idx % len(dirs)]
+            head_cell = (fx + dx, fy + 1, fz + dz)
+            feet_cell = (fx + dx, fy, fz + dz)
+            floor_cell = (fx + dx, fy - 1, fz + dz)
+            fetched = self.ctx.gateway.prefetch_blocks(bb.dimension, [head_cell, feet_cell, floor_cell], max_age=3.0)
+            floor_ent = fetched.get(floor_cell)
+            if floor_ent is None or floor_ent.name in NON_SOLID_BLOCKS or floor_ent.name in HAZARD_BLOCKS:
+                self._underground_dir_idx += 1
+                continue
+            blocked = False
+            for cell in (head_cell, feet_cell):
+                ent = fetched.get(cell)
+                if ent is not None and ent.name not in AIR_BLOCKS:
+                    if self.ctx.gateway.unreachable.is_blocked(bb.dimension, cell, "dig") or not self._is_safe_lava_dig(bb, cell):
+                        blocked = True
+                        break
+                    d_out = self._dig.dig_block(bb, cell, collect=(bb.inventory_counts.get("cobblestone", 0) < 16))
+                    return "RUNNING" if d_out.status in {"OK", "PROGRESSED"} else d_out.status
+            if blocked:
+                self._underground_dir_idx += 1
+                continue
+            n_out = self._nav.step_to(bb, (fx + dx + 0.5, float(fy), fz + dz + 0.5), tolerance=0.6)
+            if n_out.status == "FAILED_LOCAL":
+                self._underground_dir_idx += 1
+                continue
+            return "RUNNING" if n_out.status in {"OK", "PROGRESSED"} else n_out.status
+        return None
+
+    def _search_lava_pool(self, bb: Blackboard) -> str:
+        """Bounded surface sector sweep (excluding visited sectors) with deterministic y<=11 / wide-sector fallback."""
+        if self._search_origin is None:
+            self._search_origin = bb.pos
+            self._mark_sector_excluded(bb, bb.pos[0], bb.pos[2])
+            _, fy, _ = block_coord(bb.pos)
+            if fy <= 40 and is_underground(bb, self.ctx.gateway):
+                self._underground_search_active = True
+
+        # Underground lava-level (y <= 11) descent / tunnel phase
+        if self._underground_search_active:
+            if self._underground_ticks < self._MAX_UNDERGROUND_TICKS:
+                self._underground_ticks += 1
+                res = self._step_underground_lava_descent(bb)
+                if res is not None:
+                    return res
+            self._underground_search_active = False
+            self._underground_blocked = True
+
+        # Bounded surface wide-sector search (falling back to underground descent after first 4 sectors)
+        if self._surface_sectors_visited >= self._MAX_SURFACE_SECTORS_TOTAL:
+            bb.last_failure_reason = "no_lava_pool_found"
+            return "NEEDS_AI"
+
+        if (
+            not self._underground_blocked
+            and self._surface_sectors_visited >= self._MAX_SURFACE_SECTORS_BEFORE_DESCENT
+            and self._underground_ticks < self._MAX_UNDERGROUND_TICKS
+        ):
+            self._underground_search_active = True
+            self._underground_ticks += 1
+            res = self._step_underground_lava_descent(bb)
+            if res is not None:
+                return res
+            self._underground_search_active = False
+            self._underground_blocked = True
+
+        if self._current_sector_target is None:
+            self._current_sector_target = self._pick_next_surface_sector(bb)
+            self._surface_sector_ticks = 0
+            if self._current_sector_target is None:
+                if not self._underground_blocked and self._underground_ticks < self._MAX_UNDERGROUND_TICKS:
+                    self._underground_search_active = True
+                    return "RUNNING"
+                bb.last_failure_reason = "no_lava_pool_found"
+                return "NEEDS_AI"
+
+        wp = self._current_sector_target
+        if bool(bb.status.get("in_water") or bb.status.get("submerged")):
+            self._mark_sector_excluded(bb, bb.pos[0], bb.pos[2])
+            self._mark_sector_excluded(bb, wp[0], wp[2])
+            self._current_sector_target = None
+            self._surface_sector_ticks = 0
+            self._surface_sectors_visited += 1
+            return "RUNNING"
+        if dist2_xz(bb.pos, wp) <= 6.0 or self._surface_sector_ticks >= self._MAX_TICKS_PER_SECTOR:
+            self._mark_sector_excluded(bb, bb.pos[0], bb.pos[2])
+            self._mark_sector_excluded(bb, wp[0], wp[2])
+            self._current_sector_target = None
+            self._surface_sector_ticks = 0
+            self._surface_sectors_visited += 1
+            return "RUNNING"
+
+        self._surface_sector_ticks += 1
+        out = self._nav.step_to(bb, wp, tolerance=6.0, xz_only=True)
+        if out.status in {"OK", "FAILED_LOCAL"}:
+            self._mark_sector_excluded(bb, bb.pos[0], bb.pos[2])
+            self._mark_sector_excluded(bb, wp[0], wp[2])
+            self._current_sector_target = None
+            self._surface_sector_ticks = 0
+            self._surface_sectors_visited += 1
+            return "RUNNING"
+        return "RUNNING" if out.status == "PROGRESSED" else out.status
+
     def _find_nearest_lava_sources(self, bb: Blackboard, radius: int = 64) -> List[Coord3]:
         rows = self.ctx.gateway.scan_blocks(
             bb.dimension,
@@ -421,7 +784,7 @@ class EnterNetherTask(Task):
                 return self.run_child(bb, self._active_child)
 
         # 1) If a lit nether_portal already exists nearby -> clear any cobblestone mold blocking its doorway and step in!
-        portals = self.ctx.gateway.scan_blocks(bb.dimension, ["nether_portal"], radius=32, limit=12)
+        portals = self.ctx.gateway.scan_blocks(bb.dimension, ["nether_portal"], radius=48, limit=12)
         if portals:
             portal_cells = {(int(r["pos"][0]), int(r["pos"][1]), int(r["pos"][2])) for r in portals}
             cur_cell = block_coord(bb.pos)
@@ -448,13 +811,20 @@ class EnterNetherTask(Task):
             portals.sort(key=lambda r: (r["pos"][1], dist3(bb.pos, (r["pos"][0] + 0.5, r["pos"][1] + 0.5, r["pos"][2] + 0.5))))
             ppos = portals[0]["pos"]
             px, py, pz = int(ppos[0]), int(ppos[1]), int(ppos[2])
-            front_pair = [(px, py, pz + 1), (px, py + 1, pz + 1)]
-            back_pair = [(px, py, pz - 1), (px, py + 1, pz - 1)]
-            door_fetched = self.ctx.gateway.prefetch_blocks(bb.dimension, front_pair + back_pair, max_age=2.0)
-            front_open = all((e := door_fetched.get(c)) is not None and e.name in AIR_BLOCKS for c in front_pair)
-            back_open = all((e := door_fetched.get(c)) is not None and e.name in AIR_BLOCKS for c in back_pair)
-            if not front_open and not back_open:
-                for c in front_pair + back_pair:
+            door_pairs = [
+                [(px, py, pz + 1), (px, py + 1, pz + 1)],
+                [(px, py, pz - 1), (px, py + 1, pz - 1)],
+                [(px + 1, py, pz), (px + 1, py + 1, pz)],
+                [(px - 1, py, pz), (px - 1, py + 1, pz)],
+            ]
+            door_cells = [c for pair in door_pairs for c in pair]
+            door_fetched = self.ctx.gateway.prefetch_blocks(bb.dimension, door_cells, max_age=2.0)
+            any_open = any(
+                all((e := door_fetched.get(c)) is not None and e.name in AIR_BLOCKS for c in pair)
+                for pair in door_pairs
+            )
+            if not any_open:
+                for c in door_cells:
                     ent = door_fetched.get(c)
                     if ent is not None and ent.name not in (AIR_BLOCKS | {"obsidian", "nether_portal", "bedrock"}):
                         dig_out = self._dig.dig_block(bb, c, collect=False)
@@ -462,50 +832,67 @@ class EnterNetherTask(Task):
             out = self._nav.step_to(bb, (px + 0.5, float(py), pz + 0.5), tolerance=0.3)
             if out.status == "FAILED_LOCAL":
                 # Dig any remaining doorway block if 3D pathfinding failed after obsidian completion
-                for c in front_pair + back_pair:
+                for c in door_cells:
                     ent = self.ctx.gateway.get_block(bb.dimension, c, max_age=1.0)
                     if ent is not None and ent.name not in (AIR_BLOCKS | {"obsidian", "nether_portal", "bedrock"}):
                         dig_out = self._dig.dig_block(bb, c, collect=False)
                         return "RUNNING" if dig_out.status in {"OK", "PROGRESSED"} else dig_out.status
             return "RUNNING" if out.status in {"OK", "PROGRESSED"} else out.status
 
-        # 2) Ensure speedrun portal kit: iron_pickaxe, flint_and_steel, water/empty bucket
+        # 1.5) Detect an existing unlit 4x5 obsidian portal (either axis) or reusable ruined portal before lava sweep
+        partial_ruined: Optional[Tuple[Coord3, int]] = None
+        if self._portal_anchor is None:
+            obs_anchor, obs_axis, obs_count = self._scan_existing_obsidian_portal(bb, radius=48)
+            if obs_anchor is not None and obs_count == 10:
+                self._portal_anchor = obs_anchor
+                self._portal_axis = obs_axis
+                self._portal_complete_unlit = True
+            elif obs_anchor is not None and obs_count >= 4:
+                partial_ruined = (obs_anchor, obs_count)
+
+        # 2) Ensure speedrun portal kit: flint_and_steel always; pickaxe/bucket only if casting needed
         inv = bb.inventory_counts
-        if inv.get("iron_pickaxe", 0) < 1:
-            return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, "iron_pickaxe", 1))
         if inv.get("flint_and_steel", 0) < 1:
             return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, "flint_and_steel", 1))
-        has_any_bucket = (inv.get("water_bucket", 0) + inv.get("lava_bucket", 0) + inv.get("bucket", 0)) >= 1
-        if not has_any_bucket:
-            return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, "water_bucket", 1))
-        if inv.get("water_bucket", 0) < 1 and inv.get("lava_bucket", 0) < 1 and self._portal_anchor is None:
-            return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, "water_bucket", 1))
+        if not self._portal_complete_unlit:
+            if inv.get("iron_pickaxe", 0) < 1:
+                return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, "iron_pickaxe", 1))
+            has_any_bucket = (inv.get("water_bucket", 0) + inv.get("lava_bucket", 0) + inv.get("bucket", 0)) >= 1
+            if not has_any_bucket:
+                return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, "water_bucket", 1))
+            if inv.get("water_bucket", 0) < 1 and inv.get("lava_bucket", 0) < 1 and self._portal_anchor is None:
+                return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, "water_bucket", 1))
 
-        # 3) Locate stationary lava pool within 64m (properties={"level": 0} filters out flowing lava!)
-        lava_sources = self._find_nearest_lava_sources(bb, radius=64)
-        if not lava_sources and self._portal_anchor is None:
-            return self.run_child(
-                bb,
-                ExploreUntilTask(
-                    self.ctx,
-                    lambda _bb, gw: bool(
-                        gw.scan_blocks(_bb.dimension, ["lava"], radius=48, limit=4, properties={"level": 0})
-                    ),
-                    name="find_lava_pool",
-                ),
-            )
-
-        # 4) Anchor portal site on solid dry ground beside the lava pool
-        if self._portal_anchor is None and lava_sources:
-            self._portal_anchor = self._select_portal_anchor(bb, lava_sources)
-            if self.ctx.gateway.db is not None:
-                self.ctx.gateway.db.save_landmark(bb.dimension, "lava_pool", "portal_site", self._portal_anchor)
+        # 3 & 4) Locate lava pool / anchor portal site (reusing complete unlit or near-lava ruined portal if found)
+        lava_sources: List[Coord3] = []
+        if not self._portal_complete_unlit:
+            lava_sources = self._find_nearest_lava_sources(bb, radius=64)
+            if partial_ruined is not None and self._portal_anchor is None:
+                p_anchor, p_obs = partial_ruined
+                can_finish_with_obs = inv.get("obsidian", 0) >= (10 - p_obs)
+                near_lava = bool(
+                    lava_sources
+                    and dist3(
+                        (p_anchor[0] + 0.5, float(p_anchor[1]), p_anchor[2] + 0.5),
+                        (lava_sources[0][0] + 0.5, float(lava_sources[0][1]), lava_sources[0][2] + 0.5),
+                    ) <= 32.0
+                )
+                if can_finish_with_obs or near_lava:
+                    self._portal_anchor = p_anchor
+                    self._portal_axis = "x"
+            if not lava_sources and self._portal_anchor is None:
+                return self._search_lava_pool(bb)
+            if self._portal_anchor is None and lava_sources:
+                self._portal_anchor = self._select_portal_anchor(bb, lava_sources)
+                self._portal_axis = "x"
+                if self.ctx.gateway.db is not None:
+                    self.ctx.gateway.db.save_landmark(bb.dimension, "lava_pool", "portal_site", self._portal_anchor)
 
         assert self._portal_anchor is not None
         anchor = self._portal_anchor
         # Protect portal frame, mold walls, work stair, and underlying doorway footing from cobblestone mining/micro-dig!
         ax, ay, az = anchor
-        protected: Set[Coord3] = set(self._frame_cells(anchor)) | set(self._work_stair_cells(anchor))
+        protected: Set[Coord3] = set(self._frame_cells(anchor, axis=self._portal_axis)) | set(self._work_stair_cells(anchor))
         for dx in range(-3, 5):
             for dy in range(-2, 5):
                 for dz in range(-2, 4):
@@ -518,8 +905,8 @@ class EnterNetherTask(Task):
             return "RUNNING" if out.status in {"OK", "PROGRESSED"} else out.status
 
         # 5) Inspect all 10 portal obsidian cells + 6 interior cells in one batch (freshness <= 3s!)
-        frame = self._frame_cells(anchor)
-        interior = self._interior_cells(anchor)
+        frame = self._frame_cells(anchor, axis=self._portal_axis)
+        interior = self._interior_cells(anchor, axis=self._portal_axis)
         fetched = self.ctx.gateway.prefetch_blocks(bb.dimension, frame + interior, max_age=3.0)
         missing_frame = [c for c in frame if (fetched.get(c) is None or fetched[c].name != "obsidian")]
 
@@ -739,5 +1126,7 @@ class EnterNetherTask(Task):
         return _outcome_status(out)
 
     def stop(self, bb: Blackboard) -> None:
+        self._portal_axis = "x"
+        self._portal_complete_unlit = False
         bb.set("protected_cells", None, writer=self.name)
         super().stop(bb)
