@@ -12,7 +12,9 @@ from v2.domain import (
     LEAF_BLOCKS,
     LIQUID_BLOCKS,
     NON_SOLID_BLOCKS,
+    PICKAXE_TIERS,
     SCAFFOLD_BLOCKS,
+    SOFT_OCCLUDERS,
     WATER_BLOCKS,
     block_coord,
     dist3,
@@ -64,6 +66,9 @@ _PROTECTED_SURFACE_BLOCKS = frozenset({
     "bedrock", "obsidian", "crafting_table", "furnace", "chest",
     "blast_furnace", "smoker", "nether_portal",
 })
+_SOFT_SURFACE_DIG_BLOCKS = SOFT_OCCLUDERS | LEAF_BLOCKS | frozenset({
+    "sand", "red_sand", "gravel", "clay", "mud", "snow_block",
+})
 
 
 def is_underground(bb: Blackboard, gateway: VirtualWorldGateway, *, min_surface_y: int = 58) -> bool:
@@ -104,12 +109,14 @@ class ReturnToSurfaceTask(Task):
         self._surface_route_exhausted: bool = False
         self._surface_route_stalls: int = 0
         self._surface_route_last_pos: Optional[Tuple[float, float, float]] = None
+        self._no_pick_hard_digs: int = 0
 
     def stop(self, bb: Blackboard) -> None:
         self._dig.clear_cache()
         self._surface_route_exhausted = False
         self._surface_route_stalls = 0
         self._surface_route_last_pos = None
+        self._no_pick_hard_digs = 0
         super().stop(bb)
 
     def _try_plug_water_cell(self, bb: Blackboard, cell: Coord3) -> Optional[str]:
@@ -252,7 +259,23 @@ class ReturnToSurfaceTask(Task):
                     if self.ctx.gateway.unreachable.is_blocked(bb.dimension, cell, "dig"):
                         blocked = True
                         break
+                    is_soft_or_wood = (
+                        ent.name in _SOFT_SURFACE_DIG_BLOCKS
+                        or ent.name.endswith(("_log", "_planks"))
+                    )
+                    has_pick = any(bb.inventory_counts.get(p, 0) > 0 for p in PICKAXE_TIERS)
+                    if not is_soft_or_wood and not has_pick and self._no_pick_hard_digs >= 2:
+                        bb.last_failure_reason = "surface_escape:no_pickaxe"
+                        return "NEEDS_AI"
                     d_out = self._dig.dig_block(bb, cell, collect=False)
+                    if (
+                        not is_soft_or_wood
+                        and not has_pick
+                        and d_out.status == "OK"
+                        and isinstance(d_out.details, dict)
+                        and "no proper tool" in str(d_out.details.get("warning") or "").lower()
+                    ):
+                        self._no_pick_hard_digs += 1
                     return "RUNNING" if d_out.status in {"OK", "PROGRESSED"} else d_out.status
             if blocked:
                 self._dir_idx += 1

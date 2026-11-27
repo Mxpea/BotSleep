@@ -140,6 +140,45 @@ class MineResourceTask(Task):
             if prev is None or dist3(prev, (fx, fy, fz)) >= 4.0:
                 save_anchor_landmark(db, bb, "last_mine_anchor", "mine_shaft", (fx, fy, fz), writer="mining")
 
+    def _mine_opportunistic_ores(self, bb: Blackboard, fy: int) -> Optional[str]:
+        """When deep underground for iron/gold/diamond, grab adjacent exposed coal, gold, or diamond veins."""
+        if fy > 48 or self.item not in {"raw_iron", "raw_gold", "diamond"}:
+            return None
+        inv = bb.inventory_counts
+        has_iron_tier = any(inv.get(p, 0) > 0 for p in ("netherite_pickaxe", "diamond_pickaxe", "iron_pickaxe"))
+        if has_iron_tier:
+            rich_types = tuple(
+                t for t in ("diamond_ore", "deepslate_diamond_ore", "gold_ore", "deepslate_gold_ore")
+                if t not in set(self.catalogue.gathering[self.item].block_types)
+            )
+            if rich_types:
+                opp = self._dig.dig_nearest_of_types(
+                    bb,
+                    rich_types,
+                    radius=8,
+                    collect=True,
+                    max_dy=3.0,
+                    candidate_filter=lambda c: self._is_safe_to_dig(bb, c, allow_shallow_floor_water=True),
+                )
+                if opp.status in {"OK", "PROGRESSED"}:
+                    return "RUNNING"
+                if opp.status == "UNKNOWN":
+                    return "UNKNOWN"
+        if inv.get("coal", 0) < 4 and self.item != "coal":
+            opp_coal = self._dig.dig_nearest_of_types(
+                bb,
+                ("coal_ore", "deepslate_coal_ore"),
+                radius=6,
+                collect=True,
+                max_dy=2.0,
+                candidate_filter=lambda c: self._is_safe_to_dig(bb, c, allow_shallow_floor_water=True),
+            )
+            if opp_coal.status in {"OK", "PROGRESSED"}:
+                return "RUNNING"
+            if opp_coal.status == "UNKNOWN":
+                return "UNKNOWN"
+        return None
+
     def on_tick(self, bb: Blackboard) -> str:
         gather = self.catalogue.gathering.get(self.item)
         if gather is None:
@@ -165,6 +204,10 @@ class MineResourceTask(Task):
             return "RUNNING"
         if out.status == "UNKNOWN":
             return "UNKNOWN"
+
+        opp = self._mine_opportunistic_ores(bb, fy)
+        if opp is not None:
+            return opp
 
         # 2.5) Above y >= 58: try reusing remembered mine_shaft within 48m before digging a brand-new staircase
         if fy >= 58 and not self._tried_mine_shaft:
@@ -197,7 +240,7 @@ class MineResourceTask(Task):
                 self._tried_mine_shaft = True
 
         gather_types = set(gather.block_types)
-        clear_collect = bb.inventory_counts.get("cobblestone", 0) < 16
+        clear_collect = bb.inventory_counts.get("cobblestone", 0) < 8
 
         # 3) Step-driven staircase descent toward target_y: try all 4 cardinal directions in 1 tick (never spin in place!)
         if fy > self.target_y:

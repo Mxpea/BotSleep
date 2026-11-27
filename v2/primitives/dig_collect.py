@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 from v2.bt.blackboard import Blackboard
@@ -24,6 +25,9 @@ class DigCollectPrimitive:
     DROP_PICKUP_MAX_DIST = 6.0
     VEIN_CLUSTER_DIST = 2.5
     VEIN_ORIGIN_MAX_MOVE = 8.0
+    UPSTREAM_COLLECT_OVERHEAD_MS = 4000.0
+    UPSTREAM_COLLECT_WALL_MS = 5500.0
+    UPSTREAM_COLLECT_SKIP_SECONDS = 45.0
 
     def __init__(self, ctx: PrimitiveContext) -> None:
         self.ctx = ctx
@@ -34,6 +38,7 @@ class DigCollectPrimitive:
         self._vein_origin: Optional[Tuple[str, Tuple[float, float, float]]] = None
         self._last_collect_dig: Optional[Tuple[str, Coord3, int]] = None
         self._ignored_drop_keys: Set[str] = set()
+        self._skip_upstream_collect_until: float = 0.0
 
     def clear_cache(self) -> None:
         """Pure-memory reset of vein queue, close-approach attempts, and drop hints."""
@@ -43,6 +48,7 @@ class DigCollectPrimitive:
         self._vein_origin = None
         self._last_collect_dig = None
         self._ignored_drop_keys.clear()
+        self._skip_upstream_collect_until = 0.0
 
     @staticmethod
     def _is_item_entity(ent: Dict[str, Any]) -> bool:
@@ -223,15 +229,28 @@ class DigCollectPrimitive:
                     self._close_approach_attempts[key] = attempts + 1
                     return nav_out
 
+        api_collect = bool(collect) and (time.monotonic() >= self._skip_upstream_collect_until)
+        t0 = time.monotonic()
         out = self.ctx.execute_write(
             bb,
             "dig",
-            {"pos": list(target), "collect": collect},
-            lambda: self.ctx.client.dig(list(target), collect=collect),
+            {"pos": list(target), "collect": api_collect},
+            lambda: self.ctx.client.dig(list(target), collect=api_collect),
             unknown_center=target,
             record_unreachable_action="dig",
         )
+        wall_ms = (time.monotonic() - t0) * 1000.0
         if out.status == "OK":
+            if api_collect:
+                raw_dig_ms = out.details.get("dig_ms") if isinstance(out.details, dict) else None
+                slow_overhead = (
+                    isinstance(raw_dig_ms, (int, float))
+                    and (wall_ms - float(raw_dig_ms)) >= self.UPSTREAM_COLLECT_OVERHEAD_MS
+                )
+                if slow_overhead or wall_ms >= self.UPSTREAM_COLLECT_WALL_MS:
+                    self._skip_upstream_collect_until = time.monotonic() + self.UPSTREAM_COLLECT_SKIP_SECONDS
+            if isinstance(out.details, dict) and "no proper tool" in str(out.details.get("warning") or "").lower():
+                bb.last_failure_reason = "dig:no_proper_tool"
             if len(self._close_approach_attempts) > 64:
                 self._close_approach_attempts.clear()
             self._close_approach_attempts.pop(key, None)

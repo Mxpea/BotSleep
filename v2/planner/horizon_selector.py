@@ -45,6 +45,17 @@ class HorizonSelector:
         return inv.get("iron_pickaxe", 0) >= 1 or inv.get("iron_ingot", 0) >= 4
 
     @staticmethod
+    def _has_item_or_equipped(bb: Blackboard, item: str) -> bool:
+        if bb.inventory_counts.get(item, 0) > 0:
+            return True
+        armor = bb.inventory.get("armor") if isinstance(bb.inventory.get("armor"), dict) else {}
+        for piece in armor.values():
+            if isinstance(piece, dict) and piece.get("name") == item:
+                return True
+        offhand = bb.inventory.get("offhand")
+        return isinstance(offhand, dict) and offhand.get("name") == item
+
+    @staticmethod
     def _active_corpse_candidate(bb: Blackboard) -> Optional[HorizonCandidate]:
         drop = bb.get("active_corpse_drop")
         if (
@@ -171,6 +182,8 @@ class HorizonSelector:
         has_stone_pick = has_iron_pick or inv.get("stone_pickaxe", 0) > 0
         has_melee_weapon = any(k.endswith(("_sword", "_axe")) and v > 0 for k, v in inv.items())
         iron_ingots = inv.get("iron_ingot", 0)
+        has_water_bucket = self._has_item_or_equipped(bb, "water_bucket")
+        has_iron_chest = self._has_item_or_equipped(bb, "iron_chestplate") or self._has_item_or_equipped(bb, "diamond_chestplate")
         milestones = [
             ("acquire", "wooden_pickaxe", 1, "tier1"),
             ("acquire", "stone_pickaxe", 1, "tier2"),
@@ -180,6 +193,13 @@ class HorizonSelector:
             ("acquire", "water_bucket", 1, "portal_kit"),
             ("acquire", "flint_and_steel", 1, "portal_kit"),
             ("acquire", "shield", 1, "defense"),
+            ("acquire", "iron_chestplate", 1, "armor_iron"),
+            ("acquire", "iron_leggings", 1, "armor_iron"),
+            ("acquire", "iron_helmet", 1, "armor_iron"),
+            ("acquire", "iron_boots", 1, "armor_iron"),
+            ("acquire", "golden_boots", 1, "nether_gold"),
+            ("mine", "diamond", 3, "tier4_diamond"),
+            ("acquire", "diamond_pickaxe", 1, "tier4_diamond"),
         ]
         for goal, item, cnt, tag in milestones:
             if item == "wooden_pickaxe" and (has_stone_pick or portal_ready):
@@ -192,9 +212,20 @@ class HorizonSelector:
                 continue
             if item == "water_bucket" and not (has_iron_pick or iron_ingots >= 6 or inv.get("bucket", 0) >= 1):
                 continue
-            if item in {"flint_and_steel", "shield"} and not ((has_iron_pick and inv.get("water_bucket", 0) >= 1) or iron_ingots >= 7):
+            if item in {"flint_and_steel", "shield"} and not ((has_iron_pick and has_water_bucket) or iron_ingots >= 7):
                 continue
-            if inv.get(item, 0) < cnt:
+            if item == "iron_chestplate" and not (has_iron_pick and (has_water_bucket or iron_ingots >= 8)):
+                continue
+            if item in {"iron_leggings", "iron_helmet", "iron_boots"} and not has_iron_chest:
+                continue
+            if item == "golden_boots" and not (has_iron_pick and (inv.get("gold_ingot", 0) >= 4 or inv.get("raw_gold", 0) >= 4)):
+                continue
+            if item == "diamond" and (not (has_iron_pick and (has_iron_chest or bb.pos[1] <= 16.0)) or inv.get("diamond_pickaxe", 0) > 0):
+                continue
+            if item == "diamond_pickaxe" and (inv.get("diamond", 0) < 3 or inv.get("diamond_pickaxe", 0) > 0):
+                continue
+            already_have = self._has_item_or_equipped(bb, item) if cnt == 1 else False
+            if not already_have and inv.get(item, 0) < cnt:
                 est = self.catalogue.estimate_steps(item, cnt, inv)
                 if item == "stone_sword":
                     if has_stone_pick:

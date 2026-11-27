@@ -90,6 +90,8 @@ class SmeltItemTask(Task):
         self._furnace_nav_stalls: int = 0
         self._furnace_nav_steps: int = 0
         self._furnace_nav_last_pos: Optional[Tuple[float, float, float]] = None
+        self._furnace_has_active_batch: bool = False
+        self._initial_near_check_done: bool = False
 
     def _should_pickup_placed_furnace(self, bb: Blackboard) -> bool:
         if self._placed_furnace_pos is None or self._furnace_pickup_attempted:
@@ -158,7 +160,70 @@ class SmeltItemTask(Task):
                         return "UNKNOWN"
             return "COMPLETED"
 
-        # 1) Check placed furnaces within 16m
+        raw_have = bb.inventory_counts.get(smelt.input_item, 0)
+        fuel_avail = self._pick_fuel(bb.inventory_counts)
+
+        # 0) Inspect an immediately adjacent (<= 5m) furnace ONCE to catch an already-smelting batch
+        if not self._initial_near_check_done and not self._furnace_has_active_batch and (raw_have < missing or fuel_avail is None):
+            near_f = self.ctx.gateway.scan_blocks(bb.dimension, ["furnace"], radius=5, limit=2)
+            near_coord: Optional[Coord3] = None
+            for r in near_f:
+                pos_r = r.get("pos")
+                if isinstance(pos_r, list) and len(pos_r) == 3:
+                    c = (int(pos_r[0]), int(pos_r[1]), int(pos_r[2]))
+                    if dist3(bb.pos, (c[0] + 0.5, c[1] + 0.5, c[2] + 0.5)) <= 5.0:
+                        near_coord = c
+                        break
+            if near_coord is None:
+                self._initial_near_check_done = True
+            else:
+                view = self._container.inspect_window(bb, near_coord)
+                if view.status == "OK":
+                    self._initial_near_check_done = True
+                    snap = self._extract_window(view.details)
+                    self._last_window = snap
+                    self._last_window_pos = near_coord
+                    self._last_window_at = time.monotonic()
+                    if snap is not None:
+                        s_out = _section_count(snap, "output")
+                        s_in = _section_count(snap, "input", smelt.input_item)
+                        s_fuel = _section_count(snap, "fuel")
+                        s_burn = bool((snap.get("info") if isinstance(snap.get("info"), dict) else {}).get("burning", False))
+                        if s_out > 0 or (s_in > 0 and (s_burn or s_fuel > 0)):
+                            self._furnace_has_active_batch = True
+                    return "RUNNING"
+                if view.status == "PROGRESSED":
+                    return "RUNNING"
+                self._initial_near_check_done = True
+                if view.status == "UNKNOWN":
+                    return "UNKNOWN"
+
+        # 0.5) Ensure raw material & fuel BEFORE walking to or window/viewing any distant furnace!
+        if not self._furnace_has_active_batch:
+            batch_eligible = (
+                self.output_item in {"iron_ingot", "gold_ingot"}
+                and self.count >= 3
+                and bb.health >= 12.0
+                and not self._batch_mine_done
+            )
+            if raw_have < missing or (batch_eligible and self._batch_mine_active):
+                if batch_eligible:
+                    target_raw = min(10, max(6, missing + 3))
+                    self._batch_mine_active = True
+                    res = self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, smelt.input_item, target_raw))
+                    if bb.inventory_counts.get(smelt.input_item, 0) >= target_raw or res in {"COMPLETED", "FAILED_LOCAL", "NEEDS_AI"}:
+                        self._batch_mine_done = True
+                        self._batch_mine_active = False
+                        self._clear_child(bb)
+                        if bb.inventory_counts.get(smelt.input_item, 0) >= missing:
+                            return "RUNNING"
+                    return "RUNNING" if res == "COMPLETED" else res
+                return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, smelt.input_item, missing))
+            if fuel_avail is None:
+                coal_need = max(1, math.ceil(max(missing, min(raw_have, 16)) / 8))
+                return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, "coal", coal_need))
+
+        # 1) Check placed furnaces within 16m (reuse 24m landmark or place/craft) ONLY once ready or active batch exists
         furnaces = self.ctx.gateway.scan_blocks(bb.dimension, ["furnace"], radius=16, limit=6)
         if not furnaces:
             if not self._furnace_landmark_exhausted:
@@ -266,47 +331,37 @@ class SmeltItemTask(Task):
         fuel_cnt = _section_count(win, "fuel") if win else 0
         info = (win.get("info") if isinstance(win.get("info"), dict) else {}) if win else {}
         burning = bool(info.get("burning", False))
+        if win is not None and in_cnt == 0 and _section_count(win, "output") == 0:
+            self._furnace_has_active_batch = False
 
         need_raw_more = max(0, missing - in_cnt)
         raw_have = bb.inventory_counts.get(smelt.input_item, 0)
-        batch_eligible = (
-            self.output_item == "iron_ingot"
-            and self.count >= 3
-            and in_cnt == 0
-            and bb.health >= 12.0
-            and not self._batch_mine_done
-        )
-        if batch_eligible and (self._batch_mine_active or (need_raw_more > 0 and raw_have < need_raw_more)):
-            target_raw = min(8, max(6, missing))
-            if raw_have < target_raw:
-                self._batch_mine_active = True
-                res = self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, smelt.input_item, target_raw))
-                if res in {"FAILED_LOCAL", "NEEDS_AI"}:
-                    self._batch_mine_done = True
-                    self._batch_mine_active = False
-                    if bb.inventory_counts.get(smelt.input_item, 0) >= need_raw_more:
-                        return "RUNNING"
-                return res
-            self._batch_mine_done = True
-            self._batch_mine_active = False
-            self._clear_child(bb)
-        elif need_raw_more > 0 and raw_have < need_raw_more:
+        if need_raw_more > 0 and raw_have < need_raw_more:
+            self._furnace_has_active_batch = False
             return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, smelt.input_item, need_raw_more))
 
         need_fuel = not burning and fuel_cnt <= 0
         fuel = self._pick_fuel(bb.inventory_counts) if need_fuel else None
         if need_fuel and fuel is None:
+            self._furnace_has_active_batch = False
             return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, "coal", max(1, math.ceil(missing / 8))))
 
-        load_input_count = (
-            min(raw_have, 8)
-            if (smelt.input_item == "raw_iron" and raw_have > need_raw_more)
-            else need_raw_more
-        )
+        if smelt.input_item in {"raw_iron", "raw_gold"} and raw_have > need_raw_more:
+            if fuel in {"coal", "charcoal"}:
+                max_by_fuel = max(1, bb.inventory_counts.get(fuel, 0)) * 8
+                load_input_count = max(need_raw_more, min(raw_have, 16, max_by_fuel))
+            else:
+                load_input_count = min(raw_have, 8)
+        else:
+            load_input_count = need_raw_more
+
         if fuel is None:
             fuel_load_count = 0
-        elif smelt.input_item == "raw_iron" and raw_have > need_raw_more:
-            fuel_load_count = 1
+        elif smelt.input_item in {"raw_iron", "raw_gold"} and raw_have > need_raw_more:
+            fuel_load_count = min(
+                bb.inventory_counts.get(fuel, 1),
+                max(1, math.ceil(load_input_count / 8)) if fuel in {"coal", "charcoal", "coal_block", "blaze_rod"} else max(1, load_input_count),
+            )
         else:
             fuel_load_count = max(1, math.ceil(missing / 8))
 
@@ -323,6 +378,7 @@ class SmeltItemTask(Task):
             self._last_window_pos = fpos
             self._last_window_at = time.monotonic()
             self._next_inspect_at = self._last_window_at + self.poll_interval_seconds
+            self._furnace_has_active_batch = True
             return "RUNNING"
         return "RUNNING" if load_out.status == "PROGRESSED" else load_out.status
 
@@ -338,6 +394,8 @@ class SmeltItemTask(Task):
         self._furnace_nav_stalls = 0
         self._furnace_nav_steps = 0
         self._furnace_nav_last_pos = None
+        self._furnace_has_active_batch = False
+        self._initial_near_check_done = False
         super().stop(bb)
 
 

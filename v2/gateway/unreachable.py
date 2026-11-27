@@ -48,7 +48,8 @@ class BlockUnreachableTracker:
         key = (dimension, (int(pos[0]), int(pos[1]), int(pos[2])), action)
         prev_cnt, _, _ = self._entries.get(key, (0, 0.0, ""))
         cnt = prev_cnt + 1
-        ttl = min(self.max_ttl, self.base_ttl * (2 ** max(0, cnt - threshold))) if cnt >= threshold else 15.0
+        exp = min(16, max(0, cnt - threshold))
+        ttl = min(self.max_ttl, self.base_ttl * (2 ** exp)) if cnt >= threshold else 15.0
         expires_at = ts + ttl
         self._entries[key] = (cnt, expires_at, reason)
         if self.db is not None:
