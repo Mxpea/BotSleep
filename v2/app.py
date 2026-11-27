@@ -401,7 +401,7 @@ def run_v2_session(
 
                 if comp_mgr is not None and comp_sup is not None:
                     comp_sup.step(rt, client)
-                    if rt.bb.goal_status == "COMPLETED" or tick_idx % 20 == 19:
+                    if rt.bb.goal_status in {"COMPLETED", "NEEDS_AI", "FAILED_LOCAL"} or tick_idx % 20 == 19:
                         was_active = comp_mgr.active_task_id
                         try:
                             comp_mgr.sync_server_advancements(client)
@@ -410,9 +410,9 @@ def run_v2_session(
                         if was_active is not None and comp_mgr.active_task_id is None:
                             # Server already confirmed the active advancement -> immediately unmount & pivot!
                             rt.goal_mount.mount(None, rt.bb)
-                        elif rt.bb.goal_status == "COMPLETED" and comp_mgr.active_task_id is not None:
-                            # Subgoal completed on client without earning its server advancement: defer cleanly so bot advances!
-                            comp_mgr.force_exit_task("subgoal_completed_without_server_advancement")
+                        elif rt.bb.goal_status in {"COMPLETED", "NEEDS_AI", "FAILED_LOCAL"} and comp_mgr.active_task_id is not None:
+                            # Task exited without earning its server advancement -> defer with exponential backoff so bot pivots cleanly!
+                            comp_mgr.force_exit_task(f"goal_{rt.bb.goal_status.lower()}:{str(rt.bb.last_failure_reason)[:48]}")
                         newly = comp_sup.flush_score_delta()
                         if newly:
                             print(

@@ -14,6 +14,26 @@ from v2.tasks.competition.manager import CompetitionManager
 
 
 _TIME_FIT_WINDOW = 0.85
+# Advancements requiring rare/specific world entities/features that should ONLY rank high when seen nearby or mats already held
+_ENTITY_GATED_ADVANCEMENTS: FrozenSet[str] = frozenset({
+    "minecraft:husbandry/breed_an_animal",
+    "minecraft:husbandry/tame_an_animal",
+    "minecraft:husbandry/make_a_sign_glow",
+    "minecraft:husbandry/tactical_fishing",
+    "minecraft:husbandry/axolotl_in_a_bucket",
+    "minecraft:husbandry/safely_harvest_honey",
+    "minecraft:husbandry/wax_on",
+    "minecraft:husbandry/wax_off",
+    "minecraft:husbandry/ride_a_boat_with_a_goat",
+    "minecraft:adventure/brush_armadillo",
+    "minecraft:adventure/spyglass_at_parrot",
+    "minecraft:adventure/spyglass_at_ghast",
+    "minecraft:adventure/sniper_duel",
+    "minecraft:adventure/ol_betsy",
+    "minecraft:adventure/shoot_arrow",
+    "minecraft:story/deflect_arrow",
+    "minecraft:nether/distract_piglin",
+})
 
 
 def _horizon_candidate_cls():
@@ -151,7 +171,7 @@ class CompetitionScheduler:
                 if inv.get("white_bed", 0) > 0:
                     gate_mult *= 0.05
 
-            # 2) Opportunistic 24m trigger boost
+            # 2) Opportunistic 24m trigger boost + unseen-entity gating
             is_opp = False
             if spec is not None and spec.world_triggers and (spec.world_triggers & signals):
                 if aid == "minecraft:husbandry/breed_an_animal":
@@ -159,6 +179,9 @@ class CompetitionScheduler:
                 else:
                     is_opp = True
             opp_mult = 2.2 if (is_opp and not unmet_caps) else (1.25 if is_opp else 1.0)
+            if aid in _ENTITY_GATED_ADVANCEMENTS and not is_opp and miss_steps > 0:
+                # Avoid blind 40x wandering for rare mobs/structures; let deterministic mining/crafting lead!
+                gate_mult *= 0.12
 
             # 3) UnlockSynergy fanout (prioritize T0/T1 unlockers naturally)
             fanout_pts = unlocked_capability_fanout(aid, self.competition.completed_ids, self.competition.catalog)

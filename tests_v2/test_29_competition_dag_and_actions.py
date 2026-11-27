@@ -91,6 +91,19 @@ class TestCompetitionDagAndActions(unittest.TestCase):
         self.assertGreaterEqual(exit_res["defer_seconds"], 300.0)
         self.assertNotIn("minecraft:husbandry/fishy_business", [e.id for e in mgr.selectable_tasks(now=time.time())])
 
+        # 5) Trigger-gating: without glow_squid nearby, iron_tools/smelt_iron outrank make_a_sign_glow;
+        # once glow_squid appears, make_a_sign_glow becomes OPP and surges!
+        bb_det = Blackboard()
+        bb_det.status = {"dimension": "overworld", "pos": [0.5, 64.0, 0.5], "time_of_day": 2000, "food": 20}
+        bb_det.inventory_counts = {"stone_pickaxe": 1, "cobblestone": 8, "oak_planks": 8}
+        det_ids = [c.item for c in sched.select_top(bb_det, limit=6)]
+        self.assertIn("minecraft:story/iron_tools", det_ids)
+        self.assertNotIn("minecraft:husbandry/make_a_sign_glow", det_ids[:3])
+
+        bb_det.entities = [{"id": 99, "name": "glow_squid", "type": "passive", "pos": [5.0, 62.0, 0.5]}]
+        glow_top = [c.item for c in sched.select_top(bb_det, limit=4)]
+        self.assertIn("minecraft:husbandry/make_a_sign_glow", glow_top)
+
     def test_gather_mob_drop_shears_and_cobweb(self) -> None:
         sim = VirtualMcApiServer(spawn_pos=(0.5, 64.0, 0.5))
         sim.fill(-6, 63, -6, 6, 63, 6, "grass_block")

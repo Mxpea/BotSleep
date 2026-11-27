@@ -106,8 +106,12 @@ class GatherMobDropTask(Task):
                 if nav.status in {"OK", "PROGRESSED"}:
                     return "RUNNING"
 
+            if self.mob_names == ("glow_squid",):
+                bb.last_failure_reason = "mob_not_found:glow_squid"
+                return "NEEDS_AI"
+
             self._explore_steps += 1
-            if self._explore_steps > 8:
+            if self._explore_steps > 4:
                 bb.last_failure_reason = f"mob_not_found:{self.item}"
                 return "NEEDS_AI"
             dirs = ((18.0, 0.0), (0.0, 18.0), (-18.0, 0.0), (0.0, -18.0))

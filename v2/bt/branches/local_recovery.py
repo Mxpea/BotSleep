@@ -90,6 +90,7 @@ class LocalRecoveryBranch(Node):
         self._swim_anchor: Optional[Tuple[float, float, float]] = None
         self._swim_cooldown_until: float = 0.0
         self._equip_cooldown_until: Dict[str, float] = {}
+        self._bed_attempts: Dict[Coord3, int] = {}
 
     def _pick_swim_target(self, bb: Blackboard) -> Tuple[float, float, float]:
         """Prefetch 5x3x5 (+headroom) around player and BFS for the nearest reachable standable dry shore cell."""
@@ -511,7 +512,16 @@ class LocalRecoveryBranch(Node):
             if 12541 <= tod <= 23458:
                 beds = self._find_nearby_beds(bb)
                 if beds:
-                    bpos = list(beds[0])
+                    bed_coord = beds[0]
+                    bpos = list(bed_coord)
+                    attempts = self._bed_attempts.get(bed_coord, 0) + 1
+                    self._bed_attempts[bed_coord] = attempts
+                    if attempts > 4:
+                        self._bed_attempts.pop(bed_coord, None)
+                        self.gateway.unreachable.record_failure(
+                            bb.dimension, bed_coord, "sleep", "bed_approach_stalled", threshold=1,
+                        )
+                        return Status.FAILURE
                     dist = math.dist(bb.pos, (bpos[0] + 0.5, bpos[1] + 0.5, bpos[2] + 0.5))
                     if dist > 2.5:
                         bb.last_action_outcome = "recovery_approach_bed"
@@ -520,7 +530,7 @@ class LocalRecoveryBranch(Node):
                             lambda: self.gateway.client.move_to(bpos[0], bpos[1], bpos[2], range=2.0, timeout_ms=8000),
                         )
                         if res == Status.FAILURE:
-                            self.gateway.unreachable.record_failure(bb.dimension, beds[0], "sleep", "approach_failed")
+                            self.gateway.unreachable.record_failure(bb.dimension, bed_coord, "sleep", "approach_failed")
                         return res
                     bb.last_action_outcome = "recovery_sleep"
                     res = self._write_action(
@@ -528,7 +538,7 @@ class LocalRecoveryBranch(Node):
                         lambda: self.gateway.client.interact(pos=bpos),
                     )
                     if res == Status.FAILURE:
-                        self.gateway.unreachable.record_failure(bb.dimension, beds[0], "sleep", "interact_failed")
+                        self.gateway.unreachable.record_failure(bb.dimension, bed_coord, "sleep", "interact_failed")
                     return res
 
         return Status.FAILURE

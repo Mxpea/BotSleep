@@ -279,7 +279,7 @@ def load_client_traces(run_dir: Path) -> Dict[str, Any]:
                         llm_http += 1
                     elif et == "LLM_RESPONSE":
                         pr = d.get("plan_result") or {}
-                        if pr.get("ok") and pr.get("mounted"):
+                        if pr.get("ok") and (pr.get("mounted") or pr.get("active_task_id")):
                             llm_mounted += 1
                         if not trace_files:
                             timeline.append({
