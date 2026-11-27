@@ -248,6 +248,11 @@ class TestOutpostLootAndSneak100(unittest.TestCase):
                     if (ep == "place" and str(p.get("item", "")).endswith("_bed")) or ep == "interact"
                 ]
                 self.assertEqual(bed_writes, [])
+
+                # stop(bb) must be pure-memory with zero writes
+                writes_before = len(sim.write_calls)
+                task.stop(rt.bb)
+                self.assertEqual(len(sim.write_calls), writes_before)
             finally:
                 client.close()
                 db.close()
@@ -402,6 +407,12 @@ class TestOutpostLootAndSneak100(unittest.TestCase):
                 self.assertEqual(goal_st4, "FAILED_LOCAL")
                 self.assertEqual(rt.bb.last_failure_reason, "loot_chest:high_risk_trip_cap")
                 self.assertFalse(sim.sneaking)
+
+                # stop(bb) must be pure-memory with zero writes
+                writes_before = len(sim.write_calls)
+                task1.stop(rt.bb)
+                task4.stop(rt.bb)
+                self.assertEqual(len(sim.write_calls), writes_before)
             finally:
                 client.close()
                 db.close()

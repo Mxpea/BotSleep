@@ -3,48 +3,25 @@
 from __future__ import annotations
 
 import json
-import sys
-import types
+import tempfile
+import time
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
+from tests_v2.sim.virtual_mc_api import VirtualMcApiServer, VirtualMcHttpServer
 from v2.bt.blackboard import Blackboard
+from v2.gateway import VirtualWorldGateway
+from v2.kernel import MinecraftAgentClient, PendingTransactionJournal, UnifiedWorldDB
 from v2.planner import DepsPlanner, HorizonSelector, IntentCompiler
-from v2.tasks import TaskCatalogue
+from v2.primitives import PrimitiveContext
+from v2.tasks import (
+    AvoidVibrationTask,
+    EstablishOutpostTask,
+    LootChestTask,
+    NetherPortalShelterTask,
+    TaskCatalogue,
+)
 from v2.tasks.competition import CompetitionManager
-
-
-def _make_stub_outpost_and_loot_modules():
-    outpost_mod = types.ModuleType("v2.tasks.outpost")
-    loot_mod = types.ModuleType("v2.tasks.loot")
-
-    class _StubEstablishOutpostTask:
-        def __init__(self, ctx, catalogue, *, mode: str = "establish") -> None:
-            self.ctx = ctx
-            self.catalogue = catalogue
-            self.mode = mode
-
-    class _StubNetherPortalShelterTask:
-        def __init__(self, ctx, catalogue) -> None:
-            self.ctx = ctx
-            self.catalogue = catalogue
-
-    class _StubAvoidVibrationTask:
-        def __init__(self, ctx, *, radius: int = 32) -> None:
-            self.ctx = ctx
-            self.radius = radius
-
-    class _StubLootChestTask:
-        def __init__(self, ctx, *, radius: int = 32, max_high_risk_trips: int = 3) -> None:
-            self.ctx = ctx
-            self.radius = radius
-            self.max_high_risk_trips = max_high_risk_trips
-
-    outpost_mod.EstablishOutpostTask = _StubEstablishOutpostTask  # type: ignore[attr-defined]
-    outpost_mod.NetherPortalShelterTask = _StubNetherPortalShelterTask  # type: ignore[attr-defined]
-    loot_mod.AvoidVibrationTask = _StubAvoidVibrationTask  # type: ignore[attr-defined]
-    loot_mod.LootChestTask = _StubLootChestTask  # type: ignore[attr-defined]
-    return outpost_mod, loot_mod
 
 
 class TestPlannerOutpostLootWiring(unittest.TestCase):
@@ -69,51 +46,57 @@ class TestPlannerOutpostLootWiring(unittest.TestCase):
         deps_bytes = len(json.dumps({"messages": msgs, "tools": tools}, ensure_ascii=False).encode("utf-8"))
         self.assertLessEqual(deps_bytes, 6600)
 
-    def test_compile_tool_call_lazy_compiles_outpost_and_loot_goals(self) -> None:
+    def test_compile_tool_call_compiles_real_outpost_and_loot_tasks(self) -> None:
         cat = TaskCatalogue()
-        ctx = MagicMock()
-        compiler = IntentCompiler(ctx, cat, objective="daily")
-        bb = Blackboard()
+        sim = VirtualMcApiServer()
+        with tempfile.TemporaryDirectory() as td, VirtualMcHttpServer(sim) as srv:
+            db = UnifiedWorldDB.for_scope(td, srv.base_url, "CompileBot", "w1")
+            client = MinecraftAgentClient(srv.base_url, "CompileBot", "pass")
+            try:
+                ctx = PrimitiveContext(VirtualWorldGateway(client, db=db), PendingTransactionJournal(db))
+                compiler = IntentCompiler(ctx, cat, objective="daily")
+                bb = Blackboard()
 
-        outpost_mod, loot_mod = _make_stub_outpost_and_loot_modules()
-        with patch.dict(sys.modules, {"v2.tasks.outpost": outpost_mod, "v2.tasks.loot": loot_mod}):
-            t_loot, r_loot = compiler.compile_tool_call("run_goal", {"goal": "loot_chest"}, bb)
-            self.assertTrue(r_loot["ok"])
-            self.assertEqual(r_loot["mounted"], "loot_chest")
-            self.assertIsInstance(t_loot, loot_mod.LootChestTask)
-            self.assertIs(t_loot.ctx, ctx)
+                t_loot, r_loot = compiler.compile_tool_call("run_goal", {"goal": "loot_chest"}, bb)
+                self.assertTrue(r_loot["ok"])
+                self.assertEqual(r_loot["mounted"], "loot_chest")
+                self.assertIsInstance(t_loot, LootChestTask)
+                self.assertIs(t_loot.ctx, ctx)
 
-            t_avoid, r_avoid = compiler.compile_tool_call("run_goal", {"goal": "avoid_vibration"}, bb)
-            self.assertTrue(r_avoid["ok"])
-            self.assertEqual(r_avoid["mounted"], "avoid_vibration")
-            self.assertIsInstance(t_avoid, loot_mod.AvoidVibrationTask)
-            self.assertIs(t_avoid.ctx, ctx)
+                t_avoid, r_avoid = compiler.compile_tool_call("run_goal", {"goal": "avoid_vibration"}, bb)
+                self.assertTrue(r_avoid["ok"])
+                self.assertEqual(r_avoid["mounted"], "avoid_vibration")
+                self.assertIsInstance(t_avoid, AvoidVibrationTask)
+                self.assertIs(t_avoid.ctx, ctx)
 
-            t_shelter, r_shelter = compiler.compile_tool_call(
-                "run_goal", {"goal": "setup_outpost", "item": "nether_shelter"}, bb
-            )
-            self.assertTrue(r_shelter["ok"])
-            self.assertEqual(r_shelter["mounted"], "nether_portal_shelter")
-            self.assertIsInstance(t_shelter, outpost_mod.NetherPortalShelterTask)
-            self.assertIs(t_shelter.ctx, ctx)
-            self.assertIs(t_shelter.catalogue, cat)
-
-            for raw_item, expected_mode in (
-                ("", "establish"),
-                ("unknown_mode", "establish"),
-                ("establish", "establish"),
-                ("stash", "stash"),
-                ("withdraw", "withdraw"),
-            ):
-                t_outpost, r_outpost = compiler.compile_tool_call(
-                    "run_goal", {"goal": "setup_outpost", "item": raw_item}, bb
+                t_shelter, r_shelter = compiler.compile_tool_call(
+                    "run_goal", {"goal": "setup_outpost", "item": "nether_shelter"}, bb
                 )
-                self.assertTrue(r_outpost["ok"])
-                self.assertEqual(r_outpost["mounted"], f"outpost:{expected_mode}")
-                self.assertIsInstance(t_outpost, outpost_mod.EstablishOutpostTask)
-                self.assertIs(t_outpost.ctx, ctx)
-                self.assertIs(t_outpost.catalogue, cat)
-                self.assertEqual(t_outpost.mode, expected_mode)
+                self.assertTrue(r_shelter["ok"])
+                self.assertEqual(r_shelter["mounted"], "nether_portal_shelter")
+                self.assertIsInstance(t_shelter, NetherPortalShelterTask)
+                self.assertIs(t_shelter.ctx, ctx)
+                self.assertIs(t_shelter.catalogue, cat)
+
+                for raw_item, expected_mode in (
+                    ("", "establish"),
+                    ("unknown_mode", "establish"),
+                    ("establish", "establish"),
+                    ("stash", "stash"),
+                    ("withdraw", "withdraw"),
+                ):
+                    t_outpost, r_outpost = compiler.compile_tool_call(
+                        "run_goal", {"goal": "setup_outpost", "item": raw_item}, bb
+                    )
+                    self.assertTrue(r_outpost["ok"])
+                    self.assertEqual(r_outpost["mounted"], f"outpost:{expected_mode}")
+                    self.assertIsInstance(t_outpost, EstablishOutpostTask)
+                    self.assertIs(t_outpost.ctx, ctx)
+                    self.assertIs(t_outpost.catalogue, cat)
+                    self.assertEqual(t_outpost.mode, expected_mode)
+            finally:
+                client.close()
+                db.close()
 
     def test_avoid_vibration_catalogue_route_competition_manager_and_cost(self) -> None:
         cat = TaskCatalogue()
@@ -142,12 +125,77 @@ class TestPlannerOutpostLootWiring(unittest.TestCase):
         self.assertEqual(sneak_cand.est_steps, 44)
         self.assertEqual(sneak_cand.points, 15)
 
-        ctx = MagicMock()
-        _, loot_mod = _make_stub_outpost_and_loot_modules()
-        with patch.dict(sys.modules, {"v2.tasks.loot": loot_mod}):
-            task = comp.build_task(ctx, "minecraft:adventure/avoid_vibration")
-            self.assertIsInstance(task, loot_mod.AvoidVibrationTask)
-            self.assertIs(task.ctx, ctx)
+        sim = VirtualMcApiServer()
+        with tempfile.TemporaryDirectory() as td, VirtualMcHttpServer(sim) as srv:
+            db = UnifiedWorldDB.for_scope(td, srv.base_url, "CompSneakBot", "w1")
+            client = MinecraftAgentClient(srv.base_url, "CompSneakBot", "pass")
+            try:
+                ctx = PrimitiveContext(VirtualWorldGateway(client, db=db), PendingTransactionJournal(db))
+                task = comp.build_task(ctx, "minecraft:adventure/avoid_vibration")
+                self.assertIsInstance(task, AvoidVibrationTask)
+                self.assertIs(task.ctx, ctx)
+            finally:
+                client.close()
+                db.close()
+
+    def test_refresh_opportunity_signals_excludes_owned_and_looted_chests_and_detects_external(self) -> None:
+        sim = VirtualMcApiServer(spawn_pos=(0.5, 64.0, 0.5), dimension="overworld")
+        sim.fill(-12, 63, -12, 32, 63, 12, "deepslate")
+        # Own chest in bb.owned_chest_coords and SQLite landmark outpost_chest
+        sim.set_block(2, 64, 0, "chest")
+        sim.set_block(4, 64, 0, "chest")
+        # Already looted barrel within 600s
+        sim.set_block(6, 64, 0, "barrel")
+
+        with tempfile.TemporaryDirectory() as td, VirtualMcHttpServer(sim) as srv:
+            db = UnifiedWorldDB.for_scope(td, srv.base_url, "SignalBot", "w1")
+            client = MinecraftAgentClient(srv.base_url, "SignalBot", "pass")
+            try:
+                client.login()
+                db.save_landmark("overworld", "outpost_chest", "latest", (4, 64, 0))
+                gw = VirtualWorldGateway(client, db=db)
+                ctx = PrimitiveContext(gw, PendingTransactionJournal(db))
+                cat = TaskCatalogue()
+                compiler = IntentCompiler(ctx, cat, objective="daily")
+                planner = DepsPlanner(None, compiler, HorizonSelector(cat, objective="daily"))
+
+                bb = Blackboard()
+                bb.status = {"dimension": "overworld", "pos": [0.5, 64.0, 0.5], "health": 20.0, "food": 20}
+                bb.set("owned_chest_coords", [(2, 64, 0)], writer="test")
+                bb.set("looted_chests", {("overworld", (6, 64, 0)): time.time()}, writer="test")
+
+                # 1) Only owned/landmark/looted containers nearby -> both flags False
+                planner._refresh_opportunity_signals(bb)
+                self.assertFalse(bb.get("nearby_sculk_sensor"))
+                self.assertFalse(bb.get("nearby_loot_chest"))
+
+                # 2) Place external chest + sculk_sensor; throttled within <10s and <12m movement
+                sim.set_block(10, 64, 0, "chest")
+                sim.set_block(12, 64, 0, "sculk_sensor")
+                planner._refresh_opportunity_signals(bb)
+                self.assertFalse(bb.get("nearby_sculk_sensor"))
+                self.assertFalse(bb.get("nearby_loot_chest"))
+
+                # 3) Move >=12m -> triggers rescan, detects external chest & sculk sensor, payload <= 6600B
+                bb.status["pos"] = [13.0, 64.0, 0.5]
+                msgs, tools = planner.build_request_payload(bb, needs_ai=True)
+                self.assertTrue(bb.get("nearby_sculk_sensor"))
+                self.assertTrue(bb.get("nearby_loot_chest"))
+                deps_bytes = len(json.dumps({"messages": msgs, "tools": tools}, ensure_ascii=False).encode("utf-8"))
+                self.assertLessEqual(deps_bytes, 6600)
+                user_text = msgs[-1]["content"]
+                self.assertIn("SNEAK_100", user_text)
+                self.assertIn("LOOT_CHEST", user_text)
+
+                # 4) Frozen state skips scan without modifying signals
+                bb.set("nearby_sculk_sensor", False, writer="test")
+                bb.set("pending_frozen", True, writer="test")
+                bb.status["pos"] = [26.0, 64.0, 0.5]
+                planner._refresh_opportunity_signals(bb)
+                self.assertFalse(bb.get("nearby_sculk_sensor"))
+            finally:
+                client.close()
+                db.close()
 
     def test_horizon_selector_surfaces_sneak_loot_nether_and_deep_diamond_respecting_pins(self) -> None:
         cat = TaskCatalogue()

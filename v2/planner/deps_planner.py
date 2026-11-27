@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from v2.bt.blackboard import Blackboard
 from v2.bt.goal_mount import ActiveGoalMount
@@ -49,6 +49,106 @@ class DepsPlanner:
         self.retriever = retriever or BM25SkillRetriever()
         self.explainer = explainer or DepsExplainer()
         self.compactor = compactor or SemanticCompactor(keep_pairs=2)
+        self._last_opp_scan_at: float = 0.0
+        self._last_opp_scan_pos: Optional[Tuple[float, float, float]] = None
+        self._last_opp_scan_dim: Optional[str] = None
+
+    @staticmethod
+    def _as_coord3(raw: Any) -> Optional[Tuple[int, int, int]]:
+        if isinstance(raw, (list, tuple)) and len(raw) == 3:
+            return (int(raw[0]), int(raw[1]), int(raw[2]))
+        return None
+
+    def _refresh_opportunity_signals(self, bb: Blackboard) -> None:
+        """Throttled single-query sensor/loot scanner populating nearby_sculk_sensor and nearby_loot_chest."""
+        if bb.get("pending_frozen"):
+            return
+        ctx = getattr(self.compiler, "ctx", None)
+        gw = getattr(ctx, "gateway", None) if ctx is not None else None
+        if gw is None or not hasattr(gw, "scan_blocks"):
+            return
+
+        now = time.monotonic()
+        cur_pos = bb.pos
+        if (
+            self._last_opp_scan_pos is not None
+            and bb.dimension == self._last_opp_scan_dim
+            and (now - self._last_opp_scan_at) < 10.0
+            and dist3(cur_pos, self._last_opp_scan_pos) < 12.0
+        ):
+            return
+
+        try:
+            rows = gw.scan_blocks(
+                bb.dimension,
+                ["sculk_sensor", "calibrated_sculk_sensor", "chest", "barrel"],
+                radius=24,
+                limit=12,
+            )
+        except Exception:
+            return
+        if not isinstance(rows, list):
+            return
+
+        self._last_opp_scan_at = now
+        self._last_opp_scan_pos = cur_pos
+        self._last_opp_scan_dim = bb.dimension
+
+        owned: Set[Tuple[int, int, int]] = set()
+        for slot in ("outpost_chest", "nether_outpost_chest"):
+            c = self._as_coord3(bb.get(slot))
+            if c is not None:
+                owned.add(c)
+        for raw in bb.get("owned_chest_coords") or ():
+            c = self._as_coord3(raw)
+            if c is not None:
+                owned.add(c)
+        db = getattr(gw, "db", None)
+        if db is not None and hasattr(db, "list_landmarks"):
+            for kind in ("outpost_chest", "nether_outpost_chest", "chest"):
+                lm_rows = db.list_landmarks(bb.dimension, kind=kind)
+                if isinstance(lm_rows, list):
+                    for lm in lm_rows:
+                        c = self._as_coord3(lm.get("pos") if isinstance(lm, dict) else None)
+                        if c is not None:
+                            owned.add(c)
+
+        looted: Set[Tuple[int, int, int]] = set()
+        now_wall = time.time()
+        raw_looted = bb.get("looted_chests")
+        if isinstance(raw_looted, dict):
+            for key, ts in raw_looted.items():
+                if not isinstance(ts, (int, float)):
+                    continue
+                if isinstance(key, tuple) and len(key) == 2 and isinstance(key[0], str):
+                    if key[0] != bb.dimension:
+                        continue
+                    c = self._as_coord3(key[1])
+                else:
+                    c = self._as_coord3(key)
+                if c is not None and (now_wall - float(ts)) < 600.0:
+                    looted.add(c)
+        elif isinstance(raw_looted, (list, set, tuple)):
+            for item in raw_looted:
+                c = self._as_coord3(item)
+                if c is not None:
+                    looted.add(c)
+
+        has_sculk = False
+        has_loot = False
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name") or "")
+            if name in {"sculk_sensor", "calibrated_sculk_sensor"}:
+                has_sculk = True
+            elif name in {"chest", "barrel"}:
+                coord = self._as_coord3(row.get("pos"))
+                if coord is not None and coord not in owned and coord not in looted:
+                    has_loot = True
+
+        bb.set("nearby_sculk_sensor", has_sculk, writer="deps_planner")
+        bb.set("nearby_loot_chest", has_loot, writer="deps_planner")
 
     def _state_tags(self, bb: Blackboard) -> List[str]:
         tags: List[str] = [self.compiler.objective]
@@ -87,6 +187,7 @@ class DepsPlanner:
         needs_ai: bool = False,
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """Build OpenAI (messages, tools) strictly bounded to <= 6,600 serialized UTF-8 bytes."""
+        self._refresh_opportunity_signals(bb)
         tools = self.compiler.tool_schemas(needs_ai=needs_ai)
         tools_bytes = len(json.dumps(tools, ensure_ascii=False).encode("utf-8"))
 
@@ -147,6 +248,7 @@ class DepsPlanner:
 
     def plan_once(self, bb: Blackboard, *, needs_ai: bool = False) -> Tuple[Optional[Any], Dict[str, Any], Optional[LLMResponse]]:
         """Execute one planning step: LLM if enabled, else deterministic HorizonSelector fallback."""
+        self._refresh_opportunity_signals(bb)
         if self.brain is None:
             top = self.horizon.select_top(bb, limit=1)
             if not top:
