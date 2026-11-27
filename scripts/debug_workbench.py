@@ -159,6 +159,11 @@ def load_server_events(server_log_path: Optional[Path]) -> Dict[str, Any]:
             elif et == "PLAYER_KICK":
                 prec["kicks"].append({"ts_ms": ts_ms, "reason": d.get("reason")})
             elif et == "PLAYER_SAMPLE":
+                pos = d.get("pos")
+                if isinstance(pos, list) and len(pos) >= 3:
+                    prec.setdefault("sample_points", []).append(
+                        (ts_ms, _safe_float(pos[0]), _safe_float(pos[1]), _safe_float(pos[2]))
+                    )
                 blk = d.get("block") or [0, 0, 0]
                 if isinstance(blk, list) and len(blk) == 3:
                     b = ensure_blk(prec, dim, [_safe_int(blk[0]), _safe_int(blk[1]), _safe_int(blk[2])])
@@ -371,11 +376,89 @@ def load_client_traces(run_dir: Path) -> Dict[str, Any]:
     return {"bots": bots, "player_to_bot": player_to_bot}
 
 
+def detect_pacing_episodes(server: Dict[str, Any], client: Dict[str, Any]) -> Dict[str, Any]:
+    """Detect A<->B back-and-forth pacing windows (>=18m path, >=2.5m span, <=5m net disp, >=3 reversals in 30s)."""
+    episodes: List[Dict[str, Any]] = []
+    per_bot: Dict[str, Dict[str, Any]] = {}
+
+    sources: List[Tuple[str, List[Tuple[int, float, float, float]]]] = []
+    if server.get("available"):
+        for pname, prec in sorted(server["players"].items()):
+            pts = sorted(prec.get("sample_points") or [], key=lambda r: r[0])
+            bid = client["player_to_bot"].get(pname, pname)
+            if pts:
+                sources.append((bid, pts))
+    else:
+        for bid, cb in sorted(client["bots"].items()):
+            pts = []
+            for e in cb.get("timeline") or ():
+                d = e.get("data") or {}
+                pos = d.get("pos")
+                if isinstance(pos, list) and len(pos) >= 3:
+                    pts.append((_safe_int(e.get("ts_ms")), _safe_float(pos[0]), _safe_float(pos[1]), _safe_float(pos[2])))
+            pts.sort(key=lambda r: r[0])
+            if pts:
+                sources.append((bid, pts))
+
+    min_pts = 25 if server.get("available") else 8
+    for bid, rows in sources:
+        n = len(rows)
+        i = 0
+        bot_eps = 0
+        bot_path = 0.0
+        while i < n - min_pts + 1:
+            t0 = rows[i][0]
+            j = i
+            while j < n and rows[j][0] - t0 <= 30000:
+                j += 1
+            win = rows[i:j]
+            if len(win) >= min_pts:
+                path_len = 0.0
+                reversals = 0
+                prev_dx, prev_dz = 0.0, 0.0
+                xs = [r[1] for r in win]
+                zs = [r[3] for r in win]
+                for k in range(1, len(win)):
+                    dx = win[k][1] - win[k - 1][1]
+                    dy = win[k][2] - win[k - 1][2]
+                    dz = win[k][3] - win[k - 1][3]
+                    step = math.sqrt(dx * dx + dy * dy + dz * dz)
+                    if step < 12.0:
+                        path_len += step
+                    step_xz = math.hypot(dx, dz)
+                    if step_xz >= 0.4:
+                        if math.hypot(prev_dx, prev_dz) >= 0.4:
+                            if dx * prev_dx + dz * prev_dz < -0.25 * step_xz * math.hypot(prev_dx, prev_dz):
+                                reversals += 1
+                        prev_dx, prev_dz = dx, dz
+                net_disp = math.hypot(win[-1][1] - win[0][1], win[-1][3] - win[0][3])
+                span_xz = math.hypot(max(xs) - min(xs), max(zs) - min(zs))
+                if path_len >= 18.0 and span_xz >= 2.5 and net_disp <= 5.0 and reversals >= 3 and span_xz <= 45.0:
+                    bot_eps += 1
+                    bot_path += path_len
+                    episodes.append({"bot": bid, "t0": win[0][0], "t1": win[-1][0], "path": round(path_len, 1), "net": round(net_disp, 1), "rev": reversals})
+                    i = j
+                    continue
+            i += max(4, min_pts // 2)
+        if bot_eps > 0:
+            per_bot[bid] = {"episodes": bot_eps, "wasted_m": round(bot_path, 1), "wasted_min": round(bot_eps * 0.5, 1)}
+
+    total_eps = len(episodes)
+    return {
+        "total_episodes": total_eps,
+        "wasted_minutes": round(total_eps * 0.5, 1),
+        "wasted_meters": round(sum(e["path"] for e in episodes), 1),
+        "per_bot": per_bot,
+        "episodes": episodes[:30],
+    }
+
+
 def classify_anomalies(
     heatmap: Dict[str, Any],
     client: Dict[str, Any],
     server: Dict[str, Any],
     baseline_heatmap: Optional[Dict[str, Any]] = None,
+    pacing: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Classify runtime issues into SYSTEMIC vs LOCAL_CLUSTER vs ONE_OFF using fused evidence."""
     anomalies: List[Dict[str, Any]] = []
@@ -516,6 +599,21 @@ def classify_anomalies(
                 "evidence": f"服务端记录总死亡 {total_deaths} 次。",
             })
 
+    # 7. Back-and-Forth A<->B Pacing Oscillation
+    pace_info = pacing if pacing is not None else detect_pacing_episodes(server, client)
+    if pace_info["total_episodes"] > 0:
+        p_bots = sorted(pace_info["per_bot"].keys())
+        anomalies.append({
+            "id": "PACING_OSCILLATION",
+            "title": "大步来回折返踱步 (A ↔ B 往返振荡)",
+            "severity": "SYSTEMIC" if (len(p_bots) >= 2 or pace_info["wasted_minutes"] >= 5.0) else "LOCAL_CLUSTER",
+            "affected_bots": p_bots,
+            "hits": pace_info["total_episodes"],
+            "stuck_ticks": 0,
+            "persisted_across_runs": False,
+            "evidence": f"{len(p_bots)} 台 Bot 累计出现 {pace_info['total_episodes']} 段折返踱步（约 {pace_info['wasted_minutes']} Bot-分钟，无效往返 {pace_info['wasted_meters']:.0f}m）。",
+        })
+
     rank = {"SYSTEMIC": 0, "LOCAL_CLUSTER": 1, "ONE_OFF": 2}
     anomalies.sort(key=lambda a: (rank.get(a["severity"], 9), -a["hits"], a["id"]))
     return anomalies
@@ -552,11 +650,14 @@ def render_workbench_markdown(
     server: Dict[str, Any],
     anomalies: List[Dict[str, Any]],
     diff: Optional[Dict[str, Any]] = None,
+    pacing: Optional[Dict[str, Any]] = None,
 ) -> str:
     lines: List[str] = []
     lines.append(f"# BotSleep 全栈交叉调试工作台报告：`{heatmap['run_name']}`")
     lines.append("")
     lines.append(f"- 客户端数据源：`{', '.join(heatmap['sources'])}` | 总采样帧：`{heatmap['total_ticks']}` | 停滞率：**`{heatmap['stuck_pct']}%`** (`{heatmap['total_stuck_ticks']}`)")
+    if pacing is not None:
+        lines.append(f"- 往返踱步 (`A<->B`)：`{pacing['total_episodes']}` 段（约 **`{pacing['wasted_minutes']}` Bot-分钟**，无效折返 `{pacing['wasted_meters']:.0f}m`）")
     if server["available"]:
         lines.append(f"- 服务端真值日志：`{server['path']}`（已对齐事件 `{server['event_count']}` 条，追踪玩家 `{len(server['players'])}` 名）")
     else:
@@ -878,9 +979,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     client = load_client_traces(run_dir)
     server = load_server_events(server_path)
-    anomalies = classify_anomalies(heatmap, client, server, baseline_hm)
+    pacing = detect_pacing_episodes(server, client)
+    anomalies = classify_anomalies(heatmap, client, server, baseline_hm, pacing=pacing)
 
-    md = render_workbench_markdown(heatmap, client, server, anomalies, diff=diff)
+    md = render_workbench_markdown(heatmap, client, server, anomalies, diff=diff, pacing=pacing)
     if args.md_out:
         mp = Path(args.md_out)
         mp.parent.mkdir(parents=True, exist_ok=True)

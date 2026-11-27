@@ -93,7 +93,7 @@ HOSTILE_MOBS: FrozenSet[str] = frozenset({
     "piglin_brute", "hoglin", "zoglin", "silverfish", "warden", "breeze",
 })
 RANGED_MOBS: FrozenSet[str] = frozenset({
-    "skeleton", "stray", "bogged", "pillager", "witch", "blaze", "ghast", "breeze",
+    "skeleton", "stray", "bogged", "drowned", "pillager", "witch", "blaze", "ghast", "breeze",
 })
 PASSIVE_ANIMALS: FrozenSet[str] = frozenset({
     "cow", "pig", "sheep", "chicken", "rabbit", "mooshroom",

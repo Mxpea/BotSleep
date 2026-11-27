@@ -878,6 +878,16 @@ class HardSafetyBranch(Node):
                         return self._lower_shield(bb)
                     return Status.FAILURE
 
+        if bool(st.get("in_water") or st.get("submerged")):
+            bb.last_action_outcome = f"safety_swim_retreat:{tname}"
+            swim_res = self._swimmer.swim_step((rx, py + 0.5, rz), st)
+            if swim_res.status == "UNKNOWN":
+                bb.set("pending_frozen", True, writer=self.name)
+                return Status.RUNNING
+            ok = swim_res.status not in {"FAILED"}
+            self._last_retreat_failed = not ok
+            return Status.RUNNING
+
         move_payload: Dict[str, Any] = {"x": rx, "z": rz, "range": 1.5, "timeout_ms": 4000}
         if ry is not None:
             move_payload["y"] = ry

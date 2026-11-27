@@ -22,6 +22,7 @@ class NavigatePrimitive:
         avoid_block_breaking: Optional[Callable[[Coord3], bool]] = None,
         prefer_3d: bool = False,
         xz_only: bool = False,
+        avoid_hard_rock_without_pick: Optional[bool] = None,
     ) -> ActionOutcome:
         protected = bb.get("protected_cells")
         if protected:
@@ -44,6 +45,7 @@ class NavigatePrimitive:
             xz_only=xz_only,
             threat_positions=bb.get("active_threat_positions"),
             nearby_entities=bb.entities,
+            avoid_hard_rock_without_pick=avoid_hard_rock_without_pick,
         )
         if out.action_taken != "none":
             bb.writes_this_tick += 1

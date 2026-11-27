@@ -66,8 +66,13 @@ class ActiveGoalMount(Node):
             self._goal = None
             bb.active_goal_name = ""
             return Status.SUCCESS
-        # FAILED_LOCAL or NEEDS_AI: fall through to L4 AsyncLLMReplanNode
+        # FAILED_LOCAL or NEEDS_AI: record failed goal name, cleanly unmount so PrioritySelector
+        # cannot re-tick it next tick and preempt AsyncLLMReplanNode, then fall through to L4.
+        bb.set("last_failed_goal_name", bb.active_goal_name, writer=self.name)
         bb.last_failure_reason = bb.last_failure_reason or outcome
+        self._goal.stop(bb)
+        self._goal = None
+        bb.active_goal_name = ""
         return Status.FAILURE
 
     def stop(self, bb: Blackboard) -> None:

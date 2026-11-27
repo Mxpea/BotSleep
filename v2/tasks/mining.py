@@ -259,7 +259,7 @@ class MineResourceTask(Task):
                 elif self._mine_shaft_last_pos is not None:
                     self._mine_shaft_stalls = 0
                 self._mine_shaft_last_pos = bb.pos
-                if self._mine_shaft_stalls >= 6:
+                if self._mine_shaft_stalls >= 10:
                     self._tried_mine_shaft = True
                 else:
                     n_out = self._nav.step_to(bb, (reuse_target[0] + 0.5, float(reuse_target[1]), reuse_target[2] + 0.5), tolerance=2.0)
@@ -278,7 +278,7 @@ class MineResourceTask(Task):
                         return "RUNNING"
                     elif n_out.status == "FAILED_LOCAL":
                         self._mine_shaft_stalls += 1
-                        if self._mine_shaft_stalls >= 6:
+                        if self._mine_shaft_stalls >= 10:
                             self._tried_mine_shaft = True
                         if bb.writes_this_tick >= 1:
                             return "RUNNING"

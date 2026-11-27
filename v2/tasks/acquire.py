@@ -623,6 +623,13 @@ class AcquireItemTask(Task):
 
         batches = math.ceil(missing / rec.output_count)
 
+        # Gather all missing recipe ingredients BEFORE placing/checking crafting_table within 16m,
+        # otherwise walking >16m to mine ore flips table-proximity and causes A<->B ping-pong.
+        for ing, per_batch in rec.ingredients.items():
+            req = per_batch * batches
+            if bb.inventory_counts.get(ing, 0) < req:
+                return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, ing, req, _depth=self._depth + 1))
+
         # Ensure 3x3 crafting table exists within 16m or in inventory (NEVER duplicates existing table!)
         if rec.needs_table:
             if self._craft.find_nearby_table(bb) is None:
@@ -636,12 +643,6 @@ class AcquireItemTask(Task):
                     else:
                         self._placed_table_pos = self._craft.find_nearby_table(bb)
                 return "RUNNING" if out.status in {"OK", "PROGRESSED"} else out.status
-
-        # Check all recipe ingredients recursively
-        for ing, per_batch in rec.ingredients.items():
-            req = per_batch * batches
-            if bb.inventory_counts.get(ing, 0) < req:
-                return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, ing, req, _depth=self._depth + 1))
 
         # All prerequisites met -> execute ONE craft action
         out = self._craft.craft(bb, self.item, missing, needs_table=rec.needs_table)

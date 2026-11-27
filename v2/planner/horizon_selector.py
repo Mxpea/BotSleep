@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from typing import Dict, List, Optional
 
 from v2.bt.blackboard import Blackboard
@@ -308,11 +309,30 @@ class HorizonSelector:
         if bb.dimension == "the_nether":
             candidates.append(HorizonCandidate("explore", "nether_fortress", 1, 15, "nether_explore"))
 
-        # Pin CORPSE_RECOVERY #1, then PORTAL_GATE_READY; sort remaining by fewest steps
+        # Pin CORPSE_RECOVERY #1, then PORTAL_GATE_READY; sort remaining by fewest steps, demoting cooled-down failures
         corpse_pinned = [c for c in candidates if c.priority_tag == "CORPSE_RECOVERY"]
         portal_pinned = [c for c in candidates if c.priority_tag == "PORTAL_GATE_READY"]
         rest = [c for c in candidates if c.priority_tag not in {"CORPSE_RECOVERY", "PORTAL_GATE_READY"}]
         rest.sort(key=lambda c: c.est_steps)
+
+        raw_cd = bb.get("failed_goal_cooldowns")
+        cooldowns = raw_cd if isinstance(raw_cd, dict) else {}
+        if cooldowns:
+            now = time.monotonic()
+
+            def _is_cooled(cand: HorizonCandidate) -> bool:
+                for k in (f"{cand.goal}:{cand.item}x{cand.count}", f"{cand.goal}:{cand.item}", cand.goal):
+                    exp = cooldowns.get(k)
+                    if exp is not None and float(exp) > now:
+                        return True
+                return False
+
+            fresh = [c for c in rest if not _is_cooled(c)]
+            cooled = [c for c in rest if _is_cooled(c)]
+            if cooled and not any(c.goal == "explore" for c in fresh):
+                fresh.append(HorizonCandidate("explore", "surface", 1, 3, "COOLDOWN_EXPLORE"))
+            rest = fresh + cooled
+
         return (corpse_pinned + portal_pinned + rest)[:limit]
 
     def format_top(self, bb: Blackboard, *, limit: int = 5) -> str:

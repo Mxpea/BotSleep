@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from v2.bt.blackboard import Blackboard
 from v2.bt.kernel import Node, Status
-from v2.domain import dist2_xz
+from v2.domain import dist2_xz, dist3
 from v2.gateway.world_proxy import VirtualWorldGateway
 from v2.kernel.client import APIError
 
@@ -95,6 +95,10 @@ class SyncBlackboardNode(Node):
         self.entity_radius = int(entity_radius)
         self.max_transient_errors = max(1, int(max_transient_errors))
         self.consecutive_read_errors: int = 0
+        self._last_observed_pos: Optional[Tuple[float, float, float]] = None
+        self._last_observed_dim: Optional[str] = None
+        self._respawn_settle_until: float = 0.0
+        self._recent_death_records: List[Tuple[float, str, List[float]]] = []
 
     def update(self, bb: Blackboard) -> Status:
         try:
@@ -146,25 +150,38 @@ class SyncBlackboardNode(Node):
                         )
                     cause_l = cause.lower()
                     if not any(tag in cause_l for tag in _IRREVERSIBLE_CAUSES):
+                        corpse_active = isinstance(bb.get("active_corpse_drop"), dict)
                         inv_snap = bb.get("last_alive_inv")
                         if not isinstance(inv_snap, dict):
                             inv_snap = _snapshot_inventory(bb)
                         key_items = _classify_high_value(inv_snap)
-                        if key_items:
-                            bb.set(
-                                "active_corpse_drop",
-                                {
-                                    "id": f"death_{int(now * 1000)}_{bb.tick_index}",
-                                    "dim": bb.dimension,
-                                    "pos": fpos,
-                                    "created_at": now,
-                                    "loaded_elapsed": 0.0,
-                                    "last_tick_ts": now,
-                                    "key_items": key_items,
-                                    "cause": cause,
-                                },
-                                writer=self.name,
+                        if key_items or corpse_active:
+                            repeat_zone = sum(
+                                1
+                                for d_ts, d_dim, d_pos in self._recent_death_records
+                                if (now - d_ts) <= 600.0 and d_dim == bb.dimension and dist3(d_pos, fpos) <= 24.0
                             )
+                            self._recent_death_records.append((now, bb.dimension, fpos))
+                            if len(self._recent_death_records) > 20:
+                                self._recent_death_records = self._recent_death_records[-20:]
+                            if repeat_zone >= 1:
+                                bb.set("active_corpse_drop", None, writer=self.name)
+                                bb.log_event(self.name, "corpse_zone_abandoned", f"repeat_deaths={repeat_zone + 1}")
+                            elif key_items:
+                                bb.set(
+                                    "active_corpse_drop",
+                                    {
+                                        "id": f"death_{int(now * 1000)}_{bb.tick_index}",
+                                        "dim": bb.dimension,
+                                        "pos": fpos,
+                                        "created_at": now,
+                                        "loaded_elapsed": 0.0,
+                                        "last_tick_ts": now,
+                                        "key_items": key_items,
+                                        "cause": cause,
+                                    },
+                                    writer=self.name,
+                                )
 
         drop = bb.get("active_corpse_drop")
         if isinstance(drop, dict):
@@ -191,5 +208,19 @@ class SyncBlackboardNode(Node):
                 # Player respawned alive with empty inventory -> clear stale pre-death cache
                 bb.set("last_alive_inv", snap, writer=self.name)
 
+        now_mono = time.monotonic()
+        respawn_jumped = (
+            self._last_observed_pos is not None
+            and self._last_observed_dim == bb.dimension
+            and dist3(bb.pos, self._last_observed_pos) > 40.0
+        )
+        if died_this_tick or respawn_jumped:
+            self._respawn_settle_until = now_mono + 2.5
+        self._last_observed_pos = bb.pos
+        self._last_observed_dim = bb.dimension
+
         self.gateway.ingest_status_stance(bb.status)
+        if now_mono < self._respawn_settle_until and not bool(bb.status.get("on_ground", True)):
+            bb.last_action_outcome = "respawn_world_loading"
+            return Status.RUNNING
         return Status.SUCCESS

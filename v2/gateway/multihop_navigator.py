@@ -78,6 +78,7 @@ class MultiHopNavigator:
         self.swimmer = swimmer or SurfaceSwimExecutor(self.client, journal)
         self._stall_counts: Dict[Tuple[str, Coord3], int] = {}
         self._last_pos_for_target: Dict[Tuple[str, Coord3], Tuple[float, float, float]] = {}
+        self._best_dist_for_target: Dict[Tuple[str, Coord3], float] = {}
         self._water_steps: Dict[Tuple[str, Coord3], int] = {}
         self._water_stalls: Dict[Tuple[str, Coord3], int] = {}
         self._water_anchor_pos: Dict[Tuple[str, Coord3], Tuple[float, float, float]] = {}
@@ -94,6 +95,7 @@ class MultiHopNavigator:
         key = (dimension, target)
         self._stall_counts.pop(key, None)
         self._last_pos_for_target.pop(key, None)
+        self._best_dist_for_target.pop(key, None)
         self._reset_water_state(key)
 
     def _run_write(
@@ -115,6 +117,8 @@ class MultiHopNavigator:
                 self.gateway.invalidate_unknown_radius(dimension, unknown_center or block_coord(pos))
                 return None, NavOutcome("UNKNOWN", action_taken=endpoint, reason=err.code)
             self.journal.resolve_write(tx_id, "failed_known", details={"code": err.code})
+            if err.code == "not_ready":
+                return None, NavOutcome("PROGRESSED", action_taken="none", reason="not_ready_wait")
             return None, NavOutcome("BLOCKED", action_taken=endpoint, reason=err.code, details=err.details)
         self.journal.resolve_write(tx_id, "confirmed")
         return res, None
@@ -479,18 +483,31 @@ class MultiHopNavigator:
             self._reset_water_state(key)
             self.swimmer.reset()
             prev_pos = self._last_pos_for_target.get(key)
-            stalled = prev_pos is not None and dist3(prev_pos, cur_p) < self.MIN_PROGRESS_METERS
-            if stalled:
+            cur_metric_dist = dist2_xz(cur_p, tgt) if xz_only else dist3(cur_p, tgt)
+            best_d = self._best_dist_for_target.get(key)
+            if best_d is None:
+                best_d = (
+                    (dist2_xz(prev_pos, tgt) if xz_only else dist3(prev_pos, tgt))
+                    if prev_pos is not None
+                    else cur_metric_dist
+                )
+                self._best_dist_for_target[key] = best_d
+            no_step_move = prev_pos is not None and dist3(prev_pos, cur_p) < self.MIN_PROGRESS_METERS
+            if no_step_move or (prev_pos is not None and (best_d - cur_metric_dist) < 0.45):
+                stalled = True
                 self._stall_counts[key] = self._stall_counts.get(key, 0) + 1
                 if self._stall_counts[key] >= 6:
                     self._stall_counts[key] = 0
+                    self._best_dist_for_target.pop(key, None)
                     self.gateway.unreachable.record_failure(dim, tgt_cell, "navigate", "stalled_no_displacement")
                     self.gateway.unreachable.record_failure(dim, tgt_cell, "navigate", "stalled_no_displacement")
                     return NavOutcome("BLOCKED", action_taken="move_to", reason="stalled_no_displacement")
-            elif prev_pos is not None:
+            else:
+                self._best_dist_for_target[key] = cur_metric_dist
                 self._stall_counts[key] = 0
+                stalled = False
             self._last_pos_for_target[key] = cur_p
-            use_3d = prefer_3d or self._stall_counts.get(key, 0) >= 1
+            use_3d = prefer_3d or (self._stall_counts.get(key, 0) >= 1 and no_step_move) or (self._stall_counts.get(key, 0) >= 2)
 
         fx_b, fy_b, fz_b = block_coord(cur_p)
         underground_enclosed = fy_b < 58 and any(
@@ -535,9 +552,14 @@ class MultiHopNavigator:
                 return NavOutcome("PROGRESSED", action_taken="move_to", reason="threat_detour" if deflected else "", details=res.get("result", {}) if res else {})
             if err_out.status == "UNKNOWN":
                 return err_out
-            # move_to failed (e.g. path_not_found across leaves/wall/pit) -> escalate to 3D on next tick
-            self._stall_counts[key] = self._stall_counts.get(key, 0) + 1
-            return NavOutcome("PROGRESSED", action_taken="move_to_fallback_3d", reason=err_out.reason)
+            if err_out.reason == "not_ready_wait":
+                return err_out
+            # move_to failed (e.g. path_not_found across leaves/wall/pit) -> escalate to 3D ONCE, then report BLOCKED
+            stalls = self._stall_counts.get(key, 0) + 1
+            self._stall_counts[key] = stalls
+            if stalls == 1:
+                return NavOutcome("PROGRESSED", action_taken="move_to_fallback_3d", reason=err_out.reason)
+            return NavOutcome("BLOCKED", action_taken="move_to_fallback_3d", reason=err_out.reason)
 
         # 3) Local 3D A* step (micro-dig / pillar-up / bridge / swim / climb_shore / detour walk)
         if in_water and water_stalls >= 2:
@@ -559,9 +581,7 @@ class MultiHopNavigator:
             )
 
         enforce_rock_guard = (
-            avoid_hard_rock_without_pick
-            if avoid_hard_rock_without_pick is not None
-            else (start_cell[1] < 58)
+            True if avoid_hard_rock_without_pick is None else bool(avoid_hard_rock_without_pick)
         )
         no_pickaxe = (
             enforce_rock_guard

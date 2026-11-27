@@ -808,6 +808,14 @@ class EnterNetherTask(Task):
         if cell in {(fx, fy, fz), (fx, fy + 1, fz)}:
             out = self._nav.step_to(bb, (cell[0] + 0.5, float(fy), cell[2] + 2.5), tolerance=0.5, xz_only=True)
             return "RUNNING" if out.status in {"OK", "PROGRESSED"} else out.status
+        nbs = [
+            (cell[0] + ox, cell[1] + oy, cell[2] + oz)
+            for ox, oy, oz in ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))
+        ]
+        nb_map = self.ctx.gateway.prefetch_blocks(bb.dimension, nbs, max_age=3.0)
+        if not any((nb_e := nb_map.get(nb)) is not None and nb_e.name not in NON_SOLID_BLOCKS for nb in nbs):
+            bb.last_failure_reason = "place:no_support_precheck"
+            return "FAILED_LOCAL"
         out = self._place.place_at(bb, item, cell)
         return "RUNNING" if out.status in {"OK", "PROGRESSED"} else out.status
 

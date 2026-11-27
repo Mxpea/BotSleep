@@ -293,6 +293,9 @@ class AsyncLLMReplanNode(Node):
         self._in_flight_inv: Optional[Tuple[Tuple[str, int], ...]] = None
         self._last_stop_reason: str = ""
         self._last_discarded_info: Optional[Dict[str, Any]] = None
+        self._failed_goal_streaks: Dict[str, int] = {}
+        self._failed_goal_pos: Optional[Tuple[float, float, float]] = None
+        self._failed_goal_inv: Optional[Tuple[Tuple[str, int], ...]] = None
 
     def bump_context_version(self) -> None:
         self._context_version += 1
@@ -376,8 +379,32 @@ class AsyncLLMReplanNode(Node):
             bb.last_action_outcome = "llm_thinking_async"
             return Status.RUNNING
 
-        # 2.5) Water cooldown lock & wet-flicker hysteresis: never spam LLM replans until dry footing stabilizes
+        # Track repeated consecutive goal failures at same position/inv and cool them down in HorizonSelector
         now = time.monotonic()
+        failed_goal = str(bb.get("last_failed_goal_name") or "")
+        if failed_goal and bb.goal_status in {"NEEDS_AI", "FAILED_LOCAL"}:
+            cur_p = bb.pos
+            inv_s = self._inventory_signature(bb)
+            if (
+                self._failed_goal_pos is not None
+                and dist3(cur_p, self._failed_goal_pos) <= 3.0
+                and inv_s == self._failed_goal_inv
+            ):
+                streak = self._failed_goal_streaks.get(failed_goal, 0) + 1
+            else:
+                self._failed_goal_streaks.clear()
+                streak = 1
+            self._failed_goal_streaks[failed_goal] = streak
+            self._failed_goal_pos = cur_p
+            self._failed_goal_inv = inv_s
+            bb.set("last_failed_goal_name", "", writer=self.name)
+            if streak >= 2:
+                raw_cd = bb.get("failed_goal_cooldowns")
+                cooldowns = dict(raw_cd) if isinstance(raw_cd, dict) else {}
+                cooldowns[failed_goal] = now + 75.0
+                bb.set("failed_goal_cooldowns", cooldowns, writer=self.name)
+
+        # 2.5) Water cooldown lock & wet-flicker hysteresis: never spam LLM replans until dry footing stabilizes
         in_water = bool(bb.status.get("in_water") or bb.status.get("submerged"))
         water_lock_until = float(bb.get("water_replan_lock_until", 0.0) or 0.0)
         dry_footing_streak = int(bb.get("dry_footing_streak", 0) or 0)

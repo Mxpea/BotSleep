@@ -285,9 +285,8 @@ class MinecraftAgentClient:
         """Extract integer block coordinates from spatial action payloads for heatmap telemetry."""
         if endpoint not in {"dig", "place", "move_to", "interact"} or not isinstance(payload, dict):
             return None
-        if "x" in payload and "z" in payload:
-            x, z = payload.get("x"), payload.get("z")
-            y = payload.get("y", 0)
+        if "x" in payload and "z" in payload and "y" in payload:
+            x, y, z = payload.get("x"), payload.get("y"), payload.get("z")
             if (
                 not isinstance(x, bool) and isinstance(x, (int, float))
                 and not isinstance(y, bool) and isinstance(y, (int, float))

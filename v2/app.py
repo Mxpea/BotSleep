@@ -235,12 +235,29 @@ def run_v2_session(
             last_logged_err: Any = None
             last_comp_key: Optional[tuple] = comp_mgr.snapshot() and (comp_mgr.total_score, len(comp_mgr.completed_ids)) if comp_mgr is not None else None
             last_dim: Optional[str] = status.get("dimension")
+            reconnect_attempts = 0
 
             for tick_idx in range(max_ticks):
                 if time.monotonic() >= deadline or rt.bb.stop_requested:
                     break
                 tick_t0 = time.perf_counter()
-                tick_status = rt.tick_once()
+                try:
+                    tick_status = rt.tick_once()
+                except APIError as err:
+                    if (
+                        err.code == "not_connected"
+                        and not once
+                        and reconnect_attempts < 2
+                        and (time.monotonic() + 10.0) < deadline
+                    ):
+                        reconnect_attempts += 1
+                        time.sleep(4.0)
+                        client.login(max_wait_seconds=api_cfg["login_timeout_seconds"])
+                        rt.observe.consecutive_read_errors = 0
+                        if recorder:
+                            recorder.record("WARN", "v2.app", "RECONNECTED", {"attempt": reconnect_attempts})
+                        continue
+                    raise
                 tick_elapsed_ms = (time.perf_counter() - tick_t0) * 1000.0
                 if heatmap is not None:
                     heatmap.record_tick(

@@ -199,7 +199,12 @@ class ReturnToSurfaceTask(Task):
                     if self._surface_route_stalls >= 6:
                         self._surface_route_exhausted = True
                     else:
-                        n_out = self._nav.step_to(bb, anchor_center, tolerance=1.5)
+                        n_out = self._nav.step_to(
+                            bb,
+                            anchor_center,
+                            tolerance=1.5,
+                            avoid_hard_rock_without_pick=True,
+                        )
                         if n_out.status == "UNKNOWN":
                             return "UNKNOWN"
                         if n_out.status == "OK":
@@ -219,9 +224,34 @@ class ReturnToSurfaceTask(Task):
 
         # 2) Conservative 3-high staircase fallback (+ fast water plug before rotating direction)
         fx, fy, fz = block_coord(bb.pos)
-        if fy >= self.target_y or any(bb.inventory_counts.get(p, 0) > 0 for p in PICKAXE_TIERS):
+        has_pick = any(bb.inventory_counts.get(p, 0) > 0 for p in PICKAXE_TIERS)
+        no_pick_origin = bb.get("surface_no_pick_origin")
+        if (
+            fy >= self.target_y
+            or has_pick
+            or (no_pick_origin is not None and dist3(bb.pos, no_pick_origin) >= 5.0)
+        ):
             if int(bb.get("surface_no_pick_hard_digs", 0) or 0) != 0:
                 bb.set("surface_no_pick_hard_digs", 0, writer="surface")
+            if no_pick_origin is not None:
+                bb.set("surface_no_pick_origin", None, writer="surface")
+
+        # Without a pickaxe, scan for any open/soft-only direction before attempting hard-rock digs
+        if not has_pick:
+            for cand_i in range(len(self._dirs)):
+                idx = (self._dir_idx + cand_i) % len(self._dirs)
+                cdx, cdz = self._dirs[idx]
+                c_clr = [(fx, fy + 2, fz), (fx + cdx, fy + 2, fz + cdz), (fx + cdx, fy + 1, fz + cdz)]
+                c_map = self.ctx.gateway.prefetch_blocks(bb.dimension, c_clr, max_age=3.0)
+                if all(
+                    (e := c_map.get(cc)) is None
+                    or e.name in (AIR_BLOCKS | LEAF_BLOCKS | _SOFT_SURFACE_DIG_BLOCKS)
+                    or e.name.endswith(("_log", "_planks"))
+                    for cc in c_clr
+                ):
+                    self._dir_idx = idx
+                    break
+
         for _ in range(len(self._dirs)):
             dx, dz = self._dirs[self._dir_idx % len(self._dirs)]
             # Clear overhead at current column + headroom at next elevated step (fy+1, fy+2)
@@ -269,6 +299,7 @@ class ReturnToSurfaceTask(Task):
                     has_pick = any(bb.inventory_counts.get(p, 0) > 0 for p in PICKAXE_TIERS)
                     hard_digs = max(self._no_pick_hard_digs, int(bb.get("surface_no_pick_hard_digs", 0) or 0))
                     if not is_soft_or_wood and not has_pick and hard_digs >= 2:
+                        bb.set("surface_no_pick_origin", bb.pos, writer="surface")
                         bb.last_failure_reason = "surface_escape:no_pickaxe"
                         return "NEEDS_AI"
                     d_out = self._dig.dig_block(bb, cell, collect=False)
@@ -295,10 +326,23 @@ class ReturnToSurfaceTask(Task):
                 if scaffold is None or self.ctx.gateway.unreachable.is_blocked(bb.dimension, floor_cell, "place"):
                     self._dir_idx += 1
                     continue
+                nbs = [
+                    (floor_cell[0] + ox, floor_cell[1] + oy, floor_cell[2] + oz)
+                    for ox, oy, oz in ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))
+                ]
+                nb_map = self.ctx.gateway.prefetch_blocks(bb.dimension, nbs, max_age=3.0)
+                if not any((nb_e := nb_map.get(nb)) is not None and nb_e.name not in NON_SOLID_BLOCKS for nb in nbs):
+                    self._dir_idx += 1
+                    continue
                 p_out = self._place.place_at(bb, scaffold, floor_cell)
                 return "RUNNING" if p_out.status in {"OK", "PROGRESSED"} else p_out.status
 
-            n_out = self._nav.step_to(bb, (fx + dx + 0.5, float(fy + 1), fz + dz + 0.5), tolerance=0.6)
+            n_out = self._nav.step_to(
+                bb,
+                (fx + dx + 0.5, float(fy + 1), fz + dz + 0.5),
+                tolerance=0.6,
+                avoid_hard_rock_without_pick=True,
+            )
             if n_out.status == "FAILED_LOCAL":
                 self._dir_idx += 1
                 continue
