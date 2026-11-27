@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from v2.tasks.competition.graph import ADVANCEMENT_GRAPH
+
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -89,52 +91,35 @@ GATHER_TABLE: Dict[str, GatherEntry] = {
     "sugar_cane": GatherEntry("sugar_cane", ("sugar_cane",)),
     "clay_ball": GatherEntry("clay_ball", ("clay",)),
     "hay_block": GatherEntry("hay_block", ("hay_block",)),
+    "wheat_seeds": GatherEntry("wheat_seeds", ("short_grass", "tall_grass", "wheat")),
+    "quartz": GatherEntry("quartz", ("nether_quartz_ore",), min_pickaxe="wooden_pickaxe"),
+    "glowstone_dust": GatherEntry("glowstone_dust", ("glowstone",)),
+    "pumpkin": GatherEntry("pumpkin", ("pumpkin",)),
+    "amethyst_shard": GatherEntry("amethyst_shard", ("amethyst_cluster",), min_pickaxe="wooden_pickaxe"),
+    "sweet_berries": GatherEntry("sweet_berries", ("sweet_berry_bush",)),
+    "cobweb": GatherEntry("cobweb", ("cobweb",)),
 }
 
-# Maps competition advancement IDs to concrete item/goal routes solvable by v2 tasks!
+MOB_DROP_TABLE: Dict[str, Tuple[str, ...]] = {
+    "white_wool": ("sheep",),
+    "string": ("spider", "cave_spider"),
+    "feather": ("chicken",),
+    "leather": ("cow", "mooshroom", "horse"),
+    "bone": ("skeleton", "stray", "bogged"),
+    "glow_ink_sac": ("glow_squid",),
+    "ink_sac": ("squid",),
+    "rotten_flesh": ("zombie", "husk", "drowned"),
+    "spider_eye": ("spider",),
+    "gunpowder": ("creeper",),
+    "cod": ("cod",),
+    "salmon": ("salmon",),
+    "blaze_rod": ("blaze",),
+}
+
+# Maps competition advancement IDs to concrete (handler, target) routes compiled from ADVANCEMENT_GRAPH!
 ADVANCEMENT_GOAL_ROUTES: Dict[str, Tuple[str, str]] = {
-    # (kind, target) where kind in {"acquire", "enter_nether", "avoid_vibration", "shelter", "equip", "hunt", "smelt"}
-    "minecraft:story/mine_stone": ("acquire", "cobblestone"),
-    "minecraft:story/upgrade_tools": ("acquire", "stone_pickaxe"),
-    "minecraft:story/smelt_iron": ("acquire", "iron_ingot"),
-    "minecraft:story/iron_tools": ("acquire", "iron_pickaxe"),
-    "minecraft:story/obtain_armor": ("acquire", "iron_chestplate"),
-    "minecraft:story/deflect_arrow": ("acquire", "shield"),
-    "minecraft:story/lava_bucket": ("acquire", "lava_bucket"),
-    "minecraft:story/form_obsidian": ("acquire", "obsidian"),
-    "minecraft:story/enter_the_nether": ("enter_nether", "the_nether"),
-    "minecraft:story/mine_diamond": ("acquire", "diamond"),
-    "minecraft:story/shiny_gear": ("acquire", "diamond_chestplate"),
-    "minecraft:story/enchant_item": ("acquire", "enchanting_table"),
-    "minecraft:adventure/sleep_in_bed": ("acquire", "white_bed"),
-    "minecraft:adventure/shoot_arrow": ("acquire", "bow"),
-    "minecraft:adventure/ol_betsy": ("acquire", "crossbow"),
-    "minecraft:adventure/spyglass_at_parrot": ("acquire", "spyglass"),
-    "minecraft:adventure/lightning_rod_with_villager_no_fire": ("acquire", "lightning_rod"),
-    "minecraft:adventure/brush_armadillo": ("acquire", "brush"),
-    "minecraft:adventure/avoid_vibration": ("avoid_vibration", "sculk_sensor"),
-    "minecraft:adventure/crafters_crafting_crafters": ("acquire", "crafter"),
-    "minecraft:husbandry/plant_seed": ("acquire", "wheat_seeds"),
-    "minecraft:husbandry/make_a_sign_glow": ("acquire", "oak_sign"),
-    "minecraft:husbandry/balanced_diet": ("acquire", "bread"),
-    "minecraft:husbandry/obtain_netherite_hoe": ("acquire", "diamond_hoe"),
-    "minecraft:husbandry/axolotl_in_a_bucket": ("acquire", "water_bucket"),
-    "minecraft:husbandry/tactical_fishing": ("acquire", "water_bucket"),
-    "minecraft:husbandry/wax_on": ("acquire", "copper_block"),
-    "minecraft:nether/obtain_crying_obsidian": ("acquire", "obsidian"),
-    "minecraft:nether/distract_piglin": ("acquire", "gold_ingot"),
-    "minecraft:nether/use_lodestone": ("acquire", "compass"),
-    "minecraft:nether/brew_potion": ("acquire", "glass_bottle"),
-    "minecraft:nether/ride_strider": ("acquire", "fishing_rod"),
-    "minecraft:nether/get_wither_skull": ("acquire", "iron_sword"),
-    "minecraft:nether/obtain_blaze_rod": ("acquire", "iron_sword"),
-    "minecraft:nether/charge_respawn_anchor": ("acquire", "obsidian"),
-    "minecraft:adventure/kill_a_mob": ("acquire", "stone_sword"),
-    "minecraft:adventure/trade": ("acquire", "emerald"),
-    "minecraft:adventure/sniper_duel": ("acquire", "bow"),
-    "minecraft:adventure/honey_block_slide": ("acquire", "glass_bottle"),
-    "minecraft:story/follow_ender_eye": ("acquire", "ender_eye"),
-    "minecraft:story/enter_the_end": ("enter_nether", "the_nether"),
+    aid: (spec.handler, spec.target)
+    for aid, spec in ADVANCEMENT_GRAPH.items()
 }
 
 
@@ -146,6 +131,7 @@ class TaskCatalogue:
         self.recipes: Dict[str, List[RecipeEntry]] = {}
         self.smelting: Dict[str, SmeltEntry] = dict(SMELT_TABLE)
         self.gathering: Dict[str, GatherEntry] = dict(GATHER_TABLE)
+        self.mob_drops: Dict[str, Tuple[str, ...]] = dict(MOB_DROP_TABLE)
         self._load_recipes()
 
     def _load_recipes(self) -> None:
@@ -231,10 +217,10 @@ class TaskCatalogue:
         return min(variants, key=score)
 
     def can_produce(self, item: str, *, _seen: Optional[set[str]] = None) -> bool:
-        """Check whether an item is producible through gathering, smelting, fluids, or recipes."""
+        """Check whether an item is producible through gathering, mob drops, smelting, fluids, or recipes."""
         if item in {"water_bucket", "lava_bucket"}:
             return self.can_produce("bucket", _seen=_seen)
-        if item in self.gathering:
+        if item in self.gathering or item in self.mob_drops:
             return True
         seen = set() if _seen is None else set(_seen)
         if item in seen:
@@ -269,6 +255,8 @@ class TaskCatalogue:
             if g.min_pickaxe and inventory_counts.get(g.min_pickaxe, 0) < 1:
                 tool_cost = self.estimate_steps(g.min_pickaxe, 1, inventory_counts, _depth=_depth + 1)
             return tool_cost + need * 2
+        if item in self.mob_drops:
+            return need * 12
         if item in self.smelting:
             sm = self.smelting[item]
             return (

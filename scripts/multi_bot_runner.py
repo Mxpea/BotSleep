@@ -130,10 +130,13 @@ def build_bot_config(
     survival = cfg.setdefault("survival", {})
     survival["state_dir"] = str(state_dir)
     survival["world_id"] = f"{run_id}_bot_{index}"
+    comp = survival.setdefault("competition", {})
     if max_runtime_seconds is not None:
         survival["max_runtime_seconds"] = int(max_runtime_seconds)
+        comp["max_seconds"] = int(max_runtime_seconds)
     if max_steps is not None:
         survival["max_steps"] = int(max_steps)
+        comp["max_steps"] = int(max_steps)
 
     debug = cfg.setdefault("debug", {})
     recorder = debug.setdefault("flight_recorder", {})

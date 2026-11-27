@@ -731,10 +731,27 @@ class VirtualMcApiServer:
                 ent = next((e for e in self.entities if e["id"] == eid), None)
                 if ent is None:
                     raise SimAPIError("no_such_entity", f"entity {eid} not visible")
+                item = payload.get("item")
                 if ent["name"].endswith("_boat") or ent["name"] in {"boat", "bamboo_raft"}:
                     self.in_vehicle = {"id": eid, "name": ent["name"]}
                     return {"mounted": ent["name"], "entity_id": eid}
-                return {"interacted_entity": eid}
+                if item == "shears" and ent["name"] == "sheep":
+                    self.give("white_wool", 2)
+                    return {"sheared": "sheep", "gained": {"white_wool": 2}}
+                if item == "water_bucket" and ent["name"] in {"cod", "salmon", "tropical_fish", "pufferfish", "axolotl"}:
+                    if not self.consume("water_bucket", 1):
+                        raise SimAPIError("missing_item", "no water_bucket")
+                    bname = f"{ent['name']}_bucket"
+                    self.give(bname, 1)
+                    self.entities = [e for e in self.entities if e["id"] != eid]
+                    return {"scooped": bname, "entity_id": eid}
+                if item:
+                    if self.inventory_counts.get(str(item), 0) < 1:
+                        raise SimAPIError("missing_item", f"no {item}")
+                    self.consume(str(item), 1)
+                elif ent["name"] in {"horse", "donkey"}:
+                    self.in_vehicle = {"id": eid, "name": ent["name"]}
+                return {"interacted_entity": eid, "item": item}
             raw_pos = payload.get("pos")
             item = payload.get("item")
             if raw_pos is None:
@@ -846,6 +863,19 @@ class VirtualMcApiServer:
                 self.push_event("spawn_bound", pos=[tx, ty, tz])
                 return {"slept": False, "interacted": True, "daytime": True}
 
+            if item and item.endswith("_hoe") and blk in {"dirt", "grass_block"}:
+                self.set_block(tx, ty, tz, "farmland")
+                return {"tilled": True, "pos": [tx, ty, tz]}
+            if item in {"wheat_seeds", "carrot", "potato", "beetroot_seeds"} and blk == "farmland":
+                if not self.consume(item, 1):
+                    raise SimAPIError("missing_item", f"no {item}")
+                self.set_block(tx, ty + 1, tz, "wheat")
+                return {"planted": item, "pos": [tx, ty + 1, tz]}
+            if item in {"glow_ink_sac", "compass", "honeycomb", "glass_bottle", "glowstone", "book"}:
+                if not self.consume(item, 1):
+                    raise SimAPIError("missing_item", f"no {item}")
+                return {"interacted": blk, "used": item, "pos": [tx, ty, tz]}
+
             return {"interacted": blk, "pos": [tx, ty, tz]}
 
         if ep == "craft":
@@ -937,24 +967,86 @@ class VirtualMcApiServer:
             raise SimAPIError("bad_args", "unsupported window target")
 
         if ep == "window/view":
-            pos = _resolve_window_pos(payload.get("target") or {})
+            tgt = payload.get("target") or {}
+            if tgt.get("entity_id") is not None:
+                eid = int(tgt["entity_id"])
+                ent = next((e for e in self.entities if e["id"] == eid), None)
+                if ent is None or ent["name"] not in {"villager", "wandering_trader"}:
+                    raise SimAPIError("no_window", "entity has no merchant window")
+                return {
+                    "window": "merchant",
+                    "target": {"entity_id": eid},
+                    "options": getattr(self, "merchant_options", [
+                        {"index": 0, "give": [{"name": "stick", "count": 4}], "get": {"name": "emerald", "count": 1}, "uses": 0, "max_uses": 16, "available": True},
+                    ]),
+                }
+            pos = _resolve_window_pos(tgt)
             c = self.containers.get(pos)
             if c is None:
                 blk = self.block_name(*pos)
                 if blk == "furnace":
                     c = {"type": "furnace", "input": None, "fuel": None, "output": None, "remaining_ticks": 0}
                     self.containers[pos] = c
-                elif blk in {"chest", "barrel"}:
+                elif blk in {"chest", "barrel", "crafter"}:
                     c = {"type": blk, "items": {}}
+                    self.containers[pos] = c
+                elif blk == "enchanting_table":
+                    c = {"type": "enchantment", "item": None, "lapis": None}
                     self.containers[pos] = c
                 else:
                     raise SimAPIError("not_container", f"{blk} is not a container")
             return _describe_container(c, pos)
 
         if ep == "window/act":
-            pos = _resolve_window_pos(payload.get("target") or {})
+            tgt = payload.get("target") or {}
             ops = payload.get("ops", [])
-            c = self.containers.setdefault(pos, {"type": self.block_name(*pos), "input": None, "fuel": None, "output": None, "items": {}, "remaining_ticks": 0})
+            if tgt.get("entity_id") is not None:
+                eid = int(tgt["entity_id"])
+                opts = getattr(self, "merchant_options", [
+                    {"index": 0, "give": [{"name": "stick", "count": 4}], "get": {"name": "emerald", "count": 1}, "uses": 0, "max_uses": 16, "available": True},
+                ])
+                done_m: List[Dict[str, Any]] = []
+                for op in ops:
+                    if op.get("op") == "select":
+                        idx = int(op.get("option", 0))
+                        if not 0 <= idx < len(opts):
+                            raise SimAPIError("bad_option", "bad merchant option")
+                        off = opts[idx]
+                        for g in off.get("give", []):
+                            if not self.consume(g["name"], int(g.get("count", 1))):
+                                raise SimAPIError("option_unavailable", "missing payment")
+                        get_item = off.get("get") or {}
+                        if get_item.get("name"):
+                            self.give(get_item["name"], int(get_item.get("count", 1)))
+                        done_m.append({"op": "select", "option": idx})
+                return {"done": done_m, "window": {"window": "merchant"}}
+            pos = _resolve_window_pos(tgt)
+            blk = self.block_name(*pos)
+            c = self.containers.setdefault(pos, {"type": "enchantment" if blk == "enchanting_table" else blk, "input": None, "fuel": None, "output": None, "items": {}, "remaining_ticks": 0})
+            if c.get("type") == "enchantment" or blk == "enchanting_table":
+                held_item: Optional[str] = None
+                done_e: List[Dict[str, Any]] = []
+                for op in ops:
+                    action = op.get("op")
+                    if action == "put":
+                        sec = op.get("to")
+                        if sec not in {"item", "lapis"}:
+                            raise SimAPIError("bad_section", f'section "{sec}" not in enchantment; have: item, lapis')
+                        if not self.consume(op["item"], int(op.get("count", 1))):
+                            raise SimAPIError("missing_item", f"missing {op['item']}")
+                        if sec == "item":
+                            held_item = op["item"]
+                        done_e.append({"op": "put", "to": sec})
+                    elif action == "select":
+                        done_e.append({"op": "select", "option": int(op.get("option", 0))})
+                    elif action == "take":
+                        sec = op.get("from")
+                        if sec != "item" or not held_item:
+                            raise SimAPIError("no_output", "nothing in enchantment item slot")
+                        self.give(held_item, 1)
+                        done_e.append({"op": "take", "from": "item", "item": held_item})
+                        held_item = None
+                return {"done": done_e, "window": {"window": "enchantment"}}
             done: List[Dict[str, Any]] = []
             for op in ops:
                 action = op.get("op")

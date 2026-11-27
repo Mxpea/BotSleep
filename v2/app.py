@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from v2.bt import BTRuntime, Status
 from v2.gateway import VirtualWorldGateway
@@ -27,6 +27,120 @@ from v2.planner import (
 from v2.primitives import PrimitiveContext
 from v2.tasks import TaskCatalogue
 from v2.tasks.competition import CompetitionManager
+
+
+_RECON_ENTITIES = frozenset({
+    "villager", "wandering_trader", "sheep", "cow", "chicken", "pig", "wolf", "cat",
+    "horse", "donkey", "cod", "salmon", "tropical_fish", "pufferfish", "glow_squid",
+    "skeleton", "stray", "zombie", "spider", "piglin", "armadillo", "goat", "parrot", "axolotl",
+})
+_STATIC_LANDMARK_ENTITIES = frozenset({"villager", "wandering_trader", "glow_squid"})
+
+
+def update_island_recon(bb: Any, gateway: VirtualWorldGateway, *, now: Optional[float] = None) -> Dict[str, List[Dict[str, Any]]]:
+    """Zero-HTTP passive landmark recorder tracking nearby useful mobs & cached features in bb['island_recon']."""
+    ts = time.time() if now is None else float(now)
+    recon: Dict[str, List[Dict[str, Any]]] = dict(bb.get("island_recon") or {})
+    dim = bb.dimension
+    for ent in bb.entities:
+        if not isinstance(ent, dict):
+            continue
+        name = str(ent.get("name") or "")
+        if name not in _RECON_ENTITIES:
+            continue
+        epos = ent.get("pos")
+        if not isinstance(epos, (list, tuple)) or len(epos) != 3:
+            continue
+        p = [round(float(epos[0]), 1), round(float(epos[1]), 1), round(float(epos[2]), 1)]
+        rows = list(recon.get(name) or [])
+        deduped = False
+        for row in rows:
+            rp = row.get("pos")
+            if isinstance(rp, list) and len(rp) == 3:
+                if abs(rp[0] - p[0]) + abs(rp[1] - p[1]) + abs(rp[2] - p[2]) <= 8.0 and row.get("dim") == dim:
+                    row["pos"] = p
+                    row["ts"] = ts
+                    deduped = True
+                    break
+        if not deduped:
+            rows.append({"dim": dim, "pos": p, "ts": ts})
+            if len(rows) > 4:
+                rows = rows[-4:]
+            if name in _STATIC_LANDMARK_ENTITIES and gateway.db is not None:
+                gateway.db.save_landmark(dim, name, f"{name}_{int(p[0])}_{int(p[1])}_{int(p[2])}", (int(p[0]), int(p[1]), int(p[2])))
+        recon[name] = rows
+    bb.set("island_recon", recon, writer="island_recon")
+    return recon
+
+
+class CompetitionSupervisor:
+    """Tracks per-task progress timeouts and emits structured competition telemetry."""
+
+    def __init__(self, comp_mgr: CompetitionManager, *, start_mono: float, recorder: Optional[FlightRecorder] = None) -> None:
+        self.comp_mgr = comp_mgr
+        self.start_mono = float(start_mono)
+        self.recorder = recorder
+        self.active_id: Optional[str] = comp_mgr.active_task_id
+        self.started_mono: float = float(start_mono)
+        self.last_progress_mono: float = float(start_mono)
+        self.last_inv_sig: Tuple[Tuple[str, int], ...] = ()
+        self.last_completed: set[str] = set(comp_mgr.completed_ids)
+
+    def step(self, rt: BTRuntime, client: MinecraftAgentClient, *, now_mono: Optional[float] = None) -> Optional[str]:
+        now = time.monotonic() if now_mono is None else float(now_mono)
+        bb = rt.bb
+        cur_id = self.comp_mgr.active_task_id
+        if cur_id != self.active_id:
+            self.active_id = cur_id
+            self.started_mono = now
+            self.last_progress_mono = now
+            if cur_id is not None and self.recorder:
+                self.recorder.record("INFO", "v2.competition", "COMPETITION_SELECT", {
+                    "task_id": cur_id,
+                    "elapsed_s": round(now - self.start_mono, 1),
+                    "score": self.comp_mgr.total_score,
+                })
+
+        inv_sig = tuple(sorted((k, int(v)) for k, v in bb.inventory_counts.items() if v > 0))
+        prev_map = dict(self.last_inv_sig)
+        if any(cnt > prev_map.get(k, 0) for k, cnt in inv_sig) or self.comp_mgr.completed_ids != self.last_completed:
+            self.last_progress_mono = now
+        self.last_inv_sig = inv_sig
+
+        if self.active_id is not None and not bb.get("pending_frozen"):
+            timeout_s = self.comp_mgr.get_timeout_seconds(self.active_id)
+            total_elapsed = now - self.started_mono
+            idle_elapsed = now - self.last_progress_mono
+            if total_elapsed > timeout_s * 1.45 or idle_elapsed > timeout_s:
+                timed_out_id = self.active_id
+                res = self.comp_mgr.force_exit_task("task_timeout_stoploss")
+                rt.goal_mount.mount(None, bb)
+                bb.last_failure_reason = f"comp_timeout:{timed_out_id}"
+                self.active_id = None
+                if self.recorder:
+                    self.recorder.record("WARN", "v2.competition", "COMPETITION_TIMEOUT", {
+                        "task_id": timed_out_id,
+                        "idle_s": round(idle_elapsed, 1),
+                        "total_s": round(total_elapsed, 1),
+                        "defer_seconds": res.get("defer_seconds"),
+                    })
+                return f"timeout:{timed_out_id}"
+        return None
+
+    def flush_score_delta(self, *, now_mono: Optional[float] = None) -> Optional[Tuple[str, ...]]:
+        now = time.monotonic() if now_mono is None else float(now_mono)
+        newly = tuple(sorted(self.comp_mgr.completed_ids - self.last_completed))
+        if not newly:
+            return None
+        self.last_completed = set(self.comp_mgr.completed_ids)
+        self.last_progress_mono = now
+        if self.recorder:
+            self.recorder.record("INFO", "v2.competition", "COMPETITION_SCORE", {
+                **self.comp_mgr.snapshot(),
+                "newly_completed": list(newly),
+                "elapsed_s": round(now - self.start_mono, 1),
+            })
+        return newly
 
 
 def _build_brain(config: Dict[str, Any], recorder: Optional[FlightRecorder], *, scope_id: str) -> Optional[OpenAIBrain]:
@@ -233,13 +347,19 @@ def run_v2_session(
 
             last_logged_resp = None
             last_logged_err: Any = None
-            last_comp_key: Optional[tuple] = comp_mgr.snapshot() and (comp_mgr.total_score, len(comp_mgr.completed_ids)) if comp_mgr is not None else None
+            comp_sup = (
+                CompetitionSupervisor(comp_mgr, start_mono=time.monotonic(), recorder=recorder)
+                if comp_mgr is not None
+                else None
+            )
             last_dim: Optional[str] = status.get("dimension")
             reconnect_attempts = 0
 
             for tick_idx in range(max_ticks):
-                if time.monotonic() >= deadline or rt.bb.stop_requested:
+                now_loop = time.monotonic()
+                if now_loop >= deadline or rt.bb.stop_requested:
                     break
+                rt.bb.set("competition_remaining_seconds", max(0.0, deadline - now_loop), writer="app")
                 tick_t0 = time.perf_counter()
                 try:
                     tick_status = rt.tick_once()
@@ -276,23 +396,29 @@ def run_v2_session(
                 if chat_dbg is not None:
                     chat_dbg.process_events(rt.bb)
 
-                if comp_mgr is not None and (rt.bb.goal_status == "COMPLETED" or tick_idx % 20 == 19):
-                    try:
-                        comp_mgr.sync_server_advancements(client)
-                    except APIError:
-                        pass
-                    if rt.bb.goal_status == "COMPLETED" and comp_mgr.active_task_id is not None:
-                        # Subgoal completed on client without earning its server advancement (e.g. shield craft before block): defer cleanly so bot advances!
-                        comp_mgr.force_exit_task("subgoal_completed_without_server_advancement")
-                    comp_key = (comp_mgr.total_score, len(comp_mgr.completed_ids))
-                    if comp_key != last_comp_key:
-                        last_comp_key = comp_key
-                        if recorder:
-                            recorder.record("INFO", "v2.competition", "COMPETITION_SCORE", comp_mgr.snapshot())
-                        print(
-                            f"[v2] [{client.username}] score={comp_mgr.total_score} done={len(comp_mgr.completed_ids)} active={comp_mgr.active_task_id}",
-                            flush=True,
-                        )
+                if tick_idx % 10 == 0:
+                    update_island_recon(rt.bb, gateway)
+
+                if comp_mgr is not None and comp_sup is not None:
+                    comp_sup.step(rt, client)
+                    if rt.bb.goal_status == "COMPLETED" or tick_idx % 20 == 19:
+                        was_active = comp_mgr.active_task_id
+                        try:
+                            comp_mgr.sync_server_advancements(client)
+                        except APIError:
+                            pass
+                        if was_active is not None and comp_mgr.active_task_id is None:
+                            # Server already confirmed the active advancement -> immediately unmount & pivot!
+                            rt.goal_mount.mount(None, rt.bb)
+                        elif rt.bb.goal_status == "COMPLETED" and comp_mgr.active_task_id is not None:
+                            # Subgoal completed on client without earning its server advancement: defer cleanly so bot advances!
+                            comp_mgr.force_exit_task("subgoal_completed_without_server_advancement")
+                        newly = comp_sup.flush_score_delta()
+                        if newly:
+                            print(
+                                f"[v2] [{client.username}] score={comp_mgr.total_score} +{list(newly)} done={len(comp_mgr.completed_ids)} active={comp_mgr.active_task_id}",
+                                flush=True,
+                            )
 
                 if replan_node is not None:
                     resp = replan_node.last_response

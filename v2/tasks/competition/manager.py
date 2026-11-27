@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Dict, List, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Mapping, Optional
 
 from v2.kernel.client import MinecraftAgentClient
 from v2.kernel.storage import UnifiedWorldDB
 from v2.primitives.base import PrimitiveContext
-from v2.tasks.acquire import AcquireItemTask
 from v2.tasks.base import Task
-from v2.tasks.catalogue import TaskCatalogue
+from v2.tasks.competition.graph import get_advancement_spec
 from v2.tasks.competition.rules import CompetitionEntry, scoring_catalog
-from v2.tasks.nether_portal import EnterNetherTask
+
+if TYPE_CHECKING:
+    from v2.tasks.catalogue import TaskCatalogue
 
 
 COMPETITION_TOOL_NAMES = (
@@ -44,6 +45,7 @@ class CompetitionManager:
         self.active_task_id: Optional[str] = None
         self.progress_note: str = ""
         self.deferred_until: Dict[str, float] = {}
+        self.failure_counts: Dict[str, int] = {}
         self.ended: bool = False
         self.end_reason: str = ""
         if reset:
@@ -67,6 +69,9 @@ class CompetitionManager:
         raw_def = saved.get("deferred_until")
         if isinstance(raw_def, dict):
             self.deferred_until = {str(k): float(v) for k, v in raw_def.items() if isinstance(v, (int, float))}
+        raw_fail = saved.get("failure_counts")
+        if isinstance(raw_fail, dict):
+            self.failure_counts = {str(k): max(0, int(v)) for k, v in raw_fail.items() if isinstance(v, (int, float))}
         self.ended = bool(saved.get("ended", False))
         self.end_reason = str(saved.get("end_reason") or "")
 
@@ -79,6 +84,7 @@ class CompetitionManager:
                 adv_id = row["id"]
                 if adv_id in self.catalog:
                     self.completed_ids.add(adv_id)
+                    self.failure_counts.pop(adv_id, None)
         if self.active_task_id in self.completed_ids:
             self.active_task_id = None
         self._persist()
@@ -86,6 +92,10 @@ class CompetitionManager:
 
     def is_executable(self, adv_id: str) -> bool:
         return adv_id in self.catalog and self.catalogue.advancement_route(adv_id) is not None
+
+    def get_timeout_seconds(self, adv_id: str) -> float:
+        spec = get_advancement_spec(adv_id)
+        return float(spec.timeout_seconds) if spec is not None else 240.0
 
     def build_task(self, ctx: PrimitiveContext, adv_id: str) -> Optional[Task]:
         if adv_id not in self.catalog:
@@ -95,13 +105,37 @@ class CompetitionManager:
             return None
         kind, target = route
         if kind == "enter_nether":
+            from v2.tasks.nether_portal import EnterNetherTask
+
             return EnterNetherTask(ctx, self.catalogue)
         if kind == "avoid_vibration":
             from v2.tasks.loot import AvoidVibrationTask
 
             return AvoidVibrationTask(ctx)
         if kind == "acquire":
+            from v2.tasks.acquire import AcquireItemTask
+
             return AcquireItemTask(ctx, self.catalogue, target, 1)
+        from v2.tasks.advancement_actions import (
+            CombatAndRangedAdvTask,
+            InteractBlockAdvTask,
+            InteractEntityAdvTask,
+            StructureBuildAdvTask,
+            UseItemAndFishAdvTask,
+            WindowActionAdvTask,
+        )
+        if kind == "interact_block":
+            return InteractBlockAdvTask(ctx, self.catalogue, target)
+        if kind == "interact_entity":
+            return InteractEntityAdvTask(ctx, self.catalogue, target)
+        if kind == "use_item":
+            return UseItemAndFishAdvTask(ctx, self.catalogue, target)
+        if kind == "combat_ranged":
+            return CombatAndRangedAdvTask(ctx, self.catalogue, target)
+        if kind == "window_action":
+            return WindowActionAdvTask(ctx, self.catalogue, target)
+        if kind == "structure_build":
+            return StructureBuildAdvTask(ctx, self.catalogue, target)
         return None
 
     # ---- Exact 5 Competition Lifecycle Tools ----
@@ -143,11 +177,14 @@ class CompetitionManager:
         target = self.active_task_id
         if target is None:
             return {"ok": False, "error": "no_active_task"}
-        self.deferred_until[target] = time.time() + self.defer_seconds
+        fails = self.failure_counts.get(target, 0) + 1
+        self.failure_counts[target] = fails
+        backoff = min(1800.0, self.defer_seconds * float(2 ** max(0, fails - 1)))
+        self.deferred_until[target] = time.time() + backoff
         self.active_task_id = None
         self.progress_note = reason
         self._persist()
-        return {"ok": True, "exited": target, "reason": reason}
+        return {"ok": True, "exited": target, "reason": reason, "fails": fails, "defer_seconds": backoff}
 
     def end_competition(self, reason: str = "completed") -> Dict[str, Any]:
         self.ended = True
@@ -189,6 +226,7 @@ class CompetitionManager:
                 "active_task_id": self.active_task_id,
                 "progress_note": self.progress_note,
                 "deferred_until": self.deferred_until,
+                "failure_counts": self.failure_counts,
                 "ended": self.ended,
                 "end_reason": self.end_reason,
             })

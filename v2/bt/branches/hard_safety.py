@@ -793,6 +793,41 @@ class HardSafetyBranch(Node):
         self._drown_stalls = 0
         self._drown_last_pos = None
 
+        # 2b) Void-island cliff/edge guard: avoid stepping off sheer drop into void_air
+        if (
+            not st.get("in_water")
+            and not st.get("submerged")
+            and not bool(bb.get("in_sealed_burrow", False))
+        ):
+            bx, by, bz = block_coord(bb.pos)
+            # Check up to 6 blocks down from cached blocks (zero forced RPCs on steady ground)
+            below_col = [self.gateway.get_block(bb.dimension, (bx, by - dy, bz), allow_fetch=False) for dy in range(1, 7)]
+            is_void_or_cliff = all(b is not None and b.name in AIR_BLOCKS for b in below_col) and (
+                not bool(st.get("on_ground", True))
+                or by <= -59
+                or any(b is not None and b.name == "void_air" for b in below_col)
+            )
+            if is_void_or_cliff:
+                safe_nb = None
+                for dx, dz in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                    nb_below = self.gateway.get_block(bb.dimension, (bx + dx, by - 1, bz + dz), allow_fetch=False)
+                    nb_feet = self.gateway.get_block(bb.dimension, (bx + dx, by, bz + dz), allow_fetch=False)
+                    if (
+                        nb_below is not None and nb_below.name not in (NON_SOLID_BLOCKS | HAZARD_BLOCKS)
+                        and (nb_feet is None or nb_feet.name in NON_SOLID_BLOCKS)
+                    ):
+                        safe_nb = (bx + dx + 0.5, float(by), bz + dz + 0.5)
+                        break
+                if safe_nb is not None:
+                    bb.last_action_outcome = "safety_void_edge_guard"
+                    status_ret, _, _ = self._write_action(
+                        bb,
+                        "move_to",
+                        {"x": safe_nb[0], "y": safe_nb[1], "z": safe_nb[2], "range": 0.8},
+                        lambda _s=safe_nb: self.gateway.client.move_to(x=_s[0], y=_s[1], z=_s[2], range=0.8, timeout_ms=2500),
+                    )
+                    return status_ret
+
         # 3) Sealed-burrow exit check (dawn arrived without close hostiles OR healed >= 14.0 and safe)
         tod = int(st.get("time_of_day", 1000)) % 24000
         is_night = bb.dimension == "overworld" and (12541 <= tod <= 23458)

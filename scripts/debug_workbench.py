@@ -21,6 +21,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.analyze_heatmap import diff_runs, load_run_heatmaps, normalize_fail  # noqa: E402
+from v2.tasks.competition.rules import scoring_catalog  # noqa: E402
 
 DEFAULT_MC_PLUGINS_RUNS = (
     REPO_ROOT.parent / "minecraft-server" / "plugins" / "BotSleepDebug" / "runs"
@@ -245,6 +246,9 @@ def load_client_traces(run_dir: Path) -> Dict[str, Any]:
         flight_files = sorted(bdir.glob("v2_flight_*.jsonl"))
         player_name = bot_id
         timeline: List[Dict[str, Any]] = []
+        comp_selects = 0
+        comp_timeouts = 0
+        comp_scores: List[Dict[str, Any]] = []
         llm_http = 0
         llm_mounted = 0
         llm_discarded = 0
@@ -289,6 +293,12 @@ def load_client_traces(run_dir: Path) -> Dict[str, Any]:
                                 "ts_ms": ts_ms, "ts_fmt": _fmt_ts_ms(ts_ms), "source": "client_llm",
                                 "player": player_name, "event": et, "summary": _summarize_client_event(et, d), "data": d,
                             })
+                    elif et == "COMPETITION_SELECT":
+                        comp_selects += 1
+                    elif et == "COMPETITION_TIMEOUT":
+                        comp_timeouts += 1
+                    elif et == "COMPETITION_SCORE":
+                        comp_scores.append({"ts_ms": ts_ms, **d})
                     elif et == "TICK_SUMMARY":
                         pos = d.get("pos") or [0, 64, 0]
                         if isinstance(pos, list) and len(pos) >= 3:
@@ -370,6 +380,9 @@ def load_client_traces(run_dir: Path) -> Dict[str, Any]:
             "stalled_hits": stalled_hits,
             "descents": len(descents),
             "distinct_shaft_sites": len(clusters),
+            "comp_selects": comp_selects,
+            "comp_timeouts": comp_timeouts,
+            "comp_scores": comp_scores,
             "timeline": timeline,
         }
 
@@ -644,6 +657,65 @@ def _merge_aligned_timelines(client: Dict[str, Any], server: Dict[str, Any], *, 
     return merged
 
 
+def summarize_competition_scores(heatmap: Dict[str, Any], client: Dict[str, Any], server: Dict[str, Any]) -> Dict[str, Any]:
+    """Compute official server-advancement competition scores, PPM, and Top-3 vs Bottom-3 feature deltas."""
+    catalog = scoring_catalog()
+    rows: List[Dict[str, Any]] = []
+    hm_bots = {b["bot_id"]: b for b in heatmap.get("bots", [])}
+    for bid, cb in sorted(client["bots"].items()):
+        pname = cb["player"]
+        sp = server.get("players", {}).get(pname) or {}
+        srv_advs = sp.get("advancements") or []
+        scored_ids: List[str] = []
+        seen: set[str] = set()
+        t_min = None
+        t_max = None
+        for ev in srv_advs:
+            ts = _safe_int(ev.get("ts_ms"))
+            if ts > 0:
+                t_min = ts if t_min is None else min(t_min, ts)
+                t_max = ts if t_max is None else max(t_max, ts)
+            raw_k = str(ev.get("key") or "")
+            aid = raw_k if ":" in raw_k else f"minecraft:{raw_k}"
+            if aid in catalog and aid not in seen:
+                seen.add(aid)
+                scored_ids.append(aid)
+        raw_score = sum(catalog[aid].points for aid in scored_ids)
+        # Prefer client score checkpoint if server events omitted key
+        cs_list = cb.get("comp_scores") or []
+        if cs_list and raw_score == 0:
+            raw_score = max(_safe_int(c.get("total_score")) for c in cs_list)
+        hb = hm_bots.get(bid) or {}
+        ticks = max(1, _safe_int(hb.get("total_ticks")))
+        elapsed_min = max(1.0, ((t_max - t_min) / 60000.0) if (t_min and t_max and t_max > t_min) else (ticks / 60.0))
+        rows.append({
+            "bot_id": bid,
+            "player": pname,
+            "score": raw_score,
+            "adv_count": len(scored_ids),
+            "ppm": round(raw_score / elapsed_min, 2),
+            "deaths": len(sp.get("deaths") or []),
+            "timeouts": _safe_int(cb.get("comp_timeouts")),
+            "selects": _safe_int(cb.get("comp_selects")),
+            "bare_hand_rock": len(sp.get("bare_hand_rock_breaks") or []),
+            "stuck_pct": round(100.0 * _safe_int(hb.get("total_stuck_ticks")) / ticks, 1),
+            "scored_ids": scored_ids,
+        })
+    rows.sort(key=lambda r: (-r["score"], -r["adv_count"], r["deaths"], r["bot_id"]))
+    top3 = rows[:3]
+    bot3 = rows[-3:] if len(rows) >= 3 else rows
+    def _avg(sub: List[Dict[str, Any]], k: str) -> float:
+        return round(sum(float(x[k]) for x in sub) / max(1, len(sub)), 2)
+    return {
+        "rows": rows,
+        "has_scores": any(r["score"] > 0 or r["selects"] > 0 for r in rows),
+        "mean_score": _avg(rows, "score"),
+        "max_score": max((r["score"] for r in rows), default=0),
+        "top3_avg": {"score": _avg(top3, "score"), "deaths": _avg(top3, "deaths"), "timeouts": _avg(top3, "timeouts"), "stuck_pct": _avg(top3, "stuck_pct")},
+        "bot3_avg": {"score": _avg(bot3, "score"), "deaths": _avg(bot3, "deaths"), "timeouts": _avg(bot3, "timeouts"), "stuck_pct": _avg(bot3, "stuck_pct")},
+    }
+
+
 def render_workbench_markdown(
     heatmap: Dict[str, Any],
     client: Dict[str, Any],
@@ -694,6 +766,25 @@ def render_workbench_markdown(
             f"{cb['llm_http']}/{cb['llm_mounted']}/{cb['llm_discarded']} | {srv_str} |"
         )
     lines.append("")
+    comp = summarize_competition_scores(heatmap, client, server)
+    if comp["has_scores"]:
+        lines.append("## 三、 竞赛得分排行榜与优胜 Bot 共性对比")
+        lines.append("")
+        lines.append(
+            f"- 均分：**`{comp['mean_score']}`** | 最高分：**`{comp['max_score']}`** | "
+            f"Top-3 均值(`score={comp['top3_avg']['score']}`, `deaths={comp['top3_avg']['deaths']}`, `timeouts={comp['top3_avg']['timeouts']}`, `stuck={comp['top3_avg']['stuck_pct']}%`) "
+            f"vs Bottom-3 均值(`score={comp['bot3_avg']['score']}`, `deaths={comp['bot3_avg']['deaths']}`, `timeouts={comp['bot3_avg']['timeouts']}`, `stuck={comp['bot3_avg']['stuck_pct']}%`)"
+        )
+        lines.append("")
+        lines.append("| 排名 | Bot | 玩家 | 得分 | 成就数 | PPM | 死亡 | 超时止损 | 选任务数 | 成就清单 |")
+        lines.append("|---:|---|---|---:|---:|---:|---:|---:|---:|---|")
+        for idx, r in enumerate(comp["rows"], 1):
+            adv_str = ", ".join(a.split("/")[-1] for a in r["scored_ids"][:8]) + (" ..." if len(r["scored_ids"]) > 8 else "")
+            lines.append(
+                f"| {idx} | `{r['bot_id']}` | `{r['player']}` | **{r['score']}** | {r['adv_count']} | {r['ppm']} | "
+                f"{r['deaths']} | {r['timeouts']} | {r['selects']} | {adv_str or '-'} |"
+            )
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -744,6 +835,7 @@ def render_workbench_html(
         "place_no_support": heatmap["place_no_support"],
         "anomalies": anomalies,
         "diff": diff,
+        "competition": summarize_competition_scores(heatmap, client, server),
         "timelines": merged_timelines,
         "bots_hm": bots_hm,
         "codes": codes_list,

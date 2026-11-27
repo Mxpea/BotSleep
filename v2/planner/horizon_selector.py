@@ -149,67 +149,15 @@ class HorizonSelector:
         candidates: List[HorizonCandidate] = []
         corpse_cand = self._active_corpse_candidate(bb)
 
-        # Competition mode: rank directly-achievable scoring tasks cleanly in natural progression order!
+        # Competition mode: non-serial PPM + UnlockSynergy + TimeFit + 24m OpportunisticHit scheduler
         if self.objective == "competition" and self.competition is not None:
-            has_stone_tool = inv.get("stone_pickaxe", 0) > 0 or inv.get("iron_pickaxe", 0) > 0 or inv.get("diamond_pickaxe", 0) > 0
-            has_iron_tool = inv.get("iron_pickaxe", 0) > 0 or inv.get("diamond_pickaxe", 0) > 0
-            # Tasks whose current AcquireItem route does NOT by itself trigger the server advancement
-            indirect_penalties = {
-                "minecraft:husbandry/make_a_sign_glow": 600,
-                "minecraft:husbandry/tactical_fishing": 600,
-                "minecraft:adventure/sniper_duel": 500,
-                "minecraft:adventure/ol_betsy": 500,
-                "minecraft:adventure/shoot_arrow": 400,
-                "minecraft:adventure/kill_a_mob": 350,
-                "minecraft:story/deflect_arrow": 350,
-                "minecraft:nether/ride_strider": 800,
-                "minecraft:nether/charge_respawn_anchor": 800,
-                "minecraft:nether/obtain_crying_obsidian": 800,
-                "minecraft:nether/distract_piglin": 700,
-                "minecraft:story/enchant_item": 600,
-                "minecraft:adventure/crafters_crafting_crafters": 600,
-            }
-            for entry in self.competition.selectable_tasks():
-                route = self.catalogue.advancement_route(entry.id)
-                if route is None:
-                    continue
-                kind, target = route
-                if kind == "enter_nether":
-                    if self.is_portal_gate_ready(bb):
-                        est = 8
-                    else:
-                        est = (
-                            self.catalogue.estimate_steps("iron_pickaxe", 1, inv)
-                            + self.catalogue.estimate_steps("water_bucket", 1, inv)
-                            + self.catalogue.estimate_steps("flint_and_steel", 1, inv)
-                            + 16
-                        )
-                elif kind == "avoid_vibration":
-                    est = 4
-                else:
-                    est = max(1, self.catalogue.estimate_steps(target, 1, inv))
-                eff_est = est + max(0, entry.difficulty - 1) * 40 + indirect_penalties.get(entry.id, 0)
-                if not has_iron_tool and target in {"diamond", "diamond_chestplate", "obsidian", "enchanting_table", "diamond_hoe"}:
-                    eff_est += 400
-                if not has_stone_tool and target in {"iron_ingot", "iron_pickaxe", "iron_chestplate", "shield", "bucket", "water_bucket", "lava_bucket"}:
-                    eff_est += 80
-                tag = "PORTAL_GATE_READY" if (entry.id == "minecraft:story/enter_the_nether" and self.is_portal_gate_ready(bb)) else f"comp_{entry.points}pt"
-                candidates.append(HorizonCandidate(
-                    goal="select_task",
-                    item=entry.id,
-                    count=1,
-                    est_steps=max(1, eff_est),
-                    priority_tag=tag,
-                    points=entry.points,
-                ))
-            candidates.sort(key=lambda c: (
-                0 if c.priority_tag == "PORTAL_GATE_READY" else 1,
-                -(c.points / max(1, c.est_steps)),
-                c.est_steps,
-            ))
-            if corpse_cand is not None:
-                candidates = [corpse_cand] + candidates
-            return candidates[:limit]
+            from v2.planner.competition_scheduler import CompetitionScheduler
+
+            return CompetitionScheduler(self.catalogue, self.competition).select_top(
+                bb,
+                corpse_cand=corpse_cand,
+                limit=limit,
+            )
 
         # Survival / speedrun progression ladder
         if corpse_cand is not None:

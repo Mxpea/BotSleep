@@ -624,6 +624,12 @@ class AcquireItemTask(Task):
         # 4) Craftable items (886-item TaskCatalogue!)
         rec = self.catalogue.get_best_recipe(self.item, bb.inventory_counts)
         if rec is None:
+            # 5) Mob-drop gather fallback (white_wool, string, bone, feather, leather, glow_ink_sac...)
+            mobs = self.catalogue.mob_drops.get(self.item)
+            if mobs:
+                from v2.tasks.mob_gather import GatherMobDropTask
+
+                return self.run_child(bb, GatherMobDropTask(self.ctx, self.item, self.count, mobs))
             bb.last_failure_reason = f"unknown_production_route:{self.item}"
             return "NEEDS_AI"
 
