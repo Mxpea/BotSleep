@@ -32,9 +32,10 @@ from v2.primitives.dig_collect import DigCollectPrimitive
 from v2.primitives.fluid import FluidPrimitive
 from v2.primitives.navigate import NavigatePrimitive
 from v2.primitives.place_build import PlaceBuildPrimitive
-from v2.tasks.acquire import AcquireItemTask
+from v2.tasks.acquire import AcquireItemTask, _has_pickaxe_tier
 from v2.tasks.base import Task
 from v2.tasks.catalogue import TaskCatalogue
+from v2.tasks.mining import deep_mining_ready
 from v2.tasks.surface import is_underground
 
 
@@ -49,13 +50,20 @@ class EnterNetherTask(Task):
     _MAX_TICKS_PER_SECTOR: int = 8
     _MAX_SURFACE_SECTORS_BEFORE_DESCENT: int = 4
     _MAX_SURFACE_SECTORS_TOTAL: int = 8
-    _MAX_UNDERGROUND_TICKS: int = 260
+    _MAX_UNDERGROUND_TICKS: int = 720
     _LAVA_SEARCH_TARGET_Y: int = 11
+    _DEEP_LAVA_TARGET_Y: int = -53
 
-    def __init__(self, ctx: PrimitiveContext, catalogue: TaskCatalogue) -> None:
+    def __init__(
+        self,
+        ctx: PrimitiveContext,
+        catalogue: TaskCatalogue,
+        lava_target_y: Optional[int] = None,
+    ) -> None:
         super().__init__("enter_nether")
         self.ctx = ctx
         self.catalogue = catalogue
+        self.lava_target_y: Optional[int] = lava_target_y
         self._nav = NavigatePrimitive(ctx)
         self._dig = DigCollectPrimitive(ctx)
         self._fluid = FluidPrimitive(ctx)
@@ -598,11 +606,35 @@ class EnterNetherTask(Task):
             for c in probe
         )
 
+    def _effective_lava_target_y(self, bb: Blackboard) -> int:
+        if self.lava_target_y is not None:
+            return int(self.lava_target_y)
+        if deep_mining_ready(bb):
+            return self._DEEP_LAVA_TARGET_Y
+        return self._LAVA_SEARCH_TARGET_Y
+
     def _step_underground_lava_descent(self, bb: Blackboard) -> Optional[str]:
-        """Deterministically staircase down to y <= 11 and tunnel safely until a lava source enters scan radius."""
+        """Deterministically staircase down to target_y (11 or -53) and tunnel safely until lava enters scan radius."""
         fx, fy, fz = block_coord(bb.pos)
         dirs = ((1, 0), (0, 1), (-1, 0), (0, -1))
-        if fy > self._LAVA_SEARCH_TARGET_Y:
+        if fy <= 48 and _has_pickaxe_tier(bb.inventory_counts, "iron_pickaxe"):
+            opp = self._dig.dig_nearest_of_types(
+                bb,
+                ("diamond_ore", "deepslate_diamond_ore", "gold_ore", "deepslate_gold_ore"),
+                radius=4,
+                collect=True,
+                max_dy=3.0,
+                candidate_filter=lambda c: self._is_safe_lava_dig(bb, c),
+            )
+            if opp.status in {"OK", "PROGRESSED"}:
+                return "RUNNING"
+            if opp.status == "UNKNOWN":
+                return "UNKNOWN"
+            if bb.writes_this_tick >= 1:
+                return "RUNNING"
+
+        target_y = self._effective_lava_target_y(bb)
+        if fy > target_y:
             for _ in range(len(dirs)):
                 dx, dz = dirs[self._underground_dir_idx % len(dirs)]
                 stair_cells = [(fx + dx, fy + 1, fz + dz), (fx + dx, fy, fz + dz), (fx + dx, fy - 1, fz + dz)]
@@ -626,12 +658,16 @@ class EnterNetherTask(Task):
                     continue
                 n_out = self._nav.step_to(bb, (fx + dx + 0.5, float(fy - 1), fz + dz + 0.5), tolerance=0.6)
                 if n_out.status == "FAILED_LOCAL":
+                    if bb.writes_this_tick >= 1:
+                        return "RUNNING"
                     self._underground_dir_idx += 1
                     continue
                 return "RUNNING" if n_out.status in {"OK", "PROGRESSED"} else n_out.status
-            return None
+            if fy >= 58:
+                return None
 
-        # At y <= 11: dig safe 2-high horizontal tunnel
+        # At y <= target_y (or underground staircase blocked by bedrock/void): dig safe 2-high horizontal tunnel
+        cobble_total = bb.inventory_counts.get("cobblestone", 0) + bb.inventory_counts.get("cobbled_deepslate", 0)
         for _ in range(len(dirs)):
             dx, dz = dirs[self._underground_dir_idx % len(dirs)]
             head_cell = (fx + dx, fy + 1, fz + dz)
@@ -649,13 +685,15 @@ class EnterNetherTask(Task):
                     if self.ctx.gateway.unreachable.is_blocked(bb.dimension, cell, "dig") or not self._is_safe_lava_dig(bb, cell):
                         blocked = True
                         break
-                    d_out = self._dig.dig_block(bb, cell, collect=(bb.inventory_counts.get("cobblestone", 0) < 16))
+                    d_out = self._dig.dig_block(bb, cell, collect=(cobble_total < 16))
                     return "RUNNING" if d_out.status in {"OK", "PROGRESSED"} else d_out.status
             if blocked:
                 self._underground_dir_idx += 1
                 continue
             n_out = self._nav.step_to(bb, (fx + dx + 0.5, float(fy), fz + dz + 0.5), tolerance=0.6)
             if n_out.status == "FAILED_LOCAL":
+                if bb.writes_this_tick >= 1:
+                    return "RUNNING"
                 self._underground_dir_idx += 1
                 continue
             return "RUNNING" if n_out.status in {"OK", "PROGRESSED"} else n_out.status
@@ -755,13 +793,17 @@ class EnterNetherTask(Task):
         return out
 
     def _place_block_safe(self, bb: Blackboard, anchor: Coord3, cell: Coord3, *, allow_dirt: bool = False) -> str:
-        """Place cobblestone (or dirt for non-lava work stair if requested), acquiring cobblestone batch if empty."""
-        item = "cobblestone"
-        if bb.inventory_counts.get("cobblestone", 0) < 1:
-            if allow_dirt and bb.inventory_counts.get("dirt", 0) >= 1:
+        """Place cobblestone/cobbled_deepslate (or dirt for non-lava work stair if requested), acquiring cobblestone batch if empty."""
+        inv = bb.inventory_counts
+        if inv.get("cobblestone", 0) + inv.get("cobbled_deepslate", 0) < 1:
+            if allow_dirt and inv.get("dirt", 0) >= 1:
                 item = "dirt"
             else:
                 return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, "cobblestone", 16))
+        elif inv.get("cobblestone", 0) >= 1:
+            item = "cobblestone"
+        else:
+            item = "cobbled_deepslate"
         fx, fy, fz = block_coord(bb.pos)
         if cell in {(fx, fy, fz), (fx, fy + 1, fz)}:
             out = self._nav.step_to(bb, (cell[0] + 0.5, float(fy), cell[2] + 2.5), tolerance=0.5, xz_only=True)
@@ -855,7 +897,7 @@ class EnterNetherTask(Task):
         if inv.get("flint_and_steel", 0) < 1:
             return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, "flint_and_steel", 1))
         if not self._portal_complete_unlit:
-            if inv.get("iron_pickaxe", 0) < 1:
+            if not _has_pickaxe_tier(inv, "iron_pickaxe"):
                 return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, "iron_pickaxe", 1))
             has_any_bucket = (inv.get("water_bucket", 0) + inv.get("lava_bucket", 0) + inv.get("bucket", 0)) >= 1
             if not has_any_bucket:
@@ -1126,6 +1168,7 @@ class EnterNetherTask(Task):
         return _outcome_status(out)
 
     def stop(self, bb: Blackboard) -> None:
+        self._dig.clear_cache()
         self._portal_axis = "x"
         self._portal_complete_unlit = False
         bb.set("protected_cells", None, writer=self.name)

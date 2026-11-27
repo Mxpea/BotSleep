@@ -8,6 +8,7 @@ from v2.bt.blackboard import Blackboard
 from v2.domain import (
     AIR_BLOCKS,
     Coord3,
+    FOOD_ITEMS,
     HAZARD_BLOCKS,
     LIQUID_BLOCKS,
     NON_SOLID_BLOCKS,
@@ -25,6 +26,26 @@ from v2.tasks.acquire import AcquireItemTask, _has_pickaxe_tier
 from v2.tasks.base import Task
 from v2.tasks.catalogue import TaskCatalogue
 from v2.tasks.surface import is_underground, load_anchor_landmark, save_anchor_landmark
+
+
+_DEEP_OPPORTUNISTIC_ITEMS = frozenset({
+    "raw_iron", "raw_gold", "diamond", "redstone", "lapis_lazuli", "raw_copper",
+})
+
+
+def deep_mining_ready(bb: Blackboard) -> bool:
+    """Return True when the player holds a safe deep-Y (-53) mining and survival kit."""
+    inv = bb.inventory_counts
+    if not _has_pickaxe_tier(inv, "iron_pickaxe"):
+        return False
+    if inv.get("water_bucket", 0) < 1:
+        return False
+    if (inv.get("cobblestone", 0) + inv.get("cobbled_deepslate", 0)) < 16:
+        return False
+    edible_food = sum(int(inv.get(name, 0)) for name in FOOD_ITEMS if name != "rotten_flesh")
+    if edible_food < 4:
+        return False
+    return bb.health >= 14.0
 
 
 class MineResourceTask(Task):
@@ -45,7 +66,12 @@ class MineResourceTask(Task):
         self.item = item
         self.count = max(1, int(count))
         gather = catalogue.gathering.get(item)
-        self.target_y = target_y if target_y is not None else (gather.preferred_y if gather and gather.preferred_y is not None else 16)
+        if target_y is not None:
+            self.target_y = target_y
+        elif gather and gather.preferred_y is not None:
+            self.target_y = -53 if gather.preferred_y <= -54 else gather.preferred_y
+        else:
+            self.target_y = 16
         self._dig = DigCollectPrimitive(ctx)
         self._nav = NavigatePrimitive(ctx)
         self._place = PlaceBuildPrimitive(ctx)
@@ -141,12 +167,11 @@ class MineResourceTask(Task):
                 save_anchor_landmark(db, bb, "last_mine_anchor", "mine_shaft", (fx, fy, fz), writer="mining")
 
     def _mine_opportunistic_ores(self, bb: Blackboard, fy: int) -> Optional[str]:
-        """When deep underground for iron/gold/diamond, grab adjacent exposed coal, gold, or diamond veins."""
-        if fy > 48 or self.item not in {"raw_iron", "raw_gold", "diamond"}:
+        """When deep underground, grab adjacent exposed coal, gold, or diamond veins."""
+        if fy > 48 or self.item not in _DEEP_OPPORTUNISTIC_ITEMS:
             return None
         inv = bb.inventory_counts
-        has_iron_tier = any(inv.get(p, 0) > 0 for p in ("netherite_pickaxe", "diamond_pickaxe", "iron_pickaxe"))
-        if has_iron_tier:
+        if _has_pickaxe_tier(inv, "iron_pickaxe"):
             rich_types = tuple(
                 t for t in ("diamond_ore", "deepslate_diamond_ore", "gold_ore", "deepslate_gold_ore")
                 if t not in set(self.catalogue.gathering[self.item].block_types)
@@ -164,6 +189,8 @@ class MineResourceTask(Task):
                     return "RUNNING"
                 if opp.status == "UNKNOWN":
                     return "UNKNOWN"
+                if bb.writes_this_tick >= 1:
+                    return "RUNNING"
         if inv.get("coal", 0) < 4 and self.item != "coal":
             opp_coal = self._dig.dig_nearest_of_types(
                 bb,
@@ -204,6 +231,8 @@ class MineResourceTask(Task):
             return "RUNNING"
         if out.status == "UNKNOWN":
             return "UNKNOWN"
+        if bb.writes_this_tick >= 1:
+            return "RUNNING"
 
         opp = self._mine_opportunistic_ores(bb, fy)
         if opp is not None:
@@ -240,7 +269,10 @@ class MineResourceTask(Task):
                 self._tried_mine_shaft = True
 
         gather_types = set(gather.block_types)
-        clear_collect = bb.inventory_counts.get("cobblestone", 0) < 8
+        clear_collect = (
+            bb.inventory_counts.get("cobblestone", 0)
+            + bb.inventory_counts.get("cobbled_deepslate", 0)
+        ) < 8
 
         # 3) Step-driven staircase descent toward target_y: try all 4 cardinal directions in 1 tick (never spin in place!)
         if fy > self.target_y:
