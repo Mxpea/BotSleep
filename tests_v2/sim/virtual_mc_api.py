@@ -721,8 +721,8 @@ class VirtualMcApiServer:
             self.set_block(bx, by, bz, item)
             if item == "furnace":
                 self.containers[(bx, by, bz)] = {"type": "furnace", "input": None, "fuel": None, "output": None, "remaining_ticks": 0}
-            elif item == "chest":
-                self.containers[(bx, by, bz)] = {"type": "chest", "items": {}}
+            elif item in {"chest", "barrel"}:
+                self.containers[(bx, by, bz)] = {"type": item, "items": {}}
             return {"placed": item, "pos": [bx, by, bz], "sneaked": True}
 
         if ep == "interact":
@@ -830,9 +830,11 @@ class VirtualMcApiServer:
                     self.set_block(*ignite_cell, "fire")
                 return {"ignited": True, "portal": lit, "pos": list(ignite_cell)}
 
-            # Bed sleep / wake
+            # Bed sleep / wake / daytime spawn-point bind
             blk = self.block_name(tx, ty, tz)
             if blk.endswith("_bed"):
+                if self.dimension == "the_nether":
+                    raise SimAPIError("bed_exploded", "beds explode in the_nether")
                 if self.is_sleeping:
                     self.is_sleeping = False
                     self.push_event("wake")
@@ -841,7 +843,8 @@ class VirtualMcApiServer:
                     self.is_sleeping = True
                     self.push_event("sleep")
                     return {"sleeping": True}
-                raise SimAPIError("cannot_sleep", "you can only sleep at night")
+                self.push_event("spawn_bound", pos=[tx, ty, tz])
+                return {"slept": False, "interacted": True, "daytime": True}
 
             return {"interacted": blk, "pos": [tx, ty, tz]}
 
@@ -941,8 +944,8 @@ class VirtualMcApiServer:
                 if blk == "furnace":
                     c = {"type": "furnace", "input": None, "fuel": None, "output": None, "remaining_ticks": 0}
                     self.containers[pos] = c
-                elif blk == "chest":
-                    c = {"type": "chest", "items": {}}
+                elif blk in {"chest", "barrel"}:
+                    c = {"type": blk, "items": {}}
                     self.containers[pos] = c
                 else:
                     raise SimAPIError("not_container", f"{blk} is not a container")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from typing import Dict, List, Optional
 
 from v2.bt.blackboard import Blackboard
@@ -183,6 +184,8 @@ class HorizonSelector:
                             + self.catalogue.estimate_steps("flint_and_steel", 1, inv)
                             + 16
                         )
+                elif kind == "avoid_vibration":
+                    est = 4
                 else:
                     est = max(1, self.catalogue.estimate_steps(target, 1, inv))
                 eff_est = est + max(0, entry.difficulty - 1) * 40 + indirect_penalties.get(entry.id, 0)
@@ -231,6 +234,13 @@ class HorizonSelector:
         if cook_cand is not None:
             candidates.append(cook_cand)
 
+        if bb.get("nearby_sculk_sensor") and not bb.get("avoid_vibration_done"):
+            candidates.append(HorizonCandidate("avoid_vibration", "sculk_sensor", 1, 2, "SNEAK_100"))
+        if bb.get("nearby_loot_chest") and corpse_cand is None:
+            candidates.append(HorizonCandidate("loot_chest", "chest", 1, 3, "LOOT_CHEST"))
+        if bb.dimension == "the_nether" and not bb.get("nether_portal_sheltered") and corpse_cand is None:
+            candidates.append(HorizonCandidate("setup_outpost", "nether_shelter", 1, 3, "NETHER_OUTPOST"))
+
         has_iron_pick = inv.get("iron_pickaxe", 0) > 0 or inv.get("diamond_pickaxe", 0) > 0
         has_stone_pick = has_iron_pick or inv.get("stone_pickaxe", 0) > 0
         has_melee_weapon = any(k.endswith(("_sword", "_axe")) and v > 0 for k, v in inv.items())
@@ -273,7 +283,16 @@ class HorizonSelector:
                 continue
             if item == "golden_boots" and not (has_iron_pick and (inv.get("gold_ingot", 0) >= 4 or inv.get("raw_gold", 0) >= 4)):
                 continue
-            if item == "diamond" and (not (has_iron_pick and (has_iron_chest or bb.pos[1] <= 16.0)) or inv.get("diamond_pickaxe", 0) > 0):
+            deep_diamond_ready = (
+                has_iron_pick
+                and has_water_bucket
+                and (inv.get("cobblestone", 0) + inv.get("cobbled_deepslate", 0) >= 16)
+                and bb.health >= 14.0
+            )
+            if item == "diamond" and (
+                not ((has_iron_pick and (has_iron_chest or bb.pos[1] <= 16.0)) or deep_diamond_ready)
+                or inv.get("diamond_pickaxe", 0) > 0
+            ):
                 continue
             if item == "diamond_pickaxe" and (inv.get("diamond", 0) < 3 or inv.get("diamond_pickaxe", 0) > 0):
                 continue
@@ -290,11 +309,30 @@ class HorizonSelector:
         if bb.dimension == "the_nether":
             candidates.append(HorizonCandidate("explore", "nether_fortress", 1, 15, "nether_explore"))
 
-        # Pin CORPSE_RECOVERY #1, then PORTAL_GATE_READY; sort remaining by fewest steps
+        # Pin CORPSE_RECOVERY #1, then PORTAL_GATE_READY; sort remaining by fewest steps, demoting cooled-down failures
         corpse_pinned = [c for c in candidates if c.priority_tag == "CORPSE_RECOVERY"]
         portal_pinned = [c for c in candidates if c.priority_tag == "PORTAL_GATE_READY"]
         rest = [c for c in candidates if c.priority_tag not in {"CORPSE_RECOVERY", "PORTAL_GATE_READY"}]
         rest.sort(key=lambda c: c.est_steps)
+
+        raw_cd = bb.get("failed_goal_cooldowns")
+        cooldowns = raw_cd if isinstance(raw_cd, dict) else {}
+        if cooldowns:
+            now = time.monotonic()
+
+            def _is_cooled(cand: HorizonCandidate) -> bool:
+                for k in (f"{cand.goal}:{cand.item}x{cand.count}", f"{cand.goal}:{cand.item}", cand.goal):
+                    exp = cooldowns.get(k)
+                    if exp is not None and float(exp) > now:
+                        return True
+                return False
+
+            fresh = [c for c in rest if not _is_cooled(c)]
+            cooled = [c for c in rest if _is_cooled(c)]
+            if cooled and not any(c.goal == "explore" for c in fresh):
+                fresh.append(HorizonCandidate("explore", "surface", 1, 3, "COOLDOWN_EXPLORE"))
+            rest = fresh + cooled
+
         return (corpse_pinned + portal_pinned + rest)[:limit]
 
     def format_top(self, bb: Blackboard, *, limit: int = 5) -> str:

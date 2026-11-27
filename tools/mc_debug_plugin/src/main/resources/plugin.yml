@@ -1,0 +1,9 @@
+name: BotSleepDebug
+version: 1.0.0
+main: com.botsleep.debug.BotSleepDebugPlugin
+api-version: '1.21'
+description: Read-only timestamp-aligned ground-truth telemetry plugin for BotSleep debugging.
+commands:
+  bsdebug:
+    description: BotSleep server-side debug suite controls
+    usage: /bsdebug <run <id>|status|tp <player>|mark <player> [on|off]>

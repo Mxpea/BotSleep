@@ -8,6 +8,7 @@ from v2.bt.blackboard import Blackboard
 from v2.domain import (
     AIR_BLOCKS,
     Coord3,
+    FOOD_ITEMS,
     HAZARD_BLOCKS,
     LIQUID_BLOCKS,
     NON_SOLID_BLOCKS,
@@ -25,6 +26,26 @@ from v2.tasks.acquire import AcquireItemTask, _has_pickaxe_tier
 from v2.tasks.base import Task
 from v2.tasks.catalogue import TaskCatalogue
 from v2.tasks.surface import is_underground, load_anchor_landmark, save_anchor_landmark
+
+
+_DEEP_OPPORTUNISTIC_ITEMS = frozenset({
+    "raw_iron", "raw_gold", "diamond", "redstone", "lapis_lazuli", "raw_copper",
+})
+
+
+def deep_mining_ready(bb: Blackboard) -> bool:
+    """Return True when the player holds a safe deep-Y (-53) mining and survival kit."""
+    inv = bb.inventory_counts
+    if not _has_pickaxe_tier(inv, "iron_pickaxe"):
+        return False
+    if inv.get("water_bucket", 0) < 1:
+        return False
+    if (inv.get("cobblestone", 0) + inv.get("cobbled_deepslate", 0)) < 16:
+        return False
+    edible_food = sum(int(inv.get(name, 0)) for name in FOOD_ITEMS if name != "rotten_flesh")
+    if edible_food < 4:
+        return False
+    return bb.health >= 14.0
 
 
 class MineResourceTask(Task):
@@ -45,13 +66,19 @@ class MineResourceTask(Task):
         self.item = item
         self.count = max(1, int(count))
         gather = catalogue.gathering.get(item)
-        self.target_y = target_y if target_y is not None else (gather.preferred_y if gather and gather.preferred_y is not None else 16)
+        if target_y is not None:
+            self.target_y = target_y
+        elif gather and gather.preferred_y is not None:
+            self.target_y = -53 if gather.preferred_y <= -54 else gather.preferred_y
+        else:
+            self.target_y = 16
         self._dig = DigCollectPrimitive(ctx)
         self._nav = NavigatePrimitive(ctx)
         self._place = PlaceBuildPrimitive(ctx)
         self._dir_idx: int = 0
         self._dirs = ((1, 0), (0, 1), (-1, 0), (0, -1))
         self._tried_mine_shaft: bool = False
+        self._entry_reached: bool = False
         self._mine_shaft_stalls: int = 0
         self._mine_shaft_last_pos: Optional[Tuple[float, float, float]] = None
         self._surface_anchor_saved: bool = False
@@ -62,6 +89,7 @@ class MineResourceTask(Task):
     def stop(self, bb: Blackboard) -> None:
         self._dig.clear_cache()
         self._tried_mine_shaft = False
+        self._entry_reached = False
         self._mine_shaft_stalls = 0
         self._mine_shaft_last_pos = None
         self._surface_anchor_saved = False
@@ -128,11 +156,7 @@ class MineResourceTask(Task):
         if fy >= 58:
             if not self._surface_anchor_saved:
                 prev_surf = load_anchor_landmark(db, bb, "last_surface_anchor", "surface_entry", writer="mining")
-                if (
-                    prev_surf is None
-                    or dist3(prev_surf, (fx, fy, fz)) > 48.0
-                    or (not is_underground(bb, self.ctx.gateway) and fy >= prev_surf[1])
-                ):
+                if prev_surf is None or dist3(prev_surf, (fx, fy, fz)) > 64.0:
                     save_anchor_landmark(db, bb, "last_surface_anchor", "surface_entry", (fx, fy, fz), writer="mining")
                 self._surface_anchor_saved = True
         else:
@@ -141,12 +165,11 @@ class MineResourceTask(Task):
                 save_anchor_landmark(db, bb, "last_mine_anchor", "mine_shaft", (fx, fy, fz), writer="mining")
 
     def _mine_opportunistic_ores(self, bb: Blackboard, fy: int) -> Optional[str]:
-        """When deep underground for iron/gold/diamond, grab adjacent exposed coal, gold, or diamond veins."""
-        if fy > 48 or self.item not in {"raw_iron", "raw_gold", "diamond"}:
+        """When deep underground, grab adjacent exposed coal, gold, or diamond veins."""
+        if fy > 48 or self.item not in _DEEP_OPPORTUNISTIC_ITEMS:
             return None
         inv = bb.inventory_counts
-        has_iron_tier = any(inv.get(p, 0) > 0 for p in ("netherite_pickaxe", "diamond_pickaxe", "iron_pickaxe"))
-        if has_iron_tier:
+        if _has_pickaxe_tier(inv, "iron_pickaxe"):
             rich_types = tuple(
                 t for t in ("diamond_ore", "deepslate_diamond_ore", "gold_ore", "deepslate_gold_ore")
                 if t not in set(self.catalogue.gathering[self.item].block_types)
@@ -164,6 +187,8 @@ class MineResourceTask(Task):
                     return "RUNNING"
                 if opp.status == "UNKNOWN":
                     return "UNKNOWN"
+                if bb.writes_this_tick >= 1:
+                    return "RUNNING"
         if inv.get("coal", 0) < 4 and self.item != "coal":
             opp_coal = self._dig.dig_nearest_of_types(
                 bb,
@@ -204,35 +229,56 @@ class MineResourceTask(Task):
             return "RUNNING"
         if out.status == "UNKNOWN":
             return "UNKNOWN"
+        if bb.writes_this_tick >= 1:
+            return "RUNNING"
 
         opp = self._mine_opportunistic_ores(bb, fy)
         if opp is not None:
             return opp
 
-        # 2.5) Above y >= 58: try reusing remembered mine_shaft within 48m before digging a brand-new staircase
+        # 2.5) Above y >= 58: walk back into remembered surface_entry shaft mouth first, then reuse mine_shaft
         if fy >= 58 and not self._tried_mine_shaft:
-            shaft = load_anchor_landmark(self.ctx.gateway.db, bb, "last_mine_anchor", "mine_shaft", writer="mining")
-            if shaft is not None and dist3(bb.pos, shaft) <= 48.0:
+            db = self.ctx.gateway.db
+            entry = load_anchor_landmark(db, bb, "last_surface_anchor", "surface_entry", writer="mining")
+            shaft = load_anchor_landmark(db, bb, "last_mine_anchor", "mine_shaft", writer="mining")
+            reuse_target: Optional[Coord3] = None
+            entering_mouth = False
+            if entry is not None and shaft is not None and not self._entry_reached and dist3(bb.pos, entry) <= 64.0:
+                if dist3(bb.pos, entry) <= 3.0:
+                    self._entry_reached = True
+                    self._mine_shaft_stalls = 0
+                    self._mine_shaft_last_pos = None
+                else:
+                    reuse_target = entry
+                    entering_mouth = True
+            if reuse_target is None and shaft is not None and dist3(bb.pos, shaft) <= 64.0:
+                reuse_target = shaft
+            if reuse_target is not None:
                 if self._mine_shaft_last_pos is not None and dist3(self._mine_shaft_last_pos, bb.pos) < 0.35:
                     self._mine_shaft_stalls += 1
                 elif self._mine_shaft_last_pos is not None:
                     self._mine_shaft_stalls = 0
                 self._mine_shaft_last_pos = bb.pos
-                if self._mine_shaft_stalls >= 6:
+                if self._mine_shaft_stalls >= 10:
                     self._tried_mine_shaft = True
                 else:
-                    n_out = self._nav.step_to(bb, (shaft[0] + 0.5, float(shaft[1]), shaft[2] + 0.5), tolerance=2.0)
+                    n_out = self._nav.step_to(bb, (reuse_target[0] + 0.5, float(reuse_target[1]), reuse_target[2] + 0.5), tolerance=2.0)
                     if n_out.status == "UNKNOWN":
                         return "UNKNOWN"
                     if n_out.status == "OK":
-                        self._tried_mine_shaft = True
+                        if entering_mouth:
+                            self._entry_reached = True
+                            self._mine_shaft_stalls = 0
+                            self._mine_shaft_last_pos = None
+                        else:
+                            self._tried_mine_shaft = True
                         if bb.writes_this_tick >= 1:
                             return "RUNNING"
                     elif n_out.status == "PROGRESSED":
                         return "RUNNING"
                     elif n_out.status == "FAILED_LOCAL":
                         self._mine_shaft_stalls += 1
-                        if self._mine_shaft_stalls >= 6:
+                        if self._mine_shaft_stalls >= 10:
                             self._tried_mine_shaft = True
                         if bb.writes_this_tick >= 1:
                             return "RUNNING"
@@ -240,7 +286,10 @@ class MineResourceTask(Task):
                 self._tried_mine_shaft = True
 
         gather_types = set(gather.block_types)
-        clear_collect = bb.inventory_counts.get("cobblestone", 0) < 8
+        clear_collect = (
+            bb.inventory_counts.get("cobblestone", 0)
+            + bb.inventory_counts.get("cobbled_deepslate", 0)
+        ) < 8
 
         # 3) Step-driven staircase descent toward target_y: try all 4 cardinal directions in 1 tick (never spin in place!)
         if fy > self.target_y:

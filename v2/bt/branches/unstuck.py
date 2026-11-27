@@ -26,6 +26,7 @@ from v2.domain import (
     LEAF_BLOCKS,
     LOG_BLOCKS,
     NON_SOLID_BLOCKS,
+    PICKAXE_TIERS,
     SOFT_OCCLUDERS,
     block_coord,
     dist2_xz,
@@ -79,6 +80,8 @@ class PhysicalUnstuckBranch(Node):
         self._l4_bearing_idx: int = 0
         self._l4_consecutive_fails: int = 0
         self._l4_last_pos: Optional[Tuple[float, float, float]] = None
+        self._l3_no_pick_digs: int = 0
+        self._l3_no_pick_origin: Optional[Tuple[float, float, float]] = None
 
     def _write_action(
         self,
@@ -387,6 +390,12 @@ class PhysicalUnstuckBranch(Node):
 
         # Otherwise attempt a 3D staircase climb upward (+4 Y, +4 X/Z) to escape pits/holes
         fx, fy, fz = block_coord(bb.pos)
+        has_pick = any(bb.inventory_counts.get(p, 0) > 0 for p in PICKAXE_TIERS)
+        if fy >= 58 or has_pick or (
+            self._l3_no_pick_origin is not None and dist3(bb.pos, self._l3_no_pick_origin) >= 12.0
+        ):
+            self._l3_no_pick_digs = 0
+            self._l3_no_pick_origin = None
         dx, dz = _RELOCATE_BEARINGS[self._l1_cycle % len(_RELOCATE_BEARINGS)]
         climb_goal = (fx + int(round(dx * 4)), fy + 3, fz + int(round(dz * 4)))
         out = self.navigator.step_toward(
@@ -396,7 +405,31 @@ class PhysicalUnstuckBranch(Node):
             inventory_counts=bb.inventory_counts,
             prefer_3d=True,
             threat_positions=bb.get("active_threat_positions"),
+            avoid_hard_rock_without_pick=True,
         )
+        if (
+            out.status not in {"PROGRESSED", "REACHED", "UNKNOWN"}
+            and fy < 58
+            and str(bb.last_failure_reason or "") == "surface_escape:no_pickaxe"
+            and self._l3_no_pick_digs < 2
+        ):
+            anchor = bb.get("last_surface_anchor")
+            escape_goal = climb_goal
+            if isinstance(anchor, (list, tuple)) and len(anchor) == 3 and dist3(bb.pos, anchor) <= 160.0:
+                escape_goal = (int(anchor[0]), int(anchor[1]), int(anchor[2]))
+            out = self.navigator.step_toward(
+                (escape_goal[0] + 0.5, float(escape_goal[1]), escape_goal[2] + 0.5),
+                bb.status,
+                tolerance=1.5,
+                inventory_counts=bb.inventory_counts,
+                prefer_3d=True,
+                threat_positions=bb.get("active_threat_positions"),
+                avoid_hard_rock_without_pick=False,
+            )
+            if out.action_taken == "dig":
+                self._l3_no_pick_digs += 1
+                if self._l3_no_pick_origin is None:
+                    self._l3_no_pick_origin = bb.pos
         if out.action_taken != "none":
             bb.writes_this_tick += 1
         if out.status == "UNKNOWN":
@@ -449,6 +482,7 @@ class PhysicalUnstuckBranch(Node):
             xz_only=True,
             threat_positions=threats,
             nearby_entities=bb.entities,
+            avoid_hard_rock_without_pick=True,
         )
         if out.action_taken != "none":
             bb.writes_this_tick += 1

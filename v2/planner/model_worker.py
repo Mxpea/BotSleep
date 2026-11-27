@@ -26,6 +26,7 @@ class SerialModelWorker:
         self._thread: Optional[threading.Thread] = None
         self._inflight_job_id: Optional[str] = None
         self._completed: Optional[WorkerResult] = None
+        self.last_discarded: Optional[WorkerResult] = None
 
     @property
     def is_busy(self) -> bool:
@@ -61,9 +62,17 @@ class SerialModelWorker:
             if res is None:
                 return None
             self._completed = None
-        if expected_context_version is not None and res.context_version != expected_context_version:
-            return None
+            if expected_context_version is not None and res.context_version != expected_context_version:
+                self.last_discarded = res
+                return None
         return res
+
+    def pop_discarded(self) -> Optional[WorkerResult]:
+        """Return and clear the most recently discarded stale WorkerResult, if any."""
+        with self._lock:
+            res = self.last_discarded
+            self.last_discarded = None
+            return res
 
     def join(self, timeout: Optional[float] = 5.0) -> None:
         t = self._thread

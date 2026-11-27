@@ -93,7 +93,7 @@ GATHER_TABLE: Dict[str, GatherEntry] = {
 
 # Maps competition advancement IDs to concrete item/goal routes solvable by v2 tasks!
 ADVANCEMENT_GOAL_ROUTES: Dict[str, Tuple[str, str]] = {
-    # (kind, target) where kind in {"acquire", "enter_nether", "shelter", "equip", "hunt", "smelt"}
+    # (kind, target) where kind in {"acquire", "enter_nether", "avoid_vibration", "shelter", "equip", "hunt", "smelt"}
     "minecraft:story/mine_stone": ("acquire", "cobblestone"),
     "minecraft:story/upgrade_tools": ("acquire", "stone_pickaxe"),
     "minecraft:story/smelt_iron": ("acquire", "iron_ingot"),
@@ -112,6 +112,7 @@ ADVANCEMENT_GOAL_ROUTES: Dict[str, Tuple[str, str]] = {
     "minecraft:adventure/spyglass_at_parrot": ("acquire", "spyglass"),
     "minecraft:adventure/lightning_rod_with_villager_no_fire": ("acquire", "lightning_rod"),
     "minecraft:adventure/brush_armadillo": ("acquire", "brush"),
+    "minecraft:adventure/avoid_vibration": ("avoid_vibration", "sculk_sensor"),
     "minecraft:adventure/crafters_crafting_crafters": ("acquire", "crafter"),
     "minecraft:husbandry/plant_seed": ("acquire", "wheat_seeds"),
     "minecraft:husbandry/make_a_sign_glow": ("acquire", "oak_sign"),

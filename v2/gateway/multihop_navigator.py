@@ -17,6 +17,7 @@ from v2.domain import (
     LEAF_BLOCKS,
     NON_SOLID_BLOCKS,
     PASS_THROUGH_BLOCKS,
+    PICKAXE_TIERS,
     SCAFFOLD_BLOCKS,
     SOFT_OCCLUDERS,
     block_coord,
@@ -24,6 +25,18 @@ from v2.domain import (
     dist3,
     pick_best_item,
 )
+
+_HARD_ROCK_NO_PICK_BLOCKS = frozenset({
+    "stone", "deepslate", "cobblestone", "cobbled_deepslate",
+    "andesite", "diorite", "granite", "tuff", "sandstone",
+    "red_sandstone", "blackstone", "basalt", "netherrack",
+    "obsidian", "iron_ore", "deepslate_iron_ore", "coal_ore",
+    "deepslate_coal_ore", "gold_ore", "deepslate_gold_ore",
+    "copper_ore", "deepslate_copper_ore", "diamond_ore",
+    "deepslate_diamond_ore", "lapis_ore", "deepslate_lapis_ore",
+    "redstone_ore", "deepslate_redstone_ore", "emerald_ore",
+    "deepslate_emerald_ore",
+})
 from v2.gateway.pathfinder_3d import NavStep, Pathfinder3D
 from v2.gateway.surface_swim import SurfaceSwimExecutor
 from v2.gateway.world_proxy import VirtualWorldGateway
@@ -65,6 +78,7 @@ class MultiHopNavigator:
         self.swimmer = swimmer or SurfaceSwimExecutor(self.client, journal)
         self._stall_counts: Dict[Tuple[str, Coord3], int] = {}
         self._last_pos_for_target: Dict[Tuple[str, Coord3], Tuple[float, float, float]] = {}
+        self._best_dist_for_target: Dict[Tuple[str, Coord3], float] = {}
         self._water_steps: Dict[Tuple[str, Coord3], int] = {}
         self._water_stalls: Dict[Tuple[str, Coord3], int] = {}
         self._water_anchor_pos: Dict[Tuple[str, Coord3], Tuple[float, float, float]] = {}
@@ -81,7 +95,25 @@ class MultiHopNavigator:
         key = (dimension, target)
         self._stall_counts.pop(key, None)
         self._last_pos_for_target.pop(key, None)
+        self._best_dist_for_target.pop(key, None)
         self._reset_water_state(key)
+
+    def _has_known_no_support(self, dim: str, target: Coord3) -> bool:
+        """Return True only when all 6 orthogonal neighbors are known and all are non-solid."""
+        tx, ty, tz = target
+        nbs = (
+            (tx + 1, ty, tz),
+            (tx - 1, ty, tz),
+            (tx, ty + 1, tz),
+            (tx, ty - 1, tz),
+            (tx, ty, tz + 1),
+            (tx, ty, tz - 1),
+        )
+        fetched = self.gateway.prefetch_blocks(dim, nbs, max_age=2.0)
+        ents = [fetched.get(c) for c in nbs]
+        if any(e is None for e in ents):
+            return False
+        return all(e.name in NON_SOLID_BLOCKS for e in ents if e is not None)
 
     def _run_write(
         self,
@@ -102,6 +134,8 @@ class MultiHopNavigator:
                 self.gateway.invalidate_unknown_radius(dimension, unknown_center or block_coord(pos))
                 return None, NavOutcome("UNKNOWN", action_taken=endpoint, reason=err.code)
             self.journal.resolve_write(tx_id, "failed_known", details={"code": err.code})
+            if err.code == "not_ready":
+                return None, NavOutcome("PROGRESSED", action_taken="none", reason="not_ready_wait")
             return None, NavOutcome("BLOCKED", action_taken=endpoint, reason=err.code, details=err.details)
         self.journal.resolve_write(tx_id, "confirmed")
         return res, None
@@ -321,6 +355,7 @@ class MultiHopNavigator:
         xz_only: bool = False,
         threat_positions: Optional[Sequence[Tuple[float, float, float]]] = None,
         nearby_entities: Optional[Sequence[Dict[str, Any]]] = None,
+        avoid_hard_rock_without_pick: Optional[bool] = None,
     ) -> NavOutcome:
         """Perform AT MOST ONE bounded navigation/clearing/bridging/pillaring write step toward target_pos."""
         pos = status.get("pos") or [0.0, 64.0, 0.0]
@@ -351,6 +386,9 @@ class MultiHopNavigator:
                     return NavOutcome("PROGRESSED", action_taken="none", reason="pillar_rising")
                 self._pending_pillar = None
                 if block_coord(cur_p) != p_target and cur_p[1] >= p_target[1] + 0.8:
+                    if self._has_known_no_support(dim, p_target):
+                        self.gateway.unreachable.record_blocked_edge(dim, p_target, (p_target[0], p_target[1] + 1, p_target[2]))
+                        return NavOutcome("BLOCKED", action_taken="none", reason="no_support_precheck")
                     res, err_out = self._run_write(
                         "place", {"item": p_item, "pos": list(p_target)}, dim, cur_p,
                         lambda: self.client.place_block(p_item, p_target[0], p_target[1], p_target[2]),
@@ -465,18 +503,31 @@ class MultiHopNavigator:
             self._reset_water_state(key)
             self.swimmer.reset()
             prev_pos = self._last_pos_for_target.get(key)
-            stalled = prev_pos is not None and dist3(prev_pos, cur_p) < self.MIN_PROGRESS_METERS
-            if stalled:
+            cur_metric_dist = dist2_xz(cur_p, tgt) if xz_only else dist3(cur_p, tgt)
+            best_d = self._best_dist_for_target.get(key)
+            if best_d is None:
+                best_d = (
+                    (dist2_xz(prev_pos, tgt) if xz_only else dist3(prev_pos, tgt))
+                    if prev_pos is not None
+                    else cur_metric_dist
+                )
+                self._best_dist_for_target[key] = best_d
+            no_step_move = prev_pos is not None and dist3(prev_pos, cur_p) < self.MIN_PROGRESS_METERS
+            if no_step_move or (prev_pos is not None and (best_d - cur_metric_dist) < 0.45):
+                stalled = True
                 self._stall_counts[key] = self._stall_counts.get(key, 0) + 1
                 if self._stall_counts[key] >= 6:
                     self._stall_counts[key] = 0
+                    self._best_dist_for_target.pop(key, None)
                     self.gateway.unreachable.record_failure(dim, tgt_cell, "navigate", "stalled_no_displacement")
                     self.gateway.unreachable.record_failure(dim, tgt_cell, "navigate", "stalled_no_displacement")
                     return NavOutcome("BLOCKED", action_taken="move_to", reason="stalled_no_displacement")
-            elif prev_pos is not None:
+            else:
+                self._best_dist_for_target[key] = cur_metric_dist
                 self._stall_counts[key] = 0
+                stalled = False
             self._last_pos_for_target[key] = cur_p
-            use_3d = prefer_3d or self._stall_counts.get(key, 0) >= 1
+            use_3d = prefer_3d or (self._stall_counts.get(key, 0) >= 1 and no_step_move) or (self._stall_counts.get(key, 0) >= 2)
 
         fx_b, fy_b, fz_b = block_coord(cur_p)
         underground_enclosed = fy_b < 58 and any(
@@ -521,9 +572,14 @@ class MultiHopNavigator:
                 return NavOutcome("PROGRESSED", action_taken="move_to", reason="threat_detour" if deflected else "", details=res.get("result", {}) if res else {})
             if err_out.status == "UNKNOWN":
                 return err_out
-            # move_to failed (e.g. path_not_found across leaves/wall/pit) -> escalate to 3D on next tick
-            self._stall_counts[key] = self._stall_counts.get(key, 0) + 1
-            return NavOutcome("PROGRESSED", action_taken="move_to_fallback_3d", reason=err_out.reason)
+            if err_out.reason == "not_ready_wait":
+                return err_out
+            # move_to failed (e.g. path_not_found across leaves/wall/pit) -> escalate to 3D ONCE, then report BLOCKED
+            stalls = self._stall_counts.get(key, 0) + 1
+            self._stall_counts[key] = stalls
+            if stalls == 1:
+                return NavOutcome("PROGRESSED", action_taken="move_to_fallback_3d", reason=err_out.reason)
+            return NavOutcome("BLOCKED", action_taken="move_to_fallback_3d", reason=err_out.reason)
 
         # 3) Local 3D A* step (micro-dig / pillar-up / bridge / swim / climb_shore / detour walk)
         if in_water and water_stalls >= 2:
@@ -544,13 +600,30 @@ class MultiHopNavigator:
                 int(round(start_cell[2] + (tgt_cell[2] - start_cell[2]) * ratio)),
             )
 
+        enforce_rock_guard = (
+            True if avoid_hard_rock_without_pick is None else bool(avoid_hard_rock_without_pick)
+        )
+        no_pickaxe = (
+            enforce_rock_guard
+            and (inventory_counts is not None)
+            and (not any(inv.get(p, 0) > 0 for p in PICKAXE_TIERS))
+        )
+        plan_avoid = avoid_block_breaking
+        if no_pickaxe:
+            def _avoid_rock_bare_hand(cell: Coord3, _base=avoid_block_breaking, _d=dim) -> bool:
+                if _base is not None and _base(cell):
+                    return True
+                ent = self.gateway.peek_block(_d, cell)
+                return ent is not None and ent.name in _HARD_ROCK_NO_PICK_BLOCKS
+            plan_avoid = _avoid_rock_bare_hand
+
         steps = self.pathfinder.plan(
             dim,
             start_cell,
             sub_goal,
             tolerance=min(tolerance, 2.0),
             has_scaffold=scaffold is not None,
-            avoid_block_breaking=avoid_block_breaking,
+            avoid_block_breaking=plan_avoid,
             threat_positions=threats,
         )
         if not steps:
@@ -585,6 +658,11 @@ class MultiHopNavigator:
             return NavOutcome("PROGRESSED", action_taken="control", reason=reason, details={"to": list(step.stand_after)})
 
         if step.action == "dig":
+            if no_pickaxe:
+                dig_ent = self.gateway.peek_block(dim, step.target)
+                if dig_ent is not None and dig_ent.name in _HARD_ROCK_NO_PICK_BLOCKS:
+                    self.gateway.unreachable.record_failure(dim, step.target, "dig", "no_pickaxe_for_stone")
+                    return NavOutcome("BLOCKED", action_taken="none", reason="no_pickaxe_for_stone", details={"pos": list(step.target)})
             res, err_out = self._run_write(
                 "dig", {"pos": list(step.target)}, dim, cur_p,
                 lambda: self.client.dig(list(step.target), collect=True),
@@ -602,6 +680,10 @@ class MultiHopNavigator:
             return NavOutcome("PROGRESSED", action_taken="dig", reason=dig_reason, details={"pos": list(step.target)})
 
         if step.action == "bridge" and scaffold is not None:
+            if self._has_known_no_support(dim, step.target):
+                self.gateway.unreachable.record_blocked_edge(dim, start_cell, step.stand_after)
+                self.gateway.unreachable.record_failure(dim, step.target, "place", "no_support_precheck")
+                return NavOutcome("BLOCKED", action_taken="none", reason="no_support_precheck")
             res, err_out = self._run_write(
                 "place", {"item": scaffold, "pos": list(step.target)}, dim, cur_p,
                 lambda: self.client.place_block(scaffold, step.target[0], step.target[1], step.target[2]),
@@ -628,6 +710,10 @@ class MultiHopNavigator:
                     return err_out
                 self._pending_pillar = (dim, step.target, scaffold)
                 return NavOutcome("PROGRESSED", action_taken="control", reason="pillar_jump_launch")
+            if self._has_known_no_support(dim, step.target):
+                self.gateway.unreachable.record_blocked_edge(dim, start_cell, step.stand_after)
+                self.gateway.unreachable.record_failure(dim, step.target, "place", "no_support_precheck")
+                return NavOutcome("BLOCKED", action_taken="none", reason="no_support_precheck")
             res, err_out = self._run_write(
                 "place", {"item": scaffold, "pos": list(step.target)}, dim, cur_p,
                 lambda: self.client.place_block(scaffold, step.target[0], step.target[1], step.target[2]),

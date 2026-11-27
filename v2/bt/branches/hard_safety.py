@@ -122,24 +122,30 @@ class HardSafetyBranch(Node):
         self._last_write_error_code: str = ""
         self._burrow_origin: Optional[Coord3] = None
         self._burrow_deep: bool = False
+        self._burrow_settle_stalls: int = 0
+        self._burrow_cooldown_until: float = 0.0
 
         # Burst-damage & hurt tracking
         self._prev_health: Optional[float] = None
         self._hp_history: Deque[Tuple[float, float]] = deque(maxlen=32)
         self._burst_until: float = 0.0
 
-        # Walled-threat exemption & stall tracking
+        # Walled-threat & aquatic-retreat exemption / stall tracking
         self._retreat_path_fails: Dict[int, int] = {}
         self._exempt_threats: Dict[int, float] = {}
         self._pending_retreat_check: Optional[Tuple[int, Tuple[float, float, float], float]] = None
         self._retreat_blocked_eid: Optional[int] = None
+        self._swim_retreat_stalls: Dict[int, int] = {}
+        self._swim_retreat_check: Optional[Tuple[int, Tuple[float, float, float], float]] = None
 
     def stop(self, bb: Blackboard) -> None:
         """Pure-memory reset on preemption (zero HTTP calls)."""
         self._burrow_origin = None
         self._burrow_deep = False
+        self._burrow_settle_stalls = 0
         self._shield_raised = False
         self._pending_retreat_check = None
+        self._swim_retreat_check = None
         super().stop(bb)
 
     @staticmethod
@@ -555,16 +561,20 @@ class HardSafetyBranch(Node):
 
     def _step_emergency_burrow(self, bb: Blackboard) -> Optional[Status]:
         if self._burrow_origin is None:
+            if time.monotonic() < self._burrow_cooldown_until:
+                return None
             if not self._can_safe_burrow(bb):
                 return None
             self._burrow_origin = block_coord(bb.pos)
             self._burrow_deep = False
+            self._burrow_settle_stalls = 0
 
         bx, start_fy, bz = self._burrow_origin
         cur = block_coord(bb.pos)
         if (cur[0], cur[2]) != (bx, bz) and cur[1] >= start_fy - 1:
             self._burrow_origin = None
             self._burrow_deep = False
+            self._burrow_settle_stalls = 0
             return None
 
         target_y = start_fy - (3 if self._burrow_deep else 2)
@@ -577,16 +587,20 @@ class HardSafetyBranch(Node):
             if floor_check is None or floor_check.name in (LIQUID_BLOCKS | HAZARD_BLOCKS):
                 self._burrow_origin = None
                 self._burrow_deep = False
+                self._burrow_settle_stalls = 0
                 return None
             if cur[1] - 1 == target_y and floor_check.name in NON_SOLID_BLOCKS:
                 self._burrow_origin = None
                 self._burrow_deep = False
+                self._burrow_settle_stalls = 0
                 return None
             if dig_ent is not None and dig_ent.name not in AIR_BLOCKS:
                 if dig_ent.name in (LIQUID_BLOCKS | HAZARD_BLOCKS | self._BURROW_PROTECTED):
                     self._burrow_origin = None
                     self._burrow_deep = False
+                    self._burrow_settle_stalls = 0
                     return None
+                self._burrow_settle_stalls = 0
                 bb.last_action_outcome = "safety_burrow_dig"
                 status_ret, _, ok = self._write_action(
                     bb,
@@ -600,8 +614,17 @@ class HardSafetyBranch(Node):
                     self._burrow_origin = None
                     self._burrow_deep = False
                 return status_ret
+            self._burrow_settle_stalls += 1
+            if self._burrow_settle_stalls >= 3:
+                self._burrow_origin = None
+                self._burrow_deep = False
+                self._burrow_settle_stalls = 0
+                self._burrow_cooldown_until = time.monotonic() + 20.0
+                return None
             bb.last_action_outcome = "safety_burrow_settle"
             return Status.RUNNING
+
+        self._burrow_settle_stalls = 0
 
         cap_cell = (bx, cap_y, bz)
         cap_ent = self.gateway.get_block(bb.dimension, cap_cell, max_age=2.0, allow_fetch=True)
@@ -678,6 +701,28 @@ class HardSafetyBranch(Node):
             self._retreat_path_fails.clear()
             self._pending_retreat_check = None
             self._retreat_blocked_eid = None
+
+        if not st.get("in_water") and not st.get("submerged"):
+            self._swim_retreat_stalls.clear()
+            self._swim_retreat_check = None
+        elif self._swim_retreat_check is not None:
+            s_eid, s_pos, s_dist = self._swim_retreat_check
+            self._swim_retreat_check = None
+            ent_match = next(
+                (
+                    e for e in bb.entities
+                    if int(e.get("id", -1)) == s_eid and isinstance(e.get("pos"), list) and len(e["pos"]) == 3
+                ),
+                None,
+            )
+            if ent_match is not None:
+                d_now = dist3(bb.pos, ent_match["pos"])
+                moved = dist3(bb.pos, s_pos)
+                if moved < 0.35 and (d_now - s_dist) < 0.35:
+                    self._swim_retreat_stalls[s_eid] = self._swim_retreat_stalls.get(s_eid, 0) + 1
+                    self._retreat_path_fails[s_eid] = self._retreat_path_fails.get(s_eid, 0) + 1
+                else:
+                    self._swim_retreat_stalls[s_eid] = 0
 
         if self._pending_retreat_check is not None:
             prev_eid, start_pos, start_dist = self._pending_retreat_check
@@ -877,6 +922,32 @@ class HardSafetyBranch(Node):
                     if self._shield_raised or bool(st.get("blocking", False)):
                         return self._lower_shield(bb)
                     return Status.FAILURE
+
+        if bool(st.get("in_water") or st.get("submerged")):
+            if eid >= 0 and self._swim_retreat_stalls.get(eid, 0) >= 2:
+                if tname != "creeper" and (not occluded or recently_hurt) and ((d <= 3.5 and has_weapon) or d <= 2.5):
+                    self._swim_retreat_stalls[eid] = 0
+                    return self._strike_with_best_weapon(bb, threat, tname, max_hits=2 if has_weapon else 1)
+                self._exempt_threats[eid] = now_mono + (6.0 if recently_hurt else 15.0)
+                self._swim_retreat_stalls[eid] = 0
+                self._evasion_active = False
+                bb.set("threat_hysteresis_active", False, writer=self.name)
+                if self._shield_raised or bool(st.get("blocking", False)):
+                    return self._lower_shield(bb)
+                bb.last_action_outcome = f"safety_swim_retreat_yield:{tname}"
+                return Status.FAILURE
+            bb.last_action_outcome = f"safety_swim_retreat:{tname}"
+            swim_target_y = (float(ry) if ry is not None else py) + 0.5
+            swim_res = self._swimmer.swim_step((rx, swim_target_y, rz), st)
+            bb.writes_this_tick += 1
+            if swim_res.status == "UNKNOWN":
+                bb.set("pending_frozen", True, writer=self.name)
+                return Status.RUNNING
+            ok = swim_res.status not in {"FAILED"}
+            self._last_retreat_failed = not ok
+            if eid >= 0:
+                self._swim_retreat_check = (eid, bb.pos, d)
+            return Status.RUNNING
 
         move_payload: Dict[str, Any] = {"x": rx, "z": rz, "range": 1.5, "timeout_ms": 4000}
         if ry is not None:

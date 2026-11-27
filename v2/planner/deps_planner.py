@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import time
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from v2.bt.blackboard import Blackboard
 from v2.bt.goal_mount import ActiveGoalMount
@@ -49,6 +49,106 @@ class DepsPlanner:
         self.retriever = retriever or BM25SkillRetriever()
         self.explainer = explainer or DepsExplainer()
         self.compactor = compactor or SemanticCompactor(keep_pairs=2)
+        self._last_opp_scan_at: float = 0.0
+        self._last_opp_scan_pos: Optional[Tuple[float, float, float]] = None
+        self._last_opp_scan_dim: Optional[str] = None
+
+    @staticmethod
+    def _as_coord3(raw: Any) -> Optional[Tuple[int, int, int]]:
+        if isinstance(raw, (list, tuple)) and len(raw) == 3:
+            return (int(raw[0]), int(raw[1]), int(raw[2]))
+        return None
+
+    def _refresh_opportunity_signals(self, bb: Blackboard) -> None:
+        """Throttled single-query sensor/loot scanner populating nearby_sculk_sensor and nearby_loot_chest."""
+        if bb.get("pending_frozen"):
+            return
+        ctx = getattr(self.compiler, "ctx", None)
+        gw = getattr(ctx, "gateway", None) if ctx is not None else None
+        if gw is None or not hasattr(gw, "scan_blocks"):
+            return
+
+        now = time.monotonic()
+        cur_pos = bb.pos
+        if (
+            self._last_opp_scan_pos is not None
+            and bb.dimension == self._last_opp_scan_dim
+            and (now - self._last_opp_scan_at) < 10.0
+            and dist3(cur_pos, self._last_opp_scan_pos) < 12.0
+        ):
+            return
+
+        try:
+            rows = gw.scan_blocks(
+                bb.dimension,
+                ["sculk_sensor", "calibrated_sculk_sensor", "chest", "barrel"],
+                radius=24,
+                limit=12,
+            )
+        except Exception:
+            return
+        if not isinstance(rows, list):
+            return
+
+        self._last_opp_scan_at = now
+        self._last_opp_scan_pos = cur_pos
+        self._last_opp_scan_dim = bb.dimension
+
+        owned: Set[Tuple[int, int, int]] = set()
+        for slot in ("outpost_chest", "nether_outpost_chest"):
+            c = self._as_coord3(bb.get(slot))
+            if c is not None:
+                owned.add(c)
+        for raw in bb.get("owned_chest_coords") or ():
+            c = self._as_coord3(raw)
+            if c is not None:
+                owned.add(c)
+        db = getattr(gw, "db", None)
+        if db is not None and hasattr(db, "list_landmarks"):
+            for kind in ("outpost_chest", "nether_outpost_chest", "chest"):
+                lm_rows = db.list_landmarks(bb.dimension, kind=kind)
+                if isinstance(lm_rows, list):
+                    for lm in lm_rows:
+                        c = self._as_coord3(lm.get("pos") if isinstance(lm, dict) else None)
+                        if c is not None:
+                            owned.add(c)
+
+        looted: Set[Tuple[int, int, int]] = set()
+        now_wall = time.time()
+        raw_looted = bb.get("looted_chests")
+        if isinstance(raw_looted, dict):
+            for key, ts in raw_looted.items():
+                if not isinstance(ts, (int, float)):
+                    continue
+                if isinstance(key, tuple) and len(key) == 2 and isinstance(key[0], str):
+                    if key[0] != bb.dimension:
+                        continue
+                    c = self._as_coord3(key[1])
+                else:
+                    c = self._as_coord3(key)
+                if c is not None and (now_wall - float(ts)) < 600.0:
+                    looted.add(c)
+        elif isinstance(raw_looted, (list, set, tuple)):
+            for item in raw_looted:
+                c = self._as_coord3(item)
+                if c is not None:
+                    looted.add(c)
+
+        has_sculk = False
+        has_loot = False
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name") or "")
+            if name in {"sculk_sensor", "calibrated_sculk_sensor"}:
+                has_sculk = True
+            elif name in {"chest", "barrel"}:
+                coord = self._as_coord3(row.get("pos"))
+                if coord is not None and coord not in owned and coord not in looted:
+                    has_loot = True
+
+        bb.set("nearby_sculk_sensor", has_sculk, writer="deps_planner")
+        bb.set("nearby_loot_chest", has_loot, writer="deps_planner")
 
     def _state_tags(self, bb: Blackboard) -> List[str]:
         tags: List[str] = [self.compiler.objective]
@@ -87,6 +187,7 @@ class DepsPlanner:
         needs_ai: bool = False,
     ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
         """Build OpenAI (messages, tools) strictly bounded to <= 6,600 serialized UTF-8 bytes."""
+        self._refresh_opportunity_signals(bb)
         tools = self.compiler.tool_schemas(needs_ai=needs_ai)
         tools_bytes = len(json.dumps(tools, ensure_ascii=False).encode("utf-8"))
 
@@ -147,6 +248,7 @@ class DepsPlanner:
 
     def plan_once(self, bb: Blackboard, *, needs_ai: bool = False) -> Tuple[Optional[Any], Dict[str, Any], Optional[LLMResponse]]:
         """Execute one planning step: LLM if enabled, else deterministic HorizonSelector fallback."""
+        self._refresh_opportunity_signals(bb)
         if self.brain is None:
             top = self.horizon.select_top(bb, limit=1)
             if not top:
@@ -189,6 +291,12 @@ class AsyncLLMReplanNode(Node):
         self._submit_same_pos_streak: int = 0
         self._submit_cooldown_until: float = 0.0
         self._in_flight_inv: Optional[Tuple[Tuple[str, int], ...]] = None
+        self._last_stop_reason: str = ""
+        self._last_discarded_info: Optional[Dict[str, Any]] = None
+        self._failed_goal_streaks: Dict[str, int] = {}
+        self._failed_goal_pos: Optional[Tuple[float, float, float]] = None
+        self._failed_goal_inv: Optional[Tuple[Tuple[str, int], ...]] = None
+        self._cooldown_unstuck_until: float = 0.0
 
     def bump_context_version(self) -> None:
         self._context_version += 1
@@ -220,6 +328,23 @@ class AsyncLLMReplanNode(Node):
 
         # 1) Check if an async model result is ready (compile & record on main BT thread!)
         ready = self.worker.poll(expected_context_version=self._context_version)
+        discarded = self.worker.pop_discarded() if hasattr(self.worker, "pop_discarded") else None
+        if discarded is not None:
+            info = {
+                "job_id": discarded.job_id,
+                "submitted_ctx_ver": discarded.context_version,
+                "current_ctx_ver": self._context_version,
+                "stop_reason": self._last_stop_reason,
+                "active_branch": bb.active_branch,
+                "outcome": bb.last_action_outcome,
+                "ok": discarded.ok,
+                "ts_ms": int(time.time() * 1000),
+            }
+            bb.set("last_llm_discarded", info, writer=self.name)
+            self._last_discarded_info = info
+            rec = getattr(self.planner.brain, "recorder", None)
+            if rec is not None:
+                rec.record("WARN", "v2.llm", "LLM_DISCARDED", info)
         if ready is not None:
             self._in_flight_inv = None
             if ready.ok and isinstance(ready.value, LLMResponse):
@@ -255,8 +380,43 @@ class AsyncLLMReplanNode(Node):
             bb.last_action_outcome = "llm_thinking_async"
             return Status.RUNNING
 
-        # 2.5) Water cooldown lock & wet-flicker hysteresis: never spam LLM replans until dry footing stabilizes
+        # Track repeated consecutive goal failures at same position/inv and cool them down in HorizonSelector
         now = time.monotonic()
+        failed_goal = str(bb.get("last_failed_goal_name") or "")
+        fail_reason = str(bb.last_failure_reason or "")
+        if fail_reason.startswith("surface_escape:"):
+            raw_cd = bb.get("failed_goal_cooldowns")
+            cooldowns = dict(raw_cd) if isinstance(raw_cd, dict) else {}
+            cooldowns["acquire:stone_pickaxex1"] = now + 75.0
+            cooldowns["acquire:wooden_pickaxex1"] = now + 75.0
+            if failed_goal:
+                cooldowns[failed_goal] = now + 75.0
+            bb.set("failed_goal_cooldowns", cooldowns, writer=self.name)
+            bb.set("unstuck_needed", True, writer=self.name)
+            bb.set("unstuck_level", max(int(bb.get("unstuck_level", 0) or 0), 3), writer=self.name)
+        if failed_goal and (bb.goal_status in {"NEEDS_AI", "FAILED_LOCAL"} or fail_reason.startswith("pacing_oscillation@")):
+            cur_p = bb.pos
+            inv_s = self._inventory_signature(bb)
+            if (
+                self._failed_goal_pos is not None
+                and dist3(cur_p, self._failed_goal_pos) <= 3.0
+                and inv_s == self._failed_goal_inv
+            ):
+                streak = self._failed_goal_streaks.get(failed_goal, 0) + 1
+            else:
+                self._failed_goal_streaks.clear()
+                streak = 1
+            self._failed_goal_streaks[failed_goal] = streak
+            self._failed_goal_pos = cur_p
+            self._failed_goal_inv = inv_s
+            bb.set("last_failed_goal_name", "", writer=self.name)
+            if streak >= 2 or fail_reason.startswith("pacing_oscillation@"):
+                raw_cd = bb.get("failed_goal_cooldowns")
+                cooldowns = dict(raw_cd) if isinstance(raw_cd, dict) else {}
+                cooldowns[failed_goal] = now + 75.0
+                bb.set("failed_goal_cooldowns", cooldowns, writer=self.name)
+
+        # 2.5) Water cooldown lock & wet-flicker hysteresis: never spam LLM replans until dry footing stabilizes
         in_water = bool(bb.status.get("in_water") or bb.status.get("submerged"))
         water_lock_until = float(bb.get("water_replan_lock_until", 0.0) or 0.0)
         dry_footing_streak = int(bb.get("dry_footing_streak", 0) or 0)
@@ -297,6 +457,10 @@ class AsyncLLMReplanNode(Node):
             self._submit_same_pos_streak = 0
             self._submit_cooldown_until = 0.0
         if now < self._same_pos_cooldown_until or now < self._submit_cooldown_until:
+            if self._same_pos_replan_streak >= 2 and not bb.get("unstuck_needed") and now >= self._cooldown_unstuck_until:
+                self._cooldown_unstuck_until = now + 8.0
+                bb.set("unstuck_needed", True, writer=self.name)
+                bb.set("unstuck_level", min(4, max(1, int(bb.get("unstuck_level", 0) or 0) + 1)), writer=self.name)
             bb.last_action_outcome = "llm_same_pos_cooldown"
             return Status.RUNNING
 
@@ -333,5 +497,8 @@ class AsyncLLMReplanNode(Node):
         )
         if not (inv_unchanged and benign_preempt):
             self._context_version += 1
+            self._last_stop_reason = (
+                f"preempted_by:{bb.active_branch}|out:{bb.last_action_outcome}|frozen:{bool(bb.get('pending_frozen'))}"
+            )
             self._in_flight_inv = None
         super().stop(bb)

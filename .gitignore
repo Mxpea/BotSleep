@@ -26,4 +26,6 @@ server/
 # Scratch & temporary workspace files
 scratch/
 data/game_logic/spatial_grid.json
+tools/mc_debug_plugin/build/
+tools/mc_debug_plugin/dist/
 

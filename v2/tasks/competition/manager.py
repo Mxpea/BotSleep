@@ -96,6 +96,10 @@ class CompetitionManager:
         kind, target = route
         if kind == "enter_nether":
             return EnterNetherTask(ctx, self.catalogue)
+        if kind == "avoid_vibration":
+            from v2.tasks.loot import AvoidVibrationTask
+
+            return AvoidVibrationTask(ctx)
         if kind == "acquire":
             return AcquireItemTask(ctx, self.catalogue, target, 1)
         return None

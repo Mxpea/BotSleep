@@ -16,6 +16,23 @@ class PlaceBuildPrimitive:
         self._nav = NavigatePrimitive(ctx)
         self._auto_place_failed_at: Optional[tuple[str, Coord3]] = None
 
+    def _has_known_no_support(self, bb: Blackboard, cell: Coord3) -> bool:
+        """Return True only when all 6 orthogonal neighbors are known and all are non-solid."""
+        cx, cy, cz = cell
+        nbs = (
+            (cx + 1, cy, cz),
+            (cx - 1, cy, cz),
+            (cx, cy + 1, cz),
+            (cx, cy - 1, cz),
+            (cx, cy, cz + 1),
+            (cx, cy, cz - 1),
+        )
+        fetched = self.ctx.gateway.prefetch_blocks(bb.dimension, nbs, max_age=2.0)
+        ents = [fetched.get(c) for c in nbs]
+        if any(e is None for e in ents):
+            return False
+        return all(e.name in NON_SOLID_BLOCKS for e in ents if e is not None)
+
     def place_at(self, bb: Blackboard, item: str, target: Coord3) -> ActionOutcome:
         """Approach if needed, otherwise place ONE block and update voxel cache write-through."""
         if bb.inventory_counts.get(item, 0) < 1:
@@ -29,6 +46,11 @@ class PlaceBuildPrimitive:
         center = (t[0] + 0.5, t[1] + 0.5, t[2] + 0.5)
         if dist3(bb.pos, center) > 4.5:
             return self._nav.step_to(bb, center, tolerance=3.2)
+
+        if self._has_known_no_support(bb, t):
+            self.ctx.gateway.unreachable.record_failure(bb.dimension, t, "place", "no_support_precheck")
+            bb.last_failure_reason = "place:no_support_precheck"
+            return ActionOutcome("FAILED_LOCAL", "place", reason="no_support_precheck")
 
         out = self.ctx.execute_write(
             bb,
@@ -55,7 +77,10 @@ class PlaceBuildPrimitive:
 
         cur_cell = block_coord(bb.pos)
         # 1) Try upstream 1ms in-memory autoPlaceSite unless it already returned no_support at this exact cell
-        if self._auto_place_failed_at != (bb.dimension, cur_cell):
+        if (
+            self._auto_place_failed_at != (bb.dimension, cur_cell)
+            and not self.ctx.gateway.unreachable.is_blocked(bb.dimension, cur_cell, "place_auto")
+        ):
             out = self.ctx.execute_write(
                 bb,
                 "place",

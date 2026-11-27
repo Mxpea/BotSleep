@@ -25,7 +25,12 @@ class FluidPrimitive:
 
         # Approach general neighborhood first if far (> 5m)
         if dist3(bb.pos, (target[0] + 0.5, target[1] + 0.5, target[2] + 0.5)) > 5.0:
-            return self._nav.step_to(bb, (target[0] + 0.5, target[1] + 1.0, target[2] + 0.5), tolerance=3.0)
+            return self._nav.step_to(
+                bb,
+                (target[0] + 0.5, target[1] + 1.0, target[2] + 0.5),
+                tolerance=3.0,
+                avoid_hard_rock_without_pick=False,
+            )
 
         plan = self.ctx.gateway.plan_liquid_interaction(bb.dimension, target, bb.pos, mode="pickup")
         if plan.status == "CLEAR_OCCLUDER" and plan.occluder_pos is not None:
@@ -50,6 +55,7 @@ class FluidPrimitive:
                 bb,
                 (plan.stand_pos[0] + 0.5, float(plan.stand_pos[1]), plan.stand_pos[2] + 0.5),
                 tolerance=0.35,
+                avoid_hard_rock_without_pick=False,
             )
         self._fluid_nav_stall = None
 
@@ -103,6 +109,7 @@ class FluidPrimitive:
                 bb,
                 (plan.stand_pos[0] + 0.5, float(plan.stand_pos[1]), plan.stand_pos[2] + 0.5),
                 tolerance=0.35,
+                avoid_hard_rock_without_pick=False,
             )
         self._fluid_nav_stall = None
 

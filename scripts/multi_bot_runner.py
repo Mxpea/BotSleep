@@ -216,6 +216,7 @@ def _prepare_and_spread(
     spread: bool,
     min_dist: float,
     login_delay: float,
+    run_id: str = "",
 ) -> None:
     positions: Dict[str, List[float]] = {}
     rcon = None
@@ -226,6 +227,11 @@ def _prepare_and_spread(
             int(first_rcon.get("port") or 25575),
             str(first_rcon.get("password") or ""),
         )
+        if run_id:
+            try:
+                rcon.command(f"bsdebug run {run_id}")
+            except Exception:
+                pass
     try:
         for (idx, cfg, _state_dir, _log_dir), (gx, gz) in zip(bot_entries, anchors):
             agent_cfg = cfg["agent"]
@@ -367,6 +373,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 spread=args.spread,
                 min_dist=args.min_dist,
                 login_delay=args.login_delay,
+                run_id=args.run_id,
             )
 
         for idx, _cfg, _sd, log_dir, cfg_path in bot_entries:

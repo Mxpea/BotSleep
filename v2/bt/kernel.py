@@ -58,12 +58,13 @@ class PrioritySelector(Node):
         for idx, child in enumerate(self.children):
             status = child.tick(bb)
             if status != Status.FAILURE:
-                if self._active_index is not None and self._active_index != idx:
-                    prev = self.children[self._active_index]
-                    prev.stop(bb)
-                    bb.log_event(self.name, "preempt", f"{child.name} preempted {prev.name}")
+                prev_idx = self._active_index
                 self._active_index = idx if status == Status.RUNNING else None
                 bb.active_branch = child.name
+                if prev_idx is not None and prev_idx != idx:
+                    prev = self.children[prev_idx]
+                    prev.stop(bb)
+                    bb.log_event(self.name, "preempt", f"{child.name} preempted {prev.name}")
                 return status
         if self._active_index is not None:
             self.children[self._active_index].stop(bb)

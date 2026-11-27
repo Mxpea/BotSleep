@@ -253,7 +253,7 @@ class LocalRecoveryBranch(Node):
             probe_coords.append(c)
             for ndx, ndy, ndz in _CARDINAL_OFFSETS_3D:
                 probe_coords.append((c[0] + ndx, c[1] + ndy, c[2] + ndz))
-        fetched = self.gateway.prefetch_blocks(bb.dimension, probe_coords)
+        fetched = self.gateway.prefetch_blocks(bb.dimension, probe_coords, max_age=0.0)
 
         for cell in candidates:
             if self.gateway.unreachable.is_blocked(bb.dimension, cell, "place"):
