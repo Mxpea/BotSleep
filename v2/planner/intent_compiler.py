@@ -81,6 +81,7 @@ class IntentCompiler:
                         "enum": [
                             "acquire", "mine", "enter_nether", "build_shelter",
                             "explore", "locate_stronghold", "recover_corpse", "hunt_food",
+                            "loot_chest", "setup_outpost", "avoid_vibration",
                         ],
                     },
                     "item": {"type": "string"},
@@ -189,6 +190,21 @@ class IntentCompiler:
                 from v2.tasks.food import HuntFoodTask
 
                 return HuntFoodTask(self.ctx), {"ok": True, "mounted": "hunt_food"}
+            if goal == "loot_chest":
+                from v2.tasks.loot import LootChestTask
+
+                return LootChestTask(self.ctx), {"ok": True, "mounted": "loot_chest"}
+            if goal == "avoid_vibration":
+                from v2.tasks.loot import AvoidVibrationTask
+
+                return AvoidVibrationTask(self.ctx), {"ok": True, "mounted": "avoid_vibration"}
+            if goal == "setup_outpost":
+                from v2.tasks.outpost import EstablishOutpostTask, NetherPortalShelterTask
+
+                if item == "nether_shelter":
+                    return NetherPortalShelterTask(self.ctx, self.catalogue), {"ok": True, "mounted": "nether_portal_shelter"}
+                mode = item if item in {"establish", "stash", "withdraw"} else "establish"
+                return EstablishOutpostTask(self.ctx, self.catalogue, mode=mode), {"ok": True, "mounted": f"outpost:{mode}"}
             return None, {"ok": False, "error": f"unknown_goal:{goal}"}
 
         if name == "repair_step":

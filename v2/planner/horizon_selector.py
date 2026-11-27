@@ -183,6 +183,8 @@ class HorizonSelector:
                             + self.catalogue.estimate_steps("flint_and_steel", 1, inv)
                             + 16
                         )
+                elif kind == "avoid_vibration":
+                    est = 4
                 else:
                     est = max(1, self.catalogue.estimate_steps(target, 1, inv))
                 eff_est = est + max(0, entry.difficulty - 1) * 40 + indirect_penalties.get(entry.id, 0)
@@ -231,6 +233,13 @@ class HorizonSelector:
         if cook_cand is not None:
             candidates.append(cook_cand)
 
+        if bb.get("nearby_sculk_sensor") and not bb.get("avoid_vibration_done"):
+            candidates.append(HorizonCandidate("avoid_vibration", "sculk_sensor", 1, 2, "SNEAK_100"))
+        if bb.get("nearby_loot_chest") and corpse_cand is None:
+            candidates.append(HorizonCandidate("loot_chest", "chest", 1, 3, "LOOT_CHEST"))
+        if bb.dimension == "the_nether" and not bb.get("nether_portal_sheltered") and corpse_cand is None:
+            candidates.append(HorizonCandidate("setup_outpost", "nether_shelter", 1, 3, "NETHER_OUTPOST"))
+
         has_iron_pick = inv.get("iron_pickaxe", 0) > 0 or inv.get("diamond_pickaxe", 0) > 0
         has_stone_pick = has_iron_pick or inv.get("stone_pickaxe", 0) > 0
         has_melee_weapon = any(k.endswith(("_sword", "_axe")) and v > 0 for k, v in inv.items())
@@ -273,7 +282,16 @@ class HorizonSelector:
                 continue
             if item == "golden_boots" and not (has_iron_pick and (inv.get("gold_ingot", 0) >= 4 or inv.get("raw_gold", 0) >= 4)):
                 continue
-            if item == "diamond" and (not (has_iron_pick and (has_iron_chest or bb.pos[1] <= 16.0)) or inv.get("diamond_pickaxe", 0) > 0):
+            deep_diamond_ready = (
+                has_iron_pick
+                and has_water_bucket
+                and (inv.get("cobblestone", 0) + inv.get("cobbled_deepslate", 0) >= 16)
+                and bb.health >= 14.0
+            )
+            if item == "diamond" and (
+                not ((has_iron_pick and (has_iron_chest or bb.pos[1] <= 16.0)) or deep_diamond_ready)
+                or inv.get("diamond_pickaxe", 0) > 0
+            ):
                 continue
             if item == "diamond_pickaxe" and (inv.get("diamond", 0) < 3 or inv.get("diamond_pickaxe", 0) > 0):
                 continue
