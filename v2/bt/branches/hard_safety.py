@@ -122,6 +122,8 @@ class HardSafetyBranch(Node):
         self._last_write_error_code: str = ""
         self._burrow_origin: Optional[Coord3] = None
         self._burrow_deep: bool = False
+        self._burrow_settle_stalls: int = 0
+        self._burrow_cooldown_until: float = 0.0
 
         # Burst-damage & hurt tracking
         self._prev_health: Optional[float] = None
@@ -140,6 +142,7 @@ class HardSafetyBranch(Node):
         """Pure-memory reset on preemption (zero HTTP calls)."""
         self._burrow_origin = None
         self._burrow_deep = False
+        self._burrow_settle_stalls = 0
         self._shield_raised = False
         self._pending_retreat_check = None
         self._swim_retreat_check = None
@@ -558,16 +561,20 @@ class HardSafetyBranch(Node):
 
     def _step_emergency_burrow(self, bb: Blackboard) -> Optional[Status]:
         if self._burrow_origin is None:
+            if time.monotonic() < self._burrow_cooldown_until:
+                return None
             if not self._can_safe_burrow(bb):
                 return None
             self._burrow_origin = block_coord(bb.pos)
             self._burrow_deep = False
+            self._burrow_settle_stalls = 0
 
         bx, start_fy, bz = self._burrow_origin
         cur = block_coord(bb.pos)
         if (cur[0], cur[2]) != (bx, bz) and cur[1] >= start_fy - 1:
             self._burrow_origin = None
             self._burrow_deep = False
+            self._burrow_settle_stalls = 0
             return None
 
         target_y = start_fy - (3 if self._burrow_deep else 2)
@@ -580,16 +587,20 @@ class HardSafetyBranch(Node):
             if floor_check is None or floor_check.name in (LIQUID_BLOCKS | HAZARD_BLOCKS):
                 self._burrow_origin = None
                 self._burrow_deep = False
+                self._burrow_settle_stalls = 0
                 return None
             if cur[1] - 1 == target_y and floor_check.name in NON_SOLID_BLOCKS:
                 self._burrow_origin = None
                 self._burrow_deep = False
+                self._burrow_settle_stalls = 0
                 return None
             if dig_ent is not None and dig_ent.name not in AIR_BLOCKS:
                 if dig_ent.name in (LIQUID_BLOCKS | HAZARD_BLOCKS | self._BURROW_PROTECTED):
                     self._burrow_origin = None
                     self._burrow_deep = False
+                    self._burrow_settle_stalls = 0
                     return None
+                self._burrow_settle_stalls = 0
                 bb.last_action_outcome = "safety_burrow_dig"
                 status_ret, _, ok = self._write_action(
                     bb,
@@ -603,8 +614,17 @@ class HardSafetyBranch(Node):
                     self._burrow_origin = None
                     self._burrow_deep = False
                 return status_ret
+            self._burrow_settle_stalls += 1
+            if self._burrow_settle_stalls >= 3:
+                self._burrow_origin = None
+                self._burrow_deep = False
+                self._burrow_settle_stalls = 0
+                self._burrow_cooldown_until = time.monotonic() + 20.0
+                return None
             bb.last_action_outcome = "safety_burrow_settle"
             return Status.RUNNING
+
+        self._burrow_settle_stalls = 0
 
         cap_cell = (bx, cap_y, bz)
         cap_ent = self.gateway.get_block(bb.dimension, cap_cell, max_age=2.0, allow_fetch=True)

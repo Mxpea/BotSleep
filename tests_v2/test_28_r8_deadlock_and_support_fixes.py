@@ -189,12 +189,22 @@ class TestR8DeadlockAndSupportFixes(unittest.TestCase):
                 self.assertFalse(task._surface_route_exhausted)
                 self.assertTrue(any(w[0] == "move_to" for w in sim.write_calls))
 
-                # Climbing +1 Y from surface_no_pick_origin clears persisted surface_no_pick_hard_digs
+                # +1 Y climb alone must NOT reset surface_no_pick_hard_digs; escaping >= 12m or gaining a pickaxe resets it
+                sim.fill(-2, 40, -2, 2, 45, 2, "stone")
+                sim.set_block(0, 41, 0, "air")
+                sim.set_block(0, 42, 0, "air")
                 bb.set("surface_no_pick_hard_digs", 2, writer="test")
                 bb.set("surface_no_pick_origin", (0.5, 40.0, 0.5), writer="test")
                 bb.status = {"pos": [0.5, 41.0, 0.5], "dimension": "overworld"}
                 bb.inventory_counts = {}
                 task._surface_route_exhausted = True
+                res_climb = task.tick(bb)
+                self.assertEqual(res_climb, "NEEDS_AI")
+                self.assertEqual(int(bb.get("surface_no_pick_hard_digs", 0) or 0), 2)
+
+                bb.status = {"pos": [15.5, 41.0, 0.5], "dimension": "overworld"}
+                sim.fill(13, 39, -2, 18, 39, 2, "stone")
+                sim.fill(13, 44, -2, 18, 45, 2, "stone")
                 task.tick(bb)
                 self.assertEqual(int(bb.get("surface_no_pick_hard_digs", 0) or 0), 0)
                 self.assertIsNone(bb.get("surface_no_pick_origin"))
@@ -294,6 +304,71 @@ class TestR8DeadlockAndSupportFixes(unittest.TestCase):
                 self.assertEqual(res, "RUNNING")
                 self.assertIsNone(acq._active_child)
                 self.assertTrue(any(w[0] == "dig" and w[1]["x"] == 2 for w in sim.write_calls))
+            finally:
+                client.close()
+                db.close()
+
+    def test_hard_safety_burrow_settle_aborts_after_3_stalled_ticks(self) -> None:
+        sim = VirtualMcApiServer(spawn_pos=(47.0, 39.0, 10.5))
+        sim.fill(45, 35, 9, 49, 36, 12, "stone")
+        sim.set_block(47, 38, 10, "air")
+        sim.set_block(47, 37, 10, "air")
+        with tempfile.TemporaryDirectory() as td, VirtualMcHttpServer(sim) as srv:
+            db = UnifiedWorldDB.for_scope(td, srv.base_url, "BurrowLipBot", "w1")
+            client = MinecraftAgentClient(srv.base_url, "BurrowLipBot", "pass")
+            try:
+                client.login()
+                journal = PendingTransactionJournal(db)
+                gw = VirtualWorldGateway(client, db=db)
+                hs = HardSafetyBranch(gw, journal)
+                bb = Blackboard()
+                bb.status = {"pos": [47.0, 39.0, 10.5], "dimension": "overworld", "health": 5.0, "food": 16}
+                bb.inventory_counts = {"cobblestone": 4}
+                hs._burrow_origin = (47, 39, 10)
+                hs._burrow_deep = False
+
+                self.assertEqual(hs._step_emergency_burrow(bb), Status.RUNNING)
+                self.assertEqual(bb.last_action_outcome, "safety_burrow_settle")
+                self.assertEqual(hs._step_emergency_burrow(bb), Status.RUNNING)
+                self.assertEqual(bb.last_action_outcome, "safety_burrow_settle")
+                # 3rd consecutive tick hovering above target_y aborts burrow cleanly & applies cooldown
+                self.assertIsNone(hs._step_emergency_burrow(bb))
+                self.assertIsNone(hs._burrow_origin)
+                self.assertGreater(hs._burrow_cooldown_until, 0.0)
+            finally:
+                client.close()
+                db.close()
+
+    def test_unstuck_l3_caps_bare_hand_digs_at_two(self) -> None:
+        sim = VirtualMcApiServer(spawn_pos=(0.5, 30.0, 0.5))
+        sim.fill(-3, 28, -3, 3, 36, 3, "stone")
+        sim.set_block(0, 30, 0, "air")
+        sim.set_block(0, 31, 0, "air")
+        with tempfile.TemporaryDirectory() as td, VirtualMcHttpServer(sim) as srv:
+            db = UnifiedWorldDB.for_scope(td, srv.base_url, "CapL3Bot", "w1")
+            client = MinecraftAgentClient(srv.base_url, "CapL3Bot", "pass")
+            try:
+                client.login()
+                journal = PendingTransactionJournal(db)
+                gw = VirtualWorldGateway(client, db=db)
+                gw.prefetch_blocks(
+                    "overworld",
+                    [(x, y, z) for x in range(-2, 3) for y in range(29, 34) for z in range(-2, 3)],
+                )
+                unstuck = PhysicalUnstuckBranch(gw, journal)
+                bb = Blackboard()
+                bb.status = {"pos": [0.5, 30.0, 0.5], "dimension": "overworld", "health": 20.0, "food": 20}
+                bb.inventory_counts = {}
+                bb.last_failure_reason = "surface_escape:no_pickaxe"
+
+                # Two emergency bare-hand L3 digs succeed, 3rd at same location refuses hard rock dig
+                for _ in range(3):
+                    bb.set("unstuck_needed", True, writer="test")
+                    bb.set("unstuck_level", 3, writer="test")
+                    unstuck.update(bb)
+                dig_calls = [w for w in sim.write_calls if w[0] == "dig"]
+                self.assertLessEqual(len(dig_calls), 2)
+                self.assertEqual(unstuck._l3_no_pick_digs, 2)
             finally:
                 client.close()
                 db.close()

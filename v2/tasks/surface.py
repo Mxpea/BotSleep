@@ -236,10 +236,7 @@ class ReturnToSurfaceTask(Task):
         if (
             fy >= self.target_y
             or has_pick
-            or (
-                no_pick_origin is not None
-                and (dist3(bb.pos, no_pick_origin) >= 3.0 or fy >= block_coord(no_pick_origin)[1] + 1)
-            )
+            or (no_pick_origin is not None and dist3(bb.pos, no_pick_origin) >= 12.0)
         ):
             if int(bb.get("surface_no_pick_hard_digs", 0) or 0) != 0:
                 bb.set("surface_no_pick_hard_digs", 0, writer="surface")
