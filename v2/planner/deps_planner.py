@@ -291,6 +291,8 @@ class AsyncLLMReplanNode(Node):
         self._submit_same_pos_streak: int = 0
         self._submit_cooldown_until: float = 0.0
         self._in_flight_inv: Optional[Tuple[Tuple[str, int], ...]] = None
+        self._last_stop_reason: str = ""
+        self._last_discarded_info: Optional[Dict[str, Any]] = None
 
     def bump_context_version(self) -> None:
         self._context_version += 1
@@ -322,6 +324,23 @@ class AsyncLLMReplanNode(Node):
 
         # 1) Check if an async model result is ready (compile & record on main BT thread!)
         ready = self.worker.poll(expected_context_version=self._context_version)
+        discarded = self.worker.pop_discarded() if hasattr(self.worker, "pop_discarded") else None
+        if discarded is not None:
+            info = {
+                "job_id": discarded.job_id,
+                "submitted_ctx_ver": discarded.context_version,
+                "current_ctx_ver": self._context_version,
+                "stop_reason": self._last_stop_reason,
+                "active_branch": bb.active_branch,
+                "outcome": bb.last_action_outcome,
+                "ok": discarded.ok,
+                "ts_ms": int(time.time() * 1000),
+            }
+            bb.set("last_llm_discarded", info, writer=self.name)
+            self._last_discarded_info = info
+            rec = getattr(self.planner.brain, "recorder", None)
+            if rec is not None:
+                rec.record("WARN", "v2.llm", "LLM_DISCARDED", info)
         if ready is not None:
             self._in_flight_inv = None
             if ready.ok and isinstance(ready.value, LLMResponse):
@@ -435,5 +454,8 @@ class AsyncLLMReplanNode(Node):
         )
         if not (inv_unchanged and benign_preempt):
             self._context_version += 1
+            self._last_stop_reason = (
+                f"preempted_by:{bb.active_branch}|out:{bb.last_action_outcome}|frozen:{bool(bb.get('pending_frozen'))}"
+            )
             self._in_flight_inv = None
         super().stop(bb)

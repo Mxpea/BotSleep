@@ -61,8 +61,10 @@ class FlightRecorder:
         return value
 
     def record(self, level: str, component: str, event: str, data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        now = time.time()
         entry = {
-            "ts": round(time.time(), 3),
+            "ts": round(now, 3),
+            "ts_ms": int(now * 1000),
             "level": level,
             "component": component,
             "event": event,

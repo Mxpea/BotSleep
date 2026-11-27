@@ -182,6 +182,40 @@ class OpenAIBrain:
                     "tool_calls": [tc.name for tc in parsed_calls],
                 },
             )
+            compact_msgs = []
+            for m in messages or ():
+                if not isinstance(m, dict):
+                    continue
+                m_copy = dict(m)
+                raw_c = m_copy.get("content")
+                if isinstance(raw_c, str) and len(raw_c) > 1800:
+                    m_copy["content"] = raw_c[:1800] + "...[truncated]"
+                compact_msgs.append(m_copy)
+            tool_names = [
+                str(t["function"].get("name") or "")
+                for t in (tools or ())
+                if isinstance(t, dict) and isinstance(t.get("function"), dict)
+            ]
+            self.recorder.record(
+                "INFO",
+                "v2.llm",
+                "LLM_IO",
+                {
+                    "route": route,
+                    "requested_model": self.model,
+                    "confirmed_model": confirmed_model,
+                    "latency_ms": latency_ms,
+                    "prompt_tokens": pt,
+                    "completion_tokens": ct,
+                    "messages": compact_msgs,
+                    "tool_names": tool_names,
+                    "response_content": content[:1200],
+                    "tool_calls": [
+                        {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
+                        for tc in parsed_calls
+                    ],
+                },
+            )
         return LLMResponse(
             requested_model=self.model,
             confirmed_model=confirmed_model,

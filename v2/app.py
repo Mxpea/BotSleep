@@ -15,7 +15,7 @@ from v2.kernel import (
     PendingTransactionJournal,
     UnifiedWorldDB,
 )
-from v2.observability import ChatDebugger, FlightRecorder, HeatmapTracker, MonitorServer
+from v2.observability import ChatDebugger, DebugStateTracer, FlightRecorder, HeatmapTracker, MonitorServer
 from v2.planner import (
     AsyncLLMReplanNode,
     DepsPlanner,
@@ -107,6 +107,7 @@ def run_v2_session(
     monitor: Optional[MonitorServer] = None
     recorder: Optional[FlightRecorder] = None
     heatmap: Optional[HeatmapTracker] = None
+    debug_tracer: Optional[DebugStateTracer] = None
     brain: Optional[OpenAIBrain] = None
     db: Optional[UnifiedWorldDB] = None
     client: Optional[MinecraftAgentClient] = None
@@ -135,6 +136,12 @@ def run_v2_session(
                     enabled=True,
                 )
                 recorder.add_listener(heatmap.on_flight_event)
+                debug_tracer = DebugStateTracer(
+                    fr_cfg["output_dir"],
+                    username=str(agent_cfg["name"]),
+                    enabled=True,
+                )
+                recorder.add_listener(debug_tracer.on_flight_event)
 
         db = UnifiedWorldDB.for_scope(surv_cfg["state_dir"], api_cfg["base_url"], agent_cfg["name"], surv_cfg["world_id"])
         journal = PendingTransactionJournal(db)
@@ -234,12 +241,20 @@ def run_v2_session(
                     break
                 tick_t0 = time.perf_counter()
                 tick_status = rt.tick_once()
+                tick_elapsed_ms = (time.perf_counter() - tick_t0) * 1000.0
                 if heatmap is not None:
                     heatmap.record_tick(
                         tick_idx,
                         rt.bb,
                         rt.goal_mount.goal,
-                        (time.perf_counter() - tick_t0) * 1000.0,
+                        tick_elapsed_ms,
+                    )
+                if debug_tracer is not None:
+                    debug_tracer.record_tick(
+                        tick_idx,
+                        rt.bb,
+                        rt.goal_mount.goal,
+                        tick_elapsed_ms,
                     )
                 if chat_dbg is not None:
                     chat_dbg.process_events(rt.bb)
