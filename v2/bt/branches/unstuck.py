@@ -398,6 +398,24 @@ class PhysicalUnstuckBranch(Node):
             threat_positions=bb.get("active_threat_positions"),
             avoid_hard_rock_without_pick=True,
         )
+        if (
+            out.status not in {"PROGRESSED", "REACHED", "UNKNOWN"}
+            and fy < 58
+            and str(bb.last_failure_reason or "") == "surface_escape:no_pickaxe"
+        ):
+            anchor = bb.get("last_surface_anchor")
+            escape_goal = climb_goal
+            if isinstance(anchor, (list, tuple)) and len(anchor) == 3 and dist3(bb.pos, anchor) <= 160.0:
+                escape_goal = (int(anchor[0]), int(anchor[1]), int(anchor[2]))
+            out = self.navigator.step_toward(
+                (escape_goal[0] + 0.5, float(escape_goal[1]), escape_goal[2] + 0.5),
+                bb.status,
+                tolerance=1.5,
+                inventory_counts=bb.inventory_counts,
+                prefer_3d=True,
+                threat_positions=bb.get("active_threat_positions"),
+                avoid_hard_rock_without_pick=False,
+            )
         if out.action_taken != "none":
             bb.writes_this_tick += 1
         if out.status == "UNKNOWN":

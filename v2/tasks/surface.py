@@ -110,6 +110,8 @@ class ReturnToSurfaceTask(Task):
         self._surface_route_stalls: int = 0
         self._surface_route_last_pos: Optional[Tuple[float, float, float]] = None
         self._no_pick_hard_digs: int = 0
+        self._open_pillar_stalls: int = 0
+        self._open_pillar_last_y: Optional[int] = None
 
     def stop(self, bb: Blackboard) -> None:
         self._dig.clear_cache()
@@ -117,6 +119,8 @@ class ReturnToSurfaceTask(Task):
         self._surface_route_stalls = 0
         self._surface_route_last_pos = None
         self._no_pick_hard_digs = 0
+        self._open_pillar_stalls = 0
+        self._open_pillar_last_y = None
         super().stop(bb)
 
     def _try_plug_water_cell(self, bb: Blackboard, cell: Coord3) -> Optional[str]:
@@ -183,10 +187,10 @@ class ReturnToSurfaceTask(Task):
             bb.last_failure_reason = "surface_escape_budget_exhausted"
             return "NEEDS_AI"
 
-        # 1) Fast-path return via remembered surface_entry within 64m (bounded to max 6 stalled/blocked ticks)
+        # 1) Fast-path return via remembered surface_entry within 160m (bounded to max 8 stalled/blocked ticks)
         if not self._surface_route_exhausted:
             anchor = load_anchor_landmark(self.ctx.gateway.db, bb, "last_surface_anchor", "surface_entry", writer="surface")
-            if anchor is not None and dist3(bb.pos, anchor) <= 64.0:
+            if anchor is not None and dist3(bb.pos, anchor) <= 160.0:
                 anchor_center = (anchor[0] + 0.5, float(anchor[1]), anchor[2] + 0.5)
                 if dist3(bb.pos, anchor_center) <= 1.8 and anchor[1] < self.target_y:
                     self._surface_route_exhausted = True
@@ -196,7 +200,7 @@ class ReturnToSurfaceTask(Task):
                     elif self._surface_route_last_pos is not None:
                         self._surface_route_stalls = 0
                     self._surface_route_last_pos = bb.pos
-                    if self._surface_route_stalls >= 6:
+                    if self._surface_route_stalls >= 8:
                         self._surface_route_exhausted = True
                     else:
                         n_out = self._nav.step_to(
@@ -215,7 +219,7 @@ class ReturnToSurfaceTask(Task):
                             return "RUNNING"
                         elif n_out.status == "FAILED_LOCAL":
                             self._surface_route_stalls += 1
-                            if self._surface_route_stalls >= 6:
+                            if self._surface_route_stalls >= 8:
                                 self._surface_route_exhausted = True
                             if bb.writes_this_tick >= 1 or not self._surface_route_exhausted:
                                 return "RUNNING"
@@ -224,17 +228,48 @@ class ReturnToSurfaceTask(Task):
 
         # 2) Conservative 3-high staircase fallback (+ fast water plug before rotating direction)
         fx, fy, fz = block_coord(bb.pos)
+        if self._open_pillar_last_y is not None and fy > self._open_pillar_last_y:
+            self._open_pillar_stalls = 0
+        self._open_pillar_last_y = fy
         has_pick = any(bb.inventory_counts.get(p, 0) > 0 for p in PICKAXE_TIERS)
         no_pick_origin = bb.get("surface_no_pick_origin")
         if (
             fy >= self.target_y
             or has_pick
-            or (no_pick_origin is not None and dist3(bb.pos, no_pick_origin) >= 5.0)
+            or (
+                no_pick_origin is not None
+                and (dist3(bb.pos, no_pick_origin) >= 3.0 or fy >= block_coord(no_pick_origin)[1] + 1)
+            )
         ):
             if int(bb.get("surface_no_pick_hard_digs", 0) or 0) != 0:
                 bb.set("surface_no_pick_hard_digs", 0, writer="surface")
             if no_pick_origin is not None:
                 bb.set("surface_no_pick_origin", None, writer="surface")
+
+        # Without a pickaxe, climb open vertical cave chimneys via scaffold pillar (needs >=4 air above feet so head+1 fits)
+        if (
+            not has_pick
+            and self._surface_route_exhausted
+            and self._open_pillar_stalls < 3
+            and pick_best_item(bb.inventory_counts, SCAFFOLD_BLOCKS) is not None
+        ):
+            sky_open = [(fx, fy + 2, fz), (fx, fy + 3, fz), (fx, fy + 4, fz), (fx, fy + 5, fz)]
+            sky_map = self.ctx.gateway.prefetch_blocks(bb.dimension, sky_open, max_age=2.0)
+            if all((e := sky_map.get(c)) is not None and e.name in (AIR_BLOCKS | LEAF_BLOCKS) for c in sky_open):
+                p_nav = self._nav.step_to(
+                    bb,
+                    (fx + 0.5, float(fy + 3), fz + 0.5),
+                    tolerance=0.8,
+                    prefer_3d=True,
+                    avoid_hard_rock_without_pick=True,
+                )
+                if p_nav.status == "UNKNOWN":
+                    return "UNKNOWN"
+                if p_nav.status in {"OK", "PROGRESSED"}:
+                    return "RUNNING"
+                self._open_pillar_stalls += 1
+                if bb.writes_this_tick >= 1:
+                    return "RUNNING"
 
         # Without a pickaxe, scan for any open/soft-only direction before attempting hard-rock digs
         if not has_pick:

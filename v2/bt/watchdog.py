@@ -122,7 +122,7 @@ class LoopWatchdogNode(Node):
             bb.set("bounding_sphere_stalled", False, writer=self.name)
 
         # A<->B pacing oscillation check (wide spatial back-and-forth without net progress)
-        if not skip_sphere and bb.active_goal_name and len(self._pace_positions) >= 16:
+        if not skip_sphere and bb.active_goal_name and len(self._pace_positions) >= 12:
             pts = list(self._pace_positions)
             total_path = 0.0
             reversals = 0
@@ -143,7 +143,7 @@ class LoopWatchdogNode(Node):
                     prev_dx, prev_dz = dx, dz
             net_disp = dist2_xz(pts[0], pts[-1])
             span_xz = math.hypot(max(xs) - min(xs), max(zs) - min(zs))
-            if total_path >= 18.0 and span_xz >= 3.0 and net_disp <= 5.0 and reversals >= 3:
+            if total_path >= 14.0 and span_xz >= 3.0 and net_disp <= 5.0 and reversals >= 3:
                 self._pace_positions.clear()
                 self.stalled = True
                 self.stall_signature = (

@@ -296,6 +296,7 @@ class AsyncLLMReplanNode(Node):
         self._failed_goal_streaks: Dict[str, int] = {}
         self._failed_goal_pos: Optional[Tuple[float, float, float]] = None
         self._failed_goal_inv: Optional[Tuple[Tuple[str, int], ...]] = None
+        self._cooldown_unstuck_until: float = 0.0
 
     def bump_context_version(self) -> None:
         self._context_version += 1
@@ -382,7 +383,18 @@ class AsyncLLMReplanNode(Node):
         # Track repeated consecutive goal failures at same position/inv and cool them down in HorizonSelector
         now = time.monotonic()
         failed_goal = str(bb.get("last_failed_goal_name") or "")
-        if failed_goal and bb.goal_status in {"NEEDS_AI", "FAILED_LOCAL"}:
+        fail_reason = str(bb.last_failure_reason or "")
+        if fail_reason.startswith("surface_escape:"):
+            raw_cd = bb.get("failed_goal_cooldowns")
+            cooldowns = dict(raw_cd) if isinstance(raw_cd, dict) else {}
+            cooldowns["acquire:stone_pickaxex1"] = now + 75.0
+            cooldowns["acquire:wooden_pickaxex1"] = now + 75.0
+            if failed_goal:
+                cooldowns[failed_goal] = now + 75.0
+            bb.set("failed_goal_cooldowns", cooldowns, writer=self.name)
+            bb.set("unstuck_needed", True, writer=self.name)
+            bb.set("unstuck_level", max(int(bb.get("unstuck_level", 0) or 0), 3), writer=self.name)
+        if failed_goal and (bb.goal_status in {"NEEDS_AI", "FAILED_LOCAL"} or fail_reason.startswith("pacing_oscillation@")):
             cur_p = bb.pos
             inv_s = self._inventory_signature(bb)
             if (
@@ -398,7 +410,7 @@ class AsyncLLMReplanNode(Node):
             self._failed_goal_pos = cur_p
             self._failed_goal_inv = inv_s
             bb.set("last_failed_goal_name", "", writer=self.name)
-            if streak >= 2:
+            if streak >= 2 or fail_reason.startswith("pacing_oscillation@"):
                 raw_cd = bb.get("failed_goal_cooldowns")
                 cooldowns = dict(raw_cd) if isinstance(raw_cd, dict) else {}
                 cooldowns[failed_goal] = now + 75.0
@@ -445,6 +457,10 @@ class AsyncLLMReplanNode(Node):
             self._submit_same_pos_streak = 0
             self._submit_cooldown_until = 0.0
         if now < self._same_pos_cooldown_until or now < self._submit_cooldown_until:
+            if self._same_pos_replan_streak >= 2 and not bb.get("unstuck_needed") and now >= self._cooldown_unstuck_until:
+                self._cooldown_unstuck_until = now + 8.0
+                bb.set("unstuck_needed", True, writer=self.name)
+                bb.set("unstuck_level", min(4, max(1, int(bb.get("unstuck_level", 0) or 0) + 1)), writer=self.name)
             bb.last_action_outcome = "llm_same_pos_cooldown"
             return Status.RUNNING
 

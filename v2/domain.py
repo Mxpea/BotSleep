@@ -37,6 +37,7 @@ PASS_THROUGH_BLOCKS: FrozenSet[str] = AIR_BLOCKS | frozenset({
     "cornflower", "lily_of_the_valley", "orange_tulip", "pink_tulip", "red_tulip",
     "white_tulip", "sunflower", "lilac", "rose_bush", "peony", "torch", "wall_torch",
     "snow", "sugar_cane", "nether_portal", "fire", "soul_fire",
+    "kelp", "kelp_plant", "seagrass", "tall_seagrass", "bubble_column",
 })
 
 NON_SOLID_BLOCKS: FrozenSet[str] = PASS_THROUGH_BLOCKS | LIQUID_BLOCKS

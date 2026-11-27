@@ -98,6 +98,23 @@ class MultiHopNavigator:
         self._best_dist_for_target.pop(key, None)
         self._reset_water_state(key)
 
+    def _has_known_no_support(self, dim: str, target: Coord3) -> bool:
+        """Return True only when all 6 orthogonal neighbors are known and all are non-solid."""
+        tx, ty, tz = target
+        nbs = (
+            (tx + 1, ty, tz),
+            (tx - 1, ty, tz),
+            (tx, ty + 1, tz),
+            (tx, ty - 1, tz),
+            (tx, ty, tz + 1),
+            (tx, ty, tz - 1),
+        )
+        fetched = self.gateway.prefetch_blocks(dim, nbs, max_age=2.0)
+        ents = [fetched.get(c) for c in nbs]
+        if any(e is None for e in ents):
+            return False
+        return all(e.name in NON_SOLID_BLOCKS for e in ents if e is not None)
+
     def _run_write(
         self,
         endpoint: str,
@@ -369,6 +386,9 @@ class MultiHopNavigator:
                     return NavOutcome("PROGRESSED", action_taken="none", reason="pillar_rising")
                 self._pending_pillar = None
                 if block_coord(cur_p) != p_target and cur_p[1] >= p_target[1] + 0.8:
+                    if self._has_known_no_support(dim, p_target):
+                        self.gateway.unreachable.record_blocked_edge(dim, p_target, (p_target[0], p_target[1] + 1, p_target[2]))
+                        return NavOutcome("BLOCKED", action_taken="none", reason="no_support_precheck")
                     res, err_out = self._run_write(
                         "place", {"item": p_item, "pos": list(p_target)}, dim, cur_p,
                         lambda: self.client.place_block(p_item, p_target[0], p_target[1], p_target[2]),
@@ -660,6 +680,10 @@ class MultiHopNavigator:
             return NavOutcome("PROGRESSED", action_taken="dig", reason=dig_reason, details={"pos": list(step.target)})
 
         if step.action == "bridge" and scaffold is not None:
+            if self._has_known_no_support(dim, step.target):
+                self.gateway.unreachable.record_blocked_edge(dim, start_cell, step.stand_after)
+                self.gateway.unreachable.record_failure(dim, step.target, "place", "no_support_precheck")
+                return NavOutcome("BLOCKED", action_taken="none", reason="no_support_precheck")
             res, err_out = self._run_write(
                 "place", {"item": scaffold, "pos": list(step.target)}, dim, cur_p,
                 lambda: self.client.place_block(scaffold, step.target[0], step.target[1], step.target[2]),
@@ -686,6 +710,10 @@ class MultiHopNavigator:
                     return err_out
                 self._pending_pillar = (dim, step.target, scaffold)
                 return NavOutcome("PROGRESSED", action_taken="control", reason="pillar_jump_launch")
+            if self._has_known_no_support(dim, step.target):
+                self.gateway.unreachable.record_blocked_edge(dim, start_cell, step.stand_after)
+                self.gateway.unreachable.record_failure(dim, step.target, "place", "no_support_precheck")
+                return NavOutcome("BLOCKED", action_taken="none", reason="no_support_precheck")
             res, err_out = self._run_write(
                 "place", {"item": scaffold, "pos": list(step.target)}, dim, cur_p,
                 lambda: self.client.place_block(scaffold, step.target[0], step.target[1], step.target[2]),

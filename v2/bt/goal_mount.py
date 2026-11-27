@@ -45,6 +45,7 @@ class ActiveGoalMount(Node):
 
         if bb.get("watchdog_stalled"):
             reason = str(bb.get("watchdog_reason") or "watchdog_stalled")
+            bb.set("last_failed_goal_name", self._goal.name, writer=self.name)
             self._goal.stop(bb)
             self._goal = None
             bb.active_goal_name = ""
