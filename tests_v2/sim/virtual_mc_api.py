@@ -888,6 +888,9 @@ class VirtualMcApiServer:
                         smelt_out = {
                             "raw_iron": "iron_ingot", "raw_gold": "gold_ingot",
                             "cobblestone": "stone", "sand": "glass", "oak_log": "charcoal",
+                            "beef": "cooked_beef", "porkchop": "cooked_porkchop",
+                            "mutton": "cooked_mutton", "chicken": "cooked_chicken",
+                            "potato": "baked_potato",
                         }.get(in_name, in_name)
                         out = c.get("output") or {"name": smelt_out, "count": 0}
                         out["count"] += in_cnt

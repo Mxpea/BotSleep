@@ -184,16 +184,17 @@ class LocalRecoveryBranch(Node):
 
         bank_coords = [
             (fx + dx, fy + dy, fz + dz)
-            for dy in (1, 0)
+            for dy in (1, 0, 2)
             for dx, dz in _CARDINAL_OFFSETS_2D
         ]
         has_pickaxe = pick_best_item(bb.inventory_counts, PICKAXE_TIERS) is not None
         probe_coords: List[Coord3] = list(bank_coords)
         if has_pickaxe:
-            for dx, dz in _CARDINAL_OFFSETS_2D:
-                cx, cy, cz = fx + dx, fy + 1, fz + dz
-                for ndx, ndy, ndz in _CARDINAL_OFFSETS_3D:
-                    probe_coords.append((cx + ndx, cy + ndy, cz + ndz))
+            for dy in (1, 2):
+                for dx, dz in _CARDINAL_OFFSETS_2D:
+                    cx, cy, cz = fx + dx, fy + dy, fz + dz
+                    for ndx, ndy, ndz in _CARDINAL_OFFSETS_3D:
+                        probe_coords.append((cx + ndx, cy + ndy, cz + ndz))
         bank_fetched = self.gateway.prefetch_blocks(bb.dimension, probe_coords)
 
         for c in bank_coords:
@@ -208,30 +209,31 @@ class LocalRecoveryBranch(Node):
                 return self._dig_swim_cell(bb, c, "recovery_swim_dig_bank")
 
         if has_pickaxe:
-            hard_candidates: List[Tuple[int, Coord3]] = []
-            for dx, dz in _CARDINAL_OFFSETS_2D:
-                c = (fx + dx, fy + 1, fz + dz)
-                ent = bank_fetched.get(c)
-                if (
-                    ent is None
-                    or ent.name not in _WATER_HARD_ROCK_BANK_BLOCKS
-                    or ent.name in HAZARD_BLOCKS
-                    or ent.name in {"bedrock", "obsidian"}
-                    or self.gateway.unreachable.is_blocked(bb.dimension, c, "dig")
-                ):
-                    continue
-                if any(
-                    (nbr := bank_fetched.get((c[0] + ndx, c[1] + ndy, c[2] + ndz))) is not None
-                    and nbr.name in HAZARD_BLOCKS
-                    for ndx, ndy, ndz in _CARDINAL_OFFSETS_3D
-                ):
-                    continue
-                above = bank_fetched.get((c[0], c[1] + 1, c[2]))
-                has_headroom = 0 if (above is not None and above.name in NON_SOLID_BLOCKS) else 1
-                hard_candidates.append((has_headroom, c))
-            hard_candidates.sort(key=lambda item: item[0])
+            hard_candidates: List[Tuple[int, int, Coord3]] = []
+            for dy in (1, 2):
+                for dx, dz in _CARDINAL_OFFSETS_2D:
+                    c = (fx + dx, fy + dy, fz + dz)
+                    ent = bank_fetched.get(c)
+                    if (
+                        ent is None
+                        or ent.name not in _WATER_HARD_ROCK_BANK_BLOCKS
+                        or ent.name in HAZARD_BLOCKS
+                        or ent.name in {"bedrock", "obsidian"}
+                        or self.gateway.unreachable.is_blocked(bb.dimension, c, "dig")
+                    ):
+                        continue
+                    if any(
+                        (nbr := bank_fetched.get((c[0] + ndx, c[1] + ndy, c[2] + ndz))) is not None
+                        and nbr.name in HAZARD_BLOCKS
+                        for ndx, ndy, ndz in _CARDINAL_OFFSETS_3D
+                    ):
+                        continue
+                    above = bank_fetched.get((c[0], c[1] + 1, c[2]))
+                    has_headroom = 0 if (above is not None and above.name in NON_SOLID_BLOCKS) else 1
+                    hard_candidates.append((0 if dy == 1 else 1, has_headroom, c))
+            hard_candidates.sort(key=lambda item: (item[0], item[1]))
             if hard_candidates:
-                return self._dig_swim_cell(bb, hard_candidates[0][1], "recovery_swim_dig_bank")
+                return self._dig_swim_cell(bb, hard_candidates[0][2], "recovery_swim_dig_bank")
         return None
 
     def _try_plug_water(self, bb: Blackboard) -> Optional[Status]:
@@ -410,11 +412,15 @@ class LocalRecoveryBranch(Node):
             self._swimmer.reset()
         else:
             needs_air = bool(st.get("submerged")) or bb.oxygen < 16
+            critically_drowning = bb.oxygen < 8
             now = time.monotonic()
-            if needs_air or (not bb.active_goal_name and now >= self._swim_cooldown_until):
+            if critically_drowning or (now >= self._swim_cooldown_until and (needs_air or not bb.active_goal_name)):
                 if self._swim_anchor is None:
                     self._swim_anchor = bb.pos
-                stalled_in_water = self._swim_consec >= 2 and dist3(bb.pos, self._swim_anchor) < 0.5
+                stalled_in_water = (
+                    (self._swim_consec >= 2 and dist3(bb.pos, self._swim_anchor) < 1.2)
+                    or (self._swim_consec >= 5 and dist3(bb.pos, self._swim_anchor) < 2.2)
+                )
                 if stalled_in_water:
                     dig_res = self._try_dig_swim_ceiling(bb)
                     if dig_res is not None:
@@ -428,7 +434,7 @@ class LocalRecoveryBranch(Node):
                             self._swim_consec = 0
                             self._swim_anchor = bb.pos
                         return plug_res
-                if self._swim_consec >= 3 and (not needs_air or stalled_in_water):
+                if self._swim_consec >= 3 and (not needs_air or stalled_in_water) and not critically_drowning:
                     # Yield to PhysicalUnstuckBranch & lock LLM replanning until dry footing returns
                     self._swim_cooldown_until = now + 8.0
                     self._swim_consec = 0

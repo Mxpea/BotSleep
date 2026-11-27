@@ -6,9 +6,23 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from v2.bt.blackboard import Blackboard
-from v2.domain import FOOD_ITEMS, PASSIVE_ANIMALS, dist3
+from v2.domain import FOOD_ITEMS, PASSIVE_ANIMALS, PLANK_ITEMS, dist3
 from v2.tasks.catalogue import TaskCatalogue
 from v2.tasks.competition.manager import CompetitionManager
+
+
+_COOKABLE_FOOD_PAIRS = (
+    ("beef", "cooked_beef"),
+    ("porkchop", "cooked_porkchop"),
+    ("mutton", "cooked_mutton"),
+    ("chicken", "cooked_chicken"),
+    ("potato", "baked_potato"),
+)
+_COOKED_FOOD_ITEMS = frozenset({
+    "cooked_beef", "cooked_porkchop", "cooked_mutton", "cooked_chicken",
+    "baked_potato", "cooked_salmon", "cooked_cod", "cooked_rabbit",
+    "bread", "golden_carrot",
+})
 
 
 @dataclass(frozen=True)
@@ -92,6 +106,42 @@ class HorizonSelector:
             elif ent.get("dist") is not None and float(ent["dist"]) <= 16.0:
                 return HorizonCandidate("hunt_food", "food", 4, 4, "FOOD_HUNT")
         return None
+
+    @staticmethod
+    def _cook_food_candidate(
+        bb: Blackboard,
+        corpse_cand: Optional[HorizonCandidate],
+    ) -> Optional[HorizonCandidate]:
+        if corpse_cand is not None:
+            return None
+        inv = bb.inventory_counts
+        cooked_have = sum(inv.get(k, 0) for k in _COOKED_FOOD_ITEMS)
+        if cooked_have >= 4:
+            return None
+        has_fuel = (
+            inv.get("coal", 0) > 0
+            or inv.get("charcoal", 0) > 0
+            or sum(inv.get(p, 0) for p in PLANK_ITEMS) >= 4
+        )
+        can_furnace = (
+            inv.get("furnace", 0) > 0
+            or bb.get("last_furnace_anchor") is not None
+            or inv.get("cobblestone", 0) >= 8
+        )
+        if not (has_fuel and can_furnace):
+            return None
+        best_raw: Optional[tuple] = None
+        for raw_name, cooked_name in _COOKABLE_FOOD_PAIRS:
+            raw_cnt = inv.get(raw_name, 0)
+            min_raw = 1 if bb.food <= 14 else 2
+            if raw_cnt >= min_raw and (best_raw is None or raw_cnt > best_raw[0]):
+                best_raw = (raw_cnt, cooked_name)
+        if best_raw is None:
+            return None
+        raw_cnt, cooked_name = best_raw
+        target_cnt = inv.get(cooked_name, 0) + min(raw_cnt, 8)
+        est = 3 if (bb.food <= 14 and cooked_have == 0) else 5
+        return HorizonCandidate("acquire", cooked_name, target_cnt, est, "COOK_FOOD")
 
     def select_top(self, bb: Blackboard, *, limit: int = 5) -> List[HorizonCandidate]:
         inv = bb.inventory_counts
@@ -177,6 +227,9 @@ class HorizonSelector:
         food_hunt = self._daytime_food_hunt_candidate(bb, corpse_cand)
         if food_hunt is not None:
             candidates.append(food_hunt)
+        cook_cand = self._cook_food_candidate(bb, corpse_cand)
+        if cook_cand is not None:
+            candidates.append(cook_cand)
 
         has_iron_pick = inv.get("iron_pickaxe", 0) > 0 or inv.get("diamond_pickaxe", 0) > 0
         has_stone_pick = has_iron_pick or inv.get("stone_pickaxe", 0) > 0

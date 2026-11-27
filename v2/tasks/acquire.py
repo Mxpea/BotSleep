@@ -26,6 +26,10 @@ from v2.tasks.surface import (
 )
 
 
+_RAW_FOOD_INPUTS = frozenset({"beef", "porkchop", "mutton", "chicken", "potato"})
+_BATCH_SMELT_INPUTS = frozenset({"raw_iron", "raw_gold"}) | _RAW_FOOD_INPUTS
+
+
 def _has_pickaxe_tier(counts: Dict[str, int], required: str) -> bool:
     if required not in PICKAXE_TIERS:
         return True
@@ -200,6 +204,15 @@ class SmeltItemTask(Task):
 
         # 0.5) Ensure raw material & fuel BEFORE walking to or window/viewing any distant furnace!
         if not self._furnace_has_active_batch:
+            if smelt.input_item in _RAW_FOOD_INPUTS:
+                if raw_have == 0:
+                    if have > 0:
+                        return "COMPLETED"
+                    bb.last_failure_reason = f"no_raw_food:{smelt.input_item}"
+                    return "FAILED_LOCAL"
+                if raw_have < missing:
+                    self.count = have + raw_have
+                    missing = raw_have
             batch_eligible = (
                 self.output_item in {"iron_ingot", "gold_ingot"}
                 and self.count >= 3
@@ -337,8 +350,20 @@ class SmeltItemTask(Task):
         need_raw_more = max(0, missing - in_cnt)
         raw_have = bb.inventory_counts.get(smelt.input_item, 0)
         if need_raw_more > 0 and raw_have < need_raw_more:
-            self._furnace_has_active_batch = False
-            return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, smelt.input_item, need_raw_more))
+            if smelt.input_item in _RAW_FOOD_INPUTS:
+                if raw_have == 0:
+                    if in_cnt > 0:
+                        need_raw_more = 0
+                    elif have > 0:
+                        return "COMPLETED"
+                    else:
+                        bb.last_failure_reason = f"no_raw_food:{smelt.input_item}"
+                        return "FAILED_LOCAL"
+                else:
+                    need_raw_more = raw_have
+            else:
+                self._furnace_has_active_batch = False
+                return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, smelt.input_item, need_raw_more))
 
         need_fuel = not burning and fuel_cnt <= 0
         fuel = self._pick_fuel(bb.inventory_counts) if need_fuel else None
@@ -346,7 +371,7 @@ class SmeltItemTask(Task):
             self._furnace_has_active_batch = False
             return self.run_child(bb, AcquireItemTask(self.ctx, self.catalogue, "coal", max(1, math.ceil(missing / 8))))
 
-        if smelt.input_item in {"raw_iron", "raw_gold"} and raw_have > need_raw_more:
+        if smelt.input_item in _BATCH_SMELT_INPUTS and raw_have > need_raw_more:
             if fuel in {"coal", "charcoal"}:
                 max_by_fuel = max(1, bb.inventory_counts.get(fuel, 0)) * 8
                 load_input_count = max(need_raw_more, min(raw_have, 16, max_by_fuel))
@@ -357,7 +382,7 @@ class SmeltItemTask(Task):
 
         if fuel is None:
             fuel_load_count = 0
-        elif smelt.input_item in {"raw_iron", "raw_gold"} and raw_have > need_raw_more:
+        elif smelt.input_item in _BATCH_SMELT_INPUTS and raw_have > need_raw_more:
             fuel_load_count = min(
                 bb.inventory_counts.get(fuel, 1),
                 max(1, math.ceil(load_input_count / 8)) if fuel in {"coal", "charcoal", "coal_block", "blaze_rod"} else max(1, load_input_count),
