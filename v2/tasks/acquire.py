@@ -7,7 +7,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from v2.bt.blackboard import Blackboard
-from v2.domain import Coord3, FUEL_ITEMS, PICKAXE_TIERS, dist3
+from v2.domain import Coord3, FUEL_ITEMS, HAZARD_BLOCKS, LIQUID_BLOCKS, PICKAXE_TIERS, dist3
 from v2.primitives.base import PrimitiveContext
 from v2.primitives.container import ContainerPrimitive
 from v2.primitives.craft import CraftPrimitive
@@ -576,13 +576,34 @@ class AcquireItemTask(Task):
                     if place_out.status in {"OK", "PROGRESSED"}:
                         return "RUNNING"
             max_dy = 4.0 if gather.preferred_y is not None else None
-            out = self._dig.dig_nearest_of_types(bb, gather.block_types, radius=32, collect=True, max_dy=max_dy)
+            ore_filter = None
+            if gather.preferred_y is not None and self.item != "obsidian":
+                def ore_filter(c: Coord3) -> bool:
+                    nbrs = [
+                        (c[0] + dx, c[1] + dy, c[2] + dz)
+                        for dx, dy, dz in ((1, 0, 0), (-1, 0, 0), (0, 1, 0), (0, -1, 0), (0, 0, 1), (0, 0, -1))
+                    ]
+                    fetched = self.ctx.gateway.prefetch_blocks(bb.dimension, nbrs, max_age=30.0)
+                    return not any(
+                        (ent := fetched.get(nb)) is not None and ent.name in (LIQUID_BLOCKS | HAZARD_BLOCKS)
+                        for nb in nbrs
+                    )
+            out = self._dig.dig_nearest_of_types(
+                bb, gather.block_types, radius=32, collect=True, max_dy=max_dy, candidate_filter=ore_filter
+            )
             if out.status in {"OK", "PROGRESSED"}:
                 self.local_failures = 0
                 return "RUNNING"
             # If the nearest exposed block was an unreachable pocket, it has now been blacklisted -> retry up to 2x,
             # then fall through to MineResourceTask for underground-minable items!
-            if out.status == "FAILED_LOCAL" and out.reason in {"no_3d_path", "path_not_found", "out_of_reach", "blacklisted_unreachable"}:
+            if out.status == "FAILED_LOCAL" and out.reason in {
+                "no_3d_path",
+                "path_not_found",
+                "out_of_reach",
+                "blacklisted_unreachable",
+                "stalled_no_displacement",
+                "timeout",
+            }:
                 self.local_failures += 1
                 if self.local_failures < 2:
                     return "RUNNING"

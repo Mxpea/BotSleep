@@ -16,6 +16,8 @@ from v2.bt import BTRuntime
 from v2.gateway import SurfaceSwimExecutor, VirtualWorldGateway
 from v2.kernel import APIError, MinecraftAgentClient, PendingTransactionJournal, UnifiedWorldDB
 from v2.kernel.config import DEFAULTS
+from v2.primitives import PrimitiveContext
+from v2.tasks import AcquireItemTask, TaskCatalogue
 
 
 class TestHotfixSafetyAndTransientRetry(unittest.TestCase):
@@ -96,6 +98,71 @@ class TestHotfixSafetyAndTransientRetry(unittest.TestCase):
             finally:
                 client.close()
                 db.close()
+
+    def test_acquire_ore_skips_water_lava_adjacent_and_falls_back_on_stall(self) -> None:
+        sim = VirtualMcApiServer(spawn_pos=(0.5, 40.0, 0.5))
+        sim.fill(-4, 39, -4, 6, 39, 4, "stone")
+        # Nearest iron_ore at (2, 41, 0) touches water; second at (3, 41, 0) touches lava; dry iron_ore at (4, 41, 0)
+        sim.set_block(2, 41, 0, "iron_ore")
+        sim.set_block(2, 41, 1, "water", {"level": "0"})
+        sim.set_block(3, 41, 0, "iron_ore")
+        sim.set_block(3, 41, -1, "lava", {"level": "0"})
+        sim.set_block(4, 41, 0, "iron_ore")
+        sim.give("stone_pickaxe", 1)
+
+        with tempfile.TemporaryDirectory() as td, VirtualMcHttpServer(sim) as srv:
+            db = UnifiedWorldDB.for_scope(td, srv.base_url, "DryOreBot", "w1")
+            client = MinecraftAgentClient(srv.base_url, "DryOreBot", "pass")
+            try:
+                client.login()
+                journal = PendingTransactionJournal(db)
+                gw = VirtualWorldGateway(client, db=db)
+                ctx = PrimitiveContext(gw, journal)
+                cat = TaskCatalogue()
+                rt = BTRuntime(gw, journal, enable_auto_sleep=False)
+                rt.mount_goal(AcquireItemTask(ctx, cat, "raw_iron", 1))
+
+                for _ in range(6):
+                    rt.tick_once()
+                    if sim.inventory_counts.get("raw_iron", 0) >= 1:
+                        break
+                self.assertGreaterEqual(sim.inventory_counts.get("raw_iron", 0), 1)
+                self.assertEqual(sim.block_name(2, 41, 0), "iron_ore")
+                self.assertEqual(sim.block_name(3, 41, 0), "iron_ore")
+                self.assertNotEqual(sim.block_name(4, 41, 0), "iron_ore")
+            finally:
+                client.close()
+                db.close()
+
+        # Verify stalled_no_displacement escalates to MineResourceTask instead of failing immediately
+        sim2 = VirtualMcApiServer(spawn_pos=(0.5, 40.0, 0.5))
+        sim2.fill(-4, 39, -4, 14, 39, 4, "stone")
+        sim2.set_block(10, 41, 0, "iron_ore")
+        sim2.give("stone_pickaxe", 1)
+        with tempfile.TemporaryDirectory() as td, VirtualMcHttpServer(sim2) as srv2:
+            db2 = UnifiedWorldDB.for_scope(td, srv2.base_url, "StallMineBot", "w1")
+            client2 = MinecraftAgentClient(srv2.base_url, "StallMineBot", "pass")
+            try:
+                client2.login()
+                journal2 = PendingTransactionJournal(db2)
+                gw2 = VirtualWorldGateway(client2, db=db2)
+                ctx2 = PrimitiveContext(gw2, journal2)
+                cat2 = TaskCatalogue()
+                task = AcquireItemTask(ctx2, cat2, "raw_iron", 1)
+                rt2 = BTRuntime(gw2, journal2, enable_auto_sleep=False)
+                rt2.mount_goal(task)
+                with mock.patch.object(
+                    task._dig,
+                    "dig_nearest_of_types",
+                    return_value=mock.Mock(status="FAILED_LOCAL", reason="stalled_no_displacement"),
+                ):
+                    rt2.tick_once()
+                    self.assertEqual(rt2.bb.goal_status, "RUNNING")
+                    rt2.tick_once()
+                    self.assertIsNotNone(task._active_child)
+            finally:
+                client2.close()
+                db2.close()
 
     def test_run_v2_session_retries_transient_not_ready_and_never_swallows_unknown(self) -> None:
         sim = VirtualMcApiServer(spawn_pos=(0.5, 64.0, 0.5))
