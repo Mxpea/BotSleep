@@ -26,7 +26,9 @@ BASE_SYSTEM_PROMPT = (
     "prioritize PORTAL_GATE_READY EnterNether when iron_pickaxe or 4 iron_ingot ready; "
     "in competition mode score only via server /advancements. "
     "In competition mode, when active=None you MUST call select_task(task_id) from CANDIDATES "
-    "even with empty inventory (L3 auto-gathers wood/tools); never call update_progress when active=None."
+    "even with empty inventory (L3 auto-gathers wood/tools); never call update_progress when active=None. "
+    "Prioritize deterministic underground mining achievements (smelt_iron -> iron_tools -> obtain_armor -> mine_diamond -> shiny_gear) "
+    "over random surface/mob tasks, especially while underground."
 )
 
 

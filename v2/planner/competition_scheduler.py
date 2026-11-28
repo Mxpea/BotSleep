@@ -14,6 +14,20 @@ from v2.tasks.competition.manager import CompetitionManager
 
 
 _TIME_FIT_WINDOW = 0.85
+_MINING_PRIORITY_BOOST: Dict[str, float] = {
+    "minecraft:story/smelt_iron": 2.4,
+    "minecraft:story/iron_tools": 3.0,
+    "minecraft:story/obtain_armor": 2.8,
+    "minecraft:story/mine_diamond": 3.2,
+    "minecraft:story/shiny_gear": 2.8,
+    "minecraft:story/form_obsidian": 1.8,
+    "minecraft:story/lava_bucket": 1.1,
+}
+_UNDERGROUND_CORE_REMAINING: FrozenSet[str] = frozenset({
+    "minecraft:story/obtain_armor",
+    "minecraft:story/mine_diamond",
+    "minecraft:story/shiny_gear",
+})
 # Advancements requiring rare/specific world entities/features that should ONLY rank high when seen nearby or mats already held
 _ENTITY_GATED_ADVANCEMENTS: FrozenSet[str] = frozenset({
     "minecraft:husbandry/breed_an_animal",
@@ -125,6 +139,11 @@ class CompetitionScheduler:
         rem_s = bb.get("competition_remaining_seconds")
         rem_sec = float(rem_s) if isinstance(rem_s, (int, float)) and math.isfinite(float(rem_s)) else None
         portal_ready = self._is_portal_gate_ready(bb)
+        is_underground_band = bb.dimension == "overworld" and bb.pos[1] < 54.0
+        has_unfinished_ug_core = any(
+            aid not in self.competition.completed_ids and aid in self.competition.catalog
+            for aid in _UNDERGROUND_CORE_REMAINING
+        )
         fail_counts = getattr(self.competition, "failure_counts", {})
         tod = int(bb.status.get("time_of_day", 1000)) % 24000
         is_night_or_rain = (12541 <= tod <= 23458) or bool(bb.status.get("is_raining"))
@@ -205,9 +224,21 @@ class CompetitionScheduler:
                 elif aid == "minecraft:adventure/kill_a_mob" and ("hostile" in signals or is_night_or_rain):
                     surface_mult = 1.25
 
-            ppm = (eff_pts / max(0.35, est_minutes)) * opp_mult * gate_mult * time_fit * decay * surface_mult
+            if aid in _MINING_PRIORITY_BOOST and not unmet_caps:
+                mining_mult = _MINING_PRIORITY_BOOST[aid] * (2.5 if is_underground_band else 1.0)
+            elif is_underground_band and aid != "minecraft:story/enter_the_nether":
+                mining_mult = 0.25
+            else:
+                mining_mult = 1.0
 
-            is_portal_top = (aid == "minecraft:story/enter_the_nether" and portal_ready)
+            ppm = (eff_pts / max(0.35, est_minutes)) * opp_mult * gate_mult * time_fit * decay * surface_mult * mining_mult
+
+            allow_portal_pin = (
+                not is_underground_band
+                or not has_unfinished_ug_core
+                or (rem_sec is not None and rem_sec <= 360.0)
+            )
+            is_portal_top = (aid == "minecraft:story/enter_the_nether" and portal_ready and allow_portal_pin)
             if is_portal_top:
                 tag = "PORTAL_GATE_READY"
             elif is_opp and not unmet_caps:

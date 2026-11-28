@@ -594,7 +594,9 @@ class AcquireItemTask(Task):
                     place_out = self._place.place_near_player(bb, "gravel")
                     if place_out.status in {"OK", "PROGRESSED"}:
                         return "RUNNING"
-            max_dy = 4.0 if gather.preferred_y is not None else None
+            underground_ore = gather.preferred_y is not None and self.item != "obsidian" and bb.pos[1] < 54.0
+            gather_radius = 6 if underground_ore else 32
+            max_dy = 2.0 if underground_ore else (4.0 if gather.preferred_y is not None else None)
             ore_filter = None
             if gather.preferred_y is not None and self.item != "obsidian":
                 def ore_filter(c: Coord3) -> bool:
@@ -608,7 +610,7 @@ class AcquireItemTask(Task):
                         for nb in nbrs
                     )
             out = self._dig.dig_nearest_of_types(
-                bb, gather.block_types, radius=32, collect=True, max_dy=max_dy, candidate_filter=ore_filter
+                bb, gather.block_types, radius=gather_radius, collect=True, max_dy=max_dy, candidate_filter=ore_filter
             )
             if out.status in {"OK", "PROGRESSED"}:
                 self.local_failures = 0

@@ -18,6 +18,7 @@ from v2.bt.branches.local_recovery import LocalRecoveryBranch
 from v2.gateway import MultiHopNavigator, SurfaceSwimExecutor, VirtualWorldGateway
 from v2.kernel import APIError, MinecraftAgentClient, PendingTransactionJournal, UnifiedWorldDB
 from v2.kernel.config import DEFAULTS
+from v2.planner.competition_scheduler import CompetitionScheduler
 from v2.planner.deps_planner import DepsPlanner
 from v2.planner.horizon_selector import HorizonSelector
 from v2.planner.intent_compiler import IntentCompiler
@@ -488,6 +489,42 @@ class TestHotfixSafetyAndTransientRetry(unittest.TestCase):
             finally:
                 client.close()
                 db.close()
+
+    def test_competition_scheduler_prioritizes_underground_mining_chain_over_surface_distractions(self) -> None:
+        cat = TaskCatalogue()
+        comp = CompetitionManager(cat)
+        comp.completed_ids.update({"minecraft:story/upgrade_tools", "minecraft:story/smelt_iron"})
+        sched = CompetitionScheduler(cat, comp)
+
+        # 1) Underground at Y=26 with stone_pickaxe: iron_tools & obtain_armor outrank deflect_arrow / sleep_in_bed
+        bb_ug = Blackboard()
+        bb_ug.status = {"dimension": "overworld", "pos": [0.5, 26.0, 0.5], "time_of_day": 14000, "food": 20}
+        bb_ug.inventory_counts = {"stone_pickaxe": 1, "cobblestone": 32, "oak_planks": 8}
+        top_ug = [c.item for c in sched.select_top(bb_ug, limit=5)]
+        self.assertIn("minecraft:story/iron_tools", top_ug[:3])
+        self.assertIn("minecraft:story/obtain_armor", top_ug[:3])
+        if "minecraft:story/deflect_arrow" in top_ug:
+            self.assertLess(top_ug.index("minecraft:story/iron_tools"), top_ug.index("minecraft:story/deflect_arrow"))
+        if "minecraft:adventure/sleep_in_bed" in top_ug:
+            self.assertLess(top_ug.index("minecraft:story/obtain_armor"), top_ug.index("minecraft:adventure/sleep_in_bed"))
+
+        # 2) Underground at Y=16 with iron_pickaxe & unfinished diamond/armor core: diamond/armor ranks ahead of enter_the_nether
+        comp.completed_ids.add("minecraft:story/iron_tools")
+        bb_ug.status["pos"] = [0.5, 16.0, 0.5]
+        bb_ug.inventory_counts = {"iron_pickaxe": 1, "cobblestone": 64, "oak_planks": 8}
+        top_deep = sched.select_top(bb_ug, limit=6)
+        deep_ids = [c.item for c in top_deep]
+        self.assertIn(deep_ids[0], {"minecraft:story/mine_diamond", "minecraft:story/shiny_gear", "minecraft:story/obtain_armor"})
+        if "minecraft:story/enter_the_nether" in deep_ids:
+            self.assertGreater(deep_ids.index("minecraft:story/enter_the_nether"), 0)
+
+        # 3) On surface at Y=64 with iron_pickaxe: PORTAL_GATE_READY still pins enter_the_nether #1
+        bb_surf = Blackboard()
+        bb_surf.status = {"dimension": "overworld", "pos": [0.5, 64.0, 0.5], "time_of_day": 2000, "food": 20}
+        bb_surf.inventory_counts = {"iron_pickaxe": 1, "cobblestone": 32, "oak_planks": 8}
+        top_surf = sched.select_top(bb_surf, limit=5)
+        self.assertEqual(top_surf[0].item, "minecraft:story/enter_the_nether")
+        self.assertEqual(top_surf[0].priority_tag, "PORTAL_GATE_READY")
 
 
 if __name__ == "__main__":
