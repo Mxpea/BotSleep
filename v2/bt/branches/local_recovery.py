@@ -189,10 +189,6 @@ class LocalRecoveryBranch(Node):
             ):
                 return self._dig_swim_cell(bb, c, "recovery_swim_dig_ceiling")
 
-        # Never dig lateral riverbed blocks while submerged or low on air; surface vertically first
-        if bool(bb.status.get("submerged")) or bb.oxygen < 16:
-            return None
-
         bank_coords = [
             (fx + dx, fy + dy, fz + dz)
             for dy in (1, 0, 2)
@@ -210,9 +206,17 @@ class LocalRecoveryBranch(Node):
                         probe_coords.append((cx + ndx, cy + ndy, cz + ndz))
         bank_fetched = self.gateway.prefetch_blocks(bb.dimension, probe_coords)
 
+        def _has_dry_headroom_above(cell: Coord3) -> bool:
+            above = bank_fetched.get((cell[0], cell[1] + 1, cell[2]))
+            return (
+                above is not None
+                and above.name in PASS_THROUGH_BLOCKS
+                and above.name not in WATER_BLOCKS
+                and above.name not in HAZARD_BLOCKS
+            )
+
         for c in bank_coords:
-            above_c = bank_fetched.get((c[0], c[1] + 1, c[2]))
-            if above_c is None or above_c.name in WATER_BLOCKS:
+            if not _has_dry_headroom_above(c):
                 continue
             ent = bank_fetched.get(c)
             if (
@@ -229,8 +233,7 @@ class LocalRecoveryBranch(Node):
             for dy in (1, 2):
                 for dx, dz in _CARDINAL_OFFSETS_2D:
                     c = (fx + dx, fy + dy, fz + dz)
-                    above = bank_fetched.get((c[0], c[1] + 1, c[2]))
-                    if above is None or above.name in WATER_BLOCKS:
+                    if not _has_dry_headroom_above(c):
                         continue
                     ent = bank_fetched.get(c)
                     if (
@@ -247,7 +250,8 @@ class LocalRecoveryBranch(Node):
                         for ndx, ndy, ndz in _CARDINAL_OFFSETS_3D
                     ):
                         continue
-                    has_headroom = 0 if (above.name in NON_SOLID_BLOCKS) else 1
+                    above = bank_fetched.get((c[0], c[1] + 1, c[2]))
+                    has_headroom = 0 if (above is not None and above.name in NON_SOLID_BLOCKS) else 1
                     hard_candidates.append((0 if dy == 1 else 1, has_headroom, c))
             hard_candidates.sort(key=lambda item: (item[0], item[1]))
             if hard_candidates:

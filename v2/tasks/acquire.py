@@ -69,7 +69,7 @@ class SmeltItemTask(Task):
         count: int,
         *,
         max_furnaces: int = 2,
-        poll_interval_seconds: float = 0.0,
+        poll_interval_seconds: float = 3.5,
     ) -> None:
         super().__init__(f"smelt:{output_item}x{count}")
         self.ctx = ctx
@@ -130,6 +130,17 @@ class SmeltItemTask(Task):
         if isinstance(details.get("sections"), dict):
             return details
         return None
+
+    @staticmethod
+    def _is_actively_smelting(win: Optional[Dict[str, Any]], input_item: str) -> bool:
+        if not isinstance(win, dict):
+            return False
+        if _section_count(win, "output") > 0:
+            return False
+        if _section_count(win, "input", input_item) <= 0:
+            return False
+        info = win.get("info") if isinstance(win.get("info"), dict) else {}
+        return bool(info.get("burning", False)) or _section_count(win, "fuel") > 0
 
     def on_tick(self, bb: Blackboard) -> str:
         smelt = self.catalogue.smelting.get(self.output_item)
@@ -195,6 +206,9 @@ class SmeltItemTask(Task):
                         s_burn = bool((snap.get("info") if isinstance(snap.get("info"), dict) else {}).get("burning", False))
                         if s_out > 0 or (s_in > 0 and (s_burn or s_fuel > 0)):
                             self._furnace_has_active_batch = True
+                        if self._is_actively_smelting(snap, smelt.input_item):
+                            self._next_inspect_at = self._last_window_at + self.poll_interval_seconds
+                            bb.last_action_outcome = "smelt_waiting_furnace"
                     return "RUNNING"
                 if view.status == "PROGRESSED":
                     return "RUNNING"
@@ -327,6 +341,8 @@ class SmeltItemTask(Task):
                     self._last_window_pos = fpos
                     self._last_window_at = time.monotonic()
                     self._next_inspect_at = self._last_window_at + self.poll_interval_seconds
+                    if self._is_actively_smelting(self._last_window, smelt.input_item):
+                        bb.last_action_outcome = "smelt_waiting_furnace"
                     return "RUNNING"
                 return "RUNNING" if view.status == "PROGRESSED" else view.status
         else:
@@ -336,6 +352,9 @@ class SmeltItemTask(Task):
                 self._last_window = self._extract_window(view.details)
                 self._last_window_pos = fpos
                 self._last_window_at = time.monotonic()
+                if self._is_actively_smelting(self._last_window, smelt.input_item):
+                    self._next_inspect_at = self._last_window_at + self.poll_interval_seconds
+                    bb.last_action_outcome = "smelt_waiting_furnace"
                 return "RUNNING"
             return "RUNNING" if view.status == "PROGRESSED" else view.status
 

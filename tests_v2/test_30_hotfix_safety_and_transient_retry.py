@@ -23,7 +23,7 @@ from v2.planner.horizon_selector import HorizonSelector
 from v2.planner.intent_compiler import IntentCompiler
 from v2.planner.llm_client import LLMResponse, LLMToolCall
 from v2.primitives import PrimitiveContext
-from v2.tasks import AcquireItemTask, MineResourceTask, TaskCatalogue
+from v2.tasks import AcquireItemTask, MineResourceTask, SmeltItemTask, TaskCatalogue
 from v2.tasks.competition import CompetitionManager
 
 
@@ -453,6 +453,38 @@ class TestHotfixSafetyAndTransientRetry(unittest.TestCase):
                 t3 = rec._pick_swim_target(bb)
                 self.assertEqual(t1, t2)
                 self.assertEqual(t2, t3)
+            finally:
+                client.close()
+                db.close()
+
+    def test_smelt_item_task_waits_for_slow_furnace_without_watchdog_abort(self) -> None:
+        sim = VirtualMcApiServer(spawn_pos=(0.5, 64.0, 0.5))
+        sim.fill(-3, 63, -3, 3, 63, 3, "stone")
+        sim.set_block(1, 64, 0, "furnace")
+        sim.smelt_ticks_required = 10  # Exceeds LoopWatchdog.max_repeats=6!
+        sim.give("raw_iron", 2)
+        sim.give("coal", 1)
+
+        with tempfile.TemporaryDirectory() as td, VirtualMcHttpServer(sim) as srv:
+            db = UnifiedWorldDB.for_scope(td, srv.base_url, "SlowSmeltBot", "w1")
+            client = MinecraftAgentClient(srv.base_url, "SlowSmeltBot", "pass")
+            try:
+                client.login()
+                journal = PendingTransactionJournal(db)
+                gw = VirtualWorldGateway(client, db=db)
+                ctx = PrimitiveContext(gw, journal)
+                cat = TaskCatalogue()
+                self.assertGreaterEqual(SmeltItemTask(ctx, cat, "iron_ingot", 2).poll_interval_seconds, 3.0)
+
+                rt = BTRuntime(gw, journal, enable_auto_sleep=False)
+                rt.mount_goal(SmeltItemTask(ctx, cat, "iron_ingot", 2, poll_interval_seconds=0.0))
+
+                for _ in range(20):
+                    rt.tick_once()
+                    self.assertFalse(rt.watchdog.stalled, rt.watchdog.stall_signature)
+                    if sim.inventory_counts.get("iron_ingot", 0) >= 2:
+                        break
+                self.assertEqual(sim.inventory_counts.get("iron_ingot", 0), 2)
             finally:
                 client.close()
                 db.close()
