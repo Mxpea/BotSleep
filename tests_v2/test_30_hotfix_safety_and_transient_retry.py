@@ -13,11 +13,12 @@ from unittest import mock
 from tests_v2.sim.virtual_mc_api import VirtualMcApiServer, VirtualMcHttpServer
 from v2.app import run_v2_session
 from v2.bt import BTRuntime
+from v2.bt.blackboard import Blackboard
 from v2.gateway import SurfaceSwimExecutor, VirtualWorldGateway
 from v2.kernel import APIError, MinecraftAgentClient, PendingTransactionJournal, UnifiedWorldDB
 from v2.kernel.config import DEFAULTS
 from v2.primitives import PrimitiveContext
-from v2.tasks import AcquireItemTask, TaskCatalogue
+from v2.tasks import AcquireItemTask, MineResourceTask, TaskCatalogue
 
 
 class TestHotfixSafetyAndTransientRetry(unittest.TestCase):
@@ -232,6 +233,89 @@ class TestHotfixSafetyAndTransientRetry(unittest.TestCase):
                 rc_unk = run_v2_session(cfg2, once=False, max_ticks_override=2)
             self.assertEqual(rc_unk, 1)
             self.assertEqual(tick_mock.call_count, 1)
+
+    def test_mine_resource_conservative_enclosed_avoids_cave_protects_tread_and_places_torch(self) -> None:
+        # 1) Enclosed tunnel prefers solid rock (+Z/-Z) over open cave (+X, even with ore inside) and wet adjacent ore
+        sim = VirtualMcApiServer(spawn_pos=(0.5, 16.0, 0.5))
+        sim.fill(-4, 14, -4, 12, 20, 4, "stone")
+        sim.set_block(0, 16, 0, "air")
+        sim.set_block(0, 17, 0, "air")
+        # Open natural cave ahead in +X with exposed iron_ore beyond CLOSE_ORE_RADIUS (x=10)
+        sim.fill(2, 15, -2, 10, 19, 2, "air")
+        sim.set_block(10, 16, 0, "iron_ore")
+        # Close ore touching water at (1, 16, 0) must be skipped (allow_shallow_floor_water=False)
+        sim.set_block(1, 16, 0, "iron_ore")
+        sim.set_block(1, 16, 1, "water", {"level": "0"})
+        sim.give("iron_pickaxe", 1)
+
+        with tempfile.TemporaryDirectory() as td, VirtualMcHttpServer(sim) as srv:
+            db = UnifiedWorldDB.for_scope(td, srv.base_url, "ConservativeMineBot", "w1")
+            client = MinecraftAgentClient(srv.base_url, "ConservativeMineBot", "pass")
+            try:
+                client.login()
+                journal = PendingTransactionJournal(db)
+                gw = VirtualWorldGateway(client, db=db)
+                ctx = PrimitiveContext(gw, journal)
+                cat = TaskCatalogue()
+                rt = BTRuntime(gw, journal, enable_auto_sleep=False)
+                task = MineResourceTask(ctx, cat, "raw_iron", 1, target_y=16)
+                rt.mount_goal(task)
+
+                rt.tick_once()
+                digs = [(p["x"], p["y"], p["z"]) for ep, p in sim.write_calls if ep == "dig"]
+                self.assertEqual(len(digs), 1)
+                self.assertNotEqual(digs[0], (1, 16, 0))
+                self.assertNotEqual(digs[0][0], 1)
+
+                # 2) Stepping forward/down records previous underfoot cell as protected return tread
+                bb = Blackboard()
+                bb.begin_tick()
+                bb.status = {"pos": [0.5, 20.0, 0.5], "dimension": "overworld"}
+                task._record_step_and_protect(0, 20, 0)
+                bb.status = {"pos": [1.5, 19.0, 0.5], "dimension": "overworld"}
+                task._record_step_and_protect(1, 19, 0)
+                self.assertIn((0, 19, 0), task._protected_treads)
+                self.assertIn((1, 18, 0), task._protected_treads)
+                sim.set_block(0, 19, 0, "stone")
+                sim.set_block(0, 20, 0, "air")
+                gw.invalidate_unknown_radius("overworld", (0, 19, 0), radius=1)
+                self.assertFalse(task._is_safe_to_dig(bb, (0, 19, 0)))
+            finally:
+                client.close()
+                db.close()
+
+        # 3) Conditional torch placement behind player after TORCH_INTERVAL_STEPS underground
+        sim_t = VirtualMcApiServer(spawn_pos=(1.5, 16.0, 0.5))
+        sim_t.fill(-3, 14, -3, 5, 19, 3, "stone")
+        sim_t.set_block(0, 16, 0, "air")
+        sim_t.set_block(0, 17, 0, "air")
+        sim_t.set_block(1, 16, 0, "air")
+        sim_t.set_block(1, 17, 0, "air")
+        sim_t.give("iron_pickaxe", 1)
+        sim_t.give("torch", 4)
+
+        with tempfile.TemporaryDirectory() as td, VirtualMcHttpServer(sim_t) as srv_t:
+            db_t = UnifiedWorldDB.for_scope(td, srv_t.base_url, "TorchBot", "w1")
+            client_t = MinecraftAgentClient(srv_t.base_url, "TorchBot", "pass")
+            try:
+                client_t.login()
+                journal_t = PendingTransactionJournal(db_t)
+                gw_t = VirtualWorldGateway(client_t, db=db_t)
+                ctx_t = PrimitiveContext(gw_t, journal_t)
+                cat_t = TaskCatalogue()
+                task_t = MineResourceTask(ctx_t, cat_t, "raw_iron", 1, target_y=16)
+                task_t._last_pos_cell = (1, 16, 0)
+                task_t._last_step_cell = (0, 16, 0)
+                task_t._steps_since_torch = MineResourceTask.TORCH_INTERVAL_STEPS
+                rt_t = BTRuntime(gw_t, journal_t, enable_auto_sleep=False)
+                rt_t.mount_goal(task_t)
+
+                rt_t.tick_once()
+                self.assertEqual(sim_t.block_name(0, 16, 0), "torch")
+                self.assertEqual(task_t._steps_since_torch, 0)
+            finally:
+                client_t.close()
+                db_t.close()
 
 
 if __name__ == "__main__":
