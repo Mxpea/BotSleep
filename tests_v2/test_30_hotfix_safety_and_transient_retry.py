@@ -17,8 +17,13 @@ from v2.bt.blackboard import Blackboard
 from v2.gateway import SurfaceSwimExecutor, VirtualWorldGateway
 from v2.kernel import APIError, MinecraftAgentClient, PendingTransactionJournal, UnifiedWorldDB
 from v2.kernel.config import DEFAULTS
+from v2.planner.deps_planner import DepsPlanner
+from v2.planner.horizon_selector import HorizonSelector
+from v2.planner.intent_compiler import IntentCompiler
+from v2.planner.llm_client import LLMResponse, LLMToolCall
 from v2.primitives import PrimitiveContext
 from v2.tasks import AcquireItemTask, MineResourceTask, TaskCatalogue
+from v2.tasks.competition import CompetitionManager
 
 
 class TestHotfixSafetyAndTransientRetry(unittest.TestCase):
@@ -316,6 +321,70 @@ class TestHotfixSafetyAndTransientRetry(unittest.TestCase):
             finally:
                 client_t.close()
                 db_t.close()
+
+    def test_competition_idle_update_progress_and_empty_tool_calls_auto_select_top_candidate(self) -> None:
+        sim = VirtualMcApiServer(spawn_pos=(0.5, 64.0, 0.5))
+        sim.fill(-4, 63, -4, 4, 63, 4, "grass_block")
+        with tempfile.TemporaryDirectory() as td, VirtualMcHttpServer(sim) as srv:
+            db = UnifiedWorldDB.for_scope(td, srv.base_url, "IdleFallbackBot", "w1")
+            client = MinecraftAgentClient(srv.base_url, "IdleFallbackBot", "pass")
+            try:
+                client.login()
+                journal = PendingTransactionJournal(db)
+                gw = VirtualWorldGateway(client, db=db)
+                ctx = PrimitiveContext(gw, journal)
+                cat = TaskCatalogue()
+
+                # 1) Calling update_progress when idle auto-selects top competition candidate
+                comp1 = CompetitionManager(cat)
+                compiler1 = IntentCompiler(ctx, cat, objective="competition", competition=comp1)
+                horizon1 = HorizonSelector(cat, objective="competition", competition=comp1)
+                planner1 = DepsPlanner(None, compiler1, horizon1)
+                bb = Blackboard()
+                bb.status = {"dimension": "overworld", "pos": [0.5, 64.0, 0.5], "health": 20.0, "food": 20, "oxygen": 20}
+                bb.inventory_counts = {}
+
+                resp_note = LLMResponse(
+                    requested_model="default",
+                    confirmed_model="qwen3.6-35b-a3b",
+                    content="",
+                    tool_calls=[LLMToolCall("c1", "update_progress", {"note": "need wood first"})],
+                )
+                task1, res1, _ = planner1.apply_llm_response(resp_note, bb)
+                self.assertIsNotNone(task1)
+                self.assertIsNotNone(comp1.active_task_id)
+                self.assertEqual(res1.get("auto_selected_from"), "idle_update_progress")
+
+                # 2) Empty tool_calls when idle also auto-selects top competition candidate
+                comp2 = CompetitionManager(cat)
+                compiler2 = IntentCompiler(ctx, cat, objective="competition", competition=comp2)
+                horizon2 = HorizonSelector(cat, objective="competition", competition=comp2)
+                planner2 = DepsPlanner(None, compiler2, horizon2)
+                resp_empty = LLMResponse(
+                    requested_model="default",
+                    confirmed_model="qwen3.6-35b-a3b",
+                    content="thinking about wood",
+                    tool_calls=[],
+                )
+                task2, res2, _ = planner2.apply_llm_response(resp_empty, bb)
+                self.assertIsNotNone(task2)
+                self.assertIsNotNone(comp2.active_task_id)
+                self.assertEqual(res2.get("auto_selected_from"), "empty_tool_calls")
+
+                # 3) Never bypasses PendingUnknown freeze
+                comp3 = CompetitionManager(cat)
+                compiler3 = IntentCompiler(ctx, cat, objective="competition", competition=comp3)
+                horizon3 = HorizonSelector(cat, objective="competition", competition=comp3)
+                planner3 = DepsPlanner(None, compiler3, horizon3)
+                bb.set("pending_frozen", True, writer="test")
+                t_frozen1, _, _ = planner3.apply_llm_response(resp_note, bb)
+                t_frozen2, _, _ = planner3.apply_llm_response(resp_empty, bb)
+                self.assertIsNone(t_frozen1)
+                self.assertIsNone(t_frozen2)
+                self.assertIsNone(comp3.active_task_id)
+            finally:
+                client.close()
+                db.close()
 
 
 if __name__ == "__main__":

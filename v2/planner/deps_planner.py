@@ -24,7 +24,9 @@ BASE_SYSTEM_PROMPT = (
     "You are BotSleep v2 cognitive planner. Choose ONE tool call per turn.\n"
     "Rules: never invent tools; respect PendingUnknown freeze (call wait only); "
     "prioritize PORTAL_GATE_READY EnterNether when iron_pickaxe or 4 iron_ingot ready; "
-    "in competition mode score only via server /advancements."
+    "in competition mode score only via server /advancements. "
+    "In competition mode, when active=None you MUST call select_task(task_id) from CANDIDATES "
+    "even with empty inventory (L3 auto-gathers wood/tools); never call update_progress when active=None."
 )
 
 
@@ -231,12 +233,40 @@ class DepsPlanner:
 
         return messages, tools
 
+    def _competition_idle_fallback(
+        self,
+        bb: Blackboard,
+        reason: str,
+    ) -> Tuple[Optional[Any], Optional[Dict[str, Any]]]:
+        """Auto-mount top executable competition task when LLM stalls in idle."""
+        if (
+            self.compiler.objective != "competition"
+            or self.compiler.competition is None
+            or self.compiler.competition.active_task_id is not None
+            or bb.active_goal_name
+            or bb.get("pending_frozen")
+        ):
+            return None, None
+        top = self.horizon.select_top(bb, limit=1)
+        if top and top[0].goal == "select_task":
+            fb_task, fb_res = self.compiler.compile_tool_call("select_task", {"task_id": top[0].item}, bb)
+            if fb_task is not None:
+                return fb_task, {**fb_res, "auto_selected_from": reason}
+        return None, None
+
     def apply_llm_response(self, resp: LLMResponse, bb: Blackboard) -> Tuple[Optional[Any], Dict[str, Any], LLMResponse]:
         if not resp.tool_calls:
+            fb_task, fb_res = self._competition_idle_fallback(bb, "empty_tool_calls")
+            if fb_task is not None and fb_res is not None:
+                return fb_task, fb_res, resp
             return None, {"ok": True, "action": "wait", "content": resp.content[:120]}, resp
 
         tc = resp.tool_calls[0]
         task, res = self.compiler.compile_tool_call(tc.name, tc.arguments, bb)
+        if task is None and tc.name == "update_progress":
+            fb_task, fb_res = self._competition_idle_fallback(bb, "idle_update_progress")
+            if fb_task is not None and fb_res is not None:
+                task, res = fb_task, fb_res
         self.compactor.record_tool_turn(
             call_id=tc.id,
             tool_name=tc.name,
