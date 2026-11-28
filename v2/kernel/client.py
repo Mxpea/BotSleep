@@ -855,6 +855,7 @@ class MinecraftAgentClient:
         hit_interval_ms: Optional[int] = None,
         wait: bool = True,
         timeout_seconds: Optional[float] = None,
+        stop_on: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         is_release = (
             wait is False
@@ -874,7 +875,7 @@ class MinecraftAgentClient:
         payload: Dict[str, Any] = {
             "forward": forward, "back": back, "left": left, "right": right,
             "jump": jump, "sneak": sneak, "sprint": sprint,
-            "wait": wait, "stop_on": ["hurt", "death"],
+            "wait": wait, "stop_on": ["hurt", "death"] if stop_on is None else list(stop_on),
         }
         if ms is not None:
             payload["ms"] = ms

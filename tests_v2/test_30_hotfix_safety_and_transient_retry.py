@@ -6,13 +6,14 @@ import copy
 import json
 from pathlib import Path
 import tempfile
+import time
 import unittest
 from unittest import mock
 
 from tests_v2.sim.virtual_mc_api import VirtualMcApiServer, VirtualMcHttpServer
 from v2.app import run_v2_session
 from v2.bt import BTRuntime
-from v2.gateway import VirtualWorldGateway
+from v2.gateway import SurfaceSwimExecutor, VirtualWorldGateway
 from v2.kernel import APIError, MinecraftAgentClient, PendingTransactionJournal, UnifiedWorldDB
 from v2.kernel.config import DEFAULTS
 
@@ -50,6 +51,48 @@ class TestHotfixSafetyAndTransientRetry(unittest.TestCase):
                 self.assertLessEqual(sim.pos[0], 0.5)
                 self.assertGreaterEqual(abs(sim.pos[2] - 0.5), 4.0)
                 self.assertLessEqual(get_block_calls, 75)
+                move_calls = [pl for ep, pl in sim.write_calls if ep == "move_to"]
+                self.assertTrue(move_calls)
+                self.assertEqual(move_calls[-1].get("stop_on"), [])
+
+                swim = SurfaceSwimExecutor(client, journal, pulse_ms=300)
+                st_swim = {"pos": [0.5, 62.0, 0.5], "dimension": "overworld", "oxygen": 20, "submerged": False}
+                swim.swim_step((2.5, 62.0, 0.5), st_swim)
+                ctrl_calls = [pl for ep, pl in sim.write_calls if ep == "control"]
+                self.assertTrue(ctrl_calls)
+                self.assertEqual(ctrl_calls[-1].get("stop_on"), [])
+            finally:
+                client.close()
+                db.close()
+
+    def test_walled_threat_exempts_after_single_fail_for_45s_and_resets_on_hurt(self) -> None:
+        sim = VirtualMcApiServer(spawn_pos=(0.5, 64.0, 0.5))
+        sim.fill(-2, 60, -2, 6, 63, 2, "stone")
+        for y in (64, 65):
+            for x in range(-1, 3):
+                sim.set_block(x, y, -1, "stone")
+                sim.set_block(x, y, 1, "stone")
+            sim.set_block(-1, y, 0, "stone")
+            sim.set_block(2, y, 0, "stone")
+        sim.add_entity(41, "creeper", (5.5, 64.0, 0.5), kind="hostile")
+
+        with tempfile.TemporaryDirectory() as td, VirtualMcHttpServer(sim) as srv:
+            db = UnifiedWorldDB.for_scope(td, srv.base_url, "Wall1FailBot", "w1")
+            client = MinecraftAgentClient(srv.base_url, "Wall1FailBot", "pass")
+            try:
+                client.login()
+                journal = PendingTransactionJournal(db)
+                gw = VirtualWorldGateway(client, db=db)
+                rt = BTRuntime(gw, journal, enable_auto_sleep=False, threat_radius=8.0)
+
+                now_before = time.monotonic()
+                rt.tick_once()
+                self.assertIn(41, rt.hard_safety._exempt_threats)
+                self.assertGreater(rt.hard_safety._exempt_threats[41], now_before + 30.0)
+
+                sim.push_event("hurt", source="creeper", damage=2.0)
+                rt.tick_once()
+                self.assertEqual(rt.hard_safety._exempt_threats, {})
             finally:
                 client.close()
                 db.close()

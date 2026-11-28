@@ -401,14 +401,14 @@ class HardSafetyBranch(Node):
         recently_hurt: bool,
         occluded: bool,
     ) -> bool:
-        """Exempt wall-occluded threat for 15s when unhurt + occluded + (>=2 fails at d>3.5 or >=3 fails close)."""
+        """Exempt wall-occluded threat for 45s when unhurt + occluded + (>=1 fail at d>3.5 or >=3 fails close)."""
         if recently_hurt or not occluded:
             return False
         eid = int(threat.get("id", -1))
         fails = self._retreat_path_fails.get(eid, 0)
-        if eid < 0 or fails < (2 if d > 3.5 else 3):
+        if eid < 0 or fails < (1 if d > 3.5 else 3):
             return False
-        self._exempt_threats[eid] = time.monotonic() + 15.0
+        self._exempt_threats[eid] = time.monotonic() + 45.0
         self._retreat_path_fails.pop(eid, None)
         if self._retreat_blocked_eid == eid:
             self._retreat_blocked_eid = None
@@ -777,8 +777,8 @@ class HardSafetyBranch(Node):
                 return status_ret
             bb.last_action_outcome = "safety_escape_lava"
             status_ret, _, _ = self._write_action(
-                bb, "control", {"forward": True, "jump": True, "ms": 400},
-                lambda: self.gateway.client.control(forward=True, jump=True, ms=400),
+                bb, "control", {"forward": True, "jump": True, "ms": 400, "stop_on": []},
+                lambda: self.gateway.client.control(forward=True, jump=True, ms=400, stop_on=[]),
             )
             return status_ret
 
@@ -843,8 +843,8 @@ class HardSafetyBranch(Node):
                     status_ret, _, _ = self._write_action(
                         bb,
                         "move_to",
-                        {"x": safe_nb[0], "y": safe_nb[1], "z": safe_nb[2], "range": 0.8},
-                        lambda _s=safe_nb: self.gateway.client.move_to(x=_s[0], y=_s[1], z=_s[2], range=0.8, timeout_ms=2500),
+                        {"x": safe_nb[0], "y": safe_nb[1], "z": safe_nb[2], "range": 0.8, "stop_on": []},
+                        lambda _s=safe_nb: self.gateway.client.move_to(x=_s[0], y=_s[1], z=_s[2], range=0.8, timeout_ms=2500, stop_on=[]),
                     )
                     return status_ret
 
@@ -1004,7 +1004,7 @@ class HardSafetyBranch(Node):
                 self._swim_retreat_check = (eid, bb.pos, d)
             return Status.RUNNING
 
-        move_payload: Dict[str, Any] = {"x": rx, "z": rz, "range": 1.5, "timeout_ms": 2200}
+        move_payload: Dict[str, Any] = {"x": rx, "z": rz, "range": 1.5, "timeout_ms": 2200, "stop_on": []}
         if ry is not None:
             move_payload["y"] = ry
         bb.last_action_outcome = f"safety_retreat:{tname}"
@@ -1012,7 +1012,7 @@ class HardSafetyBranch(Node):
             bb,
             "move_to",
             move_payload,
-            lambda: self.gateway.client.move_to(x=rx, y=ry, z=rz, range=1.5, timeout_ms=2200),
+            lambda: self.gateway.client.move_to(x=rx, y=ry, z=rz, range=1.5, timeout_ms=2200, stop_on=[]),
         )
         self._last_retreat_failed = (not ok) or (not found_path)
         if not ok:

@@ -88,11 +88,11 @@ class SurfaceSwimExecutor:
             yaw = math.atan2(math.sin(yaw + offset), math.cos(yaw + offset))
             lateral_deflected = True
 
-        payload = {"forward": forward, "jump": True, "sprint": False, "yaw": round(yaw, 3), "ms": self.pulse_ms}
+        payload = {"forward": forward, "jump": True, "sprint": False, "yaw": round(yaw, 3), "ms": self.pulse_ms, "stop_on": []}
         tx_id = self.journal.begin_write("control", payload, dimension=dim, pos=pos)
         try:
             res = self.client.control(
-                forward=forward, jump=True, sprint=False, yaw=yaw, ms=self.pulse_ms, wait=True
+                forward=forward, jump=True, sprint=False, yaw=yaw, ms=self.pulse_ms, wait=True, stop_on=[]
             )
         except APIError as err:
             if err.details.get("action_state") == "unknown":
