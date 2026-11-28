@@ -1,6 +1,6 @@
 # BotSleep 架构与实现状态
 
-更新：2026-11-26（已通过 `develop-tianya/rewrite-v2` 完成 L0–L4 重写并合入 `main`；旧版 v1 源码永久归档于 Git 标签 `archive/v1-final` @ `c6859dc`，已合入历史分支转由 `archive/*` 标签保存，对应总纲见 [REWRITE_V2_MASTERPLAN.md](REWRITE_V2_MASTERPLAN.md) 与 [REWRITE_V2_AGENT_PLAN.md](REWRITE_V2_AGENT_PLAN.md)）。验证结果见 [TESTING.md](TESTING.md) 与 [LIVE9_90M_REPORT_20261126.md](LIVE9_90M_REPORT_20261126.md)，历史交接背景见 [HANDOFF.md](../HANDOFF.md)。
+更新：2026-11-28（`main` 基线为 BotSleep v2 L0–L4 架构 @ `7feb2e2`；当前 `developer-tianya/competition-task-advancements` 分支在此基础上增量构建了非串行赛事调度 DAG 与 6 类成就动作插件，**暂未合入 `main`**，单 Bot 模拟赛部署详见 [COMPETITION_DEPLOY.md](COMPETITION_DEPLOY.md)）。旧版 v1 源码永久归档于 Git 标签 `archive/v1-final` @ `c6859dc`，对应总纲见 [REWRITE_V2_MASTERPLAN.md](REWRITE_V2_MASTERPLAN.md) 与 [REWRITE_V2_AGENT_PLAN.md](REWRITE_V2_AGENT_PLAN.md)，验证结果见 [TESTING.md](TESTING.md) 与 [LIVE9_90M_REPORT_20261126.md](LIVE9_90M_REPORT_20261126.md)。
 
 ## 1. 当前入口与运行模式（BotSleep v2）
 
@@ -12,8 +12,8 @@
 |---|---|---|
 | `sleep`（默认） | `BTRuntime` + `LocalRecoveryBranch`（夜间自动寻床入睡） | 夜间/雷暴就近寻床入睡与醒来；可 `#stop` 暂停，有超时 |
 | `survival/starter` | `BTRuntime` + `DepsPlanner`（规则或 `OpenAIBrain`） | 核验开局采集/制作石器与基础工具链；受步骤/时间/死亡预算限制 |
-| `survival/daily` | `BTRuntime` + 15 张 `skills_kb/*.md` + `TaskCatalogue`（886 配方） | 行为树反应式抢占 + `SerialModelWorker` 非阻塞异步规划 + `SemanticCompactor`（`<= 6.6KB`） |
-| `survival/competition` | 同一 `BTRuntime` + `v2/tasks/competition/`（5 工具与服务端 `/advancements`） | 45 无条件 + 54 条件 override 门禁；`--new-competition` 重置；只认服务端计分真值 |
+| `survival/daily` | `BTRuntime` + 16 张 `skills_kb/*.md` + `TaskCatalogue`（886 配方） | 行为树反应式抢占 + `SerialModelWorker` 非阻塞异步规划 + `SemanticCompactor`（`<= 6.6KB`） |
+| `survival/competition` | 同一 `BTRuntime` + `v2/tasks/competition/`（40+ 节点图谱、`advancement_actions` 6 插件、`CompetitionSupervisor`） | 45 无条件 + 54 条件 override 门禁；`PPM` + 连携 + 机会命中动态择优与超时止损；`--new-competition` 重置；只认服务端 `/advancements` 计分真值 |
 
 开启模型规划需同时设置 `agent.mode: survival` 与 `llm.enabled: true`。`--check-config` 只校验配置，不连接服务器；`--keep-connected` / `mc_api.keep_session_on_exit` 控制退出时是否保持游戏连接。
 
@@ -37,9 +37,9 @@ flowchart TD
 | `v2/kernel/`（L0） | `config.py` 配置加载；`client.py` 拆分单线程写 Session 与 `threading.local()` 只读池；`storage.py` + `journal.py` 维护作用域 WAL 库、实例锁与写前 `pending_tx`（`unknown` 冻结不重放）；`model_gate.py` 保证跨进程模型请求串行并发=1 与 30s 传输恢复窗口 |
 | `v2/gateway/`（L1） | `world_proxy.py` 融合 `find_blocks`、`get_block` 与站位推断并做 `y+0.85`/`y-0.01` 桶视线规划；`unreachable.py` 按 `(dim, pos, action)` 持久化 TTL 黑名单；`pathfinder_3d.py` 维护起点 3×3 预取、按需补读与 `avoid_block_breaking`；`multihop_navigator.py` 切片多跳、3D 微掘/搭柱/搭桥并经 `_precision_nudge` 桥接上游 `goNear()` `<= range + 0.5` 盲区 |
 | `v2/bt/`（L2） | `SyncBlackboard` 每帧并发拉取状态/库存/实体/增量 `/events`；`Node.stop(bb)` 立法**纯内存零网络写**；`HardSafety` 含热危害避让与举盾进出半径迟滞；`LocalRecovery` 含饮食、浮水与树冠寻树干安全下树；`LoopWatchdog` 追踪 Bounding-Sphere 停滞并豁免 `smelt_waiting_furnace` 与有界 `nether_portal_waiting` |
-| `v2/primitives/` & `v2/tasks/`（L3） | `Navigate / DigCollect / PlaceBuild / Craft / Container / Fluid / Combat / Utility` 八大单写原语与无状态递归任务；`EnterNetherTask` 实现保护区防门前挖坑、先水后岩浆浇筑 10 格模具、远距离取水点回退及有界进门等待 |
-| `v2/planner/` & `skills_kb/`（L4） | `DEPS` 失败诊断、`HorizonSelector`（含 `PORTAL_GATE_READY`）、15 张 `skills_kb/*.md` 零依赖 BM25 召回、`SemanticCompactor`（`ProgressCard` + 最近 2 组工具事务 `<= 6.6KB`）及 `IntentCompiler` |
-| `v2/observability/`、`scripts/`、`integrations/` | `FlightRecorder` 脱敏日志、`MonitorServer` 只读面板、`ChatDebugger`、`scripts/botctl.py` 运维检查、`scripts/multi_bot_runner.py` 多实例编排、与旧版解耦的 `integrations/ninjabrain/` |
+| `v2/primitives/` & `v2/tasks/`（L3） | `Navigate / DigCollect / PlaceBuild / Craft / Container / Fluid / Combat / Utility` 八大单写原语与无状态递归任务；`EnterNetherTask` 实现保护区防门前挖坑、先水后岩浆浇筑 10 格模具、远距离取水点回退及有界进门等待；赛事分支补充 `v2/tasks/competition/graph.py`、`advancement_actions.py`（6 插件）与 `mob_gather.py` |
+| `v2/planner/` & `skills_kb/`（L4） | `DEPS` 失败诊断、`HorizonSelector`、`CompetitionScheduler`（PPM + 连携 + 残局窗口 + 指数退避）、16 张 `skills_kb/*.md` 零依赖 BM25 召回、`SemanticCompactor`（`ProgressCard` + 最近 2 组工具事务 `<= 6.6KB`）及 `IntentCompiler` |
+| `v2/app.py`、`v2/observability/`、`scripts/`、`integrations/` | `IslandReconIndex` 被动侦察与 `CompetitionSupervisor` 止损计分遥测、`FlightRecorder` 脱敏日志、`MonitorServer` 只读面板、`ChatDebugger`、`scripts/botctl.py` 运维检查、`scripts/debug_workbench.py` 复盘工作台、`scripts/multi_bot_runner.py` 多实例编排、与旧版解耦的 `integrations/ninjabrain/` |
 
 ## 4. 协作开发与分支规范
 

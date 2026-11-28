@@ -9,6 +9,7 @@
 | 文档 | 适用范围 | 说明 |
 |---|---|---|
 | [README.md](../README.md) | **首读入口** | 安装、跨机环境一致性清单、`tests_v2` 验证命令、运行模式与升级说明 |
+| [COMPETITION_DEPLOY.md](COMPETITION_DEPLOY.md) | **8h 单 Bot 模拟赛部署（分支专题）** | `developer-tianya/competition-task-advancements` 阶段成果、已知边界与新机单 Bot + 仅主 API 8h 部署手册 |
 | [AGENTS.md](../AGENTS.md) | 协作者 / AI 规则 | 模块职责边界、编码与测试纪律、`mc-agent-api` 零修改约束 |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | 架构设计 | L0–L4 单向五层执行链、核心不变量与分支协作规范 |
 | [CONFIGURATION.md](CONFIGURATION.md) | 配置说明 | `v2/kernel/config.py` 参数表、环境变量覆盖顺序与 `overflow` 双路配置 |
@@ -20,7 +21,7 @@
 | [REWRITE_V2_AGENT_PLAN.md](REWRITE_V2_AGENT_PLAN.md) | v2 实施路线 | P0–P6 分阶段实施计划与验收清单 |
 | [STRONGHOLD.md](STRONGHOLD.md) | 要塞计算模块 | `integrations/ninjabrain/` 无界面 Ninjabrain Bot 安装、离线计算与实机采样 |
 | [data/competition/README.md](../data/competition/README.md) | 赛事规则目录 | `rules_v2.json` 规则快照与 `v2.tasks.competition.rules` 接口 |
-| [skills_kb/README.md](../skills_kb/README.md) | 微技能知识库 | 15 张 L4 BM25 召回微技能卡说明 |
+| [skills_kb/README.md](../skills_kb/README.md) | 微技能知识库 | 16 张 L4 BM25 召回微技能卡说明 |
 
 ---
 

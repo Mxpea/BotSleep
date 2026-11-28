@@ -1,6 +1,20 @@
 # 配置、客户端、生存、赛事与监控验证
 
-> 架构变更、异机部署运行步骤、Token/耗时账单与逻辑审计汇总另见 [交接文档](HANDOFF.md)。过夜全量测试与 API/Token 专题报告见 [OVERNIGHT_TEST_REPORT_20261126.md](OVERNIGHT_TEST_REPORT_20261126.md) 与 [API_AND_TOKEN_REPORT_20261126.md](API_AND_TOKEN_REPORT_20261126.md)；9-Bot 90 分钟与双 API 压测详报见 [LIVE9_90M_REPORT_20261126.md](LIVE9_90M_REPORT_20261126.md)。
+> 新机 8 小时单 Bot + 仅主 API 部署指引与阶段成果总览见 [COMPETITION_DEPLOY.md](COMPETITION_DEPLOY.md)。历史基准、过夜报告与 Token 账单见 [OVERNIGHT_TEST_REPORT_20261126.md](OVERNIGHT_TEST_REPORT_20261126.md)、[API_AND_TOKEN_REPORT_20261126.md](API_AND_TOKEN_REPORT_20261126.md) 与 [LIVE9_90M_REPORT_20261126.md](LIVE9_90M_REPORT_20261126.md)。
+
+## BotSleep v2 非串行赛事任务调度与 3 轮 9-Bot 实服对照（2026-11-28，`developer-tianya/competition-task-advancements`）
+
+- **源码基线与环境**：`developer-tianya/competition-task-advancements`（最新代码 `150d2de`，基于 `main` @ `7feb2e2`，**尚未合入 `main`**），Windows 11 / `.venv` Python 3.13，Leaves `1.21.11`（`difficulty=easy`、每轮重置世界），原版零修改 `mc-agent-api` `1.3.19` + `BotSleepDebug v1.0.0`。
+- **离线验证（`150d2de`，不连接真实服务器）**：
+  - `.\.venv\Scripts\python.exe -B -m unittest discover -s tests_v2 -v`：**`184 / 184` 全部通过**（`111.386s`，`0` 跳过、`0` 失败、`0` 错误），覆盖 L0–L4 AST 层边界、886 配方无状态任务、40+ 节点赛事 DAG 调度器、6 类 `advancement_actions` 行为插件、`GatherMobDropTask` 与悬崖防护。
+- **3 轮 9-Bot 实服赛事对照（服务端 `/advancements` 45 项无条件成就为唯一计分真值）**：
+  - **`Comp1`（`v2_live9_comp1_120m`，120 分钟 @ `0f54f29`）**：全员 `9/9 rc=0`；均分 **`25.0`**，最高 **`35`**（3 名 `>=30`）；`smelt_iron` `3/9`、`iron_tools` `0/9`、`plant_seed` `8/9`、`kill_a_mob` `8/9`、`obtain_armor` `2/9`、`fishy_business` `1/9`、`shoot_arrow` `1/9`、`sleep_in_bed` `1/9`、`breed_an_animal` `1/9`；总死亡 `84`、stuck `56.03%`。定位到 `NEEDS_AI` 未及时退避与接近床卡死（`654` ticks）。
+  - **`Comp2`（`v2_live9_comp2_120m`，120 分钟 @ `35b845b`）**：全员 `9/9 rc=0`；均分 `18.89`，最高 `30`；总死亡降至 **`59`（`-29.8%`）**、床锁死清零、`smelt_iron` `3/9`、`iron_tools` `2/9`；暴露地下断镐无限重规划（`1,036` 次 / `19,155` ticks）与主世界误选 `spyglass_at_ghast`（`6,908` ticks）。
+  - **`Comp3`（`v2_live9_comp3_60m`，60 分钟 @ `150d2de`）**：全员 `9/9 rc=0`；**半程时长下均分升至 `26.11`（三轮最高）**，最高 `35`（`4` 名达到 `30–35`）；**`smelt_iron` `8/9`（88.9%）**、**`iron_tools` `4/9`（44.4%）**、`plant_seed` `8/9`、`kill_a_mob` `8/9`、`breed_an_animal` `1/9`；`llm_same_pos_cooldown | unstuck_l4_exhausted` 卡死拍数 **`19,155 → 91`（`-99.5%`）**，`UNDERGROUND_NO_PICK_LOCK` **`1,036 → 4`**（8/9 机器人为 0），`bare_hand_rock` **`108 → 6`（`-94.4%`）**，主世界误选下界任务清零。
+- **尚未实服完成项（严禁混同已通过）**：
+  - 尚未在真实服务器跑过完整 **8 小时（28800s）单 Bot 连续无干预长跑**；
+  - 60–120 分钟实服轮次尚无 Bot 进入下界或末地取得维度后续成就；
+  - `sleep_in_bed` 4 线合成羊毛兜底与 `breed_an_animal` 猪/胡萝卜补充路线尚未补全。
 
 ## BotSleep v2 地下结构修复 + 9-Bot 90 分钟双 API 压测 + 代码覆盖（2026-11-26）
 
