@@ -35,7 +35,6 @@ from v2.domain import (
     dist3,
     pick_best_item,
 )
-from v2.gateway.pathfinder_3d import Pathfinder3D
 from v2.gateway.surface_swim import SurfaceSwimExecutor
 from v2.gateway.world_proxy import VirtualWorldGateway, ray_cells
 from v2.kernel.client import APIError
@@ -431,11 +430,11 @@ class HardSafetyBranch(Node):
         )
         return status_ret
 
-    def _is_dry_ground_cell(self, dimension: str, cell: Coord3) -> bool:
+    def _is_dry_ground_cell(self, dimension: str, cell: Coord3, *, allow_fetch: bool = True) -> bool:
         cx, cy, cz = cell
-        floor = self.gateway.get_block(dimension, (cx, cy - 1, cz), allow_fetch=True)
-        feet = self.gateway.get_block(dimension, (cx, cy, cz), allow_fetch=True)
-        head = self.gateway.get_block(dimension, (cx, cy + 1, cz), allow_fetch=True)
+        floor = self.gateway.get_block(dimension, (cx, cy - 1, cz), allow_fetch=allow_fetch)
+        feet = self.gateway.get_block(dimension, (cx, cy, cz), allow_fetch=allow_fetch)
+        head = self.gateway.get_block(dimension, (cx, cy + 1, cz), allow_fetch=allow_fetch)
         if floor is None or floor.name in (NON_SOLID_BLOCKS | HAZARD_BLOCKS):
             return False
         for ent in (feet, head):
@@ -443,10 +442,19 @@ class HardSafetyBranch(Node):
                 return False
         return True
 
-    def _find_dry_stand_cell(self, dimension: str, bx: int, fy: int, bz: int) -> Optional[Coord3]:
-        for dy in (0, 1, -1):
+    def _find_dry_stand_cell(
+        self,
+        dimension: str,
+        bx: int,
+        fy: int,
+        bz: int,
+        *,
+        allow_fetch: bool = True,
+        dys: Sequence[int] = (0, 1, -1),
+    ) -> Optional[Coord3]:
+        for dy in dys:
             cand = (bx, fy + dy, bz)
-            if self._is_dry_ground_cell(dimension, cand):
+            if self._is_dry_ground_cell(dimension, cand, allow_fetch=allow_fetch):
                 return cand
         return None
 
@@ -456,7 +464,7 @@ class HardSafetyBranch(Node):
         threat: Dict[str, Any],
         d: float,
     ) -> Tuple[float, Optional[float], float, bool]:
-        """Compute multi-threat repulsion points and plan terrain-aware retreat via Pathfinder3D."""
+        """Compute multi-threat repulsion points and select dry retreat using bounded single-batch probes."""
         px, py, pz = bb.pos
         fy = math.floor(py)
         start_cell = block_coord((px, py, pz))
@@ -483,15 +491,13 @@ class HardSafetyBranch(Node):
             norm = math.hypot(vx, vz)
         ux, uz = (vx / norm, vz / norm) if norm >= 1e-6 else (1.0, 0.0)
 
-        retreat_step = min(max(6.0, self.threat_exit_radius - d + 2.5), 10.0)
-        distances = tuple(dict.fromkeys([retreat_step, min(retreat_step, 6.0), 4.5]))
+        retreat_step = min(max(5.5, self.threat_exit_radius - d + 2.0), 8.5)
         angles = (0.0, 45.0, -45.0, 90.0, -90.0, 135.0, -135.0)
 
-        # Prefetch candidate landing columns in one batch to keep latency minimal
-        probe_coords: List[Coord3] = []
-        raw_candidates: List[Tuple[int, int, float]] = []
-        seen_xz: set[Tuple[int, int]] = set()
-        for dist_cand in distances:
+        def _probe_pass(dist_cand: float, y_offsets: Sequence[int], stand_dys: Sequence[int]) -> Optional[Tuple[float, Optional[float], float]]:
+            probe_coords: List[Coord3] = []
+            raw_candidates: List[Tuple[int, int, Tuple[Tuple[int, int], ...], float]] = []
+            seen_xz: set[Tuple[int, int]] = set()
             for deg in angles:
                 rad = math.radians(deg)
                 ca, sa = math.cos(rad), math.sin(rad)
@@ -502,43 +508,56 @@ class HardSafetyBranch(Node):
                 if (bx, bz) in seen_xz or (bx, bz) == (start_cell[0], start_cell[2]):
                     continue
                 seen_xz.add((bx, bz))
-                raw_candidates.append((bx, bz, abs(deg)))
-                for dy in (-2, -1, 0, 1, 2):
-                    probe_coords.append((bx, fy + dy, bz))
-        self.gateway.prefetch_blocks(bb.dimension, probe_coords)
+                samples: List[Tuple[int, int]] = []
+                for frac in (0.35, 0.5, 0.7):
+                    sx = math.floor(px + dx * (dist_cand * frac))
+                    sz = math.floor(pz + dz * (dist_cand * frac))
+                    if (sx, sz) != (start_cell[0], start_cell[2]) and (sx, sz) != (bx, bz) and (sx, sz) not in samples:
+                        samples.append((sx, sz))
+                        probe_coords.append((sx, fy - 1, sz))
+                        probe_coords.append((sx, fy, sz))
+                raw_candidates.append((bx, bz, tuple(samples), abs(deg)))
+                for oy in y_offsets:
+                    probe_coords.append((bx, fy + oy, bz))
+            if probe_coords:
+                self.gateway.prefetch_blocks(bb.dimension, probe_coords)
 
-        dry_goals: List[Tuple[float, float, Coord3]] = []
-        for bx, bz, abs_deg in raw_candidates:
-            stand = self._find_dry_stand_cell(bb.dimension, bx, fy, bz)
-            if stand is None:
-                continue
-            min_t_dist = min(
-                math.dist((stand[0] + 0.5, float(stand[1]), stand[2] + 0.5), tp)
-                for tp in all_threat_pos
-            )
-            # Prefer larger clearance from all threats while respecting repulsion alignment
-            score = min_t_dist - (abs_deg / 180.0) * 1.5
-            dry_goals.append((score, abs_deg, stand))
+            dry_goals: List[Tuple[float, float, Coord3]] = []
+            for bx, bz, samples, abs_deg in raw_candidates:
+                blocked_mid = False
+                for sx, sz in samples:
+                    s_floor = self.gateway.get_block(bb.dimension, (sx, fy - 1, sz), allow_fetch=False)
+                    s_feet = self.gateway.get_block(bb.dimension, (sx, fy, sz), allow_fetch=False)
+                    if s_floor is not None and s_floor.name in (LIQUID_BLOCKS | HAZARD_BLOCKS):
+                        blocked_mid = True
+                        break
+                    if s_feet is not None and s_feet.name not in PASS_THROUGH_BLOCKS:
+                        blocked_mid = True
+                        break
+                if blocked_mid:
+                    continue
+                stand = self._find_dry_stand_cell(bb.dimension, bx, fy, bz, allow_fetch=False, dys=stand_dys)
+                if stand is None:
+                    continue
+                min_t_dist = min(
+                    math.dist((stand[0] + 0.5, float(stand[1]), stand[2] + 0.5), tp)
+                    for tp in all_threat_pos
+                )
+                score = min_t_dist - (abs_deg / 180.0) * 1.5
+                dry_goals.append((score, abs_deg, stand))
 
-        dry_goals.sort(key=lambda item: (-item[0], item[1]))
-        pf = Pathfinder3D(self.gateway)
-        for _, _, goal in dry_goals[:4]:
-            steps = pf.plan(
-                bb.dimension,
-                start_cell,
-                goal,
-                tolerance=2.0,
-                allow_dig=False,
-                allow_pillar=False,
-                allow_bridge=False,
-                threat_positions=all_threat_pos,
-                max_expansions=160,
-            )
-            if steps:
-                dest = steps[-1].stand_after
-                if dist2_xz(bb.pos, (dest[0] + 0.5, float(dest[1]), dest[2] + 0.5)) >= 1.5:
-                    ry = float(dest[1]) if dest[1] != fy else None
-                    return dest[0] + 0.5, ry, dest[2] + 0.5, True
+            if not dry_goals:
+                return None
+            dry_goals.sort(key=lambda item: (-item[0], item[1]))
+            dest = dry_goals[0][2]
+            ry = float(dest[1]) if dest[1] != fy else None
+            return dest[0] + 0.5, ry, dest[2] + 0.5
+
+        best = _probe_pass(retreat_step, (-1, 0, 1), (0,))
+        if best is None:
+            best = _probe_pass(4.5, (-2, -1, 0, 1, 2), (0, 1, -1))
+        if best is not None:
+            return best[0], best[1], best[2], True
 
         return round(px + ux * retreat_step, 1), None, round(pz + uz * retreat_step, 1), False
 
@@ -985,7 +1004,7 @@ class HardSafetyBranch(Node):
                 self._swim_retreat_check = (eid, bb.pos, d)
             return Status.RUNNING
 
-        move_payload: Dict[str, Any] = {"x": rx, "z": rz, "range": 1.5, "timeout_ms": 4000}
+        move_payload: Dict[str, Any] = {"x": rx, "z": rz, "range": 1.5, "timeout_ms": 2200}
         if ry is not None:
             move_payload["y"] = ry
         bb.last_action_outcome = f"safety_retreat:{tname}"
@@ -993,7 +1012,7 @@ class HardSafetyBranch(Node):
             bb,
             "move_to",
             move_payload,
-            lambda: self.gateway.client.move_to(x=rx, y=ry, z=rz, range=1.5, timeout_ms=4000),
+            lambda: self.gateway.client.move_to(x=rx, y=ry, z=rz, range=1.5, timeout_ms=2200),
         )
         self._last_retreat_failed = (not ok) or (not found_path)
         if not ok:

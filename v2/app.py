@@ -354,6 +354,7 @@ def run_v2_session(
             )
             last_dim: Optional[str] = status.get("dimension")
             reconnect_attempts = 0
+            transient_tick_errors = 0
 
             for tick_idx in range(max_ticks):
                 now_loop = time.monotonic()
@@ -363,17 +364,35 @@ def run_v2_session(
                 tick_t0 = time.perf_counter()
                 try:
                     tick_status = rt.tick_once()
+                    transient_tick_errors = 0
                 except APIError as err:
+                    if (
+                        err.code in {"not_ready", "wrong_server", "dead", "backend_unavailable", "request_timeout"}
+                        and err.details.get("action_state") != "unknown"
+                        and not once
+                        and transient_tick_errors < 20
+                        and (time.monotonic() + 3.0) < deadline
+                    ):
+                        transient_tick_errors += 1
+                        if recorder:
+                            recorder.record("WARN", "v2.app", "TRANSIENT_TICK_RETRY", {
+                                "code": err.code,
+                                "message": err.message,
+                                "attempt": transient_tick_errors,
+                            })
+                        time.sleep(1.5)
+                        continue
                     if (
                         err.code == "not_connected"
                         and not once
-                        and reconnect_attempts < 2
+                        and reconnect_attempts < 5
                         and (time.monotonic() + 10.0) < deadline
                     ):
                         reconnect_attempts += 1
                         time.sleep(4.0)
                         client.login(max_wait_seconds=api_cfg["login_timeout_seconds"])
                         rt.observe.consecutive_read_errors = 0
+                        transient_tick_errors = 0
                         if recorder:
                             recorder.record("WARN", "v2.app", "RECONNECTED", {"attempt": reconnect_attempts})
                         continue
