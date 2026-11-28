@@ -14,7 +14,8 @@ from tests_v2.sim.virtual_mc_api import VirtualMcApiServer, VirtualMcHttpServer
 from v2.app import run_v2_session
 from v2.bt import BTRuntime
 from v2.bt.blackboard import Blackboard
-from v2.gateway import SurfaceSwimExecutor, VirtualWorldGateway
+from v2.bt.branches.local_recovery import LocalRecoveryBranch
+from v2.gateway import MultiHopNavigator, SurfaceSwimExecutor, VirtualWorldGateway
 from v2.kernel import APIError, MinecraftAgentClient, PendingTransactionJournal, UnifiedWorldDB
 from v2.kernel.config import DEFAULTS
 from v2.planner.deps_planner import DepsPlanner
@@ -382,6 +383,76 @@ class TestHotfixSafetyAndTransientRetry(unittest.TestCase):
                 self.assertIsNone(t_frozen1)
                 self.assertIsNone(t_frozen2)
                 self.assertIsNone(comp3.active_task_id)
+            finally:
+                client.close()
+                db.close()
+
+    def test_water_recovery_never_digs_submerged_riverbed_and_holds_steady_shore_heading(self) -> None:
+        # 1) Submerged bot beside dirt riverbed under water must surface, never dig underwater dirt
+        sim = VirtualMcApiServer(spawn_pos=(0.5, 59.0, 0.5))
+        sim.fill(-4, 58, -4, 4, 62, 4, "water", {"level": "0"})
+        sim.set_block(1, 59, 0, "dirt")
+        sim.set_block(1, 60, 0, "dirt")
+        sim.set_block(1, 61, 0, "water", {"level": "0"})
+
+        with tempfile.TemporaryDirectory() as td, VirtualMcHttpServer(sim) as srv:
+            db = UnifiedWorldDB.for_scope(td, srv.base_url, "SubmergedNoDigBot", "w1")
+            client = MinecraftAgentClient(srv.base_url, "SubmergedNoDigBot", "pass")
+            try:
+                client.login()
+                journal = PendingTransactionJournal(db)
+                gw = VirtualWorldGateway(client, db=db)
+                rec = LocalRecoveryBranch(gw, journal, enable_auto_sleep=False)
+                bb = Blackboard()
+                bb.begin_tick()
+                bb.status = {
+                    "dimension": "overworld",
+                    "pos": [0.5, 59.0, 0.5],
+                    "health": 20.0,
+                    "food": 20,
+                    "oxygen": 12,
+                    "in_water": True,
+                    "submerged": True,
+                }
+                rec._swim_consec = 2
+                rec._swim_anchor = (0.5, 59.0, 0.5)
+                self.assertIsNone(rec._try_dig_swim_ceiling(bb))
+                rec.update(bb)
+                self.assertEqual([ep for ep, _ in sim.write_calls if ep == "dig"], [])
+                self.assertEqual([ep for ep, _ in sim.write_calls if ep == "control"], ["control"])
+
+                # 2) Surfaced bot next to underwater dirt (with water above) skips it in both recovery & navigator
+                bb.begin_tick()
+                bb.status = {
+                    "dimension": "overworld",
+                    "pos": [0.5, 61.0, 0.5],
+                    "health": 20.0,
+                    "food": 20,
+                    "oxygen": 20,
+                    "in_water": True,
+                    "submerged": False,
+                }
+                sim.pos = [0.5, 61.0, 0.5]
+                sim.set_block(1, 62, 0, "water", {"level": "0"})
+                sim.set_block(1, 61, 0, "dirt")
+                gw.invalidate_unknown_radius("overworld", (1, 61, 0), radius=2)
+                self.assertIsNone(rec._try_dig_swim_ceiling(bb))
+                nav = MultiHopNavigator(gw, journal)
+                self.assertIsNone(
+                    nav._try_water_shoreline_recovery(
+                        "overworld", (0.5, 61.0, 0.5), (4.5, 63.0, 0.5), bb.status, {}, None, stalls=2
+                    )
+                )
+
+                # 3) Wide open water keeps a steady open-water heading across ticks instead of spinning 45 deg/tick
+                bb.status["pos"] = [0.5, 62.0, 0.5]
+                rec._open_water_bearing_idx = 0
+                rec._open_water_bearing_steps = 0
+                t1 = rec._pick_swim_target(bb)
+                t2 = rec._pick_swim_target(bb)
+                t3 = rec._pick_swim_target(bb)
+                self.assertEqual(t1, t2)
+                self.assertEqual(t2, t3)
             finally:
                 client.close()
                 db.close()

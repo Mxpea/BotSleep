@@ -89,6 +89,8 @@ class LocalRecoveryBranch(Node):
         self._swim_consec: int = 0
         self._swim_anchor: Optional[Tuple[float, float, float]] = None
         self._swim_cooldown_until: float = 0.0
+        self._open_water_bearing_idx: int = 0
+        self._open_water_bearing_steps: int = 0
         self._equip_cooldown_until: Dict[str, float] = {}
         self._bed_attempts: Dict[Coord3, int] = {}
 
@@ -151,10 +153,14 @@ class LocalRecoveryBranch(Node):
                     visited.add(up)
                     queue.append(up)
 
-        if self._swim_consec > 0:
-            bx, bz = _SHORE_BEARINGS[(self._swim_consec - 1) % len(_SHORE_BEARINGS)]
-            return (bb.pos[0] + bx * 3.0, bb.pos[1] + 1.0, bb.pos[2] + bz * 3.0)
-        return (bb.pos[0], bb.pos[1] + 2.0, bb.pos[2])
+        if bool(bb.status.get("submerged")) or bb.oxygen < 16:
+            return (bb.pos[0], bb.pos[1] + 2.0, bb.pos[2])
+        if self._open_water_bearing_steps >= 12:
+            self._open_water_bearing_idx = (self._open_water_bearing_idx + 2) % len(_SHORE_BEARINGS)
+            self._open_water_bearing_steps = 0
+        bx, bz = _SHORE_BEARINGS[self._open_water_bearing_idx % len(_SHORE_BEARINGS)]
+        self._open_water_bearing_steps += 1
+        return (bb.pos[0] + bx * 8.0, bb.pos[1] + 1.0, bb.pos[2] + bz * 8.0)
 
     def _dig_swim_cell(self, bb: Blackboard, c: Coord3, outcome: str) -> Status:
         bb.last_action_outcome = outcome
@@ -183,13 +189,19 @@ class LocalRecoveryBranch(Node):
             ):
                 return self._dig_swim_cell(bb, c, "recovery_swim_dig_ceiling")
 
+        # Never dig lateral riverbed blocks while submerged or low on air; surface vertically first
+        if bool(bb.status.get("submerged")) or bb.oxygen < 16:
+            return None
+
         bank_coords = [
             (fx + dx, fy + dy, fz + dz)
             for dy in (1, 0, 2)
             for dx, dz in _CARDINAL_OFFSETS_2D
         ]
         has_pickaxe = pick_best_item(bb.inventory_counts, PICKAXE_TIERS) is not None
-        probe_coords: List[Coord3] = list(bank_coords)
+        probe_coords: List[Coord3] = list(bank_coords) + [
+            (fx + dx, fy + 3, fz + dz) for dx, dz in _CARDINAL_OFFSETS_2D
+        ]
         if has_pickaxe:
             for dy in (1, 2):
                 for dx, dz in _CARDINAL_OFFSETS_2D:
@@ -199,6 +211,9 @@ class LocalRecoveryBranch(Node):
         bank_fetched = self.gateway.prefetch_blocks(bb.dimension, probe_coords)
 
         for c in bank_coords:
+            above_c = bank_fetched.get((c[0], c[1] + 1, c[2]))
+            if above_c is None or above_c.name in WATER_BLOCKS:
+                continue
             ent = bank_fetched.get(c)
             if (
                 ent is not None
@@ -214,6 +229,9 @@ class LocalRecoveryBranch(Node):
             for dy in (1, 2):
                 for dx, dz in _CARDINAL_OFFSETS_2D:
                     c = (fx + dx, fy + dy, fz + dz)
+                    above = bank_fetched.get((c[0], c[1] + 1, c[2]))
+                    if above is None or above.name in WATER_BLOCKS:
+                        continue
                     ent = bank_fetched.get(c)
                     if (
                         ent is None
@@ -229,8 +247,7 @@ class LocalRecoveryBranch(Node):
                         for ndx, ndy, ndz in _CARDINAL_OFFSETS_3D
                     ):
                         continue
-                    above = bank_fetched.get((c[0], c[1] + 1, c[2]))
-                    has_headroom = 0 if (above is not None and above.name in NON_SOLID_BLOCKS) else 1
+                    has_headroom = 0 if (above.name in NON_SOLID_BLOCKS) else 1
                     hard_candidates.append((0 if dy == 1 else 1, has_headroom, c))
             hard_candidates.sort(key=lambda item: (item[0], item[1]))
             if hard_candidates:
@@ -410,6 +427,7 @@ class LocalRecoveryBranch(Node):
         if not in_water:
             self._swim_consec = 0
             self._swim_anchor = None
+            self._open_water_bearing_steps = 0
             self._swimmer.reset()
         else:
             needs_air = bool(st.get("submerged")) or bb.oxygen < 16
@@ -435,7 +453,9 @@ class LocalRecoveryBranch(Node):
                             self._swim_consec = 0
                             self._swim_anchor = bb.pos
                         return plug_res
-                if self._swim_consec >= 3 and (not needs_air or stalled_in_water) and not critically_drowning:
+                    self._open_water_bearing_idx = (self._open_water_bearing_idx + 2) % len(_SHORE_BEARINGS)
+                    self._open_water_bearing_steps = 0
+                if not critically_drowning and ((stalled_in_water and self._swim_consec >= 3) or (not needs_air and self._swim_consec >= 12)):
                     # Yield to PhysicalUnstuckBranch & lock LLM replanning until dry footing returns
                     self._swim_cooldown_until = now + 8.0
                     self._swim_consec = 0

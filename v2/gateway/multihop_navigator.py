@@ -20,6 +20,7 @@ from v2.domain import (
     PICKAXE_TIERS,
     SCAFFOLD_BLOCKS,
     SOFT_OCCLUDERS,
+    WATER_BLOCKS,
     block_coord,
     dist2_xz,
     dist3,
@@ -263,21 +264,26 @@ class MultiHopNavigator:
                     return NavOutcome("BLOCKED", action_taken="control", reason=swim_res.reason)
                 return NavOutcome("PROGRESSED", action_taken="control", reason="water_shore_step")
 
-        # Dig obstructing 1-block overhead ceiling or soft bank/overhang
+        # Dig obstructing 1-block overhead ceiling; only dig dry-topped lateral overhang when surfaced with air
         dig_candidates: List[Coord3] = [(fx, fy + 2, fz), (fx, fy + 1, fz)]
         cardinals = sorted(
             ((1, 0), (-1, 0), (0, 1), (0, -1)),
             key=lambda d: dist2_xz((fx + d[0] + 0.5, fy, fz + d[1] + 0.5), tgt),
         )
-        for dy in (1, 0):
-            for dx, dz in cardinals:
-                dig_candidates.append((fx + dx, fy + dy, fz + dz))
+        if not bool(status.get("submerged")) and int(status.get("oxygen", 20)) >= 16:
+            for dy in (1, 0):
+                for dx, dz in cardinals:
+                    dig_candidates.append((fx + dx, fy + dy, fz + dz))
         for c in dig_candidates:
             ent = fetched.get(c)
             if ent is None or ent.name in NON_SOLID_BLOCKS or ent.name in HAZARD_BLOCKS or ent.name == "bedrock":
                 continue
             if ent.name not in _WATER_SOFT_DIG_BLOCKS:
                 continue
+            if c[0] != fx or c[2] != fz:
+                above_c = fetched.get((c[0], c[1] + 1, c[2]))
+                if above_c is None or above_c.name in WATER_BLOCKS:
+                    continue
             if avoid_block_breaking is not None and avoid_block_breaking(c):
                 continue
             if self.gateway.unreachable.is_blocked(dim, c, "dig"):
